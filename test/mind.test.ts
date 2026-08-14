@@ -122,6 +122,8 @@ test('claims reject dependency-blocked and manually in-progress work', () => {
   assert.throws(() => mind.claim(inbox.id, { owner: 'mcp:worker', principal: 'session' }), /inbox, not open work/);
   assert.throws(() => mind.claim(idea.id, { owner: 'mcp:worker', principal: 'session' }), /not an executable task/);
   assert.ok(!mind.discover('untriaged possible someday').some((match) => match.item.id === inbox.id || match.item.id === idea.id));
+  assert.ok(mind.ready().every((item) => item.kind === 'task' && item.status === 'open' && item.blockedBy.length === 0));
+  assert.ok(!mind.ready().some((item) => item.id === inbox.id || item.id === idea.id || item.id === manual.id));
   db.close();
 });
 

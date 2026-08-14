@@ -6,10 +6,12 @@ export const MIND_STATUSES = ['inbox', 'open', 'in_progress', 'waiting', 'done',
 export const MIND_KINDS = ['task', 'project', 'idea', 'question', 'reminder'] as const;
 export const MIND_SORTS = ['created_asc', 'created_desc', 'updated_asc', 'updated_desc', 'last_comment_asc', 'last_comment_desc'] as const;
 export const MIND_LOG_KINDS = ['progress', 'decision', 'result', 'verification', 'omission'] as const;
+export const MIND_GRAPH_RELATIONS = ['dependencies', 'dependents', 'parent', 'children'] as const;
 export type MindSort = (typeof MIND_SORTS)[number];
 export type MindStatus = (typeof MIND_STATUSES)[number];
 export type MindKind = (typeof MIND_KINDS)[number];
 export type MindLogKind = (typeof MIND_LOG_KINDS)[number];
+export type MindGraphRelation = (typeof MIND_GRAPH_RELATIONS)[number];
 export type MindEffectiveStatus = MindStatus | 'blocked';
 
 export interface MindItem {
@@ -32,6 +34,7 @@ export interface MindItem {
   blockedBy: MindLink[];
   blocks: MindLink[];
   childCount: number;
+  totalChildCount: number;
   commentCount: number;
   reminderCount: number;
   claim: MindClaim | null;
@@ -235,7 +238,7 @@ function parseData(value: unknown): Record<string, unknown> {
   try { return JSON.parse(value) as Record<string, unknown>; } catch { return { raw: value }; }
 }
 
-function rowBase(row: Record<string, unknown>): Omit<MindItem, 'effectiveStatus' | 'tags' | 'blockedBy' | 'blocks' | 'childCount' | 'commentCount' | 'reminderCount' | 'claim'> {
+function rowBase(row: Record<string, unknown>): Omit<MindItem, 'effectiveStatus' | 'tags' | 'blockedBy' | 'blocks' | 'childCount' | 'totalChildCount' | 'commentCount' | 'reminderCount' | 'claim'> {
   return {
     id: Number(row.id), title: String(row.title), body: String(row.body ?? ''), kind: row.kind as MindKind,
     status: row.status as MindStatus, priority: Number(row.priority), parentId: row.parent_id == null ? null : Number(row.parent_id),
@@ -305,6 +308,14 @@ export class MindStore {
     return row ? claimFromRow(row) : null;
   }
 
+  private requireExecutableTask(id: number): Record<string, unknown> {
+    const item = this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!item) throw new Error(`mind: no item #${id}`);
+    if (item.archived_at != null) throw new Error(`mind: item #${id} is archived`);
+    if (item.kind !== 'task') throw new Error(`mind: item #${id} is a ${String(item.kind)}, not an executable task`);
+    return item;
+  }
+
   private hydrate(row: Record<string, unknown>): MindItem {
     if (!Object.hasOwn(row, 'last_comment_at')) {
       const latest = this.db.prepare('SELECT max(COALESCE(updated_at, created_at)) AS at FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL').get(Number(row.id)) as { at: number | null };
@@ -318,6 +329,7 @@ export class MindStore {
       effectiveStatus: ACTIVE_STATUSES.includes(base.status) && blockedBy.length > 0 ? 'blocked' : base.status,
       tags: this.tagsFor(base.id), blockedBy, blocks: this.dependents(base.id),
       childCount: count('SELECT count(*) AS n FROM mind_items WHERE parent_id = ? AND archived_at IS NULL'),
+      totalChildCount: count('SELECT count(*) AS n FROM mind_items WHERE parent_id = ?'),
       commentCount: count('SELECT count(*) AS n FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL'),
       reminderCount: count('SELECT count(*) AS n FROM mind_reminders WHERE item_id = ? AND cancelled_at IS NULL AND fired_at IS NULL'),
       claim: this.claimFor(base.id),
@@ -396,12 +408,12 @@ export class MindStore {
     };
     const rows = this.db.prepare(`SELECT i.*, (SELECT max(COALESCE(mc.updated_at, mc.created_at)) FROM mind_comments mc WHERE mc.item_id = i.id AND mc.deleted_at IS NULL) AS last_comment_at FROM mind_items i ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${orderBy[sort]} LIMIT ? OFFSET ?`).all(...values, limit, offset) as Record<string, unknown>[];
     let items = rows.map((row) => this.hydrate(row));
-    if (filter.ready) items = items.filter((item) => READY_STATUSES.includes(item.status) && item.blockedBy.length === 0);
+    if (filter.ready) items = items.filter((item) => item.kind === 'task' && item.status === 'open' && item.blockedBy.length === 0);
     if (filter.blocked) items = items.filter((item) => item.effectiveStatus === 'blocked');
     return items;
   }
 
-  ready(limit = 100): MindItem[] { return this.list({ ready: true, limit }); }
+  ready(limit = 100): MindItem[] { return this.list({ statuses: ['open'], kinds: ['task'], ready: true, limit }); }
 
   discover(context: string, opts: MindDiscoverOptions = {}): MindWorkMatch[] {
     assertText(context, 'discovery context', 50_000, true);
@@ -508,6 +520,7 @@ export class MindStore {
     assertText(principal, 'claim principal', 200);
     const ttl = claimTtl(ttlMs); const now = Date.now();
     this.transaction(() => {
+      this.requireExecutableTask(id);
       const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
       if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
       if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
@@ -522,6 +535,7 @@ export class MindStore {
   releaseClaim(id: number, principal: string, status: 'open' | 'waiting', note: string): MindDetail {
     assertText(principal, 'claim principal', 200); assertText(note, 'release note', 20_000); const now = Date.now();
     this.transaction(() => {
+      this.requireExecutableTask(id);
       const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
       if (!row) throw new Error(`mind: item #${id} has no active claim`);
       if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
@@ -539,6 +553,7 @@ export class MindStore {
     if (!MIND_LOG_KINDS.includes(kind)) throw new Error(`mind: invalid log kind ${JSON.stringify(kind)}`);
     const ttl = claimTtl(ttlMs); const now = Date.now();
     this.transaction(() => {
+      this.requireExecutableTask(id);
       const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
       if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
       if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
@@ -558,6 +573,7 @@ export class MindStore {
     assertText(body, 'completion record', 20_000);
     const now = Date.now();
     this.transaction(() => {
+      this.requireExecutableTask(id);
       const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
       if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
       if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
@@ -676,13 +692,30 @@ export class MindStore {
 
   stats(): MindStats {
     const items = this.list({ limit: 500 }); const now = Date.now();
-    return { active: items.filter((x) => ACTIVE_STATUSES.includes(x.status)).length, ready: items.filter((x) => READY_STATUSES.includes(x.status) && x.blockedBy.length === 0).length, blocked: items.filter((x) => x.effectiveStatus === 'blocked').length, waiting: items.filter((x) => x.status === 'waiting').length, overdue: items.filter((x) => x.dueAt != null && x.dueAt < now && ACTIVE_STATUSES.includes(x.status)).length, done: items.filter((x) => x.status === 'done').length, inbox: items.filter((x) => x.status === 'inbox').length };
+    return { active: items.filter((x) => ACTIVE_STATUSES.includes(x.status)).length, ready: items.filter((x) => x.kind === 'task' && x.status === 'open' && x.blockedBy.length === 0).length, blocked: items.filter((x) => x.effectiveStatus === 'blocked').length, waiting: items.filter((x) => x.status === 'waiting').length, overdue: items.filter((x) => x.dueAt != null && x.dueAt < now && ACTIVE_STATUSES.includes(x.status)).length, done: items.filter((x) => x.status === 'done').length, inbox: items.filter((x) => x.status === 'inbox').length };
   }
 
-  graph(rootId: number, depth = 4): MindGraph {
-    this.requireId(rootId); const maxDepth = Math.max(0, Math.min(12, Math.floor(depth))); const seen = new Set<number>([rootId]); const queue = [{ id: rootId, depth: 0 }]; const edges: MindGraph['edges'] = [];
-    while (queue.length) { const current = queue.shift()!; if (current.depth >= maxDepth) continue; const deps = this.allDependencies(current.id); const dependents = this.dependents(current.id); const detail = this.get(current.id)!; for (const dep of deps) { edges.push({ from: current.id, to: dep.id, type: 'depends_on' }); if (!seen.has(dep.id)) { seen.add(dep.id); queue.push({ id: dep.id, depth: current.depth + 1 }); } } for (const child of dependents) { edges.push({ from: child.id, to: current.id, type: 'depends_on' }); if (!seen.has(child.id)) { seen.add(child.id); queue.push({ id: child.id, depth: current.depth + 1 }); } } if (detail.parent) { edges.push({ from: current.id, to: detail.parent.id, type: 'parent' }); if (!seen.has(detail.parent.id)) { seen.add(detail.parent.id); queue.push({ id: detail.parent.id, depth: current.depth + 1 }); } } for (const child of detail.children) { edges.push({ from: child.id, to: current.id, type: 'parent' }); if (!seen.has(child.id)) { seen.add(child.id); queue.push({ id: child.id, depth: current.depth + 1 }); } } }
-    const nodes = Array.from(seen).map((id) => this.get(id)!).filter(Boolean); const uniqueEdges = Array.from(new Map(edges.map((e) => [`${e.type}:${e.from}:${e.to}`, e])).values()); return { rootId, nodes, edges: uniqueEdges };
+  graph(rootId: number, depth = 4, relations: MindGraphRelation[] = [...MIND_GRAPH_RELATIONS]): MindGraph {
+    this.requireId(rootId);
+    const maxDepth = Math.max(0, Math.min(12, Math.floor(depth)));
+    const relationSet = new Set(relations);
+    for (const relation of relationSet) if (!MIND_GRAPH_RELATIONS.includes(relation)) throw new Error(`mind: invalid graph relation ${JSON.stringify(relation)}`);
+    const seen = new Set<number>([rootId]); const queue = [{ id: rootId, depth: 0 }]; const edges: MindGraph['edges'] = [];
+    const visit = (from: number, to: number, type: 'depends_on' | 'parent', nextId: number, nextDepth: number) => {
+      edges.push({ from, to, type });
+      if (!seen.has(nextId)) { seen.add(nextId); queue.push({ id: nextId, depth: nextDepth }); }
+    };
+    while (queue.length) {
+      const current = queue.shift()!; if (current.depth >= maxDepth) continue;
+      const nextDepth = current.depth + 1; const detail = this.get(current.id)!;
+      if (relationSet.has('dependencies')) for (const dep of this.allDependencies(current.id)) visit(current.id, dep.id, 'depends_on', dep.id, nextDepth);
+      if (relationSet.has('dependents')) for (const dependent of this.dependents(current.id)) visit(dependent.id, current.id, 'depends_on', dependent.id, nextDepth);
+      if (relationSet.has('parent') && detail.parent) visit(current.id, detail.parent.id, 'parent', detail.parent.id, nextDepth);
+      if (relationSet.has('children')) for (const child of detail.children) visit(child.id, current.id, 'parent', child.id, nextDepth);
+    }
+    const nodes = Array.from(seen).map((id) => this.get(id)!).filter(Boolean);
+    const uniqueEdges = Array.from(new Map(edges.map((edge) => [`${edge.type}:${edge.from}:${edge.to}`, edge])).values());
+    return { rootId, nodes, edges: uniqueEdges };
   }
 
   createReminderRecord(itemId: number, scheduledTaskId: number, fireAt: number, channelId: string | null, createdBy: string): MindReminder {
@@ -749,7 +782,7 @@ export class MindService {
   finishClaim(id: number, principal: string, owner: string, result: string, verification: string, omissions: string): MindDetail { return this.batch(() => { const item = this.store.finishClaim(id, principal, owner, result, verification, omissions); this.cancelPendingReminders(id, owner); return this.changed(this.store.get(item.id)!); }); }
   expireClaims(now?: number): number[] { const ids = this.store.expireClaims(now); if (ids.length) this.changed(undefined); return ids; }
   stats(): MindStats { return this.store.stats(); }
-  graph(id: number, depth?: number): MindGraph { return this.store.graph(id, depth); }
+  graph(id: number, depth?: number, relations?: MindGraphRelation[]): MindGraph { return this.store.graph(id, depth, relations); }
   update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail { return this.batch(() => { const item = this.store.update(id, patch, actor); if (item.status === 'done' || item.status === 'cancelled') this.cancelPendingReminders(id, actor); return this.changed(this.store.get(id)!); }); }
   setStatus(id: number, status: MindStatus, actor = 'agent'): MindDetail { return this.update(id, { status }, actor); }
   archive(id: number, actor = 'agent'): MindDetail { return this.changed(this.store.archive(id, actor)); }

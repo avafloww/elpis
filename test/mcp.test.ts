@@ -37,8 +37,12 @@ function envelope(result: Awaited<ReturnType<Client['callTool']>>): any {
   const text = result.content.find((part) => part.type === 'text');
   assert.ok(text && text.type === 'text');
   assert.ok(result.structuredContent && typeof result.structuredContent === 'object');
-  if (!result.isError) assert.deepEqual(JSON.parse(text.text), result.structuredContent);
-  else assert.match(text.text, /^\[[A-Z_]+\] /);
+  if (!result.isError) {
+    const parsed = JSON.parse(text.text);
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.receipt, (result.structuredContent as any).receipt);
+    assert.deepEqual(parsed.page, (result.structuredContent as any).page);
+  } else assert.match(text.text, /^\[[A-Z_]+\] /);
   return result.structuredContent;
 }
 
@@ -77,10 +81,15 @@ test('Streamable HTTP MCP uses canonical Mind, client provenance, task-bound wak
     ['mind_archive_created', 'mind_ask', 'mind_await', 'mind_block', 'mind_claim', 'mind_comment', 'mind_context', 'mind_create', 'mind_discover', 'mind_finish', 'mind_get', 'mind_graph', 'mind_link', 'mind_list', 'mind_log', 'mind_message', 'mind_ready', 'mind_release', 'mind_renew', 'mind_resume', 'mind_unlink', 'mind_update'],
   );
   assert.ok(tools.tools.every((tool) => tool.outputSchema?.type === 'object'));
+  assert.ok(tools.tools.reduce((sum, tool) => sum + JSON.stringify(tool.outputSchema).length, 0) < 6_000, 'generic output schemas stay compact');
   const prioritySchema = tools.tools.find((tool) => tool.name === 'mind_create')!.inputSchema.properties!.priority as Record<string, unknown>;
   assert.deepEqual({ minimum: prioritySchema.minimum, maximum: prioritySchema.maximum }, { minimum: 0, maximum: 4 });
 
-  const lifecycle = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Repair parser cache invalidation', body: 'src/parser/cache.ts loses decoder state', tags: ['parser', 'cache'] } })).item;
+  const createResult = await client.callTool({ name: 'mind_create', arguments: { title: 'Repair parser cache invalidation', body: 'src/parser/cache.ts loses decoder state', tags: ['parser', 'cache'] } });
+  const createEnvelope = envelope(createResult);
+  const createText = createResult.content.find((part) => part.type === 'text')?.text ?? '';
+  assert.ok(createText.length < JSON.stringify(createResult.structuredContent).length, 'text is a compact continuation summary, not duplicated structured data');
+  const lifecycle = createEnvelope.data.item;
   const discovered = value(await client.callTool({ name: 'mind_discover', arguments: { context: 'working in src/parser/cache.ts on decoder cache invalidation' } }));
   assert.equal(discovered.matches[0].item.id, lifecycle.id);
   const context = value(await client.callTool({ name: 'mind_context', arguments: { id: lifecycle.id } }));
@@ -100,6 +109,20 @@ test('Streamable HTTP MCP uses canonical Mind, client provenance, task-bound wak
   assert.equal(finished.item.status, 'done');
   assert.equal(finished.item.claim, null);
   assert.match(mind.get(lifecycle.id)!.comments.at(-1)!.body, /Result:\nDecoder-local invalidation implemented\.[\s\S]*Verification:\nFocused parser tests pass\.[\s\S]*Omissions:\nFull integration suite not run\./);
+
+  const question = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Question is not executable', kind: 'question' } })).item;
+  const ready = value(await client.callTool({ name: 'mind_ready', arguments: {} }));
+  assert.ok(ready.items.every((item: any) => item.kind === 'task' && item.status === 'open' && item.capabilities.claim));
+  assert.ok(!ready.items.some((item: any) => item.id === question.id));
+  for (const name of ['mind_block', 'mind_finish']) {
+    const arguments_: Record<string, unknown> = name === 'mind_block'
+      ? { id: question.id, blocker: 'not applicable' }
+      : { id: question.id, result: 'none', verification: 'none', omissions: 'none' };
+    const denied = await client.callTool({ name, arguments: arguments_ });
+    const deniedEnvelope = envelope(denied);
+    assert.equal(deniedEnvelope.error.code, 'INVALID_LIFECYCLE');
+    assert.equal(deniedEnvelope.error.retryable, false);
+  }
 
   const race = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Atomic claim race' } })).item;
   const claimed = value(await client.callTool({ name: 'mind_claim', arguments: { id: race.id, note: 'worker 7 starts' } }));
@@ -166,8 +189,9 @@ test('Streamable HTTP MCP uses canonical Mind, client provenance, task-bound wak
     ['agent', 'Yes, keep it decoder-local.', askWake.commentId],
   ]);
   assert.equal(detail.events, undefined, 'events are opt-in');
+  const expectedNewestEvents = mind.get(created.id)!.events.slice(0, 2).map((event) => event.id);
   const withEvents = value(await client.callTool({ name: 'mind_get', arguments: { id: created.id, include: ['events'], event_limit: 2 } }));
-  assert.equal(withEvents.events.length, 2);
+  assert.deepEqual(withEvents.events.map((event: any) => event.id), expectedNewestEvents);
 
   const unchanged = envelope(await client.callTool({ name: 'mind_update', arguments: { id: created.id, title: created.title } }));
   assert.equal(unchanged.receipt.changed, false);
@@ -198,6 +222,26 @@ test('Streamable HTTP MCP uses canonical Mind, client provenance, task-bound wak
 
   const graph = value(await client.callTool({ name: 'mind_graph', arguments: { id: created.id } }));
   assert.equal(graph.nodes[0].body, undefined, 'graph nodes are compact');
+
+  const graphParent = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Graph parent', kind: 'project' } })).item;
+  const graphRoot = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Graph root', parent_id: graphParent.id } })).item;
+  const graphSibling = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Graph sibling', parent_id: graphParent.id } })).item;
+  const graphDependency = value(await client.callTool({ name: 'mind_create', arguments: { title: 'Graph dependency' } })).item;
+  value(await client.callTool({ name: 'mind_link', arguments: { id: graphRoot.id, depends_on: graphDependency.id } }));
+  const wideGraph = value(await client.callTool({ name: 'mind_graph', arguments: { id: graphRoot.id, depth: 2 } }));
+  assert.ok(wideGraph.nodes.some((node: any) => node.id === graphSibling.id), 'default graph retains compatibility and reaches siblings');
+  const dependencyGraph = value(await client.callTool({ name: 'mind_graph', arguments: { id: graphRoot.id, depth: 2, relations: ['dependencies'] } }));
+  assert.deepEqual(new Set(dependencyGraph.nodes.map((node: any) => node.id)), new Set([graphRoot.id, graphDependency.id]));
+  const isolatedContext = value(await client.callTool({ name: 'mind_context', arguments: { id: graphRoot.id, include_related: false, graph_relations: ['dependencies'] } }));
+  assert.deepEqual(isolatedContext.related, []);
+  assert.ok(!isolatedContext.graph.nodes.some((node: any) => node.id === graphSibling.id));
+  value(await client.callTool({ name: 'mind_archive_created', arguments: { ids: [graphSibling.id], note: 'archival projection test' } }));
+  const parentAfterArchive = value(await client.callTool({ name: 'mind_get', arguments: { id: graphParent.id, include: [] } }));
+  assert.equal(parentAfterArchive.item.childCount, 1);
+  assert.equal(parentAfterArchive.item.totalChildCount, 2);
+  const archivedSibling = value(await client.callTool({ name: 'mind_list', arguments: { query: 'Graph sibling', include_archived: true } }));
+  assert.equal(archivedSibling.items[0].archived, true);
+  assert.ok(archivedSibling.items[0].archivedAt);
 
   const cleanup = value(await client.callTool({ name: 'mind_create', arguments: { title: '[MCP TEST] cleanup target' } })).item;
   value(await client.callTool({ name: 'mind_claim', arguments: { id: cleanup.id, note: 'cleanup lease protection' } }));

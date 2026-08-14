@@ -6,6 +6,7 @@ import { isInitializeRequest, type CallToolResult, type ToolAnnotations } from '
 import * as z from 'zod/v4';
 import type { Logger } from '../lib/log.js';
 import {
+  MIND_GRAPH_RELATIONS,
   MIND_KINDS,
   MIND_LOG_KINDS,
   MIND_SORTS,
@@ -14,6 +15,7 @@ import {
   type MindComment,
   type MindDetail,
   type MindGraph,
+  type MindGraphRelation,
   type MindItem,
   type MindKind,
   type MindListFilter,
@@ -112,17 +114,9 @@ function sanitizeClientName(name: string | undefined): string {
 const TOOL_OUTPUT_SCHEMA = {
   ok: z.boolean(),
   data: z.unknown().optional(),
-  receipt: z.object({
-    operation: z.string(),
-    itemId: z.number().int().positive().optional(),
-    changed: z.boolean().optional(),
-    status: z.string().optional(),
-  }).optional(),
-  page: z.object({
-    next_cursor: z.string().nullable().optional(),
-    total_count: z.number().int().min(0).optional(),
-  }).optional(),
-  error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).optional(),
+  receipt: z.unknown().optional(),
+  page: z.unknown().optional(),
+  error: z.unknown().optional(),
 };
 
 interface ToolResultOptions {
@@ -131,13 +125,34 @@ interface ToolResultOptions {
   page?: { next_cursor?: string | null; total_count?: number };
 }
 
+function compactTextData(data: unknown): unknown {
+  if (Array.isArray(data)) return { count: data.length };
+  if (!data || typeof data !== 'object') return data;
+  const record = data as Record<string, unknown>;
+  const item = record.item as Record<string, unknown> | undefined;
+  const detail = record.detail as Record<string, unknown> | undefined;
+  const detailItem = detail?.item as Record<string, unknown> | undefined;
+  const comment = record.comment as Record<string, unknown> | undefined;
+  const reply = record.reply as Record<string, unknown> | null | undefined;
+  if (item) return { item_id: item.id, status: item.status };
+  if (detailItem) return { item_id: detailItem.id, fields: Object.keys(record) };
+  if (Array.isArray(record.items)) return { items: record.items.length };
+  if (Array.isArray(record.matches)) return { matches: record.matches.length };
+  if (Array.isArray(record.nodes)) return { nodes: record.nodes.length, edges: Array.isArray(record.edges) ? record.edges.length : undefined };
+  if (comment || reply !== undefined) return { comment_id: comment?.id, reply_id: reply?.id ?? null, timed_out: record.timedOut };
+  return { fields: Object.keys(record) };
+}
+
 function toolResult(data: unknown, opts: ToolResultOptions = {}): CallToolResult {
   const structuredContent: Record<string, unknown> = { ok: true, data };
   if (opts.receipt) structuredContent.receipt = opts.receipt;
   if (opts.page) structuredContent.page = opts.page;
+  const textSummary: Record<string, unknown> = { ok: true, data: compactTextData(data) };
+  if (opts.receipt) textSummary.receipt = opts.receipt;
+  if (opts.page) textSummary.page = opts.page;
   return {
     structuredContent,
-    content: [{ type: 'text', text: opts.text ?? JSON.stringify(structuredContent) }],
+    content: [{ type: 'text', text: opts.text ?? JSON.stringify(textSummary) }],
   };
 }
 
@@ -174,13 +189,23 @@ function compactItem(item: MindItem): Record<string, unknown> {
     priority: item.priority,
     parentId: item.parentId,
     dueAt: item.dueAt,
+    dueAtIso: item.dueAt == null ? null : new Date(item.dueAt).toISOString(),
+    archived: item.archivedAt != null,
+    archivedAt: item.archivedAt,
     tags: item.tags,
     blockedBy: item.blockedBy.map((link) => link.id),
     blocks: item.blocks.map((link) => link.id),
     childCount: item.childCount,
+    totalChildCount: item.totalChildCount,
     commentCount: item.commentCount,
     reminderCount: item.reminderCount,
     claim: item.claim ? { owner: item.claim.owner, expiresAt: item.claim.expiresAt, expired: item.claim.expired } : null,
+    capabilities: {
+      claim: item.archivedAt == null && item.kind === 'task' && item.status === 'open' && item.blockedBy.length === 0 && item.claim == null,
+      resume: item.archivedAt == null && item.kind === 'task' && item.status === 'waiting' && item.blockedBy.length === 0 && item.claim == null,
+      updateMetadata: item.archivedAt == null,
+      comment: item.archivedAt == null,
+    },
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     lastCommentAt: item.lastCommentAt,
@@ -197,7 +222,7 @@ function projectDetail(item: MindDetail, parts = DEFAULT_DETAIL_PARTS, commentLi
     result.dependencies = item.dependencies;
   }
   if (include.has('comments')) result.comments = item.comments.slice(-commentLimit);
-  if (include.has('events')) result.events = item.events.slice(-eventLimit);
+  if (include.has('events')) result.events = item.events.slice(0, eventLimit);
   if (include.has('reminders')) result.reminders = item.reminders;
   return result;
 }
@@ -245,12 +270,12 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         'This is the resident agent’s durable collaboration surface.',
         'You are a bounded external collaborator, not another instance of the resident agent.',
         'At the start of coding work, call mind_discover with fresh repository/task context unless an item was assigned, then call mind_context.',
-        'Read the item and acquire mind_claim before editing; never work an unclaimed item.',
+        'Before coding an executable task, read it and acquire mind_claim; ideas, questions, projects, and reminders are metadata records and cannot be claimed.',
         'Renew long work before its lease expires. Record decisions, results, blockers, verification, and omissions as comments.',
         'Ask the resident agent before guessing about architecture, external behavior, security/privacy, scope conflicts, or ambiguous acceptance criteria.',
         'Use mind_ask for clarification: it posts to one item, wakes the resident agent, and waits for a structured reply; use mind_await only after a timeout.',
         'Recorded ideas/questions are not commitments. Do not start unrelated work merely because it exists in Mind.',
-        'Tool results use native structuredContent with compact receipts; runtime errors include stable codes and retryability.',
+        'Tool results use native structuredContent with compact receipts; domain/runtime errors include stable codes and retryability, while invalid tool arguments are MCP invalid-parameter errors.',
       ].join(' '),
     },
   );
@@ -277,10 +302,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       tag: z.string().min(1).max(80).optional(),
       query: z.string().min(1).max(500).optional(),
       parent_id: ID.nullable().optional(),
-      ready: z.boolean().optional(),
+      ready: z.boolean().optional().describe('Restrict to claimable open tasks with satisfied dependencies'),
       blocked: z.boolean().optional(),
       overdue: z.boolean().optional(),
-      include_archived: z.boolean().optional(),
+      include_archived: z.boolean().optional().describe('Include softly archived records; summaries expose archived and archivedAt'),
       sort: z.enum(MIND_SORTS).optional(),
       limit: z.number().int().min(1).max(200).optional(),
       cursor: z.string().min(1).max(256).optional(),
@@ -317,7 +342,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       id: ID,
       include: z.array(z.enum(DETAIL_PARTS)).max(DETAIL_PARTS.length).optional(),
       comment_limit: z.number().int().min(0).max(100).optional(),
-      event_limit: z.number().int().min(0).max(200).optional(),
+      event_limit: z.number().int().min(0).max(200).optional().describe('Return at most this many newest-first events'),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, async ({ id, include, comment_limit, event_limit }) => {
@@ -334,10 +359,14 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   }, async ({ limit }) => { const items = deps.mind.ready(limit); return toolResult({ items: items.map(compactItem), returned: items.length }); });
 
   registerTool('mind_graph', {
-    description: 'Read a dependency/parent graph around one Mind item.',
-    inputSchema: { id: ID, depth: z.number().int().min(1).max(8).optional() },
+    description: 'Read a bounded relation graph around one Mind item.',
+    inputSchema: {
+      id: ID,
+      depth: z.number().int().min(1).max(8).optional().describe('Traversal hops, from 1 through 8'),
+      relations: z.array(z.enum(MIND_GRAPH_RELATIONS)).max(MIND_GRAPH_RELATIONS.length).optional().describe('Traversal relations; omit for dependencies, dependents, parent, and children'),
+    },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, async ({ id, depth }) => toolResult(compactGraph(deps.mind.graph(parseMindId(id), depth))));
+  }, async ({ id, depth, relations }) => toolResult(compactGraph(deps.mind.graph(parseMindId(id), depth, relations as MindGraphRelation[] | undefined))));
   registerTool('mind_discover', {
     description: 'Rank open dependency-ready tasks against fresh context; filters constrain and boosts only rank.',
     inputSchema: {
@@ -366,21 +395,31 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
     description: 'Read a compact work bundle: projected item detail, compact graph, and related ready tasks.',
     inputSchema: {
       id: ID,
-      depth: z.number().int().min(1).max(6).optional(),
+      depth: z.number().int().min(1).max(6).optional().describe('Graph traversal hops, from 1 through 6'),
       related_limit: z.number().int().min(1).max(20).optional(),
+      include_related: z.boolean().optional().describe('Set false to omit related suggestions entirely'),
+      related_parent_id: ID.nullable().optional().describe('Strictly limit related suggestions to this parent'),
+      related_filter_tags: z.array(z.string().min(1).max(80)).max(20).optional().describe('Strictly limit related suggestions by tags'),
+      related_filter_mode: z.enum(['all', 'any']).optional(),
+      graph_relations: z.array(z.enum(MIND_GRAPH_RELATIONS)).max(MIND_GRAPH_RELATIONS.length).optional(),
       include: z.array(z.enum(DETAIL_PARTS)).max(DETAIL_PARTS.length).optional(),
       comment_limit: z.number().int().min(0).max(100).optional(),
-      event_limit: z.number().int().min(0).max(200).optional(),
+      event_limit: z.number().int().min(0).max(200).optional().describe('Return at most this many newest-first events'),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, async ({ id, depth, related_limit, include, comment_limit, event_limit }) => {
+  }, async ({ id, depth, related_limit, include_related, related_parent_id, related_filter_tags, related_filter_mode, graph_relations, include, comment_limit, event_limit }) => {
     const itemId = parseMindId(id); const item = deps.mind.get(itemId);
     if (!item) throw new Error(`mind: no item #${itemId}`);
-    const related = deps.mind.discover(`${item.title}\n${item.body}\n${item.tags.join(' ')}`, { boostTags: item.tags, limit: (related_limit ?? 6) + 1 })
-      .filter((match) => match.item.id !== itemId).slice(0, related_limit ?? 6);
+    const related = include_related === false ? [] : deps.mind.discover(`${item.title}\n${item.body}\n${item.tags.join(' ')}`, {
+      boostTags: item.tags,
+      filterTags: related_filter_tags,
+      filterMode: related_filter_mode,
+      parentId: related_parent_id === undefined ? undefined : related_parent_id === null ? null : parseMindId(related_parent_id),
+      limit: (related_limit ?? 6) + 1,
+    }).filter((match) => match.item.id !== itemId).slice(0, related_limit ?? 6);
     return toolResult({
       detail: projectDetail(item, include as DetailPart[] | undefined, comment_limit, event_limit),
-      graph: compactGraph(deps.mind.graph(itemId, depth ?? 2)),
+      graph: compactGraph(deps.mind.graph(itemId, depth ?? 2, graph_relations as MindGraphRelation[] | undefined)),
       related: related.map((match) => ({ score: match.score, matched: match.matched, item: compactItem(match.item) })),
     });
   });
@@ -392,7 +431,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       title: z.string().min(1).max(500),
       body: z.string().max(100_000).optional(),
       kind: z.enum(MIND_KINDS).optional(),
-      priority: z.number().int().min(0).max(4).optional(),
+      priority: z.number().int().min(0).max(4).optional().describe('0 is highest priority; 4 is lowest'),
       parent_id: ID.nullable().optional(),
       due_at: TIMESTAMP.nullable().optional(),
       tags: z.array(z.string().min(1).max(80)).max(50).optional(),
@@ -494,7 +533,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       title: z.string().min(1).max(500).optional(),
       body: z.string().max(100_000).optional(),
       kind: z.enum(MIND_KINDS).optional(),
-      priority: z.number().int().min(0).max(4).optional(),
+      priority: z.number().int().min(0).max(4).optional().describe('0 is highest priority; 4 is lowest'),
       parent_id: ID.nullable().optional(),
       due_at: TIMESTAMP.nullable().optional(),
       tags: z.array(z.string().min(1).max(80)).max(50).optional(),
