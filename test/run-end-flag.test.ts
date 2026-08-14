@@ -125,6 +125,18 @@ test('end: true on a successful run ends the turn with no further completion', a
   cleanup();
 });
 
+test('shared test agents expose the current inbound during a real turn and clear it when idle', async () => {
+  const llm = scriptedLLM([runCall("if (elpis.inbound?.channelId !== '100') throw new Error('missing current inbound')", true)]);
+  const { agent, inboundRef, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-inbound-ref-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  assert.equal(llm.calls, 1, 'documented elpis.inbound access must succeed on the first dispatch');
+  assert.equal(inboundRef.current, null, 'the current inbound must clear after the turn parks');
+  agent.stop();
+  cleanup();
+});
+
 test('external thinking is forced once on each outer turn, then the separator continuation is ordinary', async () => {
   assert.deepEqual(THINK_TOOL.function.parameters.required, ['thoughts']);
   const thought = 'need inspect the actual edge before choosing';

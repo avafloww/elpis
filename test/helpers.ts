@@ -15,7 +15,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Agent, type AgentDeps } from '../src/agent.js';
+import { Agent, type AgentDeps, type InboundMessage } from '../src/agent.js';
 import { createMemory, ensureFile } from '../src/store/memory.js';
 import { createSandbox } from '../src/sandbox/index.js';
 import { createContextTracker } from '../src/llm/context-tracker.js';
@@ -190,12 +190,14 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const llm = opts.llm ?? makeStubLLM();
   const sent: { channelId: string; text: string }[] = [];
   const agentRef: { current: Agent | null } = { current: null };
+  const inboundRef: { current: InboundMessage | null } = { current: null };
   const depsCtx: DepsContext = { tmpDir, config, memory, llm, agentRef };
   let channelsRef: ReturnType<typeof createChannelDirectory> | null = null;
   const sandbox = createSandbox({
     config,
     memory,
     logbuf: [],
+    get inbound() { return inboundRef.current; },
     send: async (channelId, text) => { await agentRef.current!.send(channelId, text); },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),
@@ -221,6 +223,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     density,
     transcript,
     channels,
+    setCurrentInbound: (msg) => { inboundRef.current = msg; },
     send: async (channelId, text) => { sent.push({ channelId, text }); },
     ...resolveDeps<AgentDeps>(opts.agentDeps, depsCtx),
   });
@@ -229,5 +232,5 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     if (opts.dir) return; // caller-owned directory
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   };
-  return { agent, tmpDir, config, llm, memory, tracker, compactor, transcript, sandbox, sent, agentRef, cleanup };
+  return { agent, tmpDir, config, llm, memory, tracker, compactor, transcript, sandbox, sent, agentRef, inboundRef, cleanup };
 }
