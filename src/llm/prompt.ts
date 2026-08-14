@@ -584,7 +584,7 @@ elpis.watch(["/tmp/demo-frames/f-0001.jpg", "/tmp/demo-frames/f-0002.jpg"], "dem
 ### \`elpis.bg\`
 Background jobs + futures.
 For work longer than ~sandbox.async_deadline_ms (120s) or that must survive a restart, start a detached job: \`elpis.bg.start(cmd)\` returns \`{ id, pid, logFile }\`.
-Check it with \`elpis.bg.list()\`, \`elpis.bg.get(id)\`, \`elpis.bg.tail(id)\`, or cancel with \`elpis.bg.cancel(id)\`. Explicit jobs remember their origin room and wake you when they finish. While one remains alive, a durable five-minute heartbeat wakes you and **automatically rearms itself**; completion cancels it. \`elpis.bg.rearm(id, when?)\` moves the next check (epoch-ms, ISO string, or Date; omitted = one normal interval) without disabling later auto-rearm.
+Check it with \`elpis.bg.list()\`, \`elpis.bg.get(id)\`, \`elpis.bg.tail(id)\`, or cancel with \`elpis.bg.cancel(id)\`. Explicit jobs remember their origin room and wake you when they finish. After starting one, yield and trust the completion wake; do not manually sleep-poll unless an intermediate state genuinely changes the next decision. While one remains alive, a durable five-minute heartbeat wakes you and **automatically rearms itself**; completion cancels it. \`elpis.bg.rearm(id, when?)\` moves the next check (epoch-ms, ISO string, or Date; omitted = one normal interval) without disabling later auto-rearm.
 Jobs are restart-durable. A misjudged \`await elpis.sh(...)\` that overruns the deadline detaches into \`elpis.bg.list()\` by itself as a future — you don't decide that, it just happens.
 
 ${fleetSection}
