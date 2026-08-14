@@ -8,7 +8,7 @@ import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, parseScenario, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
-import { evaluateOutcome } from './outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
@@ -111,8 +111,9 @@ async function main(): Promise<void> {
   let currentMessages: () => ChatMessage[] = () => [];
   let malformedInjected = false, terminalFailureInjected = false;
   const hasOutcome = () => recorder.snapshot().some((e) => e.kind === 'outcome' && e.ok);
-  const actionObserved = () => recorder.snapshot().some((e) => e.kind === 'tool-call' && (e.code?.trim() ?? '').length > 0 && e.code?.trim() !== 'void 0') || sends.length > 0;
-  const currentOutcome = () => evaluateOutcome(spec, WORK, sends, actionObserved());
+  const toolCodes = () => recorder.snapshot().filter((e) => e.kind === 'tool-call' && typeof e.code === 'string').map((e) => e.code!);
+  const actionObserved = () => toolCodes().some((code) => code.trim().length > 0 && code.trim() !== 'void 0') || sends.length > 0;
+  const currentOutcome = () => evaluateOutcome(spec, WORK, sends, spec.expected.action === 'forbidden' ? hasForbiddenSideEffect(toolCodes(), sends.length) : actionObserved());
   const recordRequiredOutcome = () => {
     if (spec.expected.action !== 'required' || hasOutcome()) return;
     const result = currentOutcome();

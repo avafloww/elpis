@@ -24,6 +24,8 @@ import { createCompactor } from '../src/llm/compactor.js';
 import { createTranscriptStore } from '../src/store/sessions.js';
 import { createChannelDirectory } from '../src/store/channels.js';
 import { openDatabase } from '../src/store/db.js';
+import { MindService } from '../src/store/mind.js';
+import { Scheduler } from '../src/store/scheduler.js';
 import type { Config } from '../src/config.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
@@ -139,6 +141,9 @@ export interface DepsContext {
   memory: ReturnType<typeof createMemory>;
   llm: LLM;
   agentRef: { current: Agent | null };
+  db: ReturnType<typeof openDatabase>;
+  scheduler: Scheduler;
+  mind: MindService;
 }
 type DepsOrFn<T> = Partial<T> | ((ctx: DepsContext) => Partial<T>);
 const resolveDeps = <T>(d: DepsOrFn<T> | undefined, ctx: DepsContext): Partial<T> =>
@@ -191,7 +196,10 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const sent: { channelId: string; text: string }[] = [];
   const agentRef: { current: Agent | null } = { current: null };
   const inboundRef: { current: InboundMessage | null } = { current: null };
-  const depsCtx: DepsContext = { tmpDir, config, memory, llm, agentRef };
+  const db = openDatabase(tmpDir);
+  const scheduler = new Scheduler({ db, logger: config.logger, onTaskWake: () => {} });
+  const mind = new MindService({ db, scheduler, logger: config.logger });
+  const depsCtx: DepsContext = { tmpDir, config, memory, llm, agentRef, db, scheduler, mind };
   let channelsRef: ReturnType<typeof createChannelDirectory> | null = null;
   const sandbox = createSandbox({
     config,
@@ -199,6 +207,9 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     logbuf: [],
     get inbound() { return inboundRef.current; },
     restart: (reason) => ({ ok: true, note: `restart simulated in test harness${reason ? `: ${reason}` : ''}` }),
+    typing: () => {},
+    scheduler,
+    mind,
     send: async (channelId, text) => { await agentRef.current!.send(channelId, text); },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),
@@ -207,7 +218,6 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     channelLabel: (id) => agentRef.current!.qualifiedChannelLabel(id),
     ...resolveDeps<SandboxDeps>(opts.sandboxDeps, depsCtx),
   });
-  const db = openDatabase(tmpDir);
   const density = createDensityModel(db, config.llm.model, config.logger);
   const tracker = opts.tracker ?? createContextTracker(100000, 8192, density);
   const compactor = createCompactor(llm, tracker, { ratio: () => density.ratio(), ...opts.compactorOpts });
@@ -218,6 +228,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     config,
     sandbox,
     memory,
+    mind,
     llm,
     tracker,
     compactor,
@@ -233,5 +244,5 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     if (opts.dir) return; // caller-owned directory
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   };
-  return { agent, tmpDir, config, llm, memory, tracker, compactor, transcript, sandbox, sent, agentRef, inboundRef, cleanup };
+  return { agent, tmpDir, config, llm, memory, db, scheduler, mind, tracker, compactor, transcript, sandbox, sent, agentRef, inboundRef, cleanup };
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { evaluateOutcome } from '../bench/outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect } from '../bench/outcome.js';
 import { parseScenario, SCHEMA_VERSION, type ScenarioSpec } from '../bench/schema.js';
 
 function scenario(expected: ScenarioSpec['expected']): ScenarioSpec {
@@ -25,6 +25,16 @@ function scenario(expected: ScenarioSpec['expected']): ScenarioSpec {
 }
 
 function temp(): string { return fs.mkdtempSync(path.join(os.tmpdir(), 'bench-outcome-')); }
+
+test('forbidden-action classifier permits inspection but catches observable mutations', () => {
+  assert.equal(hasForbiddenSideEffect(["elpis.mind.list({ statuses: ['in_progress'] }); elpis.tasks(); fs.readFileSync('health.json', 'utf8'); await elpis.sh('grep -n stuck health.json')"], 0), false);
+  assert.equal(hasForbiddenSideEffect(["fs.writeFileSync('report.md', 'ready\\n')"], 0), true);
+  assert.equal(hasForbiddenSideEffect(["elpis.mind.add({ title: 'wait', status: 'waiting' })"], 0), false);
+  assert.equal(hasForbiddenSideEffect(["elpis.mind.remind(1, Date.now() + 1000)"], 0), true);
+  assert.equal(hasForbiddenSideEffect(["elpis.schedule({ name: 'wake', payload: 'x', nextRunAt: Date.now() })"], 0), true);
+  assert.equal(hasForbiddenSideEffect(["await elpis.sh('sh renewal.sh')"], 0), true);
+  assert.equal(hasForbiddenSideEffect([], 1), true);
+});
 
 test('required JSON outcome stays false after a read and becomes true only after valid equivalent repair', () => {
   const root = temp();

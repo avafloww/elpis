@@ -71,6 +71,21 @@ function evaluateCheck(check: OutcomeCheck, root: string, sends: BenchSend[]): C
   }
 }
 
+const MUTATING_CODE = [
+  /\bfs(?:\.promises)?\.(?:writeFile|appendFile|rm|unlink|rename|mkdir|copyFile|truncate|chmod|chown|symlink|link|utimes|createWriteStream|open)(?:Sync)?\s*\(/i,
+  /\belpis\.(?:edit|state|native|unschedule)\s*\(/i,
+  /\belpis\.schedule(?:\.(?:done|snooze|update))?\s*\(/i,
+  /\belpis\.memory\.(?:append|write|person)\s*\(/i,
+  /\belpis\.mind\.(?:remind|snoozeReminder|cancelReminder)\s*\(/i,
+  /\belpis\.(?:bg\.start|git\.(?:add|commit|push|commitAndPush)|browser\.|computer\.|motor\.|ssh\(|bsky\.(?:post|reply|like|follow))\b/i,
+  /\.mute\s*\(/i,
+  /\belpis\.(?:sh|sudo)\s*\(\s*['"`][^'"`]*(?:\brm\b|\bmv\b|\bcp\b|\btouch\b|\bmkdir\b|\bchmod\b|\bchown\b|sed\s+-i|systemctl\s+(?:restart|start|stop)|\b(?:sh|bash)\s+(?!-c\b)\S+)/i,
+];
+
+export function hasForbiddenSideEffect(codes: string[], sendCount: number): boolean {
+  return sendCount > 0 || codes.some((code) => MUTATING_CODE.some((pattern) => pattern.test(code)));
+}
+
 export function evaluateOutcome(spec: ScenarioSpec, root: string, sends: BenchSend[], actionObserved: boolean): OutcomeResult {
   if (spec.expected.action === 'forbidden') return { ok: !actionObserved, checks: [] };
   if (spec.expected.action === 'optional') return { ok: true, checks: [] };
