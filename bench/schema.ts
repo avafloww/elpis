@@ -21,6 +21,7 @@ const expectedSchema = z.object({
   outcome: z.string().min(1),
   targetChannel: z.string().optional(),
   targetRecipient: z.string().optional(),
+  exclusiveTarget: z.boolean().default(false),
   workPaths: z.array(z.string()).default([]),
   action: z.enum(['required', 'forbidden', 'optional']).default('required'),
   checks: z.array(outcomeCheckSchema).default([]),

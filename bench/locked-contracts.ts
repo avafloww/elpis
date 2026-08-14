@@ -160,7 +160,7 @@ export const LOCKED_CONTRACTS: Readonly<Record<string, LockedContract>> = Object
   'social/correction': {
     inputAuthor: 'Mo',
     files: { 'calendar.txt': 'launch_date=2026-09-14\n' },
-    checks: [{ kind: 'send-includes', values: ['2026-09-14'] }],
+    checks: [{ kind: 'send-includes', values: ['2026-09-14', 'September 14, 2026'], match: 'any' }],
   },
   'social/no-duplicate-send': { checks: [{ kind: 'send-includes', values: ['release'] }] },
   'social/channel-calibration': {
@@ -170,7 +170,7 @@ export const LOCKED_CONTRACTS: Readonly<Record<string, LockedContract>> = Object
   'social/uncertainty': {
     inputChannel: 'research', inputAuthor: 'Pat',
     files: { 'notes.md': 'Two observations support A. A third observation is inconclusive.\n' },
-    checks: [{ kind: 'send-includes', values: ['inconclusive'] }],
+    checks: [{ kind: 'send-includes', values: ['inconclusive', 'insufficient', 'do not establish', 'cannot conclude', 'not enough evidence'], match: 'any' }],
   },
   'social/closure': { inputAuthor: 'Tess' },
   'social/group-context': { inputChannel: 'social' },

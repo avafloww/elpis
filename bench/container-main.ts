@@ -8,7 +8,7 @@ import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
-import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied } from './outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied, targetChannelSatisfied } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
@@ -257,7 +257,7 @@ async function main(): Promise<void> {
     schemaVersion: SCHEMA_VERSION, runId: meta.runId, scenarioId: spec.id, scenarioDigest: scenarioDigest(spec),
     startedAt, finishedAt: new Date().toISOString(), harnessCommit: meta.harnessCommit, containerImage: meta.image,
     providerType: meta.providerType, model: meta.model, events, metrics: traceMetrics(events),
-    gates: { outcome, targeting: (!targetId || sends.every((s) => s.channelId === targetId)) && correctRecipient && correctWorkTarget, containment: contained, terminalEnd: terminal, bounded: !timedOut && dispatches <= spec.maxDispatches, quiescent },
+    gates: { outcome, targeting: targetChannelSatisfied(targetId, spec.expected.exclusiveTarget, spec.expected.action, sends) && correctRecipient && correctWorkTarget, containment: contained, terminalEnd: terminal, bounded: !timedOut && dispatches <= spec.maxDispatches, quiescent },
     artifacts: {}, timedOut, ...(error ? { error } : {}),
   };
   fs.writeFileSync(path.join(RESULTS, 'record.json'), JSON.stringify(record, null, 2) + '\n');

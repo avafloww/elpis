@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied } from '../bench/outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied, targetChannelSatisfied } from '../bench/outcome.js';
 import { parseScenario, SCHEMA_VERSION, type ScenarioSpec } from '../bench/schema.js';
 
 function scenario(expected: ScenarioSpec['expected'], inputAuthor?: string): ScenarioSpec {
@@ -34,6 +34,16 @@ test('forbidden-action classifier permits inspection but catches observable muta
   assert.equal(hasForbiddenSideEffect(["elpis.schedule({ name: 'wake', payload: 'x', nextRunAt: Date.now() })"], 0), true);
   assert.equal(hasForbiddenSideEffect(["await elpis.sh('sh renewal.sh')"], 0), true);
   assert.equal(hasForbiddenSideEffect([], 1), true);
+});
+
+test('target channels require delivery and enforce exclusivity only when declared', () => {
+  const sends = [{ channelId: '100', text: 'working' }, { channelId: '101', text: 'result' }];
+  assert.equal(targetChannelSatisfied('101', false, 'required', sends), true);
+  assert.equal(targetChannelSatisfied('101', true, 'required', sends), false);
+  assert.equal(targetChannelSatisfied('102', false, 'required', sends), false);
+  assert.equal(targetChannelSatisfied('101', false, 'optional', []), true);
+  assert.equal(targetChannelSatisfied('101', false, 'optional', [{ channelId: '100', text: 'oops' }]), false);
+  assert.equal(targetChannelSatisfied(undefined, false, 'required', sends), true);
 });
 
 test('recipient targeting distinguishes direct replies from third-party delivery', () => {

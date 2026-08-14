@@ -86,6 +86,13 @@ export function hasForbiddenSideEffect(codes: string[], sendCount: number): bool
   return sendCount > 0 || codes.some((code) => MUTATING_CODE.some((pattern) => pattern.test(code)));
 }
 
+export function targetChannelSatisfied(targetId: string | undefined, exclusiveTarget: boolean, action: 'required' | 'optional' | 'forbidden', sends: BenchSend[]): boolean {
+  if (!targetId) return true;
+  if (action !== 'required' && sends.length === 0) return true;
+  const targetSends = sends.filter((send) => send.channelId === targetId);
+  return targetSends.length > 0 && (!exclusiveTarget || targetSends.length === sends.length);
+}
+
 export function recipientSatisfied(targetRecipient: string | undefined, inputAuthor: string | undefined, action: 'required' | 'optional' | 'forbidden', targetSends: BenchSend[]): boolean {
   if (!targetRecipient || action !== 'required') return true;
   if (inputAuthor?.toLocaleLowerCase() === targetRecipient.toLocaleLowerCase()) return true;

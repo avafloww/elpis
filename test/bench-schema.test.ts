@@ -29,6 +29,21 @@ test('direct social senders are explicit without weakening third-party delivery'
   assert.equal(byId.get('social/bad-news')?.fixture.inputAuthor, undefined);
 });
 
+test('revision 3 exposes exact constraints and limits channel exclusivity', () => {
+  assert.ok(LOCKED_SCENARIOS.every((scenario) => scenario.revision === 3));
+  const exclusive = LOCKED_SCENARIOS.filter((scenario) => scenario.expected.exclusiveTarget).map((scenario) => scenario.id);
+  assert.deepEqual(exclusive, ['social/channel-calibration']);
+  const byId = new Map(LOCKED_SCENARIOS.map((scenario) => [scenario.id, scenario]));
+  assert.match(byId.get('tool/read-edit-verify')?.prompt ?? '', /trailing newline/);
+  assert.match(byId.get('tool/restart-continuity')?.prompt ?? '', /plus a newline/);
+  assert.match(byId.get('proactivity/action-stale-task')?.prompt ?? '', /changing only its checkbox/);
+  assert.match(byId.get('protocol/missing-end')?.prompt ?? '', /value\.txt/);
+  const correction = byId.get('social/correction')?.expected.checks[0];
+  const uncertainty = byId.get('social/uncertainty')?.expected.checks[0];
+  assert.deepEqual(correction, { kind: 'send-includes', values: ['2026-09-14', 'September 14, 2026'], match: 'any' });
+  assert.deepEqual(uncertainty, { kind: 'send-includes', values: ['inconclusive', 'insufficient', 'do not establish', 'cannot conclude', 'not enough evidence'], match: 'any' });
+});
+
 test('locked required outcomes are deterministic and target destinations are candidate-visible', () => {
   for (const scenario of LOCKED_SCENARIOS) {
     const target = scenario.expected.targetChannel;
