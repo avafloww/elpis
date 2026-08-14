@@ -55,6 +55,9 @@ export interface MindClaimOptions {
 
 export interface MindDiscoverOptions {
   tags?: string[];
+  boostTags?: string[];
+  filterTags?: string[];
+  filterMode?: 'all' | 'any';
   parentId?: number | null;
   limit?: number;
 }
@@ -403,8 +406,11 @@ export class MindStore {
   discover(context: string, opts: MindDiscoverOptions = {}): MindWorkMatch[] {
     assertText(context, 'discovery context', 50_000, true);
     const terms = discoveryTerms(context);
-    const tagHints = uniq((opts.tags ?? []).map(normalizeTag));
-    const candidates = this.list({ statuses: ['open'], kinds: ['task'], ready: true, parentId: opts.parentId, limit: 500, sort: 'updated_desc' });
+    const tagHints = uniq([...(opts.tags ?? []), ...(opts.boostTags ?? [])].map(normalizeTag));
+    const filterTags = uniq((opts.filterTags ?? []).map(normalizeTag));
+    const filterMode = opts.filterMode ?? 'all';
+    const candidates = this.list({ statuses: ['open'], kinds: ['task'], ready: true, parentId: opts.parentId, limit: 500, sort: 'updated_desc' })
+      .filter((item) => filterTags.length === 0 || (filterMode === 'all' ? filterTags.every((tag) => item.tags.includes(tag)) : filterTags.some((tag) => item.tags.includes(tag))));
     const matches: MindWorkMatch[] = [];
     for (const item of candidates) {
       const detail = this.get(item.id)!;
@@ -469,6 +475,31 @@ export class MindStore {
       const note = opts.note?.trim();
       this.addCommentInternal(id, `Work claimed through MCP.${note ? `\n\n${note}` : ''}`, opts.owner.trim(), now);
       this.event(id, 'claim.started', opts.owner.trim(), { expiresAt, previousExpiredOwner }, now);
+    });
+    return this.get(id)!;
+  }
+
+  resumeClaim(id: number, opts: MindClaimOptions): MindDetail {
+    assertText(opts.owner, 'claim owner', 120);
+    assertText(opts.principal, 'claim principal', 200);
+    assertText(opts.note ?? '', 'resume note', 20_000);
+    const ttl = claimTtl(opts.ttlMs); const now = Date.now();
+    this.transaction(() => {
+      const item = this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!item) throw new Error(`mind: no item #${id}`);
+      if (item.archived_at != null) throw new Error(`mind: item #${id} is archived`);
+      if (item.kind !== 'task') throw new Error(`mind: item #${id} is a ${String(item.kind)}, not an executable task`);
+      if (item.status !== 'waiting') throw new Error(`mind: item #${id} is ${String(item.status)}, not waiting`);
+      if (this.unresolvedDependencyCount(id) > 0) throw new Error(`mind: item #${id} is blocked by dependencies`);
+      const existing = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (existing && Number(existing.expires_at) > now) throw new Error(`mind: item #${id} is claimed by ${String(existing.owner)}`);
+      if (existing) this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id);
+      const expiresAt = now + ttl;
+      this.db.prepare('INSERT INTO mind_claims (item_id, owner, principal, claimed_at, renewed_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, opts.owner.trim(), opts.principal.trim(), now, now, expiresAt);
+      this.db.prepare("UPDATE mind_items SET status = 'in_progress', closed_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+      const comment = this.addCommentInternal(id, `Resumed and claimed through MCP.\n\n${opts.note!.trim()}`, opts.owner.trim(), now);
+      this.event(id, 'claim.resumed', opts.owner.trim(), { expiresAt, commentId: comment.id }, now);
     });
     return this.get(id)!;
   }
@@ -699,9 +730,19 @@ export class MindService {
   create(opts: CreateMindItem & { remindAt?: number | null; reminderChannelId?: string | null }): MindDetail { return this.batch(() => { const item = this.store.create(opts); if (opts.remindAt != null) this.addReminder(item.id, opts.remindAt, opts.actor ?? 'agent', opts.reminderChannelId ?? null); return this.changed(this.store.get(item.id)!); }); }
   get(id: number): MindDetail | null { return this.store.get(id); }
   list(filter?: MindListFilter): MindItem[] { return this.store.list(filter); }
+  count(filter: MindListFilter = {}): number {
+    const base = { ...filter }; delete base.limit; delete base.offset;
+    let count = 0;
+    for (;;) {
+      const page = this.store.list({ ...base, limit: 500, offset: count });
+      count += page.length;
+      if (page.length < 500) return count;
+    }
+  }
   ready(limit?: number): MindItem[] { return this.store.ready(limit); }
   discover(context: string, opts?: MindDiscoverOptions): MindWorkMatch[] { return this.store.discover(context, opts); }
   claim(id: number, opts: MindClaimOptions): MindDetail { return this.changed(this.store.claim(id, opts)); }
+  resumeClaim(id: number, opts: MindClaimOptions): MindDetail { return this.changed(this.store.resumeClaim(id, opts)); }
   renewClaim(id: number, principal: string, ttlMs?: number): MindDetail { return this.changed(this.store.renewClaim(id, principal, ttlMs)); }
   releaseClaim(id: number, principal: string, status: 'open' | 'waiting', note: string): MindDetail { return this.changed(this.store.releaseClaim(id, principal, status, note)); }
   logClaim(id: number, principal: string, owner: string, kind: MindLogKind, body: string, ttlMs?: number): MindDetail { return this.changed(this.store.logClaim(id, principal, owner, kind, body, ttlMs)); }

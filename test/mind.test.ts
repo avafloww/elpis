@@ -125,6 +125,23 @@ test('claims reject dependency-blocked and manually in-progress work', () => {
   db.close();
 });
 
+test('resume atomically claims waiting dependency-ready work', () => {
+  const db = database();
+  const mind = new MindStore(db);
+  const waiting = mind.create({ title: 'waiting work', status: 'waiting' });
+  const resumed = mind.resumeClaim(waiting.id, { owner: 'mcp:worker', principal: 'session', note: 'fixture arrived' });
+  assert.equal(resumed.status, 'in_progress');
+  assert.equal(resumed.claim?.owner, 'mcp:worker');
+  assert.ok(resumed.events.some((event) => event.type === 'claim.resumed'));
+  assert.match(resumed.comments.at(-1)!.body, /fixture arrived/);
+  assert.throws(() => mind.resumeClaim(waiting.id, { owner: 'mcp:other', principal: 'other', note: 'again' }), /not waiting/);
+
+  const dependency = mind.create({ title: 'unfinished dependency' });
+  const blocked = mind.create({ title: 'blocked waiting work', status: 'waiting', dependsOn: [dependency.id] });
+  assert.throws(() => mind.resumeClaim(blocked.id, { owner: 'mcp:worker', principal: 'session', note: 'not actually resolved' }), /blocked by dependencies/);
+  db.close();
+});
+
 test('resident overrides and archive revoke external claims visibly', () => {
   const db = database();
   const mind = new MindStore(db);
