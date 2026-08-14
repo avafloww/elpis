@@ -1,0 +1,19 @@
+# elpis-desktop — Openbox/tint2 session for elpis.computer.
+# Installed as a systemd USER unit by deploy/install.sh; Xorg is elpis-xorg.service.
+
+[Unit]
+Description=elpis desktop — Openbox session on the Proxmox-visible Xorg display
+After=network.target
+
+[Service]
+Type=simple
+Environment=ELPIS_DISPLAY=:0
+Environment=ELPIS_GEOMETRY=1280x800
+Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/computer
+Environment=XAUTHORITY=<DATA_DIR>/computer/Xauthority
+ExecStart=<HARNESS_ROOT>/deploy/start-desktop.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

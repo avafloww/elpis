@@ -1,0 +1,844 @@
+// Behaviour tests for the `end` flag on the run tool (spec:
+// the explicit turn-ending contract. `end: true` on a
+// SUCCESSFUL run is the only sanctioned turn-end; anything else nudges.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { RUN_TOOL, THINK_TOOL, externalThinkingJuice } from '../src/llm/llm.js';
+import { buildTestAgent, EMPTY_END, makeConfig } from './helpers.js';
+import type { LLM, CompleteOptions, CompleteResult, ChatMessage } from '../src/llm/llm.js';
+import type { MindListFilter, MindService } from '../src/store/mind.js';
+import type { Agent } from '../src/agent.js';
+import { END_NUDGE_ALERT_AT, END_NUDGE_REALERT_EVERY } from '../src/agent.js';
+import type { ConsoleHub } from '../src/console/hub.js';
+import type { Logger } from '../src/lib/log.js';
+
+test('RUN_TOOL exposes `end` as a boolean, with `code` still the only required param', () => {
+  const params = RUN_TOOL.function.parameters;
+  assert.equal(params.properties.end.type, 'boolean');
+  assert.ok(params.properties.end.description.length > 0, 'end needs a model-facing description');
+  assert.deepEqual(params.required, ['code'], 'end must stay optional to the model');
+  assert.equal(params.properties.code.type, 'string');
+});
+
+test('external-thinking JUICE preserves the chosen effort after native reasoning is disabled', () => {
+  assert.equal(externalThinkingJuice('low'), 4);
+  assert.equal(externalThinkingJuice('high'), 48);
+  assert.equal(externalThinkingJuice('max'), 960);
+  assert.equal(externalThinkingJuice('unknown'), 8);
+});
+
+test('the `end` description names the chosen-silence idiom', () => {
+ // The model has no other sanctioned way to end a turn without acting, so the
+ // empty-code form has to be discoverable from the schema itself.
+  assert.match(RUN_TOOL.function.parameters.properties.end.description, /empty code/i);
+});
+
+/** A scripted LLM that yields a macrotask per call. The yield is mandatory: on a
+ * no-tool-call response the loop's only await is `complete`, so a
+ * `Promise.resolve` stub starves the macrotask queue and setTimeout-based waits
+ * never fire. */
+function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; requests: ChatMessage[][]; options: CompleteOptions[] } {
+  let i = 0;
+  let calls = 0;
+  const requests: ChatMessage[][] = [];
+  const options: CompleteOptions[] = [];
+  return {
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
+    get calls() { return calls; },
+    requests,
+    options,
+    async complete(messages: ChatMessage[], _ratio?: number, completeOptions: CompleteOptions = {}): Promise<CompleteResult> {
+      calls++;
+      requests.push(messages);
+      options.push(completeOptions);
+      const r = responses[Math.min(i, responses.length - 1)];
+      i++;
+      await new Promise((res) => setImmediate(res));
+      return r;
+    },
+    summarize(): Promise<string> { return Promise.resolve('SUMMARY'); },
+  } as LLM & { calls: number; requests: ChatMessage[][]; options: CompleteOptions[] };
+}
+
+function userMsg(): Parameters<Agent['enqueue']>[0] {
+  return {
+    id: 'm1', channelId: '100', channelName: '100', author: 'u', authorId: 'u',
+    content: 'hi', createdAt: '2026-01-01T00:00:00Z',
+    replyTo: null, forwarded: null, mentions: [], attachments: [], kind: 'discord',
+  };
+}
+
+async function settle(ms = 80): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+function runCall(code: string, end: boolean): CompleteResult {
+  return {
+    message: {
+      role: 'assistant', content: '',
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code, end }) } }],
+    },
+    stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+}
+
+function thinkCall(thoughts: string): CompleteResult {
+  return {
+    message: {
+      role: 'assistant', content: '',
+      tool_calls: [{ id: 'think1', type: 'function', function: { name: 'think', arguments: JSON.stringify({ thoughts }) } }],
+    },
+    stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+}
+
+/** A single response carrying MULTIPLE tool_calls, each independently
+ * {code, end} — for exercising cross-call `endedByFlag` interaction within
+ * one dispatch. */
+function multiRunCall(calls: { code: string; end: boolean }[]): CompleteResult {
+  return {
+    message: {
+      role: 'assistant', content: '',
+      tool_calls: calls.map((c, i) => ({
+        id: `tc${i + 1}`, type: 'function' as const,
+        function: { name: 'run', arguments: JSON.stringify({ code: c.code, end: c.end }) },
+      })),
+    },
+    stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+}
+
+test('end: true on a successful run ends the turn with no further completion', async () => {
+  const llm = scriptedLLM([runCall('1 + 1', true)]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-ok-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 1, 'exactly one completion — no turn-end round trip');
+  cleanup();
+});
+
+test('external thinking is forced once on each outer turn, then the separator continuation is ordinary', async () => {
+  assert.deepEqual(THINK_TOOL.function.parameters.required, ['thoughts']);
+  const thought = 'need inspect the actual edge before choosing';
+  const llm = scriptedLLM([thinkCall(thought), runCall('', true)]);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    config: { llm: { ...base.llm, externalThinking: true } },
+    tmpPrefix: 'harness-external-think-',
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+
+  assert.equal(llm.calls, 2);
+  assert.equal(llm.options[0].forceThink, true, 'first model request must force think');
+  assert.equal(llm.options[1].forceThink, false, 'post-think continuation must return to normal choice');
+  assert.equal(sent.length, 0, 'think arguments never become chat output');
+  const thinkMessage = agent.messagesForTest.find((message) =>
+    message.role === 'assistant' && message.tool_calls?.some((call) => call.function.name === 'think'));
+  assert.ok(thinkMessage);
+  assert.match(thinkMessage.tool_calls![0].function.arguments, /actual edge/);
+  const separator = agent.messagesForTest.find((message) => message.role === 'tool' && message.tool_call_id === 'think1');
+  assert.equal(separator?.content, '------');
+  cleanup();
+});
+
+test('external thinking stays optional on synthetic stimulus turns', async () => {
+  const llm = scriptedLLM([runCall('', true)]);
+  const base = makeConfig();
+  const { agent, cleanup } = buildTestAgent({
+    llm,
+    config: { llm: { ...base.llm, externalThinking: true } },
+    tmpPrefix: 'harness-external-think-synthetic-',
+  });
+  void agent.loop();
+  agent.enqueue({
+    id: 'heartbeat-test', channelId: 'internal', channelName: 'heartbeat',
+    author: 'agent', authorId: 'agent', content: '[heartbeat]',
+    createdAt: '2026-01-01T00:00:00Z', replyTo: null, forwarded: null,
+    mentions: [], attachments: [], kind: 'heartbeat',
+  });
+  await settle();
+  agent.stop();
+
+  assert.equal(llm.calls, 1);
+  assert.equal(llm.options[0].forceThink, false, 'synthetic turn keeps think available without requiring it');
+  cleanup();
+});
+
+test('Mind frontier serves once per outer turn, not on tool continuations', async () => {
+  const llm = scriptedLLM([runCall('1 + 1', false), EMPTY_END, EMPTY_END]);
+  const mindItem = {
+    id: 12, title: 'Current commitment', body: '', kind: 'task', status: 'in_progress', effectiveStatus: 'in_progress',
+    priority: 3, parentId: null, dueAt: null, createdBy: 'agent', createdAt: 1, updatedAt: 1,
+    closedAt: null, archivedAt: null, tags: [], blockedBy: [], blocks: [], childCount: 0,
+    commentCount: 0, reminderCount: 0,
+  } as const;
+  const mind = {
+    stats: () => ({ active: 1, ready: 0, blocked: 0, waiting: 0, overdue: 0, done: 0, inbox: 0 }),
+    list: (filter: MindListFilter = {}) => {
+      if (filter.statuses && !filter.statuses.includes(mindItem.status)) return [];
+      if (filter.kinds && !filter.kinds.includes(mindItem.kind)) return [];
+      if (filter.ready || filter.blocked) return [];
+      return [mindItem].slice(0, filter.limit);
+    },
+  } as unknown as MindService;
+  const base = makeConfig();
+  const { agent, cleanup } = buildTestAgent({
+    llm,
+    config: { discord: { ...base.discord, guilds: [{ id: 'g-home', slug: 'home', slashCommands: false, quietHours: null, timezone: null, channels: { '100': 'direct' } }] } },
+    agentDeps: { mind },
+    tmpPrefix: 'harness-mind-frontier-cadence-',
+  });
+  agent.enqueue({ ...userMsg(), guildId: 'g-home' });
+  agent.enqueue({ ...userMsg(), id: 'm-batch-2', content: 'second message in the same inbound batch', guildId: 'g-home' });
+  void agent.loop();
+  await settle();
+  assert.equal(llm.calls, 2);
+  assert.match(String(llm.requests[0].at(-3)?.content), /^<mind-frontier>/, 'frontier sits before the whole current inbound batch');
+  assert.match(String(llm.requests[0].at(-2)?.content), /hi/, 'first inbound stays after the frontier');
+  assert.match(String(llm.requests[0].at(-1)?.content), /second message in the same inbound batch/, 'current conversation has maximum recency');
+  assert.ok(llm.requests[1].every((m) => !String(m.content).startsWith('<mind-frontier>')), 'post-tool continuation omits the request-only card');
+
+  agent.enqueue({ ...userMsg(), id: 'm2', content: 'new outer turn', guildId: 'g-home' });
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 3);
+  assert.match(String(llm.requests[2].at(-2)?.content), /^<mind-frontier>/, 'turn end re-arms the next turn');
+  assert.match(String(llm.requests[2].at(-1)?.content), /new outer turn/, 'new conversation remains after the frontier');
+  cleanup();
+});
+
+test('end: true on a FAILED run continues the chain', async () => {
+ // A throwing program yields ok:false, so `end` must be ignored and the model
+ // asked again — otherwise the error is never seen.
+  const llm = scriptedLLM([runCall('throw new Error("boom")', true), EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-fail-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 2, `a failed run must not end the turn (calls=${llm.calls})`);
+  cleanup();
+});
+
+test('a mixed multi-tool-call response — an ending call followed by a failing call — does not end the turn', async () => {
+ // If `endedByFlag` were OR'd instead of assigned, tc1's `end: true` would
+ // survive tc2's failure and the turn would end without the model ever
+ // seeing tc2's error.
+  const llm = scriptedLLM([
+    multiRunCall([{ code: '1 + 1', end: true }, { code: 'throw new Error("boom")', end: false }]),
+    EMPTY_END,
+  ]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-mixed-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 2, `a sibling call's failure must not be swallowed by an earlier end:true (calls=${llm.calls})`);
+  cleanup();
+});
+
+test('end: true still ends the turn when the run only sends', async () => {
+  const llm = scriptedLLM([runCall('await elpis.channel("100").send("hi there")', true)]);
+  const { agent, sent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-send-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].text, 'hi there');
+  assert.equal(llm.calls, 1, 'the send turn cost one completion, not two');
+  cleanup();
+});
+
+test('omitting end keeps the chain running', async () => {
+  const llm = scriptedLLM([runCall('1 + 1', false), EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-omit-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 2, 'a run without end must not end the turn');
+  cleanup();
+});
+
+test('run("", end: true) — the chosen-silence idiom — ends the turn and sends nothing', async () => {
+  const llm = scriptedLLM([EMPTY_END]);
+  const { agent, sent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-silence-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  assert.equal(llm.calls, 1, 'silence costs exactly one completion');
+  assert.equal(sent.length, 0);
+  cleanup();
+});
+
+/** Text unique to END_TURN_NUDGE. Both nudges name the `run('', end: true)`
+ * idiom — the ghost bounce's corrected final sentence does too — so probing on
+ * the idiom cannot tell them apart, and a test that did would pass on a ghost
+ * bounce with the end-nudge deleted entirely. Probe the distinguishing clause. */
+const END_NUDGE_MARK = 'that did not end your turn';
+
+test('a response with NO tool calls does not end the turn — it nudges and continues', async () => {
+ // Artifact-only content on purpose: `hasReplySubstance('</invoke>')` is false,
+ // so the ghost bounce cannot fire and the END nudge is the only thing that can
+ // put a second user message in history. With a substantive fixture this test
+ // passed on the ghost bounce alone and stayed green with the end-nudge removed.
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: '</invoke>' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+  };
+  const llm = scriptedLLM([bare, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-nudge-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  assert.ok(users.some((m) => m.content.includes(END_NUDGE_MARK)),
+    'the end-turn nudge should be in history');
+  assert.ok(users.some((m) => m.content.includes("run('', end: true)")),
+    'and it should name the chosen-silence idiom');
+  assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
+    'artifact-only content must not bounce — the END nudge is what fired');
+  assert.ok(llm.calls >= 2, 'the loop asked again rather than ending');
+  cleanup();
+});
+
+test('the nudge repeats without bound — there is deliberately no force-end', async () => {
+ // Operator decision no bounded retry, no fallback. A cap here would
+ // be a regression, so assert its absence rather than trusting comments.
+ //
+ // The assertion is STRICT GROWTH across two samples, not a floor. A floor of N
+ // is only violated by a cap below N — a "for safety" cap of 5 or 50 would sail
+ // past `nudges.length >= 4` while being exactly the regression this test
+ // exists to catch. Any finite cap eventually stops the count moving, so
+ // sample → wait → sample → assert growth catches all of them.
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: '</invoke>' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+  };
+  const llm = scriptedLLM([bare]);  // repeats forever
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-unbounded-' });
+  const countNudges = () => agent.messagesForTest.filter(
+    (m) => m.role === 'user' && m.content.includes(END_NUDGE_MARK)).length;
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(150);
+  const first = countNudges();
+  await settle(150);
+  const second = countNudges();
+  agent.stop();
+  await settle(50);
+  assert.ok(first > 0, `nudging started at all, got ${first}`);
+  assert.ok(second > first,
+    `the nudge count must still be growing — a cap would have frozen it (${first} → ${second})`);
+  cleanup();
+});
+
+test('agent.stop() breaks a nudge spin — graceful shutdown is not a fallback', async () => {
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: 'nope' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+  const llm = scriptedLLM([bare]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-stop-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(150);
+  agent.stop();
+  await settle(100);
+  const before = llm.calls;
+  await settle(150);
+  assert.equal(llm.calls, before, 'no further completions after stop()');
+  cleanup();
+});
+
+test('the consecutive-nudge counter resets when a turn finally ends', async () => {
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: 'not yet' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+ // Two bare responses, then a proper end; then a second turn that also nudges.
+  const llm = scriptedLLM([bare, bare, EMPTY_END, bare, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-reset-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(200);
+  agent.enqueue({ ...userMsg(), id: 'm2' });
+  await settle(200);
+  agent.stop();
+  assert.equal(agent.endNudgeCountForTest, 0, 'counter reset at the last finishTurn');
+  cleanup();
+});
+
+test('ghost-reply nudge still fires on a turn ended via end with zero sends', async () => {
+ // Retro finding #18: a written-but-unsent reply is silent failure. The reply
+ // now rides the run-call message's content, so the nudge must read it there.
+  const ghost: CompleteResult = {
+    message: {
+      role: 'assistant',
+      content: 'Yes, I can help with that — here is what I would do first.',
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","end":true}' } }],
+    },
+    stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+  };
+  const llm = scriptedLLM([ghost, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-ghost-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(200);
+  agent.stop();
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  assert.ok(users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
+    'the ghost bounce must still fire when the turn ended via the end flag');
+  cleanup();
+});
+
+test('ghost-reply nudge takes precedence over the end-nudge', async () => {
+ // A bare response carrying reply substance is BOTH a ghost reply and a missing
+ // end. The ghost bounce is the one that fires — it concerns a person.
+  const ghostBare: CompleteResult = {
+    message: { role: 'assistant', content: 'Sure, happy to help you with that today.' },
+    stripped: false, usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+  };
+  const llm = scriptedLLM([ghostBare, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-precedence-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(200);
+  agent.stop();
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const ghostIdx = users.findIndex((m) => m.content.includes('you wrote a reply but sent nothing'));
+ // Probe END_TURN_NUDGE by a phrase unique to it: both nudges now name the
+ // `run('', end: true)` idiom (the ghost bounce's corrected final sentence
+ // does too), so matching on the idiom alone cannot tell them apart.
+  const endIdx = users.findIndex((m) => m.content.includes('that did not end your turn'));
+  assert.ok(ghostIdx >= 0, 'ghost bounce fired');
+  assert.ok(endIdx === -1 || ghostIdx < endIdx, 'ghost bounce came first');
+  cleanup();
+});
+
+test('mid-turn inbound arriving during an end run drains instead of parking', async () => {
+  const llm = scriptedLLM([runCall('await elpis.sleep(40)', true), EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-midturn-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(30);
+  agent.enqueue({ ...userMsg(), id: 'm2', content: 'one more thing' });
+  await settle(250);
+  agent.stop();
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  assert.ok(users.some((m) => m.content.includes('one more thing')),
+    'the mid-turn message must reach history, not be stranded in the queue');
+  assert.ok(llm.calls >= 2, 'a new turn ran for the queued message');
+  cleanup();
+});
+
+test('a fully-leaked response ends the turn without nudging', async () => {
+ // The leak path exits via finishTurn before the turn-end region, so the
+ // end-nudge must never fire there — otherwise a broken endpoint spins.
+  const leaked: CompleteResult = {
+    message: { role: 'assistant', content: '' }, stripped: true,
+    usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+  };
+  const llm = scriptedLLM([leaked]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-leak-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  agent.stop();
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  assert.ok(!users.some((m) => m.content.includes("run('', end: true)")),
+    'the leak path must exit, not nudge');
+  cleanup();
+});
+
+test('a sustained nudge loop alerts the operator exactly once, at the threshold', async () => {
+ // Artifact-only content (`</invoke>`), same reason as the END_NUDGE_MARK test
+ // above: substantive content ('nope' etc.) would fire the one-shot ghost-reply
+ // bounce on the FIRST response instead of the end-nudge, throwing off the exact
+ // count this test relies on (deterministic array length == END_NUDGE_ALERT_AT).
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: '</invoke>' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+ // Exactly END_NUDGE_ALERT_AT nudges, then a real end — short enough that the
+ // periodic re-alert (every END_NUDGE_REALERT_EVERY past the threshold, see the
+ // dedicated re-alert test below) never gets a second chance to fire.
+  const responses = Array.from({ length: END_NUDGE_ALERT_AT }, () => bare).concat([EMPTY_END]);
+  const llm = scriptedLLM(responses);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-end-alert-',
+ // makeConfig takes Partial<Config>, so `discord` must be a complete object —
+ // spread the base and override one key (same idiom as test/leak-retry.test.ts).
+    config: { discord: { ...base.discord, errorChannelId: '999' } },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(500);
+  agent.stop();
+  await settle(50);
+  const alerts = sent.filter((s) => s.channelId === '999' && /no-run-call responses/.test(s.text));
+  assert.equal(alerts.length, 1, `expected exactly one operator alert, got ${alerts.length}`);
+  cleanup();
+});
+
+// ---------- agent -> console.endNudge wiring (review fix: Important 1) ----------
+//
+// Mirrors test/cache-stats.test.ts's agent -> console.cacheBusted pair
+// (:312, :331): the hub-level test alone (test/console.test.ts) does not
+// prove agent.ts actually calls it, or that the call is guarded. Without
+// these, deleting `this.deps.console?.endNudge(...)` — or its try/catch —
+// passes the whole suite.
+
+test('agent: a spinning nudge loop reaches console.endNudge with the consecutive count', async () => {
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: 'nope' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+  const llm = scriptedLLM([bare]); // never ends
+  const counts: number[] = [];
+  const stubConsole = { endNudge: (count: number) => { counts.push(count); } } as unknown as ConsoleHub;
+  const { agent, cleanup } = buildTestAgent({
+    llm, tmpPrefix: 'harness-end-hub-wire-', agentDeps: { console: stubConsole },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  agent.stop();
+  assert.ok(counts.length > 0, 'console.endNudge must be called during a spin');
+  assert.deepEqual(counts, counts.map((_, i) => i + 1),
+    'reported counts are consecutive, starting at 1 (one call per nudge)');
+  assert.equal(counts[counts.length - 1], agent.endNudgeCountForTest,
+    "the last reported count matches the agent's own counter");
+  cleanup();
+});
+
+test('agent: a throwing console.endNudge is swallowed — the loop keeps nudging', async () => {
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: 'nope' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+  const llm = scriptedLLM([bare]); // never ends
+  const stubConsole = {
+    endNudge: () => { throw new Error('boom — observer-only, must not propagate'); },
+  } as unknown as ConsoleHub;
+  const { agent, cleanup } = buildTestAgent({
+    llm, tmpPrefix: 'harness-end-hub-throw-', agentDeps: { console: stubConsole },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(150);
+  const first = agent.endNudgeCountForTest;
+  await settle(150);
+  const second = agent.endNudgeCountForTest;
+  agent.stop();
+  assert.ok(first > 0, 'the loop must have started nudging before the throwing observer could matter');
+  assert.ok(second > first,
+    'the nudge count keeps growing — a throwing console.endNudge must not break the loop');
+  cleanup();
+});
+
+// ---------- clearContext resets the nudge counter (review fix: Minor 2) ----------
+
+test("clearContext() resets the nudge counter mid-spin — the fresh spin can re-alert", async () => {
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: 'nope' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+  const llm = scriptedLLM([bare]); // never ends
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-clear-reset-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  const before = agent.endNudgeCountForTest;
+  assert.ok(before > 0, 'the loop must have nudged before clearing');
+  agent.clearContext();
+  assert.equal(agent.endNudgeCountForTest, 0,
+    'clearContext() resets the nudge counter synchronously, alongside the other one-shot flags — ' +
+    'otherwise a fresh post-clear spin would start above the alert threshold and never re-cross it');
+  agent.stop();
+  cleanup();
+});
+
+// ---------- final-review fix wave : the SECOND unbounded loop
+// shape — a tool chain that never lands a successful `end: true` — is now
+// instrumented the same way as the no-run-call nudge above (own counter, own
+// alert wording, same threshold), WITHOUT capping or force-ending it. ----------
+
+/** Text unique to toolChainSpinAlert — distinguishes it from endNudgeAlert's
+ * "no-run-call responses" wording, which would misdescribe this shape (a run
+ * IS being called here; it just never lands a successful end: true). */
+const TOOL_CHAIN_ALERT_MARK = 'it IS calling run';
+
+test('a tool chain that never lands end: true is counted (toolChainContinueCountForTest)', async () => {
+  const failing = runCall('throw new Error("boom")', true);
+  const llm = scriptedLLM([failing]); // a throwing run never succeeds — never ends
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-toolchain-count-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  agent.stop();
+  assert.ok(agent.toolChainContinueCountForTest > 0,
+    'a spinning tool chain must increment its own counter, not just endNudgeCount (which stays 0 here)');
+  assert.equal(agent.endNudgeCountForTest, 0,
+    'this shape never produces a no-tool-calls response, so the sibling counter must not move');
+  cleanup();
+});
+
+test('the tool-chain spin repeats without bound — there is deliberately no force-end', async () => {
+ // Sibling of "the nudge repeats without bound" above, for the OTHER
+ // unbounded loop shape (final-review fix wave, ): a tool chain
+ // that keeps calling run but never lands a successful end: true. Same
+ // reasoning applies: the assertion is STRICT GROWTH across two samples, not
+ // a floor — any finite cap eventually stops the count moving, so
+ // sample -> wait -> sample -> assert growth catches all of them regardless
+ // of where the cap is set. No message is pushed for this shape (unlike the
+ // no-run-call nudge), so the counter itself — not history — is what's
+ // sampled.
+  const failing = runCall('throw new Error("boom")', true);
+  const llm = scriptedLLM([failing]); // a throwing run never succeeds — repeats forever
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-toolchain-unbounded-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(150);
+  const first = agent.toolChainContinueCountForTest;
+  await settle(150);
+  const second = agent.toolChainContinueCountForTest;
+  agent.stop();
+  await settle(50);
+  assert.ok(first > 0, `spinning started at all, got ${first}`);
+  assert.ok(second > first,
+    `the tool-chain spin count must still be growing — a cap would have frozen it (${first} → ${second})`);
+  cleanup();
+});
+
+test('a tool-chain spin alerts the operator, with shape-specific wording, at the same threshold', async () => {
+  const failing = runCall('throw new Error("boom")', true);
+ // Exactly END_NUDGE_ALERT_AT failing calls, then a real end — deterministic
+ // and short enough that the periodic re-alert (tested separately below)
+ // never gets a second chance to fire, so "exactly one" is unambiguous.
+  const responses = Array.from({ length: END_NUDGE_ALERT_AT }, () => failing).concat([EMPTY_END]);
+  const llm = scriptedLLM(responses);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-toolchain-alert-',
+    config: { discord: { ...base.discord, errorChannelId: '999' } },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(500);
+  agent.stop();
+  await settle(50);
+  const alerts = sent.filter((s) => s.channelId === '999' && s.text.includes(TOOL_CHAIN_ALERT_MARK));
+  assert.equal(alerts.length, 1, `expected exactly one operator alert, got ${alerts.length}`);
+  assert.ok(!alerts.some((s) => s.text.includes('no-run-call responses')),
+    'the tool-chain alert must not borrow the no-run-call shape\'s wording — the model IS calling run here');
+  cleanup();
+});
+
+test('successful non-ending runs after a failure threshold do not repeat an unchanged alert', async () => {
+  const failing = runCall('throw new Error("boom")', true);
+  const succeeding = runCall('1 + 1', false);
+  const responses = [
+    ...Array.from({ length: END_NUDGE_ALERT_AT }, () => failing),
+    ...Array.from({ length: 4 }, () => succeeding),
+    runCall('', true),
+  ];
+  const llm = scriptedLLM(responses);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-toolchain-no-duplicate-alert-',
+    config: { discord: { ...base.discord, errorChannelId: '999' } },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(700);
+  agent.stop();
+  await settle(50);
+  const alerts = sent.filter((s) => s.channelId === '999' && s.text.includes(TOOL_CHAIN_ALERT_MARK));
+  assert.equal(alerts.length, 1,
+    `successful continuation at an unchanged failure count must not repeat the threshold alert; got ${alerts.length}`);
+  cleanup();
+});
+
+test('a sustained tool-chain spin re-alerts every END_NUDGE_REALERT_EVERY cycles past the threshold', async () => {
+ // Deterministic (finite scripted array), not timing-based: exactly
+ // END_NUDGE_ALERT_AT + END_NUDGE_REALERT_EVERY failing calls, then a real
+ // end — so the alert must fire exactly twice (at the crossing and at the
+ // re-alert interval), never once and never on every cycle in between.
+  const failing = runCall('throw new Error("boom")', true);
+  const secondCrossing = END_NUDGE_ALERT_AT + END_NUDGE_REALERT_EVERY;
+  const responses = Array.from({ length: secondCrossing }, () => failing).concat([EMPTY_END]);
+  const llm = scriptedLLM(responses);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-toolchain-realert-',
+    config: { discord: { ...base.discord, errorChannelId: '999' } },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(1500);
+  agent.stop();
+  await settle(50);
+  const alerts = sent.filter((s) => s.channelId === '999' && s.text.includes(TOOL_CHAIN_ALERT_MARK));
+  assert.equal(alerts.length, 2,
+    `expected exactly two operator alerts (at ${END_NUDGE_ALERT_AT} and ${secondCrossing}), got ${alerts.length}`);
+  cleanup();
+});
+
+test('a sustained no-run-call spin ALSO re-alerts every END_NUDGE_REALERT_EVERY cycles past the threshold', async () => {
+ // Same re-alert cadence, other shape (Minor finding 2 applies to both).
+ // Artifact-only content (see the earlier END_NUDGE_MARK test's comment):
+ // substantive content would divert the FIRST response into the one-shot
+ // ghost-reply bounce instead of the end-nudge, eating one of the counted
+ // responses and throwing off the exact crossing this test relies on.
+  const bare: CompleteResult = {
+    message: { role: 'assistant', content: '</invoke>' }, stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  };
+  const secondCrossing = END_NUDGE_ALERT_AT + END_NUDGE_REALERT_EVERY;
+  const responses = Array.from({ length: secondCrossing }, () => bare).concat([EMPTY_END]);
+  const llm = scriptedLLM(responses);
+  const base = makeConfig();
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-end-realert-',
+    config: { discord: { ...base.discord, errorChannelId: '999' } },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(1500);
+  agent.stop();
+  await settle(50);
+  const alerts = sent.filter((s) => s.channelId === '999' && /no-run-call responses/.test(s.text));
+  assert.equal(alerts.length, 2,
+    `expected exactly two operator alerts (at ${END_NUDGE_ALERT_AT} and ${secondCrossing}), got ${alerts.length}`);
+  cleanup();
+});
+
+test('agent: a tool-chain spin does not call console.endNudge — that surface is reserved for the no-run-call shape', async () => {
+ // console.endNudge's rendering is hardcoded to "end-turn nudge — N
+ // since last end, no run call" (app.js) — reusing it here would misreport both
+ // the kind (a run IS being called) and the count (a different counter).
+ // Per AGENTS.md's "no second convention beside an existing one," this shape
+ // gets the Discord alert above but no console divider.
+  const failing = runCall('throw new Error("boom")', true);
+  const llm = scriptedLLM([failing]); // never ends
+  const counts: number[] = [];
+  const stubConsole = { endNudge: (count: number) => { counts.push(count); } } as unknown as ConsoleHub;
+  const { agent, cleanup } = buildTestAgent({
+    llm, tmpPrefix: 'harness-toolchain-noconsole-', agentDeps: { console: stubConsole },
+  });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  agent.stop();
+  assert.ok(agent.toolChainContinueCountForTest > 0, 'the tool-chain spin must have been counted');
+  assert.equal(counts.length, 0,
+    'console.endNudge must not be called for the tool-chain shape (it would misreport kind and count)');
+  cleanup();
+});
+
+test('the tool-chain-continue counter resets when a turn finally ends', async () => {
+  const failing = runCall('throw new Error("boom")', true);
+  const llm = scriptedLLM([failing, failing, EMPTY_END, failing, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-toolchain-reset-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(200);
+  agent.enqueue({ ...userMsg(), id: 'm2' });
+  await settle(200);
+  agent.stop();
+  assert.equal(agent.toolChainContinueCountForTest, 0, 'counter reset at the last finishTurn');
+  cleanup();
+});
+
+test('clearContext() resets the tool-chain-continue counter mid-spin (review fix: sibling of Minor 2)', async () => {
+  const failing = runCall('throw new Error("boom")', true);
+  const llm = scriptedLLM([failing]); // never ends
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-toolchain-clear-reset-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(300);
+  const before = agent.toolChainContinueCountForTest;
+  assert.ok(before > 0, 'the loop must have spun before clearing');
+  agent.clearContext();
+  assert.equal(agent.toolChainContinueCountForTest, 0,
+    'clearContext() must reset BOTH spin counters — the review found this reset missed once already ' +
+    'for the sibling (endNudgeCount)');
+  agent.stop();
+  cleanup();
+});
+
+// ---------- Minor finding 3: misleading/duplicate "turn end" log lines ----------
+
+/** A logger stub that records every emitted line as one joined string per call,
+ * regardless of level — enough to grep for the outcome markers below. */
+function makeLogSpy(): { logger: Logger; lines: string[] } {
+  const lines: string[] = [];
+  const stringify = (a: unknown[]) => a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ');
+  const record = (...a: unknown[]) => { lines.push(stringify(a)); };
+  return { lines, logger: { debug: record, info: record, warn: record, error: record } };
+}
+
+test('a genuinely flag-ended turn logs its outcome exactly once (no premature/duplicate "turn end" line)', async () => {
+  const { logger, lines } = makeLogSpy();
+  const llm = scriptedLLM([EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-logonce-', config: { logger } });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  agent.stop();
+  const realEnd = lines.filter((l) => l.includes('turn end | ended by flag'));
+  assert.equal(realEnd.length, 1, `expected exactly one real turn-end log line, got ${realEnd.length}`);
+  const premature = lines.filter((l) => l.includes('turn end | end flag'));
+  assert.equal(premature.length, 0,
+    'the premature end-flag log (logged before the ghost-reply/end-nudge checks could still bounce ' +
+    'the turn) must be gone, not merely deduplicated');
+  cleanup();
+});
+
+test('a ghost-bounced turn does not log a turn-end that never happened', async () => {
+  const { logger, lines } = makeLogSpy();
+  const ghost: CompleteResult = {
+    message: {
+      role: 'assistant',
+      content: 'Yes, I can help with that — here is what I would do first.',
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","end":true}' } }],
+    },
+    stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+  };
+  const llm = scriptedLLM([ghost, EMPTY_END]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-end-logbounce-', config: { logger } });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle(200);
+  agent.stop();
+ // The FIRST response has endedByFlag=true but the ghost bounce pre-empts the
+ // ending — only the SECOND (EMPTY_END) call actually finishes the turn. If the
+ // premature log fired on the first, there would be two "ended"-ish lines for
+ // one real ending.
+  const realEnd = lines.filter((l) => l.includes('turn end | ended by flag'));
+  assert.equal(realEnd.length, 1,
+    `expected exactly one real turn-end line despite the bounce, got ${realEnd.length}`);
+  cleanup();
+});

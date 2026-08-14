@@ -1,0 +1,21 @@
+# elpis-xorg — real Proxmox-visible X server for elpis.computer.
+# Installed as a system service by deploy/install.sh.
+
+[Unit]
+Description=elpis Xorg — Proxmox-visible primary display
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+Environment=ELPIS_DISPLAY=:0
+Environment=ELPIS_VT=7
+Environment=ELPIS_AGENT_USER=<AGENT_USER>
+Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/computer
+ExecStart=<HARNESS_ROOT>/deploy/start-xorg.sh
+ExecStartPost=/usr/bin/chvt 7
+ExecStopPost=-/usr/bin/chvt 1
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

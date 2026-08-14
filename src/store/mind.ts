@@ -1,0 +1,526 @@
+import type { DatabaseSync } from 'node:sqlite';
+import type { Logger } from '../lib/log.js';
+import type { ScheduledTask } from './scheduler.js';
+
+export const MIND_STATUSES = ['inbox', 'open', 'in_progress', 'waiting', 'done', 'cancelled'] as const;
+export const MIND_KINDS = ['task', 'project', 'idea', 'question', 'reminder'] as const;
+export const MIND_SORTS = ['created_asc', 'created_desc', 'updated_asc', 'updated_desc', 'last_comment_asc', 'last_comment_desc'] as const;
+export type MindSort = (typeof MIND_SORTS)[number];
+export type MindStatus = (typeof MIND_STATUSES)[number];
+export type MindKind = (typeof MIND_KINDS)[number];
+export type MindEffectiveStatus = MindStatus | 'blocked';
+
+export interface MindItem {
+  id: number;
+  title: string;
+  body: string;
+  kind: MindKind;
+  status: MindStatus;
+  effectiveStatus: MindEffectiveStatus;
+  priority: number;
+  parentId: number | null;
+  dueAt: number | null;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  lastCommentAt: number | null;
+  closedAt: number | null;
+  archivedAt: number | null;
+  tags: string[];
+  blockedBy: MindLink[];
+  blocks: MindLink[];
+  childCount: number;
+  commentCount: number;
+  reminderCount: number;
+}
+
+export interface MindLink {
+  id: number;
+  title: string;
+  status: MindStatus;
+  effectiveStatus: MindEffectiveStatus;
+}
+
+export interface MindComment {
+  id: number;
+  itemId: number;
+  author: string;
+  body: string;
+  createdAt: number;
+  updatedAt: number | null;
+}
+
+export interface MindEvent {
+  id: number;
+  itemId: number;
+  type: string;
+  actor: string;
+  data: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface MindReminder {
+  id: number;
+  itemId: number;
+  scheduledTaskId: number;
+  fireAt: number;
+  channelId: string | null;
+  createdBy: string;
+  createdAt: number;
+  firedAt: number | null;
+  cancelledAt: number | null;
+}
+
+export interface MindDetail extends MindItem {
+  parent: MindLink | null;
+  children: MindLink[];
+  dependencies: MindLink[];
+  comments: MindComment[];
+  events: MindEvent[];
+  reminders: MindReminder[];
+}
+
+export interface MindListFilter {
+  statuses?: MindStatus[];
+  kinds?: MindKind[];
+  tag?: string;
+  query?: string;
+  parentId?: number | null;
+  ready?: boolean;
+  blocked?: boolean;
+  overdue?: boolean;
+  includeArchived?: boolean;
+  sort?: MindSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CreateMindItem {
+  title: string;
+  body?: string;
+  kind?: MindKind;
+  status?: MindStatus;
+  priority?: number;
+  parentId?: number | null;
+  dueAt?: number | null;
+  tags?: string[];
+  dependsOn?: number[];
+  actor?: string;
+}
+
+export interface UpdateMindItem {
+  title?: string;
+  body?: string;
+  kind?: MindKind;
+  status?: MindStatus;
+  priority?: number;
+  parentId?: number | null;
+  dueAt?: number | null;
+  tags?: string[];
+}
+
+export interface MindStats {
+  active: number;
+  ready: number;
+  blocked: number;
+  waiting: number;
+  overdue: number;
+  done: number;
+  inbox: number;
+}
+
+export interface MindGraph {
+  rootId: number;
+  nodes: MindItem[];
+  edges: { from: number; to: number; type: 'depends_on' | 'parent' }[];
+}
+
+interface SchedulerLike {
+  create(opts: { name: string; kind?: 'custom'; channelId?: string | null; payload: string; nextRunAt: number }): ScheduledTask;
+  delete(id: number): boolean;
+  update(id: number, patch: { nextRunAt?: number; payload?: string; snoozeUntil?: number | null }): ScheduledTask | null;
+}
+
+export interface CreateMindServiceDeps {
+  db: DatabaseSync;
+  scheduler: SchedulerLike;
+  logger: Logger;
+  onChanged?: () => void;
+}
+
+const ACTIVE_STATUSES: MindStatus[] = ['inbox', 'open', 'in_progress', 'waiting'];
+const READY_STATUSES: MindStatus[] = ['inbox', 'open'];
+
+function assertStatus(value: unknown): asserts value is MindStatus {
+  if (!MIND_STATUSES.includes(value as MindStatus)) throw new Error(`mind: invalid status ${JSON.stringify(value)} (expected ${MIND_STATUSES.join('|')})`);
+}
+
+function assertKind(value: unknown): asserts value is MindKind {
+  if (!MIND_KINDS.includes(value as MindKind)) throw new Error(`mind: invalid kind ${JSON.stringify(value)} (expected ${MIND_KINDS.join('|')})`);
+}
+
+function assertSort(value: unknown): asserts value is MindSort {
+  if (!MIND_SORTS.includes(value as MindSort)) throw new Error(`mind: invalid sort ${JSON.stringify(value)} (expected ${MIND_SORTS.join('|')})`);
+}
+
+function assertPriority(value: unknown): asserts value is number {
+  if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 4) throw new Error('mind: priority must be an integer from 0 to 4');
+}
+
+function assertText(value: unknown, field: string, max: number, allowEmpty = false): asserts value is string {
+  if (typeof value !== 'string') throw new Error(`mind: ${field} must be a string`);
+  const text = value.trim();
+  if (!allowEmpty && text.length === 0) throw new Error(`mind: ${field} must not be empty`);
+  if (value.length > max) throw new Error(`mind: ${field} must be at most ${max} characters`);
+}
+
+function normalizeTag(value: string): string {
+  const tag = value.trim().toLowerCase().replace(/^#/, '').replace(/\s+/g, '-');
+  if (!tag || tag.length > 48 || !/^[\p{L}\p{N}][\p{L}\p{N}._/-]*$/u.test(tag)) throw new Error(`mind: invalid tag ${JSON.stringify(value)}`);
+  return tag;
+}
+
+function uniq<T>(values: T[]): T[] { return Array.from(new Set(values)); }
+
+function parseData(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string' || value === '') return {};
+  try { return JSON.parse(value) as Record<string, unknown>; } catch { return { raw: value }; }
+}
+
+function rowBase(row: Record<string, unknown>): Omit<MindItem, 'effectiveStatus' | 'tags' | 'blockedBy' | 'blocks' | 'childCount' | 'commentCount' | 'reminderCount'> {
+  return {
+    id: Number(row.id), title: String(row.title), body: String(row.body ?? ''), kind: row.kind as MindKind,
+    status: row.status as MindStatus, priority: Number(row.priority), parentId: row.parent_id == null ? null : Number(row.parent_id),
+    dueAt: row.due_at == null ? null : Number(row.due_at), createdBy: String(row.created_by), createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at), lastCommentAt: row.last_comment_at == null ? null : Number(row.last_comment_at), closedAt: row.closed_at == null ? null : Number(row.closed_at),
+    archivedAt: row.archived_at == null ? null : Number(row.archived_at),
+  };
+}
+
+export class MindStore {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private transaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const value = fn(); this.db.exec('COMMIT'); return value; }
+    catch (error) { try { this.db.exec('ROLLBACK'); } catch { /* original error wins */ } throw error; }
+  }
+
+  private requireId(id: number): void {
+    if (!Number.isInteger(id) || id <= 0) throw new Error(`mind: invalid item id ${JSON.stringify(id)}`);
+    if (!this.db.prepare('SELECT 1 FROM mind_items WHERE id = ?').get(id)) throw new Error(`mind: no item #${id}`);
+  }
+
+  private event(itemId: number, type: string, actor: string, data: Record<string, unknown>, at = Date.now()): void {
+    this.db.prepare('INSERT INTO mind_events (item_id, type, actor, data_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(itemId, type, actor, JSON.stringify(data), at);
+  }
+
+  private tagsFor(id: number): string[] {
+    return (this.db.prepare('SELECT tag FROM mind_tags WHERE item_id = ? ORDER BY tag').all(id) as { tag: string }[]).map((r) => r.tag);
+  }
+
+  private unresolvedDependencies(id: number): MindLink[] {
+    const rows = this.db.prepare(`
+      SELECT i.* FROM mind_dependencies d JOIN mind_items i ON i.id = d.depends_on_id
+      WHERE d.item_id = ? AND i.status != 'done' ORDER BY i.priority DESC, i.id
+    `).all(id) as Record<string, unknown>[];
+    return rows.map((row) => this.toLink(row));
+  }
+
+  private allDependencies(id: number): MindLink[] {
+    const rows = this.db.prepare(`SELECT i.* FROM mind_dependencies d JOIN mind_items i ON i.id = d.depends_on_id WHERE d.item_id = ? ORDER BY i.id`).all(id) as Record<string, unknown>[];
+    return rows.map((row) => this.toLink(row));
+  }
+
+  private dependents(id: number): MindLink[] {
+    const rows = this.db.prepare(`SELECT i.* FROM mind_dependencies d JOIN mind_items i ON i.id = d.item_id WHERE d.depends_on_id = ? ORDER BY i.id`).all(id) as Record<string, unknown>[];
+    return rows.map((row) => this.toLink(row));
+  }
+
+  private toLink(row: Record<string, unknown>): MindLink {
+    const id = Number(row.id);
+    const status = row.status as MindStatus;
+    return { id, title: String(row.title), status, effectiveStatus: ACTIVE_STATUSES.includes(status) && this.unresolvedDependencyCount(id) > 0 ? 'blocked' : status };
+  }
+
+  private unresolvedDependencyCount(id: number): number {
+    const row = this.db.prepare(`
+      SELECT count(*) AS n FROM mind_dependencies d JOIN mind_items i ON i.id = d.depends_on_id
+      WHERE d.item_id = ? AND i.status != 'done'
+    `).get(id) as { n: number };
+    return Number(row.n);
+  }
+
+  private hydrate(row: Record<string, unknown>): MindItem {
+    if (!Object.hasOwn(row, 'last_comment_at')) {
+      const latest = this.db.prepare('SELECT max(COALESCE(updated_at, created_at)) AS at FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL').get(Number(row.id)) as { at: number | null };
+      row = { ...row, last_comment_at: latest.at };
+    }
+    const base = rowBase(row);
+    const blockedBy = this.unresolvedDependencies(base.id);
+    const count = (sql: string) => Number((this.db.prepare(sql).get(base.id) as { n: number }).n);
+    return {
+      ...base,
+      effectiveStatus: ACTIVE_STATUSES.includes(base.status) && blockedBy.length > 0 ? 'blocked' : base.status,
+      tags: this.tagsFor(base.id), blockedBy, blocks: this.dependents(base.id),
+      childCount: count('SELECT count(*) AS n FROM mind_items WHERE parent_id = ? AND archived_at IS NULL'),
+      commentCount: count('SELECT count(*) AS n FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL'),
+      reminderCount: count('SELECT count(*) AS n FROM mind_reminders WHERE item_id = ? AND cancelled_at IS NULL AND fired_at IS NULL'),
+    };
+  }
+
+  create(opts: CreateMindItem): MindDetail {
+    assertText(opts.title, 'title', 240);
+    const kind = opts.kind ?? 'task'; assertKind(kind);
+    const status = opts.status ?? 'open'; assertStatus(status);
+    const priority = opts.priority ?? 2; assertPriority(priority);
+    const body = opts.body ?? ''; assertText(body, 'body', 100_000, true);
+    const actor = opts.actor?.trim() || 'agent';
+    const dueAt = opts.dueAt ?? null;
+    if (dueAt != null && (!Number.isFinite(dueAt) || dueAt <= 0)) throw new Error('mind: dueAt must be finite epoch-ms or null');
+    const parentId = opts.parentId ?? null;
+    if (parentId != null) this.requireId(parentId);
+    const dependsOn = uniq(opts.dependsOn ?? []);
+    for (const id of dependsOn) this.requireId(id);
+    const tags = uniq((opts.tags ?? []).map(normalizeTag));
+    const now = Date.now();
+    const id = this.transaction(() => {
+      const result = this.db.prepare(`
+        INSERT INTO mind_items (title, body, kind, status, priority, parent_id, due_at, created_by, created_at, updated_at, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(opts.title.trim(), body, kind, status, priority, parentId, dueAt, actor, now, now, status === 'done' || status === 'cancelled' ? now : null);
+      const newId = Number(result.lastInsertRowid);
+      for (const tag of tags) this.db.prepare('INSERT INTO mind_tags (item_id, tag) VALUES (?, ?)').run(newId, tag);
+      for (const dep of dependsOn) this.addDependencyInternal(newId, dep, actor, now);
+      this.event(newId, 'item.created', actor, { title: opts.title.trim(), kind, status, priority, parentId, dueAt, tags, dependsOn }, now);
+      return newId;
+    });
+    return this.get(id)!;
+  }
+
+  get(id: number): MindDetail | null {
+    const row = this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const item = this.hydrate(row);
+    const parentRow = item.parentId == null ? null : this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(item.parentId) as Record<string, unknown> | undefined;
+    const childRows = this.db.prepare('SELECT * FROM mind_items WHERE parent_id = ? AND archived_at IS NULL ORDER BY priority DESC, id').all(id) as Record<string, unknown>[];
+    const comments = (this.db.prepare('SELECT * FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL ORDER BY created_at, id').all(id) as Record<string, unknown>[]).map((r) => ({
+      id: Number(r.id), itemId: Number(r.item_id), author: String(r.author), body: String(r.body), createdAt: Number(r.created_at), updatedAt: r.updated_at == null ? null : Number(r.updated_at),
+    }));
+    const events = (this.db.prepare('SELECT * FROM mind_events WHERE item_id = ? ORDER BY created_at DESC, id DESC LIMIT 200').all(id) as Record<string, unknown>[]).map((r) => ({
+      id: Number(r.id), itemId: Number(r.item_id), type: String(r.type), actor: String(r.actor), data: parseData(r.data_json), createdAt: Number(r.created_at),
+    }));
+    const reminders = (this.db.prepare('SELECT * FROM mind_reminders WHERE item_id = ? ORDER BY fire_at, id').all(id) as Record<string, unknown>[]).map(reminderFromRow);
+    return { ...item, parent: parentRow ? this.toLink(parentRow) : null, children: childRows.map((r) => this.toLink(r)), dependencies: this.allDependencies(id), comments, events, reminders };
+  }
+
+  list(filter: MindListFilter = {}): MindItem[] {
+    const where: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (!filter.includeArchived) where.push('i.archived_at IS NULL');
+    if (filter.statuses?.length) { for (const status of filter.statuses) assertStatus(status); where.push(`i.status IN (${filter.statuses.map(() => '?').join(',')})`); values.push(...filter.statuses); }
+    if (filter.kinds?.length) { for (const kind of filter.kinds) assertKind(kind); where.push(`i.kind IN (${filter.kinds.map(() => '?').join(',')})`); values.push(...filter.kinds); }
+    if (filter.parentId !== undefined) { where.push('i.parent_id IS ?'); values.push(filter.parentId); }
+    if (filter.tag) { where.push('EXISTS (SELECT 1 FROM mind_tags mt WHERE mt.item_id = i.id AND mt.tag = ?)'); values.push(normalizeTag(filter.tag)); }
+    if (filter.query?.trim()) {
+      const q = `%${filter.query.trim().toLowerCase()}%`;
+      where.push(`(lower(i.title) LIKE ? OR lower(i.body) LIKE ? OR EXISTS (SELECT 1 FROM mind_comments mc WHERE mc.item_id = i.id AND mc.deleted_at IS NULL AND lower(mc.body) LIKE ?))`);
+      values.push(q, q, q);
+    }
+    if (filter.overdue) { where.push(`i.due_at IS NOT NULL AND i.due_at < ? AND i.status NOT IN ('done','cancelled')`); values.push(Date.now()); }
+    const limit = Math.max(1, Math.min(500, filter.limit ?? 100));
+    const offset = Math.max(0, filter.offset ?? 0);
+    const sort = filter.sort ?? 'updated_desc'; assertSort(sort);
+    const orderBy: Record<MindSort, string> = {
+      created_asc: 'i.created_at ASC, i.id ASC',
+      created_desc: 'i.created_at DESC, i.id DESC',
+      updated_asc: 'i.updated_at ASC, i.id ASC',
+      updated_desc: 'i.updated_at DESC, i.id DESC',
+      last_comment_asc: 'last_comment_at IS NULL, last_comment_at ASC, i.id ASC',
+      last_comment_desc: 'last_comment_at IS NULL, last_comment_at DESC, i.id DESC',
+    };
+    const rows = this.db.prepare(`SELECT i.*, (SELECT max(COALESCE(mc.updated_at, mc.created_at)) FROM mind_comments mc WHERE mc.item_id = i.id AND mc.deleted_at IS NULL) AS last_comment_at FROM mind_items i ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${orderBy[sort]} LIMIT ? OFFSET ?`).all(...values, limit, offset) as Record<string, unknown>[];
+    let items = rows.map((row) => this.hydrate(row));
+    if (filter.ready) items = items.filter((item) => READY_STATUSES.includes(item.status) && item.blockedBy.length === 0);
+    if (filter.blocked) items = items.filter((item) => item.effectiveStatus === 'blocked');
+    return items;
+  }
+
+  ready(limit = 100): MindItem[] { return this.list({ ready: true, limit }); }
+
+  update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail {
+    this.requireId(id);
+    const current = this.get(id)!;
+    const sets: string[] = [];
+    const values: (string | number | null)[] = [];
+    const changed: Record<string, unknown> = {};
+    if (patch.title !== undefined) { assertText(patch.title, 'title', 240); sets.push('title = ?'); values.push(patch.title.trim()); changed.title = patch.title.trim(); }
+    if (patch.body !== undefined) { assertText(patch.body, 'body', 100_000, true); sets.push('body = ?'); values.push(patch.body); changed.body = patch.body; }
+    if (patch.kind !== undefined) { assertKind(patch.kind); sets.push('kind = ?'); values.push(patch.kind); changed.kind = patch.kind; }
+    if (patch.status !== undefined) { assertStatus(patch.status); sets.push('status = ?'); values.push(patch.status); changed.status = patch.status; const closed = patch.status === 'done' || patch.status === 'cancelled'; sets.push('closed_at = ?'); values.push(closed ? Date.now() : null); }
+    if (patch.priority !== undefined) { assertPriority(patch.priority); sets.push('priority = ?'); values.push(patch.priority); changed.priority = patch.priority; }
+    if (patch.dueAt !== undefined) { if (patch.dueAt != null && (!Number.isFinite(patch.dueAt) || patch.dueAt <= 0)) throw new Error('mind: dueAt must be finite epoch-ms or null'); sets.push('due_at = ?'); values.push(patch.dueAt); changed.dueAt = patch.dueAt; }
+    if (patch.parentId !== undefined) { if (patch.parentId != null) { this.requireId(patch.parentId); this.assertNoParentCycle(id, patch.parentId); } sets.push('parent_id = ?'); values.push(patch.parentId); changed.parentId = patch.parentId; }
+    const tags = patch.tags?.map(normalizeTag);
+    const now = Date.now();
+    this.transaction(() => {
+      if (sets.length) { sets.push('updated_at = ?'); values.push(now, id); this.db.prepare(`UPDATE mind_items SET ${sets.join(', ')} WHERE id = ?`).run(...values); }
+      if (tags) { this.db.prepare('DELETE FROM mind_tags WHERE item_id = ?').run(id); for (const tag of uniq(tags)) this.db.prepare('INSERT INTO mind_tags (item_id, tag) VALUES (?, ?)').run(id, tag); this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(now, id); changed.tags = uniq(tags); }
+      if (Object.keys(changed).length) this.event(id, patch.status !== undefined && Object.keys(changed).length === 1 ? 'item.status' : 'item.updated', actor, { before: pickItemSnapshot(current), patch: changed }, now);
+    });
+    return this.get(id)!;
+  }
+
+  setStatus(id: number, status: MindStatus, actor = 'agent'): MindDetail { return this.update(id, { status }, actor); }
+  archive(id: number, actor = 'agent'): MindDetail { this.requireId(id); const at = Date.now(); this.db.prepare('UPDATE mind_items SET archived_at = ?, updated_at = ? WHERE id = ?').run(at, at, id); this.event(id, 'item.archived', actor, {}, at); return this.get(id)!; }
+  restore(id: number, actor = 'agent'): MindDetail { this.requireId(id); const at = Date.now(); this.db.prepare('UPDATE mind_items SET archived_at = NULL, updated_at = ? WHERE id = ?').run(at, id); this.event(id, 'item.restored', actor, {}, at); return this.get(id)!; }
+
+  addDependency(id: number, dependsOnId: number, actor = 'agent'): MindDetail {
+    this.requireId(id); this.requireId(dependsOnId); const at = Date.now();
+    this.transaction(() => { this.addDependencyInternal(id, dependsOnId, actor, at); this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, id); });
+    return this.get(id)!;
+  }
+
+  private addDependencyInternal(id: number, dependsOnId: number, actor: string, at: number): void {
+    if (id === dependsOnId) throw new Error('mind: an item cannot depend on itself');
+    const cycle = this.db.prepare(`WITH RECURSIVE deps(id) AS (SELECT depends_on_id FROM mind_dependencies WHERE item_id = ? UNION SELECT d.depends_on_id FROM mind_dependencies d JOIN deps x ON d.item_id = x.id) SELECT 1 FROM deps WHERE id = ? LIMIT 1`).get(dependsOnId, id);
+    if (cycle) throw new Error(`mind: dependency #${id} → #${dependsOnId} would create a cycle`);
+    const r = this.db.prepare('INSERT OR IGNORE INTO mind_dependencies (item_id, depends_on_id, created_by, created_at) VALUES (?, ?, ?, ?)').run(id, dependsOnId, actor, at);
+    if ((r.changes ?? 0) > 0) this.event(id, 'dependency.added', actor, { dependsOnId }, at);
+  }
+
+  removeDependency(id: number, dependsOnId: number, actor = 'agent'): MindDetail {
+    this.requireId(id); const at = Date.now();
+    const r = this.db.prepare('DELETE FROM mind_dependencies WHERE item_id = ? AND depends_on_id = ?').run(id, dependsOnId);
+    if ((r.changes ?? 0) > 0) { this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, id); this.event(id, 'dependency.removed', actor, { dependsOnId }, at); }
+    return this.get(id)!;
+  }
+
+  addComment(id: number, body: string, author = 'agent'): MindComment {
+    this.requireId(id); assertText(body, 'comment', 20_000); const at = Date.now();
+    const result = this.db.prepare('INSERT INTO mind_comments (item_id, author, body, created_at) VALUES (?, ?, ?, ?)').run(id, author, body.trim(), at);
+    this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, id);
+    this.event(id, 'comment.added', author, { commentId: Number(result.lastInsertRowid) }, at);
+    return { id: Number(result.lastInsertRowid), itemId: id, author, body: body.trim(), createdAt: at, updatedAt: null };
+  }
+
+  updateComment(commentId: number, body: string, author = 'agent'): MindComment {
+    assertText(body, 'comment', 20_000); const row = this.db.prepare('SELECT * FROM mind_comments WHERE id = ? AND deleted_at IS NULL').get(commentId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`mind: no comment #${commentId}`); const at = Date.now();
+    this.db.prepare('UPDATE mind_comments SET body = ?, updated_at = ? WHERE id = ?').run(body.trim(), at, commentId);
+    this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, Number(row.item_id));
+    this.event(Number(row.item_id), 'comment.updated', author, { commentId }, at);
+    return { id: commentId, itemId: Number(row.item_id), author: String(row.author), body: body.trim(), createdAt: Number(row.created_at), updatedAt: at };
+  }
+
+  deleteComment(commentId: number, actor = 'agent'): boolean {
+    const row = this.db.prepare('SELECT item_id FROM mind_comments WHERE id = ? AND deleted_at IS NULL').get(commentId) as { item_id: number } | undefined;
+    if (!row) return false; const at = Date.now(); this.db.prepare('UPDATE mind_comments SET deleted_at = ? WHERE id = ?').run(at, commentId); this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, Number(row.item_id)); this.event(Number(row.item_id), 'comment.deleted', actor, { commentId }, at); return true;
+  }
+
+  addTag(id: number, tag: string, actor = 'agent'): MindDetail { this.requireId(id); const normalized = normalizeTag(tag); const r = this.db.prepare('INSERT OR IGNORE INTO mind_tags (item_id, tag) VALUES (?, ?)').run(id, normalized); if ((r.changes ?? 0) > 0) this.event(id, 'tag.added', actor, { tag: normalized }); return this.get(id)!; }
+  removeTag(id: number, tag: string, actor = 'agent'): MindDetail { this.requireId(id); const normalized = normalizeTag(tag); const r = this.db.prepare('DELETE FROM mind_tags WHERE item_id = ? AND tag = ?').run(id, normalized); if ((r.changes ?? 0) > 0) this.event(id, 'tag.removed', actor, { tag: normalized }); return this.get(id)!; }
+
+  stats(): MindStats {
+    const items = this.list({ limit: 500 }); const now = Date.now();
+    return { active: items.filter((x) => ACTIVE_STATUSES.includes(x.status)).length, ready: items.filter((x) => READY_STATUSES.includes(x.status) && x.blockedBy.length === 0).length, blocked: items.filter((x) => x.effectiveStatus === 'blocked').length, waiting: items.filter((x) => x.status === 'waiting').length, overdue: items.filter((x) => x.dueAt != null && x.dueAt < now && ACTIVE_STATUSES.includes(x.status)).length, done: items.filter((x) => x.status === 'done').length, inbox: items.filter((x) => x.status === 'inbox').length };
+  }
+
+  graph(rootId: number, depth = 4): MindGraph {
+    this.requireId(rootId); const maxDepth = Math.max(0, Math.min(12, Math.floor(depth))); const seen = new Set<number>([rootId]); const queue = [{ id: rootId, depth: 0 }]; const edges: MindGraph['edges'] = [];
+    while (queue.length) { const current = queue.shift()!; if (current.depth >= maxDepth) continue; const deps = this.allDependencies(current.id); const dependents = this.dependents(current.id); const detail = this.get(current.id)!; for (const dep of deps) { edges.push({ from: current.id, to: dep.id, type: 'depends_on' }); if (!seen.has(dep.id)) { seen.add(dep.id); queue.push({ id: dep.id, depth: current.depth + 1 }); } } for (const child of dependents) { edges.push({ from: child.id, to: current.id, type: 'depends_on' }); if (!seen.has(child.id)) { seen.add(child.id); queue.push({ id: child.id, depth: current.depth + 1 }); } } if (detail.parent) { edges.push({ from: current.id, to: detail.parent.id, type: 'parent' }); if (!seen.has(detail.parent.id)) { seen.add(detail.parent.id); queue.push({ id: detail.parent.id, depth: current.depth + 1 }); } } for (const child of detail.children) { edges.push({ from: child.id, to: current.id, type: 'parent' }); if (!seen.has(child.id)) { seen.add(child.id); queue.push({ id: child.id, depth: current.depth + 1 }); } } }
+    const nodes = Array.from(seen).map((id) => this.get(id)!).filter(Boolean); const uniqueEdges = Array.from(new Map(edges.map((e) => [`${e.type}:${e.from}:${e.to}`, e])).values()); return { rootId, nodes, edges: uniqueEdges };
+  }
+
+  createReminderRecord(itemId: number, scheduledTaskId: number, fireAt: number, channelId: string | null, createdBy: string): MindReminder {
+    const at = Date.now(); const r = this.db.prepare('INSERT INTO mind_reminders (item_id, scheduled_task_id, fire_at, channel_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(itemId, scheduledTaskId, fireAt, channelId, createdBy, at); this.event(itemId, 'reminder.added', createdBy, { reminderId: Number(r.lastInsertRowid), scheduledTaskId, fireAt, channelId }, at); return this.reminderById(Number(r.lastInsertRowid))!;
+  }
+  reminderById(id: number): MindReminder | null { const row = this.db.prepare('SELECT * FROM mind_reminders WHERE id = ?').get(id) as Record<string, unknown> | undefined; return row ? reminderFromRow(row) : null; }
+  pendingReminders(itemId: number): MindReminder[] { return (this.db.prepare('SELECT * FROM mind_reminders WHERE item_id = ? AND fired_at IS NULL AND cancelled_at IS NULL ORDER BY fire_at').all(itemId) as Record<string, unknown>[]).map(reminderFromRow); }
+  markReminderFiredByTask(scheduledTaskId: number): void { const row = this.db.prepare('SELECT * FROM mind_reminders WHERE scheduled_task_id = ? AND fired_at IS NULL AND cancelled_at IS NULL').get(scheduledTaskId) as Record<string, unknown> | undefined; if (!row) return; const at = Date.now(); this.db.prepare('UPDATE mind_reminders SET fired_at = ? WHERE id = ?').run(at, Number(row.id)); this.event(Number(row.item_id), 'reminder.fired', 'scheduler', { reminderId: Number(row.id), scheduledTaskId }, at); }
+  cancelReminderRecord(id: number, actor: string): MindReminder | null { const row = this.reminderById(id); if (!row || row.cancelledAt != null || row.firedAt != null) return row; const at = Date.now(); this.db.prepare('UPDATE mind_reminders SET cancelled_at = ? WHERE id = ?').run(at, id); this.event(row.itemId, 'reminder.cancelled', actor, { reminderId: id, scheduledTaskId: row.scheduledTaskId }, at); return this.reminderById(id); }
+  updateReminderRecord(id: number, fireAt: number, actor: string): MindReminder { const row = this.reminderById(id); if (!row) throw new Error(`mind: no reminder #${id}`); this.db.prepare('UPDATE mind_reminders SET fire_at = ? WHERE id = ?').run(fireAt, id); this.event(row.itemId, 'reminder.snoozed', actor, { reminderId: id, fireAt }); return this.reminderById(id)!; }
+
+  private assertNoParentCycle(id: number, parentId: number): void {
+    if (id === parentId) throw new Error('mind: an item cannot be its own parent');
+    const cycle = this.db.prepare(`WITH RECURSIVE parents(id) AS (SELECT parent_id FROM mind_items WHERE id = ? AND parent_id IS NOT NULL UNION SELECT i.parent_id FROM mind_items i JOIN parents p ON i.id = p.id WHERE i.parent_id IS NOT NULL) SELECT 1 FROM parents WHERE id = ? LIMIT 1`).get(parentId, id);
+    if (cycle) throw new Error(`mind: parent #${parentId} would create a cycle`);
+  }
+}
+
+export class MindService {
+  readonly store: MindStore;
+  private changeDepth = 0;
+  private changePending = false;
+  constructor(private readonly deps: CreateMindServiceDeps) { this.store = new MindStore(deps.db); }
+  private changed<T>(value: T): T {
+    if (this.changeDepth > 0) this.changePending = true;
+    else this.deps.onChanged?.();
+    return value;
+  }
+  private batch<T>(fn: () => T): T {
+    this.changeDepth++;
+    try { return fn(); }
+    finally {
+      this.changeDepth--;
+      if (this.changeDepth === 0 && this.changePending) { this.changePending = false; this.deps.onChanged?.(); }
+    }
+  }
+  create(opts: CreateMindItem & { remindAt?: number | null; reminderChannelId?: string | null }): MindDetail { return this.batch(() => { const item = this.store.create(opts); if (opts.remindAt != null) this.addReminder(item.id, opts.remindAt, opts.actor ?? 'agent', opts.reminderChannelId ?? null); return this.changed(this.store.get(item.id)!); }); }
+  get(id: number): MindDetail | null { return this.store.get(id); }
+  list(filter?: MindListFilter): MindItem[] { return this.store.list(filter); }
+  ready(limit?: number): MindItem[] { return this.store.ready(limit); }
+  stats(): MindStats { return this.store.stats(); }
+  graph(id: number, depth?: number): MindGraph { return this.store.graph(id, depth); }
+  update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail { return this.batch(() => { const item = this.store.update(id, patch, actor); if (item.status === 'done' || item.status === 'cancelled') this.cancelPendingReminders(id, actor); return this.changed(this.store.get(id)!); }); }
+  setStatus(id: number, status: MindStatus, actor = 'agent'): MindDetail { return this.update(id, { status }, actor); }
+  archive(id: number, actor = 'agent'): MindDetail { return this.changed(this.store.archive(id, actor)); }
+  restore(id: number, actor = 'agent'): MindDetail { return this.changed(this.store.restore(id, actor)); }
+  addDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.addDependency(id, dep, actor)); }
+  removeDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.removeDependency(id, dep, actor)); }
+  addComment(id: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.addComment(id, body, author)); }
+  updateComment(id: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.updateComment(id, body, author)); }
+  deleteComment(id: number, actor = 'agent'): boolean { return this.changed(this.store.deleteComment(id, actor)); }
+  addTag(id: number, tag: string, actor = 'agent'): MindDetail { return this.changed(this.store.addTag(id, tag, actor)); }
+  removeTag(id: number, tag: string, actor = 'agent'): MindDetail { return this.changed(this.store.removeTag(id, tag, actor)); }
+  addReminder(itemId: number, fireAt: number, actor = 'agent', channelId: string | null = null): MindReminder {
+    const item = this.store.get(itemId); if (!item) throw new Error(`mind: no item #${itemId}`); if (!Number.isFinite(fireAt) || fireAt <= Date.now()) throw new Error('mind: reminder time must be a future epoch-ms');
+    const task = this.deps.scheduler.create({ name: `mind-${itemId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, kind: 'custom', channelId, payload: `[mind reminder #${itemId}] ${item.title}\n\n${item.body || 'Open the item and decide the next true action.'}`, nextRunAt: fireAt });
+    try { return this.changed(this.store.createReminderRecord(itemId, task.id, fireAt, channelId, actor)); }
+    catch (error) { this.deps.scheduler.delete(task.id); throw error; }
+  }
+  snoozeReminder(reminderId: number, fireAt: number, actor = 'agent'): MindReminder { if (!Number.isFinite(fireAt) || fireAt <= Date.now()) throw new Error('mind: reminder time must be in the future'); const row = this.store.reminderById(reminderId); if (!row) throw new Error(`mind: no reminder #${reminderId}`); if (row.firedAt != null || row.cancelledAt != null) throw new Error(`mind: reminder #${reminderId} is no longer active`); if (!this.deps.scheduler.update(row.scheduledTaskId, { nextRunAt: fireAt, snoozeUntil: null })) throw new Error(`mind: scheduler task ${row.scheduledTaskId} is missing`); return this.changed(this.store.updateReminderRecord(reminderId, fireAt, actor)); }
+  cancelReminder(reminderId: number, actor = 'agent'): MindReminder | null { const row = this.store.reminderById(reminderId); if (!row) return null; this.deps.scheduler.delete(row.scheduledTaskId); return this.changed(this.store.cancelReminderRecord(reminderId, actor)); }
+  cancelPendingReminders(itemId: number, actor = 'agent'): void { for (const row of this.store.pendingReminders(itemId)) this.cancelReminder(row.id, actor); }
+  onScheduledTaskWake(task: ScheduledTask): void { this.store.markReminderFiredByTask(task.id); if (task.name.startsWith('mind-')) this.changed(undefined); }
+}
+
+export function parseMindId(value: unknown): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === 'string') { const m = /^(?:mind-|m-|#)?(\d+)$/i.exec(value.trim()); if (m) return Number(m[1]); }
+  throw new Error(`mind: expected an item id like 12, #12, or m-12 (got ${JSON.stringify(value)})`);
+}
+
+export function formatMindLine(item: MindItem): string {
+  const status = item.effectiveStatus === 'blocked' ? `blocked by ${item.blockedBy.map((x) => `#${x.id}`).join(',')}` : item.effectiveStatus.replace('_', ' ');
+  const priority = ['·', 'low', 'normal', 'high', 'urgent'][item.priority] ?? String(item.priority);
+  const due = item.dueAt == null ? '' : ` · due ${new Date(item.dueAt).toISOString()}`;
+  const tags = item.tags.length ? ` · ${item.tags.map((x) => `#${x}`).join(' ')}` : '';
+  return `#${item.id} [${status}] [${priority}] ${item.title}${due}${tags}`;
+}
+
+export function formatMindDetail(item: MindDetail): string {
+  const lines = [formatMindLine(item), `${item.kind} · created by ${item.createdBy} · updated ${new Date(item.updatedAt).toISOString()}`];
+  if (item.body) lines.push('', item.body);
+  if (item.parent) lines.push('', `parent: #${item.parent.id} ${item.parent.title}`);
+  if (item.dependencies.length) lines.push(`depends on: ${item.dependencies.map((x) => `#${x.id} ${x.title} [${x.effectiveStatus}]`).join('; ')}`);
+  if (item.blocks.length) lines.push(`blocks: ${item.blocks.map((x) => `#${x.id} ${x.title}`).join('; ')}`);
+  if (item.children.length) lines.push(`children: ${item.children.map((x) => `#${x.id} ${x.title}`).join('; ')}`);
+  if (item.reminders.filter((x) => x.firedAt == null && x.cancelledAt == null).length) lines.push(`reminders: ${item.reminders.filter((x) => x.firedAt == null && x.cancelledAt == null).map((x) => `r#${x.id} ${new Date(x.fireAt).toISOString()}`).join('; ')}`);
+  if (item.comments.length) { lines.push('', 'comments:'); for (const c of item.comments.slice(-10)) lines.push(`- c#${c.id} ${c.author}: ${c.body}`); }
+  return lines.join('\n');
+}
+
+function pickItemSnapshot(item: MindItem): Record<string, unknown> { return { title: item.title, body: item.body, kind: item.kind, status: item.status, priority: item.priority, parentId: item.parentId, dueAt: item.dueAt, tags: item.tags }; }
+function reminderFromRow(r: Record<string, unknown>): MindReminder { return { id: Number(r.id), itemId: Number(r.item_id), scheduledTaskId: Number(r.scheduled_task_id), fireAt: Number(r.fire_at), channelId: r.channel_id == null ? null : String(r.channel_id), createdBy: String(r.created_by), createdAt: Number(r.created_at), firedAt: r.fired_at == null ? null : Number(r.fired_at), cancelledAt: r.cancelled_at == null ? null : Number(r.cancelled_at) }; }

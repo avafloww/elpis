@@ -1,0 +1,41 @@
+# elpis-harness — systemd USER unit template.
+#
+# This is the committed reference shape for the unit the harness runs as
+# (SERVICE_UNIT = 'elpis-harness' in src/lib/lifecycle.ts). The live unit is
+# hand-installed at ~/.config/systemd/user/elpis-harness.service; keep this
+# template in sync with it. Machine-specific paths are placeholders — replace
+# the <...> tokens for your host before installing (the installer performs this substitution automatically):
+#
+# install -Dm644 deploy/elpis-harness.service \
+# ~/.config/systemd/user/elpis-harness.service
+# systemctl --user daemon-reload
+# systemctl --user enable --now elpis-harness
+#
+# Placeholders:
+# <HARNESS_ROOT> absolute path to this checkout (e.g. $HOME/elpis)
+# <NODE_BIN> absolute path to the node binary (e.g. /usr/bin/node), or
+# just `node` if it is on the unit's PATH
+
+[Unit]
+Description=Elpis — durable single-agent runtime
+After=network-online.target elpis-desktop.service
+Wants=network-online.target elpis-desktop.service
+
+[Service]
+Type=simple
+WorkingDirectory=<HARNESS_ROOT>
+ExecStart=<NODE_BIN> <HARNESS_ROOT>/dist/index.js
+Restart=on-failure
+RestartSec=2
+
+# KillMode=process is LOAD-BEARING for fleet-runner survival. Fleet runners are
+# spawned detached (their own process group) precisely so they outlive a harness
+# restart — docs/fleet.md's "a harness restart just drops the socket; the runner
+# keeps running" invariant depends on it. The systemd DEFAULT (control-group)
+# would SIGTERM the whole cgroup on stop/restart, killing every detached runner
+# with the harness and regressing that invariant. Do not drop this line when
+# reprovisioning the unit.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+.env
+config.yaml
+bench/bench.env
+bench-results/
+node_modules/
+.claude/worktrees/
+.claude/settings.local.json
+dist/
+.kilo/
+*.log
+.superpowers/
+test-tmp/
+.playwright-cli/

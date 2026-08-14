@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible Elpis defect
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include credentials, transcripts, private hostnames, or personal data. Use private vulnerability reporting for security issues."
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      placeholder: commit SHA or release
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include expected and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Relevant logs or tests
+      description: Redact private data before pasting.

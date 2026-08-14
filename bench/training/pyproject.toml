@@ -1,0 +1,24 @@
+[project]
+name = "elpisbench-train"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "transformers>=4.55",
+  "trl>=0.21",
+  "peft>=0.17",
+  "datasets>=4.0",
+  "torch>=2.6",
+]
+
+[project.scripts]
+elpisbench-preflight = "elpisbench_train.preflight:main"
+elpisbench-sft = "elpisbench_train.sft:main"
+elpisbench-dpo = "elpisbench_train.dpo:main"
+elpisbench-grpo = "elpisbench_train.grpo:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true

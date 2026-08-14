@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elpis · harness console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./styles.css">
+<script src="./marked.umd.js"></script>
+</head>
+<body>
+<div class="ep-app" id="app" data-theme="light" data-cot="open">
+<script>/* set theme before first paint to avoid a light flash for dark-preference users */
+(function(){try{var t=localStorage.getItem('ep-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.getElementById('app').setAttribute('data-theme',t);}catch(e){}})();</script>
+
+  <!-- ============ top bar ============ -->
+  <div class="ep-topbar">
+    <div class="ep-brand">
+      <span class="ep-flower">❋</span>
+      <div class="ep-brand-name">ELPIS</div>
+      <div class="ep-brand-sub">harness console</div>
+    </div>
+
+    <!-- context usage meter -->
+    <div class="ep-meter">
+      <div class="ep-meter-head">
+        <span class="ep-meter-label">context usage</span>
+        <span class="ep-meter-value" id="meter-value">— / — · 0%</span>
+      </div>
+      <div class="ep-meter-track-wrap">
+        <div class="ep-meter-track"><div class="ep-meter-fill" id="meter-fill"></div></div>
+        <div class="ep-meter-tick" id="meter-tick" title="compaction target"></div>
+      </div>
+      <div class="ep-meter-subwrap">
+        <span class="ep-meter-sub" id="meter-sub">⟂ compaction</span>
+      </div>
+    </div>
+
+    <div class="ep-spacer"></div>
+
+    <div class="ep-ws" id="ws-chip">
+      <div class="ep-ws-dot" id="ws-dot"></div>
+      <span class="ep-ws-url" id="ws-url">/ws</span>
+      <span class="ep-ws-state" id="ws-state">· connecting</span>
+    </div>
+    <div class="ep-gitbox">
+      <span class="ep-git">elpis@<span class="ep-git-hash" id="git-hash">…</span></span>
+      <span class="ep-uptime" id="git-uptime">up …</span>
+    </div>
+    <button class="ep-toggle" id="theme-toggle" title="Toggle light / dark">
+      <span id="theme-icon">☀</span><span id="theme-label">Elpis</span>
+    </button>
+    <div class="ep-avatar" id="agent-avatar">◆</div>
+  </div>
+
+  <!-- ============ middle row ============ -->
+  <div class="ep-middle">
+
+    <!-- rooms lens rail -->
+    <div class="ep-rail" id="rail" data-active-room="all">
+      <div class="ep-rail-head">
+        <div class="ep-rail-title">Rooms</div>
+        <div class="ep-rail-explain">One shared context. Spotlight a room to see only what it contributed.</div>
+      </div>
+      <div class="scroll ep-rail-list" id="rail-list"></div>
+      <div class="ep-rail-cache" id="rail-cache" hidden></div>
+      <div class="ep-rail-usage" id="rail-usage" hidden></div>
+      <div class="ep-rail-foot">
+        <div class="ep-rail-foot-row"><span>participants</span><span id="participant-count">—</span></div>
+      </div>
+    </div>
+
+    <!-- unified stream -->
+    <div class="ep-streamcol">
+      <div class="ep-stream-head">
+        <nav class="ep-view-tabs" aria-label="Console view">
+          <button class="ep-view-tab" id="stream-toggle">Thread</button>
+          <button class="ep-view-tab" id="view-toggle">Context</button>
+          <button class="ep-view-tab" id="mind-toggle">Mind</button>
+        </nav>
+        <span class="ep-spacer"></span>
+        <div class="ep-view-tools" id="stream-tools">
+          <span class="ep-compacting" id="compacting" hidden>⟳ compacting…</span>
+          <span class="ep-lens" id="lens-label">all rooms</span>
+          <button class="ep-toggle ep-cot-btn" id="cot-toggle" title="Show or hide all chains of thought"><span class="ep-flower-gold">❋</span> CoT <span id="cot-label">shown</span></button>
+          <button class="ep-toggle ep-cot-btn" id="tools-toggle" title="Show or hide all tool calls and results">Tools <span id="tools-label">hidden</span></button>
+          <button class="ep-toggle ep-cot-btn" id="previews-toggle" title="Show or hide all tool-result previews" hidden>Preview <span id="previews-label">hidden</span></button>
+        </div>
+        <div class="ep-view-tools" id="context-tools" hidden>
+          <span class="ep-ctx-stat" id="ctx-stat">—</span>
+          <button class="ep-toggle ep-ctx-btn" id="ctx-refresh" title="Re-request the current context window">↻ refresh</button>
+          <button class="ep-toggle ep-ctx-btn" id="ctx-copy-json" title="Copy the full request body (model + tools + messages) as pretty JSON">⧉ JSON</button>
+          <button class="ep-toggle ep-ctx-btn" id="ctx-copy-jsonl" title="Copy the messages as JSONL — one message object per line">⧉ JSONL</button>
+        </div>
+        <div class="ep-view-tools" id="mind-tools" hidden>
+          <span class="ep-mind-status" id="mind-status">loading…</span>
+          <select class="ep-field ep-mind-sort" id="mind-sort" aria-label="Sort Mind items">
+            <option value="updated_desc">updated · newest</option><option value="updated_asc">updated · oldest</option>
+            <option value="created_desc">created · newest</option><option value="created_asc">created · oldest</option>
+            <option value="last_comment_desc">last comment · newest</option><option value="last_comment_asc">last comment · oldest</option>
+          </select>
+          <button class="ep-mind-tag-filter" id="mind-tag-filter" title="Clear tag filter" hidden></button>
+          <input class="ep-field ep-mind-search" id="mind-search" placeholder="search mind…" aria-label="Search mind">
+          <button class="ep-toggle ep-mind-btn" id="mind-refresh" title="Refresh Mind">↻</button>
+          <button class="ep-toggle ep-mind-btn primary" id="mind-new">＋ new</button>
+        </div>
+      </div>
+      <div class="ep-stream scroll" id="stream" data-active-room="all">
+        <div class="ep-backfill" id="backfill-note" hidden>loading earlier context…</div>
+        <div id="stream-body"></div>
+        <div id="stream-live"></div>
+      </div>
+      <form class="ep-composer" id="composer">
+        <div class="ep-composer-box">
+          <textarea id="composer-text" rows="1" maxlength="32768" aria-label="Message agent · console" placeholder="Write a message…"></textarea>
+          <button type="submit" id="composer-send" aria-label="Send message" title="Send message">↑</button>
+        </div>
+        <span class="ep-composer-status" id="composer-status" aria-live="polite"></span>
+      </form>
+
+      <!-- context explorer: the raw context window, as the next API call would send it -->
+      <div class="ep-ctx" id="ctx" hidden>
+        <div class="scroll ep-ctx-list" id="ctx-body"></div>
+      </div>
+      <!-- mind: durable dependency-aware work graph -->
+      <div class="ep-mind" id="mind" hidden>
+        <div class="ep-mind-stats" id="mind-stats"></div>
+        <div class="ep-mind-workspace">
+          <div class="scroll ep-mind-list" id="mind-list"></div>
+          <div class="scroll ep-mind-detail" id="mind-detail">
+            <div class="ep-mind-empty">Select an item, or make the next true piece of work.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- draggable separator -->
+  <div class="ep-resizer" id="resizer" title="Drag to resize the log"></div>
+
+  <!-- ============ docked log ============ -->
+  <div class="ep-logdock" id="logdock">
+    <div class="ep-log-head">
+      <span class="ep-log-title">Aether</span>
+      <span class="ep-log-cmd">journalctl --user -u elpis-harness -f</span>
+      <span class="ep-spacer"></span>
+      <div class="ep-log-filters" id="log-filters">
+        <span class="ep-log-chip active" data-level="all">all</span>
+        <span class="ep-log-chip" data-level="debug">debug</span>
+        <span class="ep-log-chip" data-level="info">info</span>
+        <span class="ep-log-chip" data-level="warn">warn</span>
+        <span class="ep-log-chip" data-level="error">error</span>
+      </div>
+      <div class="ep-log-live"></div>
+    </div>
+    <div class="scroll ep-log-body" id="log-body" data-filter="all"></div>
+  </div>
+
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

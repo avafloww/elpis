@@ -1,0 +1,274 @@
+# Elpis harness configuration.
+#
+# Copy to config.yaml and fill in. config.yaml is gitignored and should be
+# mode 0600 — it holds live credentials.
+#   cp config.example.yaml config.yaml && chmod 0600 config.yaml
+#
+# Every key below shows its default. Required keys are marked REQUIRED; the
+# rest can be omitted entirely to take the default.
+
+llm:
+  # Which wire surface backs the brain LLM. Default: openai-compatible.
+  #   openai-compatible  — api_key + base_url against an OpenAI-shaped endpoint.
+  #   anthropic-oauth    — a Claude Pro/Max subscription over the native Anthropic
+  #                        Messages API. Auth is an OAuth token: run
+  #                        `npm run oauth-login` once, then set model below.
+  #                        api_key is unused; base_url defaults to the Anthropic API.
+  #                        See docs/anthropic-oauth.md.
+  #   codex-oauth         — a ChatGPT Codex subscription over the Codex Responses
+  #                        backend. Run `npm run oauth-login -- codex` once.
+  #                        See docs/codex-oauth.md.
+  provider_type: openai-compatible   # openai-compatible | anthropic-oauth | codex-oauth
+  api_key: sk-...                    # REQUIRED for openai-compatible (unused for OAuth providers)
+  base_url: https://api.openai.com/v1  # REQUIRED for openai-compatible — any OpenAI-compatible endpoint
+  model: gpt-4o                      # REQUIRED — endpoint/provider model id
+  # Context window, in tokens. Omit (or null) to probe <base_url>/models/info.
+  # Set explicitly for endpoints that don't implement that route — it is then
+  # the ONLY way the harness learns the window.
+  context_size: null
+  # Reasoning models: chain-of-thought goes to reasoning_content, not content.
+  reasoning_effort: high             # none | low | medium | high
+  external_thinking: false            # Codex Responses: force visible think tool, native reasoning off
+  # stream_idle_timeout_ms: 60000      # no-meaningful-progress watchdog; default 60s external-thinking, 180s otherwise; 0 disables
+  # call_timeout_ms: 120000            # whole-call fail-safe; default 120s external-thinking, 20m otherwise; 0 disables
+  # Which API surface to speak. auto = try the OpenAI Responses API (preserves
+  # encrypted reasoning across turns — significantly better for reasoning
+  # models) and permanently fall back to Chat Completions when the endpoint
+  # doesn't serve the route (404/405 flips outright; any other first-contact
+  # failure probes chat and commits only if chat succeeds). responses | chat
+  # force one surface, no fallback.
+  api: auto
+  # Responses path only. reasoning.summary: emit human-readable reasoning
+  # summaries (stored as reasoning_content for the console/summarizer). Omit
+  # to not send — some orgs/models reject the param.
+  # reasoning_summary: auto           # auto | concise | detailed
+  # Responses path only. reasoning.context: how much replayed reasoning the
+  # endpoint renders into context (newer models, e.g. GPT-5.6). Omit = endpoint
+  # default.
+  # reasoning_context: all_turns      # current_turn | all_turns | auto
+  # Subtracted from the context window to leave room for the reply.
+  completion_reserve_tokens: 8192
+  #
+  # --- anthropic-oauth (Claude Pro/Max subscription) ---
+  # To use a subscription instead of the above, run `npm run oauth-login` once,
+  # then replace the whole llm block with just these two keys:
+  #
+  #   provider_type: anthropic-oauth
+  #   model: claude-opus-4-8          # any Claude id (claude-sonnet-5, etc.)
+  #
+  # api_key/base_url are unused (base_url defaults to https://api.anthropic.com);
+  # context_size is mapped from the model id (set it only for an unrecognized one);
+  # api/reasoning_summary/reasoning_context are ignored on this path. Extended
+  # thinking is enabled automatically; reasoning_effort IS used as the Claude
+  # effort level (low|medium|high|xhigh|max; `none` omits it). See
+  # docs/anthropic-oauth.md.
+  #
+  # --- codex-oauth (ChatGPT Codex subscription) ---
+  # Enable device-code auth in ChatGPT settings, run
+  # `npm run oauth-login -- codex`, then use:
+  #
+  #   provider_type: codex-oauth
+  #   model: gpt-5.6-sol             # a model returned by Codex discovery
+  #
+  # api_key is unused. base_url is pinned to https://chatgpt.com/backend-api;
+  # api: chat is unsupported. Context is discovered from /codex/models unless
+  # context_size is set. See docs/codex-oauth.md.
+
+operator:
+  name: operator                     # Display name for console-authored speech
+  pronouns: null                     # Optional free-text identity metadata
+  discord_id: null                   # Discord user id authorized for slash commands
+
+discord:
+  bot_token: ...                     # REQUIRED
+  # Bot application id for slash-command registration. Omit to derive it from
+  # the bot token.
+  application_id: null
+  # Dedicated channel for harness-level error notices. null = log-only; errors
+  # never fall back to a public room.
+  error_channel_id: null
+  # Per-message budget for inlining small text attachments into the inbound
+  # message. 0 disables inlining.
+  attachment_inline_max_bytes: 32768
+  # Batching interval for ambient (non-direct-tier) inbound messages, in ms.
+  # 0 disables batching — every message wakes the loop immediately.
+  ambient_tick_ms: 600000
+  # Attach the image of a custom emote/sticker the FIRST time it is used in
+  # the current context window, so the agent reads the social cue instead of
+  # guessing from `<:name:id>` markup. false disables the feature.
+  emote_images: true
+  # Keyframes extracted (ffmpeg) per ANIMATED emote/sticker so the agent can
+  # comprehend the motion. Clamped to [1, 8]; 1 = a single static frame.
+  # ffmpeg missing/failing degrades to the raw first frame automatically.
+  emote_keyframes: 4
+  # REQUIRED — every guild the bot lives in, each with its own EXHAUSTIVE
+  # channel allowlist (channel id -> tier). A channel not listed here is
+  # never heard at all — not even to accumulate context.
+  #
+  #   tier: direct  — the bot responds to (nearly) every message
+  #        social — ambient/ambient-batched participation
+  #        quiet  — heard but the bot rarely/never initiates
+  #
+  # slug must be unique, lowercase, and not all-digits (^[a-z0-9][a-z0-9-]*$,
+  # not ^\d+$) — it's the human-readable handle for the guild. quiet_hours is
+  # "HHMM-HHMM" (24h, wraparound allowed, e.g. "2300-0900"); timezone is an
+  # IANA name used to interpret it (defaults to host tz).
+  guilds:
+    - id: "111111111111111111"
+      slug: home
+      # Slash commands register per-guild and are all operator-gated (a
+      # non-operator gets a refusal, not an effect) — but a guild with
+      # commands registered is still one whose members can see and attempt
+      # them, including /clear, which wipes the agent's entire working memory
+      # across every server. Keep this true ONLY in the operator's own home
+      # guild; leave it false everywhere else (see the friends guild below).
+      slash_commands: true
+      # Resolve PluralKit webhook proxies to their member name and suppress the
+      # briefly-visible original message so one proxied send enters history once.
+      # Adds a ~2.5s ingest hold for ordinary human messages in this guild so
+      # slower proxy round-trips cannot let the original enter history first.
+      pluralkit: false
+      channels:
+        "222222222222222222": direct
+        "333333333333333333": social
+    - id: "444444444444444444"
+      slug: friends
+      # No reason for the command surface to exist in a friend server.
+      slash_commands: false
+      quiet_hours: "2300-0900"
+      timezone: America/New_York
+      channels:
+        "555555555555555555": social
+        "666666666666666666": quiet
+
+compaction:
+  # Tokens of real context at which a compaction cycle triggers. Clamped at
+  # boot to the real usable window.
+  trigger_tokens: 180000
+  # Verbatim tail kept unsummarized. Validated: 0 < keep < trigger.
+  keep_tokens: 50000
+  # Full-fidelity window before tool results are stubbed and code head-capped.
+  # DEFAULT 0 (off), and it should stay off on any endpoint that discounts
+  # cached tokens: the aging boundary slides through the middle of the history,
+  # so each advance rewrites the cached prefix from that point on (measured:
+  # 41% of requests, ~98k tokens each, 17x the uncached tokens it saved).
+  # Set a token window only if cached tokens bill at full price.
+  tool_age_keep_tokens: 0
+
+heartbeat:
+  interval_ms: 3600000               # base autonomous wake interval (1h); 0 disables
+  max_interval_ms: 14400000          # upper bound for idle-tick backoff (4h)
+  reflection_min_messages: 3         # min real user messages between reflection beats
+  social_nudge_ms: 43200000          # reach-out nudge after this much outbound silence (12h); 0 disables
+
+sandbox:
+  sync_timeout_ms: 15000             # sync VM watchdog (kills while(true){})
+  async_deadline_ms: 120000          # detach a run's promise into bg after this long
+  preview_max_bytes: 16384
+  log_max_bytes: 32768
+
+console:
+  enabled: true
+  port: 8787
+  # Loopback-only by default: the console exposes full reasoning, every
+  # conversation, and the journal. Set 0.0.0.0 to expose on all interfaces —
+  # do that deliberately, or reach it over an SSH tunnel instead.
+  host: 127.0.0.1
+
+kagi:
+  # Enables the search()/extract() sandbox globals. null = those globals throw.
+  api_key: null
+
+bluesky:
+  # PDS host; any atproto-compatible PDS is accepted.
+  service: https://bsky.social
+  # Handle or DID, e.g. agent.example.com
+  identifier: null
+  # App password, not the account password.
+  app_password: null
+
+fleet:
+  # ON by default (opt-out). false disables the fleet entirely: no registry is
+  # constructed, boot recovery is skipped, elpis.fleet.* throws a teachable
+  # error, and the system prompt tells the agent to do the work itself.
+  # enabled: true
+
+  # Max concurrently-running fleet agents (Claude Agent SDK subprocesses).
+  max_concurrent: 4
+
+  # --- endpoint (all optional) ------------------------------------------------
+  # Every key below is a pure OVERRIDE: leave it unset and the harness passes the
+  # Claude Agent SDK nothing at all, so a fleet session uses the SDK's own
+  # endpoint, credentials, model aliases, and effort levels. Set them to point
+  # the fleet at a custom Anthropic-compatible endpoint. These are separate from
+  # llm.* — the harness's own brain-LLM credentials are NEVER shared with a
+  # fleet session (see docs/fleet.md#isolation-rules).
+  # NOTE base_url is the API ROOT with NO /v1 — the Claude CLI appends
+  # /v1/messages itself. This is the OPPOSITE of llm.base_url above, which is an
+  # OpenAI-compatible client and does need its /v1. A trailing /v1 here gets
+  # stripped with a warning at boot rather than failing later as a confusing
+  # "that model may not exist or you may not have access to it".
+  # base_url: https://api.example.com     # -> ANTHROPIC_BASE_URL
+  # api_key: sk-fleet-...                 # -> ANTHROPIC_API_KEY
+  # auth_token: ...                       # -> ANTHROPIC_AUTH_TOKEN
+
+  # Model-alias overrides. Unset aliases keep the SDK's own alias table; the
+  # agent keeps saying 'opus'/'sonnet'/'haiku'/'fable' either way.
+  #
+  # Each alias takes either a bare model name, or a mapping that also pins the
+  # model's context window in tokens. With no `context`, the harness discovers
+  # it by probing <base_url>/models/info (the same route the harness's own
+  # brain LLM uses at boot) and passes the answer to the session as
+  # CLAUDE_CODE_MAX_CONTEXT_TOKENS. Setting `context` skips that probe — use it
+  # for endpoints that don't serve models/info, or to override what it reports.
+  # A probe failure is never fatal: the session just runs on the SDK's default.
+  # models:
+  #   opus:                               # mapping form: pin the window
+  #     name: my-big-model                # -> ANTHROPIC_DEFAULT_OPUS_MODEL
+  #     context: 262144                   # -> CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  #   sonnet: my-mid-model                # shorthand: probe for the window
+  #   haiku: my-small-model
+  #   fable:
+  #     context: 200000                   # pin the window, keep the SDK's model
+
+  # Reasoning-effort levels this endpoint accepts. Defaults to the SDK's own
+  # set; narrow it (or rename it) for an endpoint that differs, or use [] for an
+  # endpoint with no effort parameter at all.
+  # efforts: [low, medium, high, xhigh, max]
+
+  # Default model for a spawned agent. null = don't send one; the SDK decides.
+  default_model: opus
+  # Default reasoning effort for a spawned agent. Must be a member of `efforts`.
+  # null = don't send one; the SDK decides.
+  default_effort: high               # low | medium | high | xhigh | max
+  # An idle runner exits gracefully after this long with no activity; the session
+  # stays revivable via elpis.fleet.send. Friendly durations accepted: a bare
+  # number is milliseconds; suffixes ms/s/m/h/d otherwise.
+  idle_timeout: 2h
+  # Deletes the on-disk session dir of DISMISSED sessions this long after
+  # dismissal. DB rows are kept forever.
+  reap_after: 14d
+  # Extra environment variables passed to every spawned agent.
+  env: {}
+
+# Provider subscription-usage tracker (Elpis Console rail widget + /usage
+# slash command). The provider is AUTO-DETECTED from llm.base_url (currently:
+# Kimi, when base_url is api.kimi.com/coding/*) and reuses llm.api_key — no
+# extra credentials. The whole section is optional.
+# usage_tracker:
+#   enabled: true            # false disables even when a provider matches
+#   poll_interval_ms: 300000 # 5 minutes
+
+paths:
+  # REQUIRED. The agent's "brain": SOUL.md, MEMORY.md, sessions/, and anything
+  # it persists. Also the sandbox cwd, so relative writes land here.
+  data_directory: ../data
+
+log_level: info                      # debug | info | warn | error | silent
+
+# --- alternate provider profile (uncomment to switch) ---
+# llm:
+#   api_key: sk-kimi-...
+#   base_url: https://api.kimi.com/coding/v1
+#   model: k3
+#   context_size: 1048576

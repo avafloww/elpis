@@ -1,0 +1,33 @@
+# Policy-denial flight recorder
+
+The Codex transport can preserve an exact private request/response specimen when a provider policy denial occurs. This exists for diagnosis, not automatic retry or evasion.
+
+## Capture condition
+
+A bundle is sealed only when the stream contains both denial wording and an error-shaped envelope such as `event: error` or `response.failed`. Ordinary generated text that discusses policy is not a denial.
+
+Bundles are written under:
+
+```text
+DATA_DIRECTORY/private/policy-denials/<timestamp-uuid>/
+```
+
+Directories are mode `0700`; files are mode `0600`. A manifest records hashes, transport metadata, capture completeness, and trigger type. Secret headers are excluded.
+
+## Contents and risk
+
+A bundle may contain exact request bytes, raw SSE bytes, prompts, messages, images, tool schemas, and opaque provider state. Treat it like a private transcript. Retention is bounded, but backup and deletion policy remain the operator's responsibility.
+
+## Replay
+
+Replay is explicit and potentially expensive:
+
+```bash
+npm run replay-policy-denial -- \
+  "$DATA_DIRECTORY/private/policy-denials/<bundle>" \
+  --yes
+```
+
+The CLI verifies the source hash, uses fresh local authentication, sends the recorded bytes, and writes a separate immutable result. It never mutates the source specimen.
+
+A successful replay does not prove the original was harmless; a failed reproduction does not prove it was deterministic. Do not repeatedly replay large or sensitive bundles casually.
