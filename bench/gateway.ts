@@ -1,6 +1,7 @@
 import * as readline from 'node:readline';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { CompleteResult } from '../src/llm/llm.js';
+import type { EpisodeBootstrap } from './bootstrap.js';
 
 export type GatewayRequest =
   | { type: 'complete'; id: string; messages: unknown[] }
@@ -24,9 +25,10 @@ export function writeJsonLine(stream: NodeJS.WritableStream, value: unknown): vo
 /** Serve container-originated completion/clock requests. Credentials and model
  * clients stay in this host process; only messages for the current episode
  * cross the pipe. */
-export function serveGateway(child: ChildProcessWithoutNullStreams, gateway: CompletionGateway): Promise<unknown> {
+export function serveGateway(child: ChildProcessWithoutNullStreams, gateway: CompletionGateway, bootstrap: EpisodeBootstrap): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: child.stdout });
+    writeJsonLine(child.stdin, bootstrap);
     const respond = (response: GatewayResponse) => writeJsonLine(child.stdin, response);
     rl.on('line', async (line) => {
       let request: GatewayRequest;

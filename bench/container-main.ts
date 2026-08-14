@@ -6,28 +6,26 @@ import * as readline from 'node:readline';
 import { buildTestAgent, makeConfig } from '../test/helpers.js';
 import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
-import { SCHEMA_VERSION, parseScenario, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
+import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
 import { evaluateOutcome, hasForbiddenSideEffect } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
 import { INTERNAL_CHANNEL_ID } from '../src/types.js';
+import { parseEpisodeBootstrap } from './bootstrap.js';
 
 process.umask(0o077);
 
 const WORK = '/episode/work';
 const RESULTS = '/episode/results';
-const spec = parseScenario(JSON.parse(fs.readFileSync(path.join(WORK, '.elpisbench-scenario.json'), 'utf8')));
-const meta = JSON.parse(fs.readFileSync(path.join(WORK, '.elpisbench-run.json'), 'utf8')) as { runId: string; providerType: RunRecord['providerType']; model: string; image: string; harnessCommit: string };
+let episodeId = 'bootstrap';
 
 class HostLLM implements LLM {
-  model = meta.model;
   runTool = RUN_TOOL;
   private seq = 0;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  constructor() {
-    const rl = readline.createInterface({ input: process.stdin });
+  constructor(readonly model: string, rl: readline.Interface) {
     rl.on('line', (line) => {
       let response: GatewayResponse;
       try { response = JSON.parse(line) as GatewayResponse; } catch { return; }
@@ -95,6 +93,16 @@ function parseCall(message: ChatMessage, recorder: TraceRecorder): void {
 }
 
 async function main(): Promise<void> {
+  const input = readline.createInterface({ input: process.stdin });
+  const bootstrap = await new Promise<unknown>((resolve, reject) => {
+    const onLine = (line: string) => {
+      input.off('line', onLine);
+      try { resolve(JSON.parse(line)); } catch (error) { reject(error); }
+    };
+    input.on('line', onLine);
+  });
+  const { spec, meta } = parseEpisodeBootstrap(bootstrap);
+  episodeId = meta.runId;
   process.chdir(WORK);
   process.env.GIT_CEILING_DIRECTORIES = path.dirname(WORK);
   seedFixture(spec);
@@ -104,7 +112,7 @@ async function main(): Promise<void> {
   const resumed = fs.existsSync(restartMarker);
   const recorder = new TraceRecorder(fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile, 'utf8')) as TraceEvent[] : []);
   if (resumed) recorder.add({ kind: 'restart', detail: 'container replaced; episode work and clock restored', data: { phase: 'resume' } });
-  const host = new HostLLM();
+  const host = new HostLLM(meta.model, input);
   let dispatches = recorder.snapshot().filter((e) => e.kind === 'dispatch').length, indexedMessages = 0;
   const sends: { channelId: string; text: string }[] = fs.existsSync(sendsFile) ? JSON.parse(fs.readFileSync(sendsFile, 'utf8')) : [];
   let idleResolve: (() => void) | null = null;
@@ -263,4 +271,4 @@ function endFor(tool: ChatMessage, messages: ChatMessage[]): boolean {
   try { return JSON.parse(call?.function.arguments ?? '{}').end === true; } catch { return false; }
 }
 
-main().catch((error) => { writeJsonLine(process.stdout, { type: 'episode-error', id: meta.runId, error: error instanceof Error ? error.stack ?? error.message : String(error) }); process.exitCode = 1; });
+main().catch((error) => { writeJsonLine(process.stdout, { type: 'episode-error', id: episodeId, error: error instanceof Error ? error.stack ?? error.message : String(error) }); process.exitCode = 1; });
