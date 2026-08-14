@@ -5,6 +5,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
+import type { BenchConfig } from '../bench/config.js';
+import { runScenario } from '../bench/runner.js';
+import { LOCKED_SCENARIOS } from '../bench/scenarios.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
 const image = process.env.ELPISBENCH_IMAGE ?? 'elpisbench:latest';
@@ -44,6 +47,35 @@ test('live Docker boundary denies network/root writes/capabilities and applies d
       deterministicTime: true, rootReadonly: true, capabilitiesDropped: true,
       noNewPrivileges: true, networkDenied: true,
     });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('live oracle episode keeps every private artifact at 0700/0600', { skip: !live }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpisbench-private-live-'));
+  const dataDirectory = path.join(root, 'data');
+  const provider = { provider_type: 'openai-compatible' as const, model: 'oracle-unused', base_url: 'https://oracle.invalid/v1', api_key: 'unused', api: 'auto' as const };
+  const config: BenchConfig = {
+    version: 1, default_provider: 'oracle', generator_provider: 'oracle', providers: { oracle: provider },
+    judges: [
+      { id: 'a', provider: 'oracle', family: 'one', teacher_pool: true },
+      { id: 'b', provider: 'oracle', family: 'two', teacher_pool: true },
+      { id: 'c', provider: 'oracle', family: 'three', teacher_pool: false },
+    ],
+    image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
+  };
+  const scenario = LOCKED_SCENARIOS.find((item) => item.id === 'tool/read-edit-verify')!;
+  try {
+    await runScenario(config, scenario, 'oracle', { oracle: true });
+    const wrong: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name); const mode = fs.statSync(file).mode & 0o777;
+        if (entry.isDirectory()) { if (mode !== 0o700) wrong.push(`${mode.toString(8)} ${file}`); walk(file); }
+        else if (mode !== 0o600) wrong.push(`${mode.toString(8)} ${file}`);
+      }
+    };
+    walk(dataDirectory);
+    assert.deepEqual(wrong, []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

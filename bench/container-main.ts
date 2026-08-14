@@ -13,6 +13,8 @@ import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
 import { INTERNAL_CHANNEL_ID } from '../src/types.js';
 
+process.umask(0o077);
+
 const WORK = '/episode/work';
 const RESULTS = '/episode/results';
 const spec = parseScenario(JSON.parse(fs.readFileSync(path.join(WORK, '.elpisbench-scenario.json'), 'utf8')));
