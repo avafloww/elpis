@@ -170,6 +170,12 @@ async function main(): Promise<void> {
       discord: benchDiscord,
       heartbeat: { intervalMs: 0, maxIntervalMs: 14_400_000, reflectionMinMessages: 3, socialNudgeMs: 43_200_000 },
     },
+    sandboxDeps: {
+      restart: (reason) => {
+        recorder.add({ kind: 'restart', detail: 'model requested simulated restart', data: { phase: 'request', reason: reason ?? null } });
+        return { ok: true, note: `restart accepted${reason ? `: ${reason}` : ''} — the benchmark will replace this container after the turn` };
+      },
+    },
     agentDeps: {
       transcript, initialMessages: initial?.messages ?? [],
       send: async (channelId, text) => { sends.push({ channelId, text }); recorder.add({ kind: 'send', channel: channelId, detail: text }); recordRequiredOutcome(); },

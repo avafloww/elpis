@@ -85,6 +85,9 @@ export interface SandboxDeps {
   ssh?: SshRegistry;
   /** Flush transcripts before a self-restart (D5). Optional. */
   flushTranscripts?: () => void;
+  /** Test/contained-runtime seam for elpis.restart. Omitted in production,
+   * where the sandbox performs the real resume-marker + systemctl choreography. */
+  restart?: (reason?: string) => { ok: true; note: string };
   /** Called around elpis.sleep/wait's timer : a sleep is the agent
  * *choosing to wait*, so the typing indicator must not show through it.
  * sleepPause clears typing on the 0->1 depth edge; sleepResume re-fires it

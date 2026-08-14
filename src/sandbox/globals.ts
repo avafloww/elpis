@@ -781,6 +781,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // detached systemctl restart. `notePrefix` is the only difference between
  // the two callers' notes ("restarting…" vs "built and restarting…").
   const triggerRestart = (reason: string | undefined, notePrefix: string): { ok: true; note: string } => {
+    if (deps.restart) return deps.restart(reason);
     deps.flushTranscripts?.();
     writeResumeMarker(deps.config.paths.dataDirectory, reason);
     restartHarnessService();

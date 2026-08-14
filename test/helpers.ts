@@ -198,6 +198,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     memory,
     logbuf: [],
     get inbound() { return inboundRef.current; },
+    restart: (reason) => ({ ok: true, note: `restart simulated in test harness${reason ? `: ${reason}` : ''}` }),
     send: async (channelId, text) => { await agentRef.current!.send(channelId, text); },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),

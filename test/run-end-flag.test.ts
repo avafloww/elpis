@@ -137,6 +137,17 @@ test('shared test agents expose the current inbound during a real turn and clear
   cleanup();
 });
 
+test('shared test agents intercept elpis.restart without spawning a real service command', async () => {
+  const llm = scriptedLLM([runCall("const result = elpis.restart('contained'); if (!result.note.includes('simulated in test harness')) throw new Error(result.note)", true)]);
+  const { agent, cleanup } = buildTestAgent({ llm, tmpPrefix: 'harness-restart-seam-' });
+  void agent.loop();
+  agent.enqueue(userMsg());
+  await settle();
+  assert.equal(llm.calls, 1, 'the simulated restart should succeed and end the turn');
+  agent.stop();
+  cleanup();
+});
+
 test('external thinking is forced once on each outer turn, then the separator continuation is ordinary', async () => {
   assert.deepEqual(THINK_TOOL.function.parameters.required, ['thoughts']);
   const thought = 'need inspect the actual edge before choosing';
