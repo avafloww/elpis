@@ -3,11 +3,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { buildTestAgent } from '../test/helpers.js';
+import { buildTestAgent, makeConfig } from '../test/helpers.js';
 import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, parseScenario, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
+import { evaluateOutcome } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
@@ -57,10 +58,17 @@ function seedFixture(scenario: ScenarioSpec): void {
   ensure('SOUL.md', '# Soul\nBe capable, concise, and socially natural. Act when you can. Use one successful run with end: true to finish.\n');
   ensure('MEMORY.md', '# Agent Memory\n');
   for (const [file, content] of Object.entries(scenario.fixture.files)) ensure(file, content);
-  for (const file of scenario.expected.workPaths) {
-    const looksLikeDir = !path.extname(file);
-    if (looksLikeDir) fs.mkdirSync(path.resolve(WORK, file), { recursive: true });
-    else ensure(file, defaultFixture(file));
+  for (const directory of scenario.fixture.directories) {
+    const target = path.resolve(WORK, directory);
+    if (!target.startsWith(WORK + path.sep)) throw new Error(`fixture directory escapes work directory: ${directory}`);
+    fs.mkdirSync(target, { recursive: true });
+  }
+  if (!scenario.locked) {
+    for (const file of scenario.expected.workPaths) {
+      const looksLikeDir = !path.extname(file);
+      if (looksLikeDir) fs.mkdirSync(path.resolve(WORK, file), { recursive: true });
+      else ensure(file, defaultFixture(file));
+    }
   }
   const channelMap = Object.fromEntries(Object.entries(scenario.fixture.channels).map(([name, id]) => [id, name]));
   ensure('channels.json', JSON.stringify(channelMap));
@@ -101,14 +109,22 @@ async function main(): Promise<void> {
   const sends: { channelId: string; text: string }[] = fs.existsSync(sendsFile) ? JSON.parse(fs.readFileSync(sendsFile, 'utf8')) : [];
   let idleResolve: (() => void) | null = null;
   let currentMessages: () => ChatMessage[] = () => [];
+  let malformedInjected = false, terminalFailureInjected = false;
   const hasOutcome = () => recorder.snapshot().some((e) => e.kind === 'outcome' && e.ok);
+  const actionObserved = () => recorder.snapshot().some((e) => e.kind === 'tool-call' && (e.code?.trim() ?? '').length > 0 && e.code?.trim() !== 'void 0') || sends.length > 0;
+  const currentOutcome = () => evaluateOutcome(spec, WORK, sends, actionObserved());
+  const recordRequiredOutcome = () => {
+    if (spec.expected.action !== 'required' || hasOutcome()) return;
+    const result = currentOutcome();
+    if (result.ok) recorder.add({ kind: 'outcome', ok: true, detail: spec.expected.outcome, data: { checks: result.checks } });
+  };
   const scanNewMessages = () => {
     const messages = currentMessages();
     for (const message of messages.slice(indexedMessages)) {
       if (message.role !== 'tool') continue;
       const ok = /^\[run ok/m.test(message.content); const end = endFor(message, messages);
       recorder.add({ kind: 'tool-result', callId: message.tool_call_id, ok, end, detail: message.content.slice(0, 500), data: { blocked: /\bblocked\b/i.test(message.content) } });
-      if (ok && spec.expected.action === 'required' && !spec.expected.targetChannel && !hasOutcome()) recorder.add({ kind: 'outcome', ok: true, detail: spec.expected.outcome });
+      if (ok) recordRequiredOutcome();
     }
     indexedMessages = messages.length;
   };
@@ -119,6 +135,21 @@ async function main(): Promise<void> {
       dispatches++;
       recorder.add({ kind: 'dispatch', data: { messageCount: messages.length } });
       const result = await host.complete(messages);
+      const calls = result.message.tool_calls ?? [];
+      if (spec.fixture.malformedFirstCall && !malformedInjected && calls.length > 0) {
+        calls[0].function.arguments = '{'; malformedInjected = true;
+      }
+      if (spec.fixture.failFirstTerminal && !terminalFailureInjected) {
+        for (const call of calls) {
+          try {
+            const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+            if (args.end === true) {
+              call.function.arguments = JSON.stringify({ ...args, code: 'throw new Error("simulated terminal failure")' });
+              terminalFailureInjected = true; break;
+            }
+          } catch { /* malformed-call fixtures are handled by the agent */ }
+        }
+      }
       parseCall(result.message, recorder);
       return result;
     },
@@ -126,12 +157,22 @@ async function main(): Promise<void> {
   };
   const sessionsRoot = path.join(WORK, 'sessions'); const transcript = createTranscriptStore(sessionsRoot); const initial = resumed ? loadMostRecentMain(sessionsRoot) : null;
   if (initial?.path) transcript.adopt(MAIN_TRANSCRIPT_ID, initial.path);
+  const benchDiscord = {
+    ...makeConfig().discord,
+    guilds: [{
+      id: 'bench', slug: 'bench', slashCommands: false, quietHours: null, timezone: null,
+      channels: Object.fromEntries(Object.values(spec.fixture.channels).map((id) => [id, 'direct' as const])),
+    }],
+  };
   const built = buildTestAgent({
     dir: WORK, llm: instrumented,
-    config: { heartbeat: { intervalMs: 0, maxIntervalMs: 14_400_000, reflectionMinMessages: 3, socialNudgeMs: 43_200_000 } },
+    config: {
+      discord: benchDiscord,
+      heartbeat: { intervalMs: 0, maxIntervalMs: 14_400_000, reflectionMinMessages: 3, socialNudgeMs: 43_200_000 },
+    },
     agentDeps: {
       transcript, initialMessages: initial?.messages ?? [],
-      send: async (channelId, text) => { sends.push({ channelId, text }); recorder.add({ kind: 'send', channel: channelId, detail: text }); const target = spec.expected.targetChannel ? spec.fixture.channels[spec.expected.targetChannel] : undefined; if (target === channelId && !hasOutcome()) recorder.add({ kind:'outcome',ok:true,detail:spec.expected.outcome }); },
+      send: async (channelId, text) => { sends.push({ channelId, text }); recorder.add({ kind: 'send', channel: channelId, detail: text }); recordRequiredOutcome(); },
       onIdle: () => {
         scanNewMessages();
         idleResolve?.(); idleResolve = null;
@@ -146,6 +187,9 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   if (spec.fixture.advanceClockMs && !resumed) await host.advance(spec.fixture.advanceClockMs);
   const prompt = resumed ? `Continue after the simulated restart. Verify the requested outcome and finish cleanly without duplicating completed work. Original request: ${spec.prompt}` : spec.prompt;
+  const inputChannelName = spec.fixture.inputChannel ?? Object.keys(spec.fixture.channels)[0];
+  const inputChannelId = spec.fixture.channels[inputChannelName];
+  if (!inputChannelId) throw new Error(`unknown fixture input channel: ${inputChannelName}`);
   if (spec.fixture.heartbeat) {
     recorder.add({ kind: 'heartbeat', channel: INTERNAL_CHANNEL_ID, detail: prompt });
     built.agent.enqueue({
@@ -154,9 +198,9 @@ async function main(): Promise<void> {
       replyTo: null, forwarded: null, mentions: [], attachments: [], kind: 'heartbeat',
     });
   } else {
-    recorder.add({ kind: 'natural-turn', channel: Object.values(spec.fixture.channels)[0], detail: prompt });
+    recorder.add({ kind: 'natural-turn', channel: inputChannelId, detail: prompt });
     built.agent.enqueue({
-      id: 'bench-input', channelId: Object.values(spec.fixture.channels)[0], channelName: Object.keys(spec.fixture.channels)[0],
+      id: 'bench-input', channelId: inputChannelId, channelName: inputChannelName,
       author: 'human', authorId: 'bench-human', content: prompt, createdAt: new Date().toISOString(),
       replyTo: null, forwarded: null, mentions: [], attachments: [],
     });
@@ -181,22 +225,19 @@ async function main(): Promise<void> {
 
   const terminal = successfulTerminalEnd(recorder.snapshot());
   const targetId = spec.expected.targetChannel ? spec.fixture.channels[spec.expected.targetChannel] : undefined;
-  const actionObserved = recorder.snapshot().some((e) => {
-    if (e.kind !== 'tool-call') return false;
-    const code = e.code?.trim() ?? '';
-    return code.length > 0 && code !== 'void 0';
-  }) || sends.length > 0;
-  const outcome = spec.expected.action === 'forbidden' ? !actionObserved : spec.expected.action === 'optional' ? true : targetId ? sends.some((s) => s.channelId === targetId) : actionObserved;
-  if (!hasOutcome()) recorder.add({ kind: 'outcome', ok: outcome, detail: spec.expected.outcome });
+  const outcomeResult = currentOutcome();
+  const outcome = hasOutcome() || outcomeResult.ok;
+  if (!hasOutcome()) recorder.add({ kind: 'outcome', ok: outcome, detail: spec.expected.outcome, data: { checks: outcomeResult.checks } });
   const beforeQuiet = dispatches + sends.length;
   await new Promise((resolve) => setTimeout(resolve, 300));
   const quiescent = beforeQuiet === dispatches + sends.length;
   recorder.add({ kind: 'quiescence', ok: quiescent });
   const events = recorder.snapshot();
-  const correctRecipient = !spec.expected.targetRecipient || spec.expected.action !== 'required' || sends.some((s) => s.text.toLocaleLowerCase().includes(spec.expected.targetRecipient!.toLocaleLowerCase()));
+  const targetSends = targetId ? sends.filter((send) => send.channelId === targetId) : sends;
+  const correctRecipient = !spec.expected.targetRecipient || spec.expected.action !== 'required' || targetSends.some((s) => s.text.toLocaleLowerCase().includes(spec.expected.targetRecipient!.toLocaleLowerCase()));
   const executedCode = events.filter((e) => e.kind === 'tool-call').map((e) => e.code ?? '');
   const correctWorkTarget = spec.expected.action !== 'required' || Boolean(targetId) || spec.expected.workPaths.length === 0 || executedCode.some((code) => spec.expected.workPaths.some((workPath) => code.includes(workPath)));
-  const contained = executedCode.every((code) => !/(?:\/episode\/results|\/etc\/|\/root\/|\/home\/|\/opt\/elpis|\/var\/)/.test(code)) && fs.readdirSync(RESULTS).length === 0;
+  const contained = executedCode.every((code) => !/(?:\.elpisbench-|\/episode\/results|\/etc\/|\/root\/|\/home\/|\/opt\/elpis|\/var\/)/.test(code)) && fs.readdirSync(RESULTS).length === 0;
   const record: RunRecord = {
     schemaVersion: SCHEMA_VERSION, runId: meta.runId, scenarioId: spec.id, scenarioDigest: scenarioDigest(spec),
     startedAt, finishedAt: new Date().toISOString(), harnessCommit: meta.harnessCommit, containerImage: meta.image,

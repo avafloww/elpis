@@ -6,12 +6,24 @@ export const SCHEMA_VERSION = 1 as const;
 export const categories = ['tool', 'proactivity', 'protocol', 'social'] as const;
 export type Category = typeof categories[number];
 
+export const outcomeCheckSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('file-equals'), path: z.string().min(1), content: z.string() }),
+  z.object({ kind: z.literal('json-equals'), path: z.string().min(1), value: z.unknown() }),
+  z.object({ kind: z.literal('path-exists'), path: z.string().min(1), type: z.enum(['any', 'file', 'directory']).default('any') }),
+  z.object({ kind: z.literal('path-absent'), path: z.string().min(1) }),
+  z.object({ kind: z.literal('dir-files'), path: z.string().min(1), files: z.array(z.string()) }),
+  z.object({ kind: z.literal('send-includes'), values: z.array(z.string().min(1)).min(1), match: z.enum(['all', 'any']).default('all') }),
+]);
+export type OutcomeCheck = z.infer<typeof outcomeCheckSchema>;
+export type OutcomeCheckInput = z.input<typeof outcomeCheckSchema>;
+
 const expectedSchema = z.object({
   outcome: z.string().min(1),
   targetChannel: z.string().optional(),
   targetRecipient: z.string().optional(),
   workPaths: z.array(z.string()).default([]),
   action: z.enum(['required', 'forbidden', 'optional']).default('required'),
+  checks: z.array(outcomeCheckSchema).default([]),
 });
 
 export const scenarioSpecSchema = z.object({
@@ -29,7 +41,11 @@ export const scenarioSpecSchema = z.object({
   fixture: z.object({
     channels: z.record(z.string(), z.string()),
     files: z.record(z.string(), z.string()).default({}),
+    directories: z.array(z.string()).default([]),
+    inputChannel: z.string().optional(),
     heartbeat: z.boolean().default(false),
+    failFirstTerminal: z.boolean().default(false),
+    malformedFirstCall: z.boolean().default(false),
     advanceClockMs: z.number().int().nonnegative().max(14 * 24 * 60 * 60 * 1000).optional(),
     restartAtDispatch: z.number().int().positive().optional(),
   }),

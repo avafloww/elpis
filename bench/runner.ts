@@ -36,17 +36,50 @@ export function providerLLM(provider: ProviderConfig, root = privateDataRoot()):
   return createLLM(config, undefined, openDatabase(dataDirectory));
 }
 
+export function oracleCode(scenario: ScenarioSpec, call = 1): string {
+  if (scenario.expected.action !== 'required') return 'void 0';
+  const statements: string[] = [];
+  const sendValues: string[] = [];
+  const write = (file: string, content: string) => {
+    const parent = path.dirname(file);
+    if (parent !== '.') statements.push(`fs.mkdirSync(${JSON.stringify(parent)}, { recursive: true })`);
+    statements.push(`if (!fs.existsSync(${JSON.stringify(file)}) || fs.readFileSync(${JSON.stringify(file)}, 'utf8') !== ${JSON.stringify(content)}) fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(content)})`);
+  };
+
+  for (const check of scenario.expected.checks) {
+    if (check.kind === 'file-equals') write(check.path, check.content);
+    else if (check.kind === 'json-equals') write(check.path, JSON.stringify(check.value) + '\n');
+    else if (check.kind === 'path-exists') {
+      if (check.type === 'directory') statements.push(`fs.mkdirSync(${JSON.stringify(check.path)}, { recursive: true })`);
+      else write(check.path, '');
+    } else if (check.kind === 'path-absent') statements.push(`fs.rmSync(${JSON.stringify(check.path)}, { recursive: true, force: true })`);
+    else if (check.kind === 'dir-files') {
+      statements.push(`fs.rmSync(${JSON.stringify(check.path)}, { recursive: true, force: true })`, `fs.mkdirSync(${JSON.stringify(check.path)}, { recursive: true })`);
+      for (const file of check.files) write(path.join(check.path, file), 'oracle\n');
+    } else if (check.kind === 'send-includes') sendValues.push(...(check.match === 'any' ? check.values.slice(0, 1) : check.values));
+  }
+
+  if (scenario.fixture.restartAtDispatch && call === 1) {
+    if (scenario.id === 'tool/restart-continuity') return `fs.writeFileSync('stage-one.txt', ${JSON.stringify('stage one\n')})`;
+    return 'void 0';
+  }
+
+  const target = scenario.expected.targetChannel ? scenario.fixture.channels[scenario.expected.targetChannel] : undefined;
+  if (target) {
+    const recipient = scenario.expected.targetRecipient ? `@${scenario.expected.targetRecipient} ` : '';
+    const text = recipient + (sendValues.length > 0 ? sendValues.join(' ') : `oracle: ${scenario.expected.outcome}`);
+    statements.push(`await elpis.channel(${JSON.stringify(target)}).send(${JSON.stringify(text)})`);
+  }
+  return statements.join('; ') || 'void 0';
+}
+
 function oracleLLM(scenario: ScenarioSpec): LLM {
   let calls = 0;
   return {
     model: 'elpisbench-oracle', runTool: {} as LLM['runTool'],
     async complete() {
       calls++;
-      const target = scenario.expected.targetChannel ? scenario.fixture.channels[scenario.expected.targetChannel] : undefined;
-      const code = scenario.expected.action === 'forbidden' || (scenario.expected.action === 'optional' && !target)
-        ? 'void 0'
-        : target ? `await elpis.channel(${JSON.stringify(target)}).send(${JSON.stringify(`${scenario.expected.targetRecipient ? `@${scenario.expected.targetRecipient} ` : ''}oracle: ${scenario.expected.outcome}`)})`
-          : `${scenario.expected.workPaths[0] ? `fs.existsSync(${JSON.stringify(scenario.expected.workPaths[0])}); ` : ''}fs.writeFileSync('.elpisbench-oracle-outcome', ${JSON.stringify(scenario.expected.outcome)})`;
+      const code = oracleCode(scenario, calls);
       const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, end: true }) } }] };
       stampGeneration(message, { providerType: 'openai-compatible', model: 'elpisbench-oracle', apiSurface: 'responses', apiEndpoint: 'https://oracle.elpisbench.invalid/v1/responses' });
       return { message, stripped: false, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };

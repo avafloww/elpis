@@ -25,3 +25,16 @@ test('comparisons are inconclusive inside 0.03 or above 10% instability',()=>{
   const a=buildSuiteSummary('a',[{record:record(),category:'tool'}]); const b={...a,suiteId:'b',weightedScore:a.weightedScore+0.02};
   assert.equal(compareSummaries(a,b).verdict,'inconclusive'); assert.equal(compareSummaries(a,{...b,inconclusive:true}).verdict,'inconclusive');
 });
+
+test('universal trajectory hygiene lowers every category and remains a judge ceiling', () => {
+  const messy = record();
+  messy.metrics = { ...messy.metrics, postOutcomeDispatches: 1, sendsPerRun: 2, surplusModelTurns: 6 };
+  for (const category of ['tool', 'proactivity', 'protocol', 'social'] as const) assert.ok(mechanicalCategoryScore(messy, category) < 1, category);
+  const judges = [
+    { runId: 'r', profile: 'a', family: 'x', criterion: 'natural', score: 4, evidence: [], rationale: '' },
+    { runId: 'r', profile: 'b', family: 'y', criterion: 'natural', score: 4, evidence: [], rationale: '' },
+    { runId: 'r', profile: 'c', family: 'z', criterion: 'natural', score: 4, evidence: [], rationale: '' },
+  ];
+  const summary = buildSuiteSummary('judged', [{ record: messy, category: 'tool', judges }]);
+  assert.equal(summary.categoryScores.tool, mechanicalCategoryScore(messy, 'tool'));
+});

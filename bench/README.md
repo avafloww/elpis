@@ -52,10 +52,25 @@ command reuses complete records.
 
 The locked suite has 16 tool-use, 12 proactive actionable/no-action, 12 social,
 and 8 protocol/adversarial scenarios. Generated scenarios are always
-`locked:false` and cannot enter it automatically. Hard gates apply before the
-35/25/20/20 weighted score. Three blind 0–4 judges are reduced by median while
-retaining evidence; a range over one is unstable, and instability over 10%
-makes comparisons inconclusive.
+`locked:false` and cannot enter it automatically.
+
+Each locked scenario has a concrete fixture contract: initial files and
+folders, the actual inbound room, optional deterministic fault injection, and
+typed outcome checks. Required work passes only when its file, JSON, directory,
+or target-send predicates are true after a successful tool result or send.
+Merely dispatching a tool is not an outcome. Cross-room and heartbeat targets
+must be named in the prompt; ordinary replies may use the inbound room. The
+scripted oracle produces ordinary tool calls that satisfy these same checks—no
+private success marker or candidate-only answer path. The no-tool baseline is
+the corresponding sensitivity check.
+
+Hard gates apply before the 35/25/20/20 weighted score. Extra sends and
+surplus model turns incur a small universal trajectory penalty; proactivity and
+protocol scenarios additionally charge post-outcome work, and other
+category-specific faults add to it. Three blind 0–4 judges
+are reduced by median while retaining evidence and may lower, but never erase,
+the deterministic mechanical score. A range over one is unstable, and
+instability over 10% makes comparisons inconclusive.
 
 ## Private data commands
 

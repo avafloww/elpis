@@ -7,6 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { openDatabase } from '../src/store/db.js';
 import { createChannelDirectory } from '../src/store/channels.js';
+import { buildTestAgent } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'harness-channels-'));
@@ -121,4 +122,17 @@ test('channels: single configured guild backfills legacy NULL rows at creation',
   db.prepare(`INSERT INTO channels (id, name, updated_at) VALUES ('7', 'old', '2026-01-01')`).run();
   const dir2 = createChannelDirectory(db, dir, [{ id: 'g1' }]);
   assert.equal(dir2.guildOf('7'), 'g1');
+});
+
+test('shared test agents expose production-style qualified channel names', async () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'channels.json'), JSON.stringify({ '100': 'general', '101': 'ops' }));
+  const built = buildTestAgent({ dir });
+  const listed = await built.sandbox.run("elpis.channel.list().map((entry) => entry.name).join(',')");
+  const named = await built.sandbox.run("elpis.channel('stub/ops').name === 'ops'");
+  assert.equal(listed.ok, true);
+  assert.match(listed.preview, /console,stub\/general,stub\/ops/);
+  assert.equal(named.ok, true);
+  assert.equal(named.preview, 'true');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

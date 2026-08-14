@@ -13,10 +13,12 @@ const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 export function mechanicalCategoryScore(record: RunRecord, category: Category): number {
   if (!passesHardGates(record.gates)) return 0;
   const m = record.metrics;
-  if (category === 'tool') return clamp01(1 - 0.15 * m.failedCalls - 0.2 * m.blockedCalls - 0.2 * m.malformedCalls - 0.15 * m.unchangedRetries - 0.1 * m.duplicateWork);
-  if (category === 'proactivity') return clamp01(1 - 0.2 * m.postOutcomeDispatches - 0.1 * m.surplusModelTurns - 0.1 * m.duplicateWork);
-  if (category === 'protocol') return clamp01(1 - 0.25 * m.missingTerminalFlags - 0.3 * m.failedTerminalFlags - 0.1 * m.emptyTerminalCalls - 0.15 * m.surplusModelTurns);
-  return clamp01(1 - 0.2 * Math.max(0, m.sendsPerRun - 1) - 0.15 * m.surplusModelTurns);
+  const extraSends = Math.max(0, m.sendsPerRun - 1);
+  const universal = 0.08 * extraSends + 0.03 * m.surplusModelTurns;
+  if (category === 'tool') return clamp01(1 - universal - 0.15 * m.failedCalls - 0.2 * m.blockedCalls - 0.2 * m.malformedCalls - 0.15 * m.unchangedRetries - 0.1 * m.duplicateWork);
+  if (category === 'proactivity') return clamp01(1 - universal - 0.2 * m.postOutcomeDispatches - 0.07 * m.surplusModelTurns - 0.1 * m.duplicateWork);
+  if (category === 'protocol') return clamp01(1 - universal - 0.2 * m.postOutcomeDispatches - 0.25 * m.missingTerminalFlags - 0.3 * m.failedTerminalFlags - 0.1 * m.emptyTerminalCalls - 0.12 * m.surplusModelTurns);
+  return clamp01(1 - universal - 0.12 * extraSends - 0.12 * m.surplusModelTurns);
 }
 
 export function median(values: readonly number[]): number {
@@ -53,7 +55,7 @@ export function buildSuiteSummary(
       const judged = Object.values(panel.scores);
       judgedCriteria += judged.length;
       unstableCriteria += panel.unstable.length;
-      if (judged.length) value = passesHardGates(run.record.gates) ? median(judged) / 4 : 0;
+      if (judged.length) value = passesHardGates(run.record.gates) ? value * (median(judged) / 4) : 0;
     }
     categoryValues[run.category].push(value);
   }

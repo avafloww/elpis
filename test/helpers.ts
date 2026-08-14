@@ -26,7 +26,7 @@ import { createChannelDirectory } from '../src/store/channels.js';
 import { openDatabase } from '../src/store/db.js';
 import type { Config } from '../src/config.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import type { SandboxDeps } from '../src/types.js';
+import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
 import { noopLogger } from '../src/lib/log.js';
 
 /** A minimal turn-end completion. Since 2026-07-24 the only sanctioned ending is
@@ -191,13 +191,17 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const sent: { channelId: string; text: string }[] = [];
   const agentRef: { current: Agent | null } = { current: null };
   const depsCtx: DepsContext = { tmpDir, config, memory, llm, agentRef };
+  let channelsRef: ReturnType<typeof createChannelDirectory> | null = null;
   const sandbox = createSandbox({
     config,
     memory,
     logbuf: [],
     send: async (channelId, text) => { await agentRef.current!.send(channelId, text); },
     listChannels: () => agentRef.current!.knownChannelIds(),
+    listChannelsWithNames: () => agentRef.current!.knownChannels(),
     resolveChannel: (ref) => agentRef.current!.resolveChannelRef(ref),
+    channelName: (id) => id === CONSOLE_CHANNEL_ID ? 'console' : channelsRef?.get(id) ?? null,
+    channelLabel: (id) => agentRef.current!.qualifiedChannelLabel(id),
     ...resolveDeps<SandboxDeps>(opts.sandboxDeps, depsCtx),
   });
   const db = openDatabase(tmpDir);
@@ -205,7 +209,8 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const tracker = opts.tracker ?? createContextTracker(100000, 8192, density);
   const compactor = createCompactor(llm, tracker, { ratio: () => density.ratio(), ...opts.compactorOpts });
   const transcript = createTranscriptStore(path.join(tmpDir, 'sessions'));
-  const channels = createChannelDirectory(db, tmpDir);
+  const channels = createChannelDirectory(db, tmpDir, config.discord.guilds);
+  channelsRef = channels;
   const agent = new Agent({
     config,
     sandbox,
