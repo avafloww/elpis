@@ -152,6 +152,7 @@ export interface Config {
   };
   console: {
     enabled: boolean;
+    mcpEnabled: boolean;
     port: number;
     /** Loopback-only by default — the console exposes full reasoning, every
  * conversation, and the journal. */
@@ -738,6 +739,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     },
     console: {
       enabled: boolOr(tree, 'console.enabled', true, f),
+      mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, f),
       port: numOr(tree, 'console.port', 8787, f),
       host: optStr(tree, 'console.host', f) ?? '127.0.0.1',
     },

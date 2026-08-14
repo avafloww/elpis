@@ -54,6 +54,14 @@ Other Discord settings control attachment inlining, animated emote keyframes, am
 
 The effective trigger is clamped below the provider context window by `llm.completion_reserve_tokens`.
 
+## `console`
+
+- `enabled`: serves the loopback operator console;
+- `host` / `port`: bind address;
+- `mcp_enabled`: opt-in Streamable HTTP MCP endpoint at `/mcp` for the canonical Mind graph.
+
+MCP has no built-in public-network authentication and rejects browser-Origin requests. Keep it loopback-bound or place it behind TLS and authentication. See [Coding-agent MCP](mcp.md).
+
 ## `heartbeat`
 
 - `interval_ms`: base autonomous wake interval; `0` disables;

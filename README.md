@@ -15,6 +15,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 - **Context without silent deletion.** Provider requests are projections of the durable record: completed-turn display reasoning and untrusted opaque state may be omitted, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
 - **Self-maintenance.** The agent can inspect source, edit files, run tests, commit changes, and deploy a verified build.
 - **Autonomous operation.** Heartbeats, scheduled tasks, background-job completion, and reminders can wake the same continuing agent.
+- **Bounded coding collaboration.** An opt-in authenticated MCP adapter lets external coding agents work through the canonical Mind graph and task-bound correspondence without becoming parallel copies of the resident agent.
 
 ## Surfaces
 
@@ -24,6 +25,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 | Elpis Console | Thread, live streaming, context inspection, logs, usage, chat ingress, and Mind UI |
 | JavaScript sandbox | Persistent programmable tool environment |
 | Mind | Dependency-aware projects, tasks, ideas, questions, comments, tags, and reminders |
+| Coding-agent MCP | Opt-in authenticated adapter over Mind plus task-bound correspondence with the resident agent |
 | Browser / computer | Stateful Playwright sessions and a persistent Linux desktop |
 | Fleet | Optional bounded coding-worker sessions |
 
@@ -58,7 +60,7 @@ npm run build
 npm start
 ```
 
-Configuration reference: [`docs/config.md`](docs/config.md).
+Configuration reference: [`docs/config.md`](docs/config.md). Coding-agent MCP: [`docs/mcp.md`](docs/mcp.md).
 
 ## Minimal configuration
 

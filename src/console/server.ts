@@ -6,9 +6,9 @@
 // it a snapshot and then streams incremental events; the socket also carries the
 // client's backfill requests back to the hub.
 //
-// The server is a pure observer — it never touches agent state directly, only
-// the hub. Binding failures (port in use) are logged and swallowed so the
-// console can never take down the agent.
+// The server serves the observer console and delegates the opt-in `/mcp` route
+// to a bounded Mind adapter. It never mutates agent state directly. Binding
+// failures are logged and swallowed so the console cannot take down the agent.
 
 import * as http from 'node:http';
 import * as fs from 'node:fs';
@@ -17,6 +17,7 @@ import * as url from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from '../config.js';
 import type { ConsoleHub, HubClient } from './hub.js';
+import type { McpHttpEndpoint } from '../mcp/server.js';
 import { ATTACHMENT_DIR } from '../types.js';
 
 export interface ConsoleServer {
@@ -98,12 +99,17 @@ export function isAllowedOrigin(origin: string | undefined, port: number): boole
   return originPort === String(port);
 }
 
-export function createConsoleServer(config: Config, hub: ConsoleHub): ConsoleServer {
+export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHttpEndpoint): ConsoleServer {
   const log = config.logger;
 
   const server = http.createServer((req, res) => {
  // Static file server for the SPA. Only GET, only within PUBLIC_DIR.
     const reqPath = decodeURIComponent((req.url ?? '/').split('?')[0]);
+    if (reqPath === '/mcp') {
+      if (!config.console.mcpEnabled || !mcp) { res.writeHead(404); res.end('not found'); return; }
+      void mcp.handle(req, res);
+      return;
+    }
  // Downloaded inbound Discord attachments (read-only) — lets the SPA render
  // image inputs inline. Files live under /tmp, so a reboot clears them; the
  // SPA falls back to a file chip on 404.
@@ -189,13 +195,14 @@ export function createConsoleServer(config: Config, hub: ConsoleHub): ConsoleSer
           resolve();
         });
         server.listen(config.console.port, config.console.host, () => {
-          log.info(`[console] listening on http://${config.console.host}:${config.console.port} (ws at /ws)`);
+          log.info(`[console] listening on http://${config.console.host}:${config.console.port} (ws at /ws${config.console.mcpEnabled ? ", mcp at /mcp" : ""})`);
           resolve();
         });
       });
     },
     stop(): void {
       try { wss.close(); } catch { /* ignore */ }
+      void mcp?.close();
       try { server.close(); } catch { /* ignore */ }
     },
   };

@@ -105,8 +105,14 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.heartbeat.intervalMs, 60 * 60 * 1000);
   assert.equal(c.heartbeat.reflectionMinMessages, 3);
   assert.equal(c.console.enabled, true);
+  assert.equal(c.console.mcpEnabled, false);
   assert.equal(c.console.port, 8787);
   assert.equal(c.console.host, '127.0.0.1');
+});
+
+test('configFile: MCP is an explicit console opt-in', () => {
+  const c = loadConfigFile(fixture(MINIMAL_OK + '\nconsole:\n  enabled: true\n  mcp_enabled: true\n'));
+  assert.equal(c.console.mcpEnabled, true);
 });
 
 test('configFile: codex-oauth needs no api key/base URL and pins the canonical backend', () => {
