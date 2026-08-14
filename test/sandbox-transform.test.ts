@@ -113,3 +113,26 @@ test('heredoc: TAG,<<<NEXT chains adjacent blocks on one line', () => {
   assert.match(expanded.code, /f\("old\\n","new\\n"\);/);
   assert.equal(transform(src).parsed, true);
 });
+
+test('heredoc: arbitrary same-line argument continuation is preserved verbatim', () => {
+  const src = 'elpis.fill(<<<MSG\nhello {{name}}\nMSG,{ name: "Aster" });';
+  const expanded = expandHeredocs(src);
+  assert.equal(expanded.error, undefined);
+  assert.ok(expanded.code.endsWith(',{ name: "Aster" });'));
+  assert.equal(transform(src).parsed, true);
+});
+
+test('heredoc: same-line method chain is preserved verbatim', () => {
+  const src = 'const x = <<<TEXT\nhello\nTEXT.trimEnd();';
+  const expanded = expandHeredocs(src);
+  assert.equal(expanded.error, undefined);
+  assert.ok(expanded.code.endsWith('.trimEnd();'));
+  assert.equal(transform(src).parsed, true);
+});
+
+test('heredoc: a longer identifier beginning with the tag remains body content', () => {
+  const src = 'const x = <<<TAG\nTAGGED stays inside\nTAG;';
+  const expanded = expandHeredocs(src);
+  assert.equal(expanded.error, undefined);
+  assert.ok(expanded.code.includes('TAGGED stays inside'));
+});

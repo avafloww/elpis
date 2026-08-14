@@ -71,5 +71,5 @@ test('parseFailureHints: TypeScript syntax still detected', () => {
 test('parseFailureHints: heredoc present falls back to the heredoc rules', () => {
   const raw = 'const a = <<<T\nbody\n';
   const hints = parseFailureHints(raw, raw, 'heredoc <<<T opened at line 1 has no terminator');
-  assert.ok(hints.some((h) => /terminator begins with.*chain the next opener/.test(h)), hints.join(' | '));
+  assert.ok(hints.some((h) => /everything after it.*preserved as JavaScript/.test(h)), hints.join(' | '));
 });

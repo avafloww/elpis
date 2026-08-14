@@ -427,9 +427,9 @@ ${externalThinkingSection}
 \`run\` calls use **plain JavaScript, not TypeScript**, with some additional convenience: the harness lifts shell-style \`<<<TAG\` heredoc blocks before processing.
 \`<<<TAG … TAG\` — heredoc blocks: author multi-line text with ZERO escaping. Everything
 between the opener line and its tag terminator becomes a string literal, verbatim —
-backticks, quotes, \`\${\`, \`\\u\`, backslashes are all literal. The terminator may
-carry natural JS closing punctuation (for example \`TAG);\`) or chain directly into the next
-opener (\`TAG,<<<NEXT\`). Reach for this whenever you write file content, test fixtures,
+backticks, quotes, \`\${\`, \`\\u\`, backslashes are all literal. Everything after the
+exact tag on its terminator line is preserved as JavaScript, so \`TAG,{ other });\`,
+\`TAG.trimEnd()\`, and \`TAG,<<<NEXT\` all work. Reach for this whenever you write file content, test fixtures,
 or code-inside-strings; it replaces the count-the-backslashes dance entirely.
 \`\`\`js
 const block = <<<EOF

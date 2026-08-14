@@ -193,10 +193,12 @@ const HEREDOC_MAX = 100;
  * - Content: every line between the opener line and the terminator line,
  * verbatim, INCLUDING the final newline (files usually want one; use
  * `.trimEnd` if not).
- * - Terminator: a line beginning with TAG (leading/trailing blanks ok), then
- * optional JS closing punctuation (`;`, `,`, `);`, `]`, etc.). A comma may
- * be followed immediately by the next `<<<TAG` opener on the same line. If
- * the content itself needs such a line, pick a different tag.
+ * - Terminator: a line beginning with the exact TAG (leading blanks ok; a
+ * longer identifier such as `TAGGED` does not match). Everything after TAG
+ * on that physical line is preserved verbatim as JavaScript, so callers may
+ * close a call, pass another argument, chain a method, add a comment, or open
+ * the next heredoc without moving to another line. If content itself needs a
+ * line beginning with the exact tag boundary, pick a different tag.
  * - Openers inside string literals / templates / comments are ignored (found
  * via blankLiterals), so code that *writes about* heredocs isn't mangled. A
  * marker inside a template `${}` interpolation is NOT expanded.
@@ -215,7 +217,7 @@ export function expandHeredocs(code: string): { code: string; error?: string } {
     const contentStart = m.index + m[0].length;
     const rest = code.slice(contentStart);
     const term = new RegExp(
-      `^[ \\t]*${tag}[ \\t]*(?:([;,]|[)\\]\\}]+[;,]?)[ \\t]*)?(?=\\r?$|<<<[A-Za-z_][A-Za-z0-9_]*[ \\t]*\\r?$)`,
+      `^[ \\t]*${tag}(?![A-Za-z0-9_])([^\\r\\n]*)\\r?$`,
       'm',
     );
     const tm = term.exec(rest);
@@ -232,7 +234,7 @@ export function expandHeredocs(code: string): { code: string; error?: string } {
         error: `heredoc <<<${tag} opened at line ${openLine} has no terminator${hint}`,
       };
     }
-    const trailer = tm[1] ?? '';           // '', separators, or closing delimiters
+    const trailer = tm[1] ?? '';           // verbatim same-line JavaScript continuation
     const content = rest.slice(0, tm.index); // verbatim, incl. final newline
     const end = contentStart + tm.index + tm[0].length;
     code = code.slice(0, m.index) + JSON.stringify(content) + trailer + code.slice(end);

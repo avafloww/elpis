@@ -90,7 +90,7 @@ export function parseFailureHints(code: string, rawCode: string, error: string):
   if (!hasHeredoc && /\b(as\s+(any|const|unknown|object|string|number|boolean)|:\s*\w+(\[\])?\s*[=,)]|interface\s+\w+|satisfies\s|<\s*\w+\s*>)/.test(rawCode)) {
     hints.push('This looks like TypeScript syntax (`as` casts, type annotations, `interface`). The sandbox runs PLAIN JavaScript — remove all type syntax.');
   } else if (hasHeredoc && hints.length === 0) {
-    hints.push('A `<<<TAG` heredoc is present. The opener must be `<<<TAG` (bare identifier, no quotes/dashes) followed by a newline; the terminator begins with `TAG` and may carry JS closing punctuation (`TAG);`) or chain the next opener (`TAG,<<<NEXT`). Body is verbatim — real newlines, no escapes.');
+    hints.push('A `<<<TAG` heredoc is present. The opener must be `<<<TAG` (bare identifier, no quotes/dashes) followed by a newline; the terminator begins with the exact `TAG`, and everything after it on that physical line is preserved as JavaScript (`TAG,{ other });`, `TAG.trimEnd()`, or `TAG,<<<NEXT`). Body is verbatim — real newlines, no escapes.');
   }
 
   return hints;
