@@ -24,7 +24,7 @@ function stubConfig(dataDirectory: string): Config {
       botToken: '', applicationId: '',
       errorChannelId: null, attachmentInlineMaxBytes: 32768,
     },
-    compaction: { triggerTokens: 100000, keepTokens: 20000, toolAgeKeepTokens: 20000 },
+    compaction: { triggerTokens: 100000, keepTokens: 20000 },
     heartbeat: { intervalMs: 0, maxIntervalMs: 0, reflectionMinMessages: 3, socialNudgeMs: 0 },
     sandbox: { syncTimeoutMs: 15000, asyncDeadlineMs: 120000, previewMaxBytes: 2048, logMaxBytes: 2048 },
     console: { enabled: false, port: 8787, host: '127.0.0.1' },

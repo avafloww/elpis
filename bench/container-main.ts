@@ -38,7 +38,7 @@ class HostLLM implements LLM {
     writeJsonLine(process.stdout, { type, id, ...body });
     return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
   }
-  complete(messages: ChatMessage[], ratio = 4): Promise<CompleteResult> { return this.request('complete', { messages, ratio }) as Promise<CompleteResult>; }
+  complete(messages: ChatMessage[]): Promise<CompleteResult> { return this.request('complete', { messages }) as Promise<CompleteResult>; }
   summarize(text: string): Promise<string> { return this.request('summarize', { text }) as Promise<string>; }
   async resetSession(): Promise<void> { await this.request('reset-session', {}); }
   async advance(ms: number): Promise<void> { await this.request('advance-clock', { ms }); }
@@ -112,11 +112,11 @@ async function main(): Promise<void> {
   };
   const instrumented: LLM = {
     model: host.model, runTool: host.runTool,
-    async complete(messages, ratio) {
+    async complete(messages) {
       scanNewMessages();
       dispatches++;
       recorder.add({ kind: 'dispatch', data: { messageCount: messages.length } });
-      const result = await host.complete(messages, ratio);
+      const result = await host.complete(messages);
       parseCall(result.message, recorder);
       return result;
     },

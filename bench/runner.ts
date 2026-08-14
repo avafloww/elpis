@@ -90,7 +90,7 @@ export async function runScenario(config: BenchConfig, scenario: ScenarioSpec, p
   writePrivateJson(path.join(workDir, '.elpisbench-run.json'), { runId, providerType: (opts.oracle || opts.noToolBaseline || opts.candidate) ? 'openai-compatible' : provider.provider_type, model: opts.oracle ? 'elpisbench-oracle' : opts.noToolBaseline ? 'elpisbench-no-tool-baseline' : opts.candidate ? 'grpo-candidate' : provider.model, image, harnessCommit: harnessCommit() });
   const llm = opts.oracle ? oracleLLM(scenario) : opts.noToolBaseline ? noToolBaselineLLM(scenario) : opts.candidate ? candidateLLM(opts.candidate) : providerLLM(provider, config.data_directory ?? privateDataRoot());
   const gateway: CompletionGateway = {
-    complete: (messages, ratio) => llm.complete(messages as Parameters<LLM['complete']>[0], ratio),
+    complete: (messages) => llm.complete(messages as Parameters<LLM['complete']>[0]),
     summarize: (text) => llm.summarize(text),
     async resetSession() { llm.resetSession?.(); },
     async advanceClock(ms) { advanceClockFile(clockFile, ms); },

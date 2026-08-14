@@ -47,7 +47,7 @@ function microtask(): Promise<void> {
 }
 
 test('effective trigger clamps to the real window on a small-window config (S3)', () => {
-  const config = makeConfig({ compaction: { triggerTokens: 100000, keepTokens: 20000, toolAgeKeepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 8192 } });
+  const config = makeConfig({ compaction: { triggerTokens: 100000, keepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 8192 } });
   const smallWindow = createContextTracker(20000, 8192); // usableBudget 11808
   const eff = computeEffectiveTrigger(config, smallWindow);
   assert.ok(eff < config.compaction.triggerTokens, 'trigger clamped below the configured value');
@@ -60,7 +60,7 @@ test('effective trigger clamps to the real window on a small-window config (S3)'
 test('compaction checkpoint: crossing the trigger pushes the memory-flush nudge', async () => {
   const { agent } = buildTestAgent({
     llm: stubLLM(() => Promise.resolve(SUMMARY_OK)),
-    config: { compaction: { triggerTokens: 500, keepTokens: 20000, toolAgeKeepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
+    config: { compaction: { triggerTokens: 500, keepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tracker: createContextTracker(100000, 100),
     compactorOpts: { keepTokens: 100 },
     tmpPrefix: 'harness-compact-',
@@ -85,7 +85,7 @@ test('compaction checkpoint: crossing the trigger pushes the memory-flush nudge'
 test('compaction checkpoint: successful apply pushes a compacted notice', async () => {
   const { agent } = buildTestAgent({
     llm: stubLLM(() => Promise.resolve(SUMMARY_OK)),
-    config: { compaction: { triggerTokens: 500, keepTokens: 20000, toolAgeKeepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
+    config: { compaction: { triggerTokens: 500, keepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tracker: createContextTracker(100000, 100),
     compactorOpts: { keepTokens: 100 },
     tmpPrefix: 'harness-compact-notice-',
@@ -149,7 +149,7 @@ test('compaction checkpoint: a cycle ending with no accepted summary alerts the 
     }),
     config: {
       discord: { ...base.discord, errorChannelId: 'err-ch' },
-      compaction: { triggerTokens: 500, keepTokens: 20000, toolAgeKeepTokens: 20000 },
+      compaction: { triggerTokens: 500, keepTokens: 20000 },
       llm: { ...base.llm, completionReserveTokens: 100 },
       heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 },
     },
@@ -193,7 +193,7 @@ test('compaction checkpoint: past 2× trigger with no successful apply escalates
  // summarize never resolves → compaction stays running, compactingSince stays set.
   const { agent } = buildTestAgent({
     llm: stubLLM(() => new Promise<string>(() => {})),
-    config: { compaction: { triggerTokens: 500, keepTokens: 20000, toolAgeKeepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
+    config: { compaction: { triggerTokens: 500, keepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tracker: createContextTracker(100000, 100),
     compactorOpts: { keepTokens: 100 },
     tmpPrefix: 'harness-escalate-',

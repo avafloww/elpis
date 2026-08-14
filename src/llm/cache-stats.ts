@@ -2,9 +2,9 @@
 // console and the Discord /cache command.
 //
 // WHY THIS EXISTS: prefix caching is the harness's biggest cost lever. The system
-// prompt avoids volatile bytes and the request-assembly diet's boundaries are
-// monotone PURELY to protect the cached prefix (see the load-bearing invariants
-// in AGENTS.md). This module is the instrument for those invariants — when one
+// prompt avoids volatile bytes and request-only projections stay stable enough
+// to protect the cached prefix (see the load-bearing invariants in AGENTS.md).
+// This module is the instrument for those invariants — when one
 // regresses, a bust divider says so with a token count.
 //
 // NOTE the invariant is "no volatile byte in the per-turn rebuild", NOT "the

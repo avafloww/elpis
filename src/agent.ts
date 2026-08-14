@@ -1337,7 +1337,7 @@ export class Agent {
           const callController = new AbortController();
           let callTimer: ReturnType<typeof setTimeout> | null = null;
           try {
-            const completion = this.llm.complete(requestMessages, this.density?.ratio() ?? 4, {
+            const completion = this.llm.complete(requestMessages, {
               forceThink: forceThinkForRequest,
               signal: callController.signal,
             });
@@ -1517,8 +1517,8 @@ export class Agent {
             tool_call_id: tc.id,
             content: resultText,
           };
- // Record the run's channel.send calls onto the tool message (3b):
- // aging renders them verbatim so the agent's outbound speech survives.
+ // Retain the run's channel sends on the tool message for console rendering,
+ // feedback localization, transcript recovery, and detached-future notices.
           if (result.sends && result.sends.length > 0) toolMsg.sends = result.sends;
           this.pushMessage(toolMsg, this.turnChannel);
           this.tracker.estimateAppended(toolMsg.content);
@@ -1964,11 +1964,7 @@ export class Agent {
  * message, and a completed-but-not-yet-applied background fold are not
  * reflected. */
   contextSnapshot(): ContextSnapshot {
-    const prepared = prepareForApi(
-      this.buildRequestMessages(),
-      this.config.compaction.toolAgeKeepTokens,
-      this.density?.ratio() ?? 4,
-    );
+    const prepared = prepareForApi(this.buildRequestMessages());
     const snap: ContextSnapshot = {
       model: this.config.llm.model,
       tools: activeModelTools(this.config.llm.externalThinking),

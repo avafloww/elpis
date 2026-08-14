@@ -147,13 +147,6 @@ compaction:
   trigger_tokens: 180000
   # Verbatim tail kept unsummarized. Validated: 0 < keep < trigger.
   keep_tokens: 50000
-  # Full-fidelity window before tool results are stubbed and code head-capped.
-  # DEFAULT 0 (off), and it should stay off on any endpoint that discounts
-  # cached tokens: the aging boundary slides through the middle of the history,
-  # so each advance rewrites the cached prefix from that point on (measured:
-  # 41% of requests, ~98k tokens each, 17x the uncached tokens it saved).
-  # Set a token window only if cached tokens bill at full price.
-  tool_age_keep_tokens: 0
 
 heartbeat:
   interval_ms: 3600000               # base autonomous wake interval (1h); 0 disables

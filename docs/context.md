@@ -27,19 +27,18 @@ Discord messages are serialized into `<incoming-message>` envelopes. Envelopes c
 
 Console messages carry console provenance. Scheduler, heartbeat, fleet, watch, and harness notices are marked synthetic.
 
-## Request dieting
+## Request projection
 
 The durable transcript is the record; the provider request is a projection of it.
 
 Before each call, `prepareForApi()` may:
 
 - remove old provider reasoning fields outside the current open chain;
-- age old tool-result payloads while preserving message and call structure;
 - omit request-only cards from tool continuations;
 - strip opaque reasoning whose replay provenance is not trusted;
 - translate messages into the selected provider's wire format.
 
-Dieting must never mutate the in-memory history or transcript. Tool-call IDs and valid JSON argument shape remain intact.
+Request projection must never mutate the in-memory history or transcript.
 
 ## Mind frontier
 
@@ -55,7 +54,7 @@ Creating a people file pre-fills the current Discord ID only when the requested 
 
 ## Context accounting
 
-The context tracker estimates the request as sent, using measured token density where available. It accounts for system text, messages, tool schemas, tool payload aging, and provider working state. The effective compaction threshold leaves a completion reserve below the configured/model context window.
+The context tracker estimates the request as sent, using measured token density where available. It accounts for system text, messages, tool schemas, and provider working state. The effective compaction threshold leaves a completion reserve below the configured/model context window.
 
 Cache metrics are observational. They never change the transcript or claim a semantic guarantee from provider-reported cached-token counts.
 

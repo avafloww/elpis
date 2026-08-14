@@ -74,7 +74,7 @@ test('outer call deadline aborts and surfaces a provider call that never settles
     client: {} as unknown as LLM['client'],
     model: 'test',
     runTool: {} as unknown as LLM['runTool'],
-    complete(_messages, _ratio, options) {
+    complete(_messages, options) {
       options?.signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
       return new Promise<CompleteResult>(() => {});
     },

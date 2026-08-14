@@ -342,7 +342,7 @@ test('agent: compaction-apply re-arms the emote seen-set', async () => {
   } as LLM;
   const { agent } = buildTestAgent({
     llm: stubLLM,
-    config: { compaction: { triggerTokens: 500, keepTokens: 20000, toolAgeKeepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
+    config: { compaction: { triggerTokens: 500, keepTokens: 20000 }, llm: { ...makeConfig().llm, completionReserveTokens: 100 }, heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 3, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tracker: createContextTracker(100000, 100),
     compactorOpts: { keepTokens: 100 },
     agentDeps: { emotes: { resetSeen: () => { resets++; } } },

@@ -448,7 +448,7 @@ test('prepareForApi: reasoning_items survive the 3a strip that drops reasoning_c
     }, // no tool calls → ended a turn (pre-flag shape) → at/before boundary
     { role: 'user', content: 'q2' },
   ];
-  const out = prepareForApi(messages, 0);
+  const out = prepareForApi(messages);
   assert.equal(out[1].reasoning_content, undefined, 'legacy reasoning text is stripped on completed turns');
   assert.deepEqual(out[1].reasoning_items, [REASONING_ITEM], 'encrypted reasoning items are preserved');
 });

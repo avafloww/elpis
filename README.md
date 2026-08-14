@@ -12,7 +12,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 - **One tool, many capabilities.** The model receives `run(code)`. JavaScript can call namespaced capabilities such as `elpis.channel`, `elpis.schedule`, `elpis.mind`, `elpis.browser`, and `elpis.computer`.
 - **Persistent working state.** Top-level JavaScript bindings survive tool calls within the process. Long-lived state belongs in the data directory.
 - **Durable identity and memory.** `SOUL.md`, `MEMORY.md`, `people/`, `ponder/`, transcripts, and `agent.db` survive restarts and model changes.
-- **Context without silent deletion.** Request assembly may diet old tool payloads and opaque reasoning, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
+- **Context without silent deletion.** Provider requests are projections of the durable record: completed-turn display reasoning and untrusted opaque state may be omitted, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
 - **Self-maintenance.** The agent can inspect source, edit files, run tests, commit changes, and deploy a verified build.
 - **Autonomous operation.** Heartbeats, scheduled tasks, background-job completion, and reminders can wake the same continuing agent.
 

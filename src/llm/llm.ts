@@ -234,30 +234,20 @@ function withEffort<T extends object>(config: Config, base: T): T & { reasoning_
 }
 
 
-// ─── Request-assembly diet ────────────────────────────────────
-// Two NON-DESTRUCTIVE transforms applied to `messages` right before they are
-// mapped to API params: they change only what is SENT, never what is stored.
-// Transcript, in-memory history, and serializeHistory (the summarizer's view)
-// always see full content.
+// ─── Request projection ───────────────────────────────────────
+// This NON-DESTRUCTIVE transform changes only what is SENT, never what is
+// stored. Transcript, in-memory history, and serializeHistory (the summarizer's
+// view) always see full content.
 //
-// 3a — strip prior-turn reasoning: drop reasoning_content on assistant messages
-// from COMPLETED turns; keep it on the current open tool chain. Responses-API
-// `reasoning_items` are deliberately NOT stripped — replaying them is how the
-// Responses path preserves the model's thinking across turns (the endpoint's
-// `reasoning.context` governs rendering). Boundary = the
-// last assistant message that ENDED a turn (see endsTurn below — a bare
-// no-tool-calls message, OR a LAST tool call carrying end: true whose run
-// actually succeeded, mirroring src/agent.ts's own endedByFlag rule), NOT
-// "last user message" (a user msg can land mid-chain under mono).
-// 3b — tool aging: outside a recent full-fidelity window, tool RESULTS are
-// stubbed to their status line + recorded sends, and tool-call CODE is
-// head-capped. `arguments` is a JSON string the server re-parses, so aging
-// must JSON.parse → cap args.code → JSON.stringify (head-capping the raw
-// string emits invalid JSON → permanent 400).
+// Strip prior-turn reasoning_content from COMPLETED turns; keep it on the
+// current open tool chain. Responses-API `reasoning_items` are deliberately NOT
+// stripped — replaying them preserves thinking across turns. The boundary is
+// the last assistant message that ENDED a turn, not the last user message,
+// because a user message can land mid-chain under monocontext.
 
 /** Pre-division char count of a single message AS SENT — content + role length +
  * 4 + tool-call `arguments` lengths. `reasoning_content` is deliberately
- * excluded (matches what `prepareForApi` sends: the diet strips it on
+ * excluded (matches what `prepareForApi` sends: the projection strips it on
  * completed turns and it is display-only on the Responses path).
  * `reasoning_items` are counted by default (encrypted blob + readable text
  * lengths) — they are replayed on every Responses request, so excluding them
@@ -310,43 +300,14 @@ export function estimateSentTokens(m: ChatMessage, ratio = 4): number {
   return Math.ceil(sentChars(m) / ratio);
 }
 
-const AGE_CODE_MAX_CHARS = 400;
-const AGE_CODE_MAX_LINES = 10;
-
-/** Head-cap the `code` inside a tool_call's JSON `arguments` string, round-
- * tripping through JSON.parse/stringify so the emitted arguments stay valid
- * JSON. Leaves `arguments` untouched if it doesn't parse. */
-function ageToolCallArguments(argumentsStr: string): string {
-  let parsed: unknown;
-  try { parsed = JSON.parse(argumentsStr); } catch { return argumentsStr; }
-  if (typeof parsed !== 'object' || parsed === null) return argumentsStr;
-  const obj = parsed as Record<string, unknown>;
-  if (typeof obj.code !== 'string') return argumentsStr;
-  const code = obj.code;
-  const lines = code.split('\n');
-  if (code.length <= AGE_CODE_MAX_CHARS && lines.length <= AGE_CODE_MAX_LINES) return argumentsStr;
-  const head = lines.slice(0, AGE_CODE_MAX_LINES).join('\n').slice(0, AGE_CODE_MAX_CHARS);
-  obj.code = `${head}\n[…code elided by harness; full text in the on-disk transcript]`;
-  return JSON.stringify(obj);
-}
-
 /** First line of a tool result beginning `[run` — the status line `formatRunResult`
  * (`src/agent.ts`) writes (`[run ok…]` on success, `[run FAILED]` on failure). A
  * generated prose can precede a tool call, so this
- * scans for the marker rather than assuming `lines[0]`. Shared by `ageToolResult`
- * (3b) and `endsTurn` (which reads it to tell a successful run from a failed one). */
+ * scans for the marker rather than assuming `lines[0]`. `endsTurn` uses it to
+ * distinguish a successful run from a failed one. */
 function toolStatusLine(content: string): string {
   const lines = (content ?? '').split('\n');
   return lines.find((l) => l.startsWith('[run')) ?? lines[0] ?? '';
-}
-
-/** Age a tool RESULT down to its status line + any recorded sends, verbatim. */
-function ageToolResult(m: ChatMessage): ChatMessage {
-  const statusLine = toolStatusLine(m.content ?? '');
-  const parts = [statusLine];
-  for (const s of m.sends ?? []) parts.push(`→ #${s.channel}: ${JSON.stringify(s.text)}`);
-  parts.push('[…result elided by harness; full text in the on-disk transcript]');
-  return { ...m, content: parts.join('\n') };
 }
 
 /** True when `messages[i]` is an assistant message that ENDED a turn. Two shapes
@@ -364,7 +325,7 @@ function ageToolResult(m: ChatMessage): ChatMessage {
  * failure has to come back to the model, so its reasoning must survive the
  * strip — and a result that isn't in the array yet (an interrupted chain)
  * can't have succeeded, so it doesn't end the turn either.
- * The diet's reasoning-strip boundary keys off this rather than off "has no
+ * The reasoning-strip boundary keys off this rather than off "has no
  * tool_calls", which silently degenerates to -1 once every turn ends with a
  * run call. */
 export function endsTurn(messages: ChatMessage[], i: number): boolean {
@@ -392,11 +353,9 @@ export function endsTurn(messages: ChatMessage[], i: number): boolean {
   return toolStatusLine(toolResult.content ?? '').startsWith('[run ok');
 }
 
-/** Apply the reasoning-strip + tool-aging diet. Returns a NEW array (inputs
- * untouched). Exported for tests. */
-export function prepareForApi(messages: ChatMessage[], toolAgeKeepTokens: number, ratio = 4): ChatMessage[] {
- // 3a boundary: index of the last assistant message that ENDED a turn. Keep
- // reasoning_content on every message AFTER it (the whole current open chain).
+/** Strip completed-turn reasoning from the provider projection. Returns a new
+ * array without mutating stored messages; unchanged messages retain identity. */
+export function prepareForApi(messages: ChatMessage[]): ChatMessage[] {
   let reasoningBoundary = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (endsTurn(messages, i)) {
@@ -404,39 +363,10 @@ export function prepareForApi(messages: ChatMessage[], toolAgeKeepTokens: number
       break;
     }
   }
- // 3b window: walk backwards accumulating estimates until toolAgeKeepTokens.
- // Messages at index >= agingStart are inside the window (sent untouched).
- // 0 disables aging entirely.
-  let agingStart = 0;
-  if (toolAgeKeepTokens > 0) {
-    let acc = 0;
-    agingStart = messages.length;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      acc += estimateSentTokens(messages[i], ratio);
-      agingStart = i;
-      if (acc >= toolAgeKeepTokens) break;
-    }
-  }
   return messages.map((m, i) => {
-    let out = m;
- // 3a: strip prior-turn reasoning (at/before the last message that ended a turn).
-    if (out.reasoning_content && i <= reasoningBoundary) {
-      const { reasoning_content: _drop, ...rest } = out;
-      out = rest;
-    }
- // 3b: age tool traffic outside the window.
-    if (toolAgeKeepTokens > 0 && i < agingStart) {
-      if (out.role === 'tool') {
-        out = ageToolResult(out);
-      } else if (out.role === 'assistant' && out.tool_calls && out.tool_calls.length > 0) {
-        const tool_calls = out.tool_calls.map((tc) => ({
-          ...tc,
-          function: { ...tc.function, arguments: ageToolCallArguments(tc.function.arguments) },
-        }));
-        out = { ...out, tool_calls };
-      }
-    }
-    return out;
+    if (!m.reasoning_content || i > reasoningBoundary) return m;
+    const { reasoning_content: _drop, ...rest } = m;
+    return rest;
   });
 }
 
@@ -759,7 +689,7 @@ export interface LLM {
   model: string;
   runTool: RunTool;
   /** Low-level chat completion call. Returns the assistant message + usage. */
-  complete(messages: ChatMessage[], ratio?: number, options?: CompleteOptions): Promise<CompleteResult>;
+  complete(messages: ChatMessage[], options?: CompleteOptions): Promise<CompleteResult>;
   /** Tool-free completion with no monocontext history. Provider implementations
  * must isolate its cache/conversation identity from the main agent lane. */
   completeStandalone?(messages: ChatMessage[], opts?: StandaloneCompleteOptions): Promise<StandaloneCompleteResult>;
@@ -856,12 +786,11 @@ export async function streamComplete(
   config: Config,
   messages: ChatMessage[],
   hub?: ConsoleHub,
-  ratio = 4,
 ): Promise<CompleteResult> {
   try {
     try { hub?.streamStart(); } catch { /* observer must never break generation */ }
     const controller = new AbortController();
-    const prepared = prepareForApi(messages, config.compaction.toolAgeKeepTokens, ratio);
+    const prepared = prepareForApi(messages);
     const charsSent = computeCharsSent(prepared, false);
     const base = {
       model: config.llm.model,
@@ -1041,8 +970,8 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
     return viaChat();
   }
 
-  async function chatComplete(messages: ChatMessage[], ratio: number): Promise<CompleteResult> {
-    return streamComplete(client, config, messages, hub, ratio);
+  async function chatComplete(messages: ChatMessage[]): Promise<CompleteResult> {
+    return streamComplete(client, config, messages, hub);
   }
 
   async function chatSummarize(systemPrompt: string, text: string): Promise<string> {
@@ -1080,10 +1009,10 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
     client,
     model: config.llm.model,
     runTool: RUN_TOOL,
-    async complete(messages: ChatMessage[], ratio = 4, _options: CompleteOptions = {}): Promise<CompleteResult> {
+    async complete(messages: ChatMessage[], _options: CompleteOptions = {}): Promise<CompleteResult> {
       return routeCall(
         async () => {
-          const result = await streamResponsesComplete(client, config, messages, hub, ratio);
+          const result = await streamResponsesComplete(client, config, messages, hub);
           stampGeneration(result.message, {
             providerType: 'openai-compatible', model: config.llm.model,
             apiSurface: 'responses', apiEndpoint: endpointAt(config.llm.baseUrl, 'responses'),
@@ -1093,7 +1022,7 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
           return result;
         },
         async () => {
-          const result = await chatComplete(messages, ratio);
+          const result = await chatComplete(messages);
           stampGeneration(result.message, {
             providerType: 'openai-compatible', model: config.llm.model,
             apiSurface: 'chat-completions', apiEndpoint: endpointAt(config.llm.baseUrl, 'chat/completions'),

@@ -478,7 +478,7 @@ export function createCodexOAuthLLM(
       }
       return standaloneLane.run(laneId, () => codexStandaloneComplete(standaloneClient, config, messages, laneId, responsesLite, opts));
     },
-    async complete(messages: ChatMessage[], ratio = 4, options: CompleteOptions = {}): Promise<CompleteResult> {
+    async complete(messages: ChatMessage[], options: CompleteOptions = {}): Promise<CompleteResult> {
  // The Codex backend requires streaming and rejects output caps. The
  // shared Responses path adds neither; this provider contributes its
  // stable cache key and the harness's tool-call invariants. A successful
@@ -487,7 +487,7 @@ export function createCodexOAuthLLM(
       const sanitizeStart = Date.now();
       const sanitizedMessages = sanitizeCodexMessagesForReplay(messages);
       config.logger.info(`[llm/codex] stage=sanitized | duration=${Date.now() - sanitizeStart}ms | messages=${sanitizedMessages.length}`);
-      const result = await streamResponsesComplete(client, config, sanitizedMessages, hub, ratio, {
+      const result = await streamResponsesComplete(client, config, sanitizedMessages, hub, {
         prompt_cache_key: sessionId,
         parallel_tool_calls: false,
         tool_choice: options.forceThink

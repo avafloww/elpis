@@ -51,7 +51,6 @@ Other Discord settings control attachment inlining, animated emote keyframes, am
 
 - `trigger_tokens`: requested fold threshold;
 - `keep_tokens`: recent history left outside the fold;
-- `tool_age_keep_tokens`: recent request budget whose tool payloads remain full.
 
 The effective trigger is clamped below the provider context window by `llm.completion_reserve_tokens`.
 

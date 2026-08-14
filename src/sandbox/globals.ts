@@ -1026,8 +1026,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ? sendOpts.files.filter((f: unknown): f is { path: string; name?: string } => typeof (f as { path?: unknown }).path === 'string')
           : undefined;
         await deps.send(channelId, text, { files });
- // Record the send onto the current run's scope so the
- // agent can stamp it onto the tool message for verbatim aging.
+ // Record the send on the current run scope for turn accounting, console
+ // rendering, transcript recovery, and detached-future delivery.
         const sendRecord: { channel: string; text: string; files?: string[] } = { channel: channelId, text };
 if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || String(f.path).split('/').pop()).filter((n): n is string => typeof n === 'string');
         runScope.getStore()?.sends.push(sendRecord);

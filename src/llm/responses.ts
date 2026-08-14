@@ -367,7 +367,6 @@ export async function streamResponsesComplete(
   config: Config,
   messages: ChatMessage[],
   hub?: ConsoleHub,
-  ratio = 4,
   extraBody: Record<string, unknown> = {},
   transformRequest?: ResponsesRequestTransform,
   outerSignal?: AbortSignal,
@@ -379,7 +378,7 @@ export async function streamResponsesComplete(
       else outerSignal?.addEventListener('abort', () => controller.abort(), { once: true });
       config.logger.info(`[llm/responses] stage=enter`);
       const prepareStart = Date.now();
-      const prepared = prepareForApi(messages, config.compaction.toolAgeKeepTokens, ratio);
+      const prepared = prepareForApi(messages);
       const charsSent = computeCharsSent(prepared, true, config.llm.externalThinking);
       config.logger.info(`[llm/responses] stage=prepared | duration=${Date.now() - prepareStart}ms | messages=${prepared.length}`);
 

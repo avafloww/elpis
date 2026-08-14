@@ -76,7 +76,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
         { id: 'stub', slug: 'stub', slashCommands: false, quietHours: null, timezone: null, channels: { '100': 'direct' } },
       ],
     },
-    compaction: { triggerTokens: 180000, keepTokens: 50000, toolAgeKeepTokens: 50000 },
+    compaction: { triggerTokens: 180000, keepTokens: 50000 },
     heartbeat: {
       intervalMs: 0,
       maxIntervalMs: 4 * 60 * 60 * 1000,

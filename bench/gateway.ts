@@ -3,7 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { CompleteResult } from '../src/llm/llm.js';
 
 export type GatewayRequest =
-  | { type: 'complete'; id: string; messages: unknown[]; ratio?: number }
+  | { type: 'complete'; id: string; messages: unknown[] }
   | { type: 'summarize'; id: string; text: string }
   | { type: 'reset-session'; id: string }
   | { type: 'advance-clock'; id: string; ms: number }
@@ -13,7 +13,7 @@ export type GatewayRequest =
 export type GatewayResponse = { type: 'response'; id: string; ok: true; value?: unknown } | { type: 'response'; id: string; ok: false; error: string };
 
 export interface CompletionGateway {
-  complete(messages: unknown[], ratio?: number): Promise<CompleteResult>;
+  complete(messages: unknown[]): Promise<CompleteResult>;
   summarize(text: string): Promise<string>;
   resetSession(): Promise<void>;
   advanceClock(ms: number): Promise<void>;
@@ -36,7 +36,7 @@ export function serveGateway(child: ChildProcessWithoutNullStreams, gateway: Com
       if (request.type === 'episode-error') { reject(new Error(request.error)); return; }
       try {
         let value: unknown;
-        if (request.type === 'complete') value = await gateway.complete(request.messages, request.ratio);
+        if (request.type === 'complete') value = await gateway.complete(request.messages);
         else if (request.type === 'summarize') value = await gateway.summarize(request.text);
         else if (request.type === 'reset-session') value = await gateway.resetSession();
         else if (request.type === 'advance-clock') value = await gateway.advanceClock(request.ms);

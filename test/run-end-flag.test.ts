@@ -50,7 +50,7 @@ function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; reques
     get calls() { return calls; },
     requests,
     options,
-    async complete(messages: ChatMessage[], _ratio?: number, completeOptions: CompleteOptions = {}): Promise<CompleteResult> {
+    async complete(messages: ChatMessage[], completeOptions: CompleteOptions = {}): Promise<CompleteResult> {
       calls++;
       requests.push(messages);
       options.push(completeOptions);

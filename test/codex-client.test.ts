@@ -29,7 +29,7 @@ function codexConfig(model = 'gpt-test-codex'): Config {
       contextSize: null, reasoningEffort: 'high', externalThinking: false, api: 'responses', reasoningSummary: null,
       reasoningContext: null, completionReserveTokens: 8192,
     },
-    compaction: { triggerTokens: 180000, keepTokens: 50000, toolAgeKeepTokens: 0 },
+    compaction: { triggerTokens: 180000, keepTokens: 50000 },
     logger: noopLogger,
   } as Config;
 }
@@ -345,7 +345,7 @@ test('Codex external thinking forces named think and sends native reasoning effo
     };
   };
 
-  await llm.complete([{ role: 'user', content: 'inspect first' }], 4, { forceThink: true });
+  await llm.complete([{ role: 'user', content: 'inspect first' }], { forceThink: true });
   assert.deepEqual(body?.tool_choice, { type: 'function', name: 'think' });
   assert.deepEqual(body?.reasoning, { effort: 'none' });
   assert.deepEqual(body?.tools.map((tool: any) => tool.name), ['run', 'think']);

@@ -295,19 +295,11 @@ async function anthropicComplete(
   store: OAuthStore,
   messages: ChatMessage[],
   hub: ConsoleHub | undefined,
-  ratio: number,
 ): Promise<CompleteResult> {
   try {
       try { hub?.streamStart(); } catch { /* observer only */ }
 
- // Tool aging is disabled on this path (pass 0), NOT `toolAgeKeepTokens`:
- // this is a caching endpoint (aging slides a mid-history boundary and
- // rewrites the cached prefix — the same reason it's off by default), and
- // aging head-caps an aged assistant's tool_use `arguments` while its
- // signed `thinking` block is replayed verbatim — a mutated tool_use no
- // longer matches the signed turn, risking a permanent signature 400.
- // (The reasoning-content strip still runs; only 3b aging is skipped.)
-      const prepared = prepareForApi(messages, 0, ratio);
+      const prepared = prepareForApi(messages);
       const charsSent = computeCharsSent(prepared, false);
       const { system, wire } = translate(prepared);
       const body: Record<string, unknown> = {
@@ -473,8 +465,8 @@ export function createAnthropicOAuthLLM(
   return {
     model: config.llm.model,
     runTool: RUN_TOOL,
-    async complete(messages: ChatMessage[], ratio = 4): Promise<CompleteResult> {
-      const result = await anthropicComplete(config, store, messages, hub, ratio);
+    async complete(messages: ChatMessage[]): Promise<CompleteResult> {
+      const result = await anthropicComplete(config, store, messages, hub);
       stampGeneration(result.message, {
         providerType: 'anthropic-oauth', model: config.llm.model,
         apiSurface: 'anthropic-messages', apiEndpoint: endpointAt(config.llm.baseUrl, 'v1/messages'),

@@ -37,7 +37,7 @@ test('provenance is excluded from every provider request surface', () => {
   const assistant: ChatMessage = { role: 'assistant', content: 'ok' }; stampGeneration(assistant, provenance());
   const messages: ChatMessage[] = [{ role: 'system', content: 's' }, assistant];
   assert.doesNotMatch(JSON.stringify(toApiMessage(assistant)), /provenance|private\.example/);
-  assert.doesNotMatch(JSON.stringify(toResponsesInput(prepareForApi(messages, 0))), /provenance|private\.example/);
+  assert.doesNotMatch(JSON.stringify(toResponsesInput(prepareForApi(messages))), /provenance|private\.example/);
   assert.doesNotMatch(JSON.stringify(translate(messages)), /provenance|private\.example/);
 });
 

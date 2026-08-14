@@ -40,7 +40,7 @@ If no candidate is accepted, the original history remains live and an operator-v
 
 An accepted summary replaces only the selected in-memory prefix. The transcript remains append-only and still contains every original message plus the compaction record. Recent messages and the current open tool chain remain verbatim.
 
-`compaction.keep_tokens` controls how much recent history stays outside the fold. Tool-payload aging is separate from compaction and affects request projection only.
+`compaction.keep_tokens` controls how much recent history stays outside the fold.
 
 ## Provider paths
 

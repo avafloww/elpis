@@ -131,9 +131,6 @@ export interface Config {
     /** Verbatim tail (tokens) kept unsummarized when compaction folds the
  * older history. Validated 0 < keep < trigger. */
     keepTokens: number;
-    /** Recent full-fidelity window (tokens) within which tool results/code are
- * sent untouched. Defaults to keepTokens. 0 disables aging. */
-    toolAgeKeepTokens: number;
   };
   heartbeat: {
     /** Interval between autonomous heartbeat wakes. 0 disables. */
@@ -635,20 +632,11 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   const logger = createLogger(logLevel);
   const botToken = reqStr(tree, 'discord.bot_token', f);
 
- // Compaction thresholds: validate 0 < keep < trigger, and that aging's
- // full-fidelity window doesn't exceed the trigger.
+ // Compaction thresholds: validate 0 < keep < trigger.
   const compactTriggerTokens = numOr(tree, 'compaction.trigger_tokens', 180000, f);
   const compactKeepTokens = numOr(tree, 'compaction.keep_tokens', 50000, f);
- // Defaults OFF. Aging's boundary slides mid-history, so every advance rewrites
- // the prefix from that point on — measured at 41% of requests / ~98k tokens
- // each, costing 17x the uncached tokens it saved. Only worth enabling on an
- // endpoint that bills cached tokens at full price. See docs/context.md.
-  const toolAgeKeepTokens = numOr(tree, 'compaction.tool_age_keep_tokens', 0, f);
   if (!(compactKeepTokens > 0 && compactKeepTokens < compactTriggerTokens)) {
     throw new Error(`${f}: compaction.keep_tokens (${compactKeepTokens}) must satisfy 0 < keep < compaction.trigger_tokens (${compactTriggerTokens})`);
-  }
-  if (toolAgeKeepTokens > compactTriggerTokens) {
-    throw new Error(`${f}: compaction.tool_age_keep_tokens (${toolAgeKeepTokens}) must be <= compaction.trigger_tokens (${compactTriggerTokens})`);
   }
 
  // fleet.efforts gates fleet.default_effort below, so it has to be resolved
@@ -735,7 +723,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         guilds: parseGuilds(tree, f),
       };
     })(),
-    compaction: { triggerTokens: compactTriggerTokens, keepTokens: compactKeepTokens, toolAgeKeepTokens },
+    compaction: { triggerTokens: compactTriggerTokens, keepTokens: compactKeepTokens },
     heartbeat: {
       intervalMs: numOr(tree, 'heartbeat.interval_ms', 60 * 60 * 1000, f),
       maxIntervalMs: numOr(tree, 'heartbeat.max_interval_ms', 4 * 60 * 60 * 1000, f),

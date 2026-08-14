@@ -39,9 +39,8 @@ export interface RunResult {
   /** When detached, the bg id the result will be delivered as. */
   bgId?: string;
   note?: string;
-  /** The channel().send() calls made during this run — the
- * agent stamps them onto the tool message so aging can render the agent's outbound
- * speech verbatim after the tool payload is stubbed. */
+  /** The channel().send() calls made during this run, retained for console
+ * rendering, feedback localization, transcript recovery, and detached futures. */
   sends?: { channel: string; text: string }[];
 }
 

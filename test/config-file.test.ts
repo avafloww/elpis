@@ -101,7 +101,6 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.sandbox.asyncDeadlineMs, 120000);
   assert.equal(c.compaction.triggerTokens, 180000);
   assert.equal(c.compaction.keepTokens, 50000);
-  assert.equal(c.compaction.toolAgeKeepTokens, 0, 'tool aging defaults OFF (prefix-cache cost)');
   assert.equal(c.llm.completionReserveTokens, 8192);
   assert.equal(c.heartbeat.intervalMs, 60 * 60 * 1000);
   assert.equal(c.heartbeat.reflectionMinMessages, 3);
@@ -178,17 +177,12 @@ test('configFile: malformed YAML throws naming the file and a line', () => {
   });
 });
 
-test('configFile: compaction threshold validation (0 < keep < trigger; aging <= trigger)', () => {
+test('configFile: compaction threshold validation (0 < keep < trigger)', () => {
   const withCompaction = (extra: string) => fixture(`${MINIMAL_OK}\ncompaction:\n${extra}`);
   assert.throws(() => loadConfigFile(withCompaction('  keep_tokens: 0\n')), /0 < keep/);
   assert.throws(() => loadConfigFile(withCompaction('  keep_tokens: 200000\n  trigger_tokens: 100000\n')), /0 < keep/);
-  assert.throws(() => loadConfigFile(withCompaction('  tool_age_keep_tokens: 200000\n  trigger_tokens: 100000\n')), /tool_age_keep_tokens/);
   const c = loadConfigFile(withCompaction('  trigger_tokens: 50000\n  keep_tokens: 10000\n'));
   assert.equal(c.compaction.triggerTokens, 50000);
-  assert.equal(c.compaction.toolAgeKeepTokens, 0, 'aging stays off regardless of keep_tokens');
- // Explicitly opting in still works (full-price-cache endpoints).
-  const on = loadConfigFile(withCompaction('  trigger_tokens: 50000\n  keep_tokens: 10000\n  tool_age_keep_tokens: 20000\n'));
-  assert.equal(on.compaction.toolAgeKeepTokens, 20000, 'explicit opt-in is honored');
 });
 
 test('configFile: wrong-typed scalar throws naming the key', () => {
