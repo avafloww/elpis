@@ -19,7 +19,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 11;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -211,10 +211,11 @@ export function runMigrations(db: DatabaseSync): void {
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       item_id    INTEGER NOT NULL REFERENCES mind_items(id) ON DELETE CASCADE,
       author     TEXT NOT NULL,
-      body       TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER,
-      deleted_at INTEGER
+      body        TEXT NOT NULL,
+      reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER,
+      deleted_at  INTEGER
     );
     CREATE INDEX IF NOT EXISTS mind_comments_item_idx ON mind_comments(item_id, created_at);
 
@@ -241,6 +242,29 @@ export function runMigrations(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS mind_reminders_item_idx ON mind_reminders(item_id, fire_at);
   `);
+
+ // v10: atomic external-worker claims. The lease principal is session-specific;
+ // owner is the human-readable MCP client actor preserved in the audit trail.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mind_claims (
+      item_id     INTEGER PRIMARY KEY REFERENCES mind_items(id) ON DELETE CASCADE,
+      owner       TEXT NOT NULL,
+      principal   TEXT NOT NULL,
+      claimed_at  INTEGER NOT NULL,
+      renewed_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mind_claims_principal_idx ON mind_claims(principal, expires_at);
+    CREATE INDEX IF NOT EXISTS mind_claims_expires_idx ON mind_claims(expires_at);
+  `);
+
+ // v11: comments can be explicit replies, allowing waitable task-bound MCP
+ // correspondence without treating an unrelated later comment as the answer.
+  const mindCommentColumns = (db.prepare(`SELECT name FROM pragma_table_info('mind_comments')`).all() as { name: string }[]).map((r) => r.name);
+  if (!mindCommentColumns.includes('reply_to_id')) {
+    db.exec('ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)');
 
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

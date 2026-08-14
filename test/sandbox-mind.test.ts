@@ -79,3 +79,16 @@ test('elpis.mind validates ids and dependency cycles teachably', () => {
   assert.throws(() => api.get('banana'), /expected an item id/);
   db.close();
 });
+
+test('elpis.mind.reply preserves structured reply provenance', () => {
+  const { db, api } = setup('Aster');
+  const item = api.add({ title: 'direct correspondence' });
+  const question = api.comment(item.id, 'Which boundary?');
+  const reply = api.reply(item.id, question.id, 'Keep the decoder boundary.');
+  assert.equal(reply.replyToId, question.id);
+  assert.equal(reply.author, 'Aster');
+  const stored = api.get(item.id).comments.find((comment: any) => comment.id === reply.id);
+  assert.equal(stored.replyToId, question.id);
+  assert.equal(stored.body, 'Keep the decoder boundary.');
+  db.close();
+});

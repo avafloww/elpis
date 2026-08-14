@@ -29,8 +29,8 @@ test('mind migrations are idempotent and create the complete schema', () => {
   const db = database();
   runMigrations(db);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mind_%' ORDER BY name").all() as { name: string }[]).map((x) => x.name);
-  assert.deepEqual(tables, ['mind_comments', 'mind_dependencies', 'mind_events', 'mind_items', 'mind_reminders', 'mind_tags']);
-  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 9);
+  assert.deepEqual(tables, ['mind_claims', 'mind_comments', 'mind_dependencies', 'mind_events', 'mind_items', 'mind_reminders', 'mind_tags']);
+  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 11);
   db.close();
 });
 
@@ -50,6 +50,95 @@ test('dependency chains derive blocked and ready state one bead at a time', () =
   mind.setStatus(walls.id, 'done', 'test');
   assert.deepEqual(mind.ready().map((x) => x.id), [roof.id]);
   assert.throws(() => mind.addDependency(foundation.id, roof.id), /would create a cycle/);
+  db.close();
+});
+
+test('claims atomically exclude competing collaborators and recover after expiry', () => {
+  const db = database();
+  const mind = new MindStore(db);
+  const item = mind.create({ title: 'shared parser task' });
+  const first = mind.claim(item.id, { owner: 'mcp:worker-a', principal: 'session-a', ttlMs: 60_000, note: 'starting parser audit' });
+  assert.equal(first.status, 'in_progress');
+  assert.equal(first.claim?.owner, 'mcp:worker-a');
+  assert.equal(first.comments.at(-1)?.body, 'Work claimed through MCP.\n\nstarting parser audit');
+  assert.throws(() => mind.claim(item.id, { owner: 'mcp:worker-b', principal: 'session-b' }), /claimed by mcp:worker-a/);
+
+  const renewed = mind.renewClaim(item.id, 'session-a', 120_000);
+  assert.ok(renewed.claim!.expiresAt > first.claim!.expiresAt);
+  assert.throws(() => mind.releaseClaim(item.id, 'session-b', 'open', 'wrong owner'), /another collaborator/);
+  db.prepare('UPDATE mind_claims SET expires_at = ? WHERE item_id = ?').run(Date.now() - 1, item.id);
+  assert.throws(() => mind.renewClaim(item.id, 'session-a'), /no active claim/);
+
+  const expiredIds = mind.expireClaims();
+  assert.deepEqual(expiredIds, [item.id]);
+  const reopened = mind.get(item.id)!;
+  assert.equal(reopened.status, 'open');
+  assert.equal(reopened.claim, null);
+  assert.match(reopened.comments.at(-1)!.body, /expired; item returned to open work/);
+
+  const takeover = mind.claim(item.id, { owner: 'mcp:worker-b', principal: 'session-b' });
+  const waiting = mind.releaseClaim(item.id, 'session-b', 'waiting', 'need an API decision');
+  assert.equal(takeover.claim?.owner, 'mcp:worker-b');
+  assert.equal(waiting.status, 'waiting');
+  assert.equal(waiting.claim, null);
+  assert.ok(waiting.comments.some((comment) => comment.body === 'Blocked: need an API decision'));
+  db.close();
+});
+
+test('discovery ranks fresh context and finish requires the full claimed-work receipt', () => {
+  const db = database();
+  const mind = new MindStore(db);
+  const parser = mind.create({ title: 'Repair parser cache', body: 'src/parser/cache.ts decoder invalidation', tags: ['parser'] });
+  mind.create({ title: 'Restyle console tabs', body: 'CSS navigation polish', tags: ['console'] });
+  const matches = mind.discover('debugging decoder invalidation in src/parser/cache.ts');
+  assert.equal(matches[0].item.id, parser.id);
+  assert.ok(matches[0].score > 0);
+
+  mind.claim(parser.id, { owner: 'mcp:worker', principal: 'session' });
+  const logged = mind.logClaim(parser.id, 'session', 'mcp:worker', 'verification', 'focused parser test passes');
+  assert.ok(logged.comments.some((comment) => comment.body === 'Verification: focused parser test passes'));
+  assert.throws(() => mind.finishClaim(parser.id, 'other', 'mcp:other', 'done', 'tests', 'none'), /another collaborator/);
+  const dependency = mind.create({ title: 'newly discovered prerequisite' });
+  mind.addDependency(parser.id, dependency.id, 'agent');
+  assert.throws(() => mind.finishClaim(parser.id, 'session', 'mcp:worker', 'fixed cache', 'parser tests pass', 'none'), /became blocked/);
+  mind.setStatus(dependency.id, 'done', 'agent');
+  const finished = mind.finishClaim(parser.id, 'session', 'mcp:worker', 'fixed cache', 'parser tests pass', 'integration suite not run');
+  assert.equal(finished.status, 'done');
+  assert.equal(finished.claim, null);
+  assert.match(finished.comments.at(-1)!.body, /Result:\nfixed cache[\s\S]*Verification:\nparser tests pass[\s\S]*Omissions:\nintegration suite not run/);
+  db.close();
+});
+
+test('claims reject dependency-blocked and manually in-progress work', () => {
+  const db = database();
+  const mind = new MindStore(db);
+  const dependency = mind.create({ title: 'dependency' });
+  const blocked = mind.create({ title: 'blocked', dependsOn: [dependency.id] });
+  const manual = mind.create({ title: 'manual', status: 'in_progress' });
+  const inbox = mind.create({ title: 'untriaged', status: 'inbox' });
+  const idea = mind.create({ title: 'possible someday', kind: 'idea' });
+  assert.throws(() => mind.claim(blocked.id, { owner: 'mcp:worker', principal: 'session' }), /blocked by dependencies/);
+  assert.throws(() => mind.claim(manual.id, { owner: 'mcp:worker', principal: 'session' }), /outside an MCP claim/);
+  assert.throws(() => mind.claim(inbox.id, { owner: 'mcp:worker', principal: 'session' }), /inbox, not open work/);
+  assert.throws(() => mind.claim(idea.id, { owner: 'mcp:worker', principal: 'session' }), /not an executable task/);
+  assert.ok(!mind.discover('untriaged possible someday').some((match) => match.item.id === inbox.id || match.item.id === idea.id));
+  db.close();
+});
+
+test('resident overrides and archive revoke external claims visibly', () => {
+  const db = database();
+  const mind = new MindStore(db);
+  const statusItem = mind.create({ title: 'resident override' });
+  mind.claim(statusItem.id, { owner: 'mcp:worker', principal: 'session-a' });
+  const waiting = mind.setStatus(statusItem.id, 'waiting', 'resident');
+  assert.equal(waiting.claim, null);
+  assert.ok(waiting.events.some((event) => event.type === 'claim.revoked' && event.actor === 'resident'));
+
+  const archivedItem = mind.create({ title: 'archive override' });
+  mind.claim(archivedItem.id, { owner: 'mcp:worker', principal: 'session-b' });
+  const archived = mind.archive(archivedItem.id, 'resident');
+  assert.equal(archived.claim, null);
+  assert.ok(archived.events.some((event) => event.type === 'claim.revoked' && event.data.archived === true));
   db.close();
 });
 
@@ -136,7 +225,15 @@ test('MindService links reminders to scheduler tasks, fires and cancels them', (
   service.setStatus(item.id, 'done', 'aster');
   assert.equal(scheduler.tasks.has(second.scheduledTaskId), false);
   assert.ok(service.get(item.id)!.reminders.find((x) => x.id === second.id)!.cancelledAt);
+
+  const claimed = service.create({ title: 'worker completion reminder' });
+  const third = service.addReminder(claimed.id, Date.now() + 180_000, 'aster', 'home');
+  service.claim(claimed.id, { owner: 'mcp:worker', principal: 'session' });
+  service.finishClaim(claimed.id, 'session', 'mcp:worker', 'implemented', 'focused tests pass', 'none');
+  assert.equal(scheduler.tasks.has(third.scheduledTaskId), false);
+  assert.ok(service.get(claimed.id)!.reminders.find((x) => x.id === third.id)!.cancelledAt);
   assert.ok(changes >= 4);
+
   db.close();
 });
 

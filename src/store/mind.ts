@@ -5,9 +5,11 @@ import type { ScheduledTask } from './scheduler.js';
 export const MIND_STATUSES = ['inbox', 'open', 'in_progress', 'waiting', 'done', 'cancelled'] as const;
 export const MIND_KINDS = ['task', 'project', 'idea', 'question', 'reminder'] as const;
 export const MIND_SORTS = ['created_asc', 'created_desc', 'updated_asc', 'updated_desc', 'last_comment_asc', 'last_comment_desc'] as const;
+export const MIND_LOG_KINDS = ['progress', 'decision', 'result', 'verification', 'omission'] as const;
 export type MindSort = (typeof MIND_SORTS)[number];
 export type MindStatus = (typeof MIND_STATUSES)[number];
 export type MindKind = (typeof MIND_KINDS)[number];
+export type MindLogKind = (typeof MIND_LOG_KINDS)[number];
 export type MindEffectiveStatus = MindStatus | 'blocked';
 
 export interface MindItem {
@@ -32,6 +34,35 @@ export interface MindItem {
   childCount: number;
   commentCount: number;
   reminderCount: number;
+  claim: MindClaim | null;
+}
+
+export interface MindClaim {
+  itemId: number;
+  owner: string;
+  claimedAt: number;
+  renewedAt: number;
+  expiresAt: number;
+  expired: boolean;
+}
+
+export interface MindClaimOptions {
+  owner: string;
+  principal: string;
+  ttlMs?: number;
+  note?: string;
+}
+
+export interface MindDiscoverOptions {
+  tags?: string[];
+  parentId?: number | null;
+  limit?: number;
+}
+
+export interface MindWorkMatch {
+  score: number;
+  matched: string[];
+  item: MindItem;
 }
 
 export interface MindLink {
@@ -46,6 +77,7 @@ export interface MindComment {
   itemId: number;
   author: string;
   body: string;
+  replyToId: number | null;
   createdAt: number;
   updatedAt: number | null;
 }
@@ -182,12 +214,25 @@ function normalizeTag(value: string): string {
 
 function uniq<T>(values: T[]): T[] { return Array.from(new Set(values)); }
 
+function claimTtl(value = 30 * 60_000): number {
+  if (!Number.isFinite(value) || value < 60_000 || value > 4 * 60 * 60_000) throw new Error('mind: claim ttlMs must be between 1 minute and 4 hours');
+  return Math.floor(value);
+}
+
+const DISCOVERY_STOP = new Set(['about','after','again','also','and','are','been','before','being','but','can','code','could','from','have','into','just','more','not','only','our','should','that','the','their','then','there','these','they','this','through','use','using','was','were','what','when','where','which','while','with','work','would','your']);
+function discoveryTerms(context: string): string[] {
+  const raw = context.toLowerCase().match(/[a-z0-9][a-z0-9._/-]{2,}/g) ?? [];
+  const expanded = raw.flatMap((token) => [token, ...token.split(/[._/-]+/)]);
+  return uniq(expanded.filter((token) => token.length >= 3 && !DISCOVERY_STOP.has(token) && !/^\d+$/.test(token))).slice(0, 60);
+}
+
+
 function parseData(value: unknown): Record<string, unknown> {
   if (typeof value !== 'string' || value === '') return {};
   try { return JSON.parse(value) as Record<string, unknown>; } catch { return { raw: value }; }
 }
 
-function rowBase(row: Record<string, unknown>): Omit<MindItem, 'effectiveStatus' | 'tags' | 'blockedBy' | 'blocks' | 'childCount' | 'commentCount' | 'reminderCount'> {
+function rowBase(row: Record<string, unknown>): Omit<MindItem, 'effectiveStatus' | 'tags' | 'blockedBy' | 'blocks' | 'childCount' | 'commentCount' | 'reminderCount' | 'claim'> {
   return {
     id: Number(row.id), title: String(row.title), body: String(row.body ?? ''), kind: row.kind as MindKind,
     status: row.status as MindStatus, priority: Number(row.priority), parentId: row.parent_id == null ? null : Number(row.parent_id),
@@ -252,6 +297,11 @@ export class MindStore {
     return Number(row.n);
   }
 
+  private claimFor(id: number): MindClaim | null {
+    const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? claimFromRow(row) : null;
+  }
+
   private hydrate(row: Record<string, unknown>): MindItem {
     if (!Object.hasOwn(row, 'last_comment_at')) {
       const latest = this.db.prepare('SELECT max(COALESCE(updated_at, created_at)) AS at FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL').get(Number(row.id)) as { at: number | null };
@@ -267,6 +317,7 @@ export class MindStore {
       childCount: count('SELECT count(*) AS n FROM mind_items WHERE parent_id = ? AND archived_at IS NULL'),
       commentCount: count('SELECT count(*) AS n FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL'),
       reminderCount: count('SELECT count(*) AS n FROM mind_reminders WHERE item_id = ? AND cancelled_at IS NULL AND fired_at IS NULL'),
+      claim: this.claimFor(base.id),
     };
   }
 
@@ -306,7 +357,7 @@ export class MindStore {
     const parentRow = item.parentId == null ? null : this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(item.parentId) as Record<string, unknown> | undefined;
     const childRows = this.db.prepare('SELECT * FROM mind_items WHERE parent_id = ? AND archived_at IS NULL ORDER BY priority DESC, id').all(id) as Record<string, unknown>[];
     const comments = (this.db.prepare('SELECT * FROM mind_comments WHERE item_id = ? AND deleted_at IS NULL ORDER BY created_at, id').all(id) as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id), itemId: Number(r.item_id), author: String(r.author), body: String(r.body), createdAt: Number(r.created_at), updatedAt: r.updated_at == null ? null : Number(r.updated_at),
+      id: Number(r.id), itemId: Number(r.item_id), author: String(r.author), body: String(r.body), replyToId: r.reply_to_id == null ? null : Number(r.reply_to_id), createdAt: Number(r.created_at), updatedAt: r.updated_at == null ? null : Number(r.updated_at),
     }));
     const events = (this.db.prepare('SELECT * FROM mind_events WHERE item_id = ? ORDER BY created_at DESC, id DESC LIMIT 200').all(id) as Record<string, unknown>[]).map((r) => ({
       id: Number(r.id), itemId: Number(r.item_id), type: String(r.type), actor: String(r.actor), data: parseData(r.data_json), createdAt: Number(r.created_at),
@@ -349,6 +400,160 @@ export class MindStore {
 
   ready(limit = 100): MindItem[] { return this.list({ ready: true, limit }); }
 
+  discover(context: string, opts: MindDiscoverOptions = {}): MindWorkMatch[] {
+    assertText(context, 'discovery context', 50_000, true);
+    const terms = discoveryTerms(context);
+    const tagHints = uniq((opts.tags ?? []).map(normalizeTag));
+    const candidates = this.list({ statuses: ['open'], kinds: ['task'], ready: true, parentId: opts.parentId, limit: 500, sort: 'updated_desc' });
+    const matches: MindWorkMatch[] = [];
+    for (const item of candidates) {
+      const detail = this.get(item.id)!;
+      const title = item.title.toLowerCase();
+      const body = item.body.toLowerCase();
+      const tags = item.tags.map((tag) => tag.toLowerCase());
+      const comments = detail.comments.slice(-30).map((comment) => comment.body.toLowerCase()).join('\n');
+      let score = 0; const matched: string[] = [];
+      for (const term of terms) {
+        let termScore = 0;
+        if (title.includes(term)) termScore += 8;
+        if (tags.some((tag) => tag.includes(term))) termScore += 6;
+        if (body.includes(term)) termScore += 3;
+        if (comments.includes(term)) termScore += 2;
+        if (termScore) { score += termScore; matched.push(term); }
+      }
+      for (const tag of tagHints) if (tags.includes(tag)) { score += 10; matched.push(`#${tag}`); }
+      if (terms.length === 0 && tagHints.length === 0) score = 1;
+      if (score > 0) matches.push({ score, matched: uniq(matched), item });
+    }
+    const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
+    return matches.sort((a, b) => b.score - a.score || b.item.priority - a.item.priority || b.item.updatedAt - a.item.updatedAt).slice(0, limit);
+  }
+
+  claim(id: number, opts: MindClaimOptions): MindDetail {
+
+    assertText(opts.owner, 'claim owner', 120);
+    assertText(opts.principal, 'claim principal', 200);
+    if (opts.note !== undefined) assertText(opts.note, 'claim note', 20_000, true);
+    const ttl = claimTtl(opts.ttlMs);
+    const now = Date.now();
+    this.transaction(() => {
+      const item = this.db.prepare('SELECT * FROM mind_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!item) throw new Error(`mind: no item #${id}`);
+      if (item.archived_at != null) throw new Error(`mind: item #${id} is archived`);
+      const status = item.status as MindStatus;
+      if (item.kind !== 'task') throw new Error(`mind: item #${id} is a ${String(item.kind)}, not an executable task`);
+      if (status === 'done' || status === 'cancelled' || status === 'waiting' || status === 'inbox') throw new Error(`mind: item #${id} is ${status}, not open work`);
+      if (this.unresolvedDependencyCount(id) > 0) throw new Error(`mind: item #${id} is blocked by dependencies`);
+
+      const existing = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (existing && Number(existing.expires_at) > now) {
+        if (String(existing.principal) !== opts.principal) throw new Error(`mind: item #${id} is claimed by ${String(existing.owner)} until ${new Date(Number(existing.expires_at)).toISOString()}`);
+        const expiresAt = now + ttl;
+        this.db.prepare('UPDATE mind_claims SET owner = ?, renewed_at = ?, expires_at = ? WHERE item_id = ?').run(opts.owner.trim(), now, expiresAt, id);
+        this.event(id, 'claim.renewed', opts.owner.trim(), { expiresAt }, now);
+        return;
+      }
+      if (status === 'in_progress' && !existing) throw new Error(`mind: item #${id} is already in progress outside an MCP claim`);
+
+      let previousExpiredOwner: string | null = null;
+      if (existing) {
+        previousExpiredOwner = String(existing.owner);
+        this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id);
+        this.addCommentInternal(id, `MCP claim by ${previousExpiredOwner} expired; item became reclaimable.`, 'system', now);
+        this.event(id, 'claim.expired', 'system', { owner: previousExpiredOwner, expiredAt: Number(existing.expires_at) }, now);
+      }
+      const expiresAt = now + ttl;
+      this.db.prepare('INSERT INTO mind_claims (item_id, owner, principal, claimed_at, renewed_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, opts.owner.trim(), opts.principal.trim(), now, now, expiresAt);
+      this.db.prepare("UPDATE mind_items SET status = 'in_progress', closed_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+      const note = opts.note?.trim();
+      this.addCommentInternal(id, `Work claimed through MCP.${note ? `\n\n${note}` : ''}`, opts.owner.trim(), now);
+      this.event(id, 'claim.started', opts.owner.trim(), { expiresAt, previousExpiredOwner }, now);
+    });
+    return this.get(id)!;
+  }
+
+  renewClaim(id: number, principal: string, ttlMs?: number): MindDetail {
+    assertText(principal, 'claim principal', 200);
+    const ttl = claimTtl(ttlMs); const now = Date.now();
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
+      if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
+      const expiresAt = now + ttl;
+      this.db.prepare('UPDATE mind_claims SET renewed_at = ?, expires_at = ? WHERE item_id = ?').run(now, expiresAt, id);
+      this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(now, id);
+      this.event(id, 'claim.renewed', String(row.owner), { expiresAt }, now);
+    });
+    return this.get(id)!;
+  }
+
+  releaseClaim(id: number, principal: string, status: 'open' | 'waiting', note: string): MindDetail {
+    assertText(principal, 'claim principal', 200); assertText(note, 'release note', 20_000); const now = Date.now();
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!row) throw new Error(`mind: item #${id} has no active claim`);
+      if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
+      const owner = String(row.owner);
+      this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id);
+      this.db.prepare('UPDATE mind_items SET status = ?, closed_at = NULL, updated_at = ? WHERE id = ?').run(status, now, id);
+      this.addCommentInternal(id, `${status === 'waiting' ? 'Blocked' : 'Released'}: ${note.trim()}`, owner, now);
+      this.event(id, status === 'waiting' ? 'claim.blocked' : 'claim.released', owner, { status }, now);
+    });
+    return this.get(id)!;
+  }
+
+  logClaim(id: number, principal: string, owner: string, kind: MindLogKind, body: string, ttlMs?: number): MindDetail {
+    assertText(principal, 'claim principal', 200); assertText(owner, 'claim owner', 120); assertText(body, 'claim log', 20_000);
+    if (!MIND_LOG_KINDS.includes(kind)) throw new Error(`mind: invalid log kind ${JSON.stringify(kind)}`);
+    const ttl = claimTtl(ttlMs); const now = Date.now();
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
+      if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
+      const labels: Record<MindLogKind, string> = { progress: 'Progress', decision: 'Decision', result: 'Result', verification: 'Verification', omission: 'Omission' };
+      this.addCommentInternal(id, `${labels[kind]}: ${body.trim()}`, owner.trim(), now);
+      const expiresAt = now + ttl;
+      this.db.prepare('UPDATE mind_claims SET owner = ?, renewed_at = ?, expires_at = ? WHERE item_id = ?').run(owner.trim(), now, expiresAt, id);
+      this.event(id, 'claim.logged', owner.trim(), { kind, expiresAt }, now);
+    });
+    return this.get(id)!;
+  }
+
+  finishClaim(id: number, principal: string, owner: string, result: string, verification: string, omissions: string): MindDetail {
+    assertText(principal, 'claim principal', 200); assertText(owner, 'claim owner', 120);
+    assertText(result, 'result', 10_000); assertText(verification, 'verification', 10_000); assertText(omissions, 'omissions', 10_000);
+    const body = `Result:\n${result.trim()}\n\nVerification:\n${verification.trim()}\n\nOmissions:\n${omissions.trim()}`;
+    assertText(body, 'completion record', 20_000);
+    const now = Date.now();
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM mind_claims WHERE item_id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!row || Number(row.expires_at) <= now) throw new Error(`mind: item #${id} has no active claim`);
+      if (String(row.principal) !== principal.trim()) throw new Error(`mind: item #${id} is claimed by another collaborator`);
+      if (this.unresolvedDependencyCount(id) > 0) throw new Error(`mind: item #${id} became blocked by dependencies`);
+      const comment = this.addCommentInternal(id, body, owner.trim(), now);
+      this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id);
+      this.db.prepare("UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);
+      this.event(id, 'claim.completed', owner.trim(), { commentId: comment.id }, now);
+    });
+    return this.get(id)!;
+  }
+
+  expireClaims(now = Date.now()): number[] {
+    return this.transaction(() => {
+      const expired = this.db.prepare('SELECT * FROM mind_claims WHERE expires_at <= ? ORDER BY item_id').all(now) as Record<string, unknown>[];
+      const ids: number[] = [];
+      for (const row of expired) {
+        const id = Number(row.item_id); ids.push(id);
+        this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id);
+        this.db.prepare("UPDATE mind_items SET status = CASE WHEN status = 'in_progress' THEN 'open' ELSE status END, updated_at = ? WHERE id = ?").run(now, id);
+        this.addCommentInternal(id, `MCP claim by ${String(row.owner)} expired; item returned to open work.`, 'system', now);
+        this.event(id, 'claim.expired', 'system', { owner: String(row.owner), expiredAt: Number(row.expires_at) }, now);
+      }
+      return ids;
+    });
+  }
+
   update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail {
     this.requireId(id);
     const current = this.get(id)!;
@@ -367,13 +572,17 @@ export class MindStore {
     this.transaction(() => {
       if (sets.length) { sets.push('updated_at = ?'); values.push(now, id); this.db.prepare(`UPDATE mind_items SET ${sets.join(', ')} WHERE id = ?`).run(...values); }
       if (tags) { this.db.prepare('DELETE FROM mind_tags WHERE item_id = ?').run(id); for (const tag of uniq(tags)) this.db.prepare('INSERT INTO mind_tags (item_id, tag) VALUES (?, ?)').run(id, tag); this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(now, id); changed.tags = uniq(tags); }
+      if ((patch.status !== undefined && patch.status !== 'in_progress') || (patch.kind !== undefined && patch.kind !== 'task')) {
+        const claim = this.db.prepare('SELECT owner FROM mind_claims WHERE item_id = ?').get(id) as { owner: string } | undefined;
+        if (claim) { this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id); this.event(id, 'claim.revoked', actor, { owner: claim.owner, status: patch.status ?? current.status, kind: patch.kind ?? current.kind }, now); }
+      }
       if (Object.keys(changed).length) this.event(id, patch.status !== undefined && Object.keys(changed).length === 1 ? 'item.status' : 'item.updated', actor, { before: pickItemSnapshot(current), patch: changed }, now);
     });
     return this.get(id)!;
   }
 
   setStatus(id: number, status: MindStatus, actor = 'agent'): MindDetail { return this.update(id, { status }, actor); }
-  archive(id: number, actor = 'agent'): MindDetail { this.requireId(id); const at = Date.now(); this.db.prepare('UPDATE mind_items SET archived_at = ?, updated_at = ? WHERE id = ?').run(at, at, id); this.event(id, 'item.archived', actor, {}, at); return this.get(id)!; }
+  archive(id: number, actor = 'agent'): MindDetail { this.requireId(id); const at = Date.now(); this.transaction(() => { const claim = this.db.prepare('SELECT owner FROM mind_claims WHERE item_id = ?').get(id) as { owner: string } | undefined; this.db.prepare('UPDATE mind_items SET archived_at = ?, updated_at = ? WHERE id = ?').run(at, at, id); if (claim) { this.db.prepare('DELETE FROM mind_claims WHERE item_id = ?').run(id); this.event(id, 'claim.revoked', actor, { owner: claim.owner, archived: true }, at); } this.event(id, 'item.archived', actor, {}, at); }); return this.get(id)!; }
   restore(id: number, actor = 'agent'): MindDetail { this.requireId(id); const at = Date.now(); this.db.prepare('UPDATE mind_items SET archived_at = NULL, updated_at = ? WHERE id = ?').run(at, id); this.event(id, 'item.restored', actor, {}, at); return this.get(id)!; }
 
   addDependency(id: number, dependsOnId: number, actor = 'agent'): MindDetail {
@@ -397,12 +606,24 @@ export class MindStore {
     return this.get(id)!;
   }
 
-  addComment(id: number, body: string, author = 'agent'): MindComment {
-    this.requireId(id); assertText(body, 'comment', 20_000); const at = Date.now();
-    const result = this.db.prepare('INSERT INTO mind_comments (item_id, author, body, created_at) VALUES (?, ?, ?, ?)').run(id, author, body.trim(), at);
+  private addCommentInternal(id: number, body: string, author: string, at: number, replyToId: number | null = null): MindComment {
+    const result = this.db.prepare('INSERT INTO mind_comments (item_id, author, body, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?)').run(id, author, body.trim(), replyToId, at);
     this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, id);
-    this.event(id, 'comment.added', author, { commentId: Number(result.lastInsertRowid) }, at);
-    return { id: Number(result.lastInsertRowid), itemId: id, author, body: body.trim(), createdAt: at, updatedAt: null };
+    this.event(id, 'comment.added', author, { commentId: Number(result.lastInsertRowid), replyToId }, at);
+    return { id: Number(result.lastInsertRowid), itemId: id, author, body: body.trim(), replyToId, createdAt: at, updatedAt: null };
+  }
+
+  addComment(id: number, body: string, author = 'agent'): MindComment {
+    this.requireId(id); assertText(body, 'comment', 20_000);
+    return this.addCommentInternal(id, body, author, Date.now());
+  }
+
+  addReply(id: number, replyToId: number, body: string, author = 'agent'): MindComment {
+    this.requireId(id); assertText(body, 'comment', 20_000);
+    const target = this.db.prepare('SELECT item_id FROM mind_comments WHERE id = ? AND deleted_at IS NULL').get(replyToId) as { item_id: number } | undefined;
+    if (!target) throw new Error(`mind: no comment #${replyToId}`);
+    if (Number(target.item_id) !== id) throw new Error(`mind: comment #${replyToId} does not belong to item #${id}`);
+    return this.addCommentInternal(id, body, author, Date.now(), replyToId);
   }
 
   updateComment(commentId: number, body: string, author = 'agent'): MindComment {
@@ -411,7 +632,7 @@ export class MindStore {
     this.db.prepare('UPDATE mind_comments SET body = ?, updated_at = ? WHERE id = ?').run(body.trim(), at, commentId);
     this.db.prepare('UPDATE mind_items SET updated_at = ? WHERE id = ?').run(at, Number(row.item_id));
     this.event(Number(row.item_id), 'comment.updated', author, { commentId }, at);
-    return { id: commentId, itemId: Number(row.item_id), author: String(row.author), body: body.trim(), createdAt: Number(row.created_at), updatedAt: at };
+    return { id: commentId, itemId: Number(row.item_id), author: String(row.author), body: body.trim(), replyToId: row.reply_to_id == null ? null : Number(row.reply_to_id), createdAt: Number(row.created_at), updatedAt: at };
   }
 
   deleteComment(commentId: number, actor = 'agent'): boolean {
@@ -453,10 +674,17 @@ export class MindService {
   readonly store: MindStore;
   private changeDepth = 0;
   private changePending = false;
+  private readonly listeners = new Set<() => void>();
   constructor(private readonly deps: CreateMindServiceDeps) { this.store = new MindStore(deps.db); }
+  private notifyChanged(): void {
+    try { this.deps.onChanged?.(); } catch (error) { this.deps.logger.warn(`mind onChanged: ${error instanceof Error ? error.message : String(error)}`); }
+    for (const listener of this.listeners) {
+      try { listener(); } catch (error) { this.deps.logger.warn(`mind listener: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+  }
   private changed<T>(value: T): T {
     if (this.changeDepth > 0) this.changePending = true;
-    else this.deps.onChanged?.();
+    else this.notifyChanged();
     return value;
   }
   private batch<T>(fn: () => T): T {
@@ -464,13 +692,21 @@ export class MindService {
     try { return fn(); }
     finally {
       this.changeDepth--;
-      if (this.changeDepth === 0 && this.changePending) { this.changePending = false; this.deps.onChanged?.(); }
+      if (this.changeDepth === 0 && this.changePending) { this.changePending = false; this.notifyChanged(); }
     }
   }
+  subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   create(opts: CreateMindItem & { remindAt?: number | null; reminderChannelId?: string | null }): MindDetail { return this.batch(() => { const item = this.store.create(opts); if (opts.remindAt != null) this.addReminder(item.id, opts.remindAt, opts.actor ?? 'agent', opts.reminderChannelId ?? null); return this.changed(this.store.get(item.id)!); }); }
   get(id: number): MindDetail | null { return this.store.get(id); }
   list(filter?: MindListFilter): MindItem[] { return this.store.list(filter); }
   ready(limit?: number): MindItem[] { return this.store.ready(limit); }
+  discover(context: string, opts?: MindDiscoverOptions): MindWorkMatch[] { return this.store.discover(context, opts); }
+  claim(id: number, opts: MindClaimOptions): MindDetail { return this.changed(this.store.claim(id, opts)); }
+  renewClaim(id: number, principal: string, ttlMs?: number): MindDetail { return this.changed(this.store.renewClaim(id, principal, ttlMs)); }
+  releaseClaim(id: number, principal: string, status: 'open' | 'waiting', note: string): MindDetail { return this.changed(this.store.releaseClaim(id, principal, status, note)); }
+  logClaim(id: number, principal: string, owner: string, kind: MindLogKind, body: string, ttlMs?: number): MindDetail { return this.changed(this.store.logClaim(id, principal, owner, kind, body, ttlMs)); }
+  finishClaim(id: number, principal: string, owner: string, result: string, verification: string, omissions: string): MindDetail { return this.batch(() => { const item = this.store.finishClaim(id, principal, owner, result, verification, omissions); this.cancelPendingReminders(id, owner); return this.changed(this.store.get(item.id)!); }); }
+  expireClaims(now?: number): number[] { const ids = this.store.expireClaims(now); if (ids.length) this.changed(undefined); return ids; }
   stats(): MindStats { return this.store.stats(); }
   graph(id: number, depth?: number): MindGraph { return this.store.graph(id, depth); }
   update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail { return this.batch(() => { const item = this.store.update(id, patch, actor); if (item.status === 'done' || item.status === 'cancelled') this.cancelPendingReminders(id, actor); return this.changed(this.store.get(id)!); }); }
@@ -480,6 +716,7 @@ export class MindService {
   addDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.addDependency(id, dep, actor)); }
   removeDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.removeDependency(id, dep, actor)); }
   addComment(id: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.addComment(id, body, author)); }
+  addReply(id: number, replyToId: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.addReply(id, replyToId, body, author)); }
   updateComment(id: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.updateComment(id, body, author)); }
   deleteComment(id: number, actor = 'agent'): boolean { return this.changed(this.store.deleteComment(id, actor)); }
   addTag(id: number, tag: string, actor = 'agent'): MindDetail { return this.changed(this.store.addTag(id, tag, actor)); }
@@ -507,7 +744,8 @@ export function formatMindLine(item: MindItem): string {
   const priority = ['·', 'low', 'normal', 'high', 'urgent'][item.priority] ?? String(item.priority);
   const due = item.dueAt == null ? '' : ` · due ${new Date(item.dueAt).toISOString()}`;
   const tags = item.tags.length ? ` · ${item.tags.map((x) => `#${x}`).join(' ')}` : '';
-  return `#${item.id} [${status}] [${priority}] ${item.title}${due}${tags}`;
+  const claim = item.claim ? ` · claimed by ${item.claim.owner}${item.claim.expired ? ' (expired)' : ''}` : '';
+  return `#${item.id} [${status}] [${priority}] ${item.title}${due}${tags}${claim}`;
 }
 
 export function formatMindDetail(item: MindDetail): string {
@@ -518,9 +756,10 @@ export function formatMindDetail(item: MindDetail): string {
   if (item.blocks.length) lines.push(`blocks: ${item.blocks.map((x) => `#${x.id} ${x.title}`).join('; ')}`);
   if (item.children.length) lines.push(`children: ${item.children.map((x) => `#${x.id} ${x.title}`).join('; ')}`);
   if (item.reminders.filter((x) => x.firedAt == null && x.cancelledAt == null).length) lines.push(`reminders: ${item.reminders.filter((x) => x.firedAt == null && x.cancelledAt == null).map((x) => `r#${x.id} ${new Date(x.fireAt).toISOString()}`).join('; ')}`);
-  if (item.comments.length) { lines.push('', 'comments:'); for (const c of item.comments.slice(-10)) lines.push(`- c#${c.id} ${c.author}: ${c.body}`); }
+  if (item.comments.length) { lines.push('', 'comments:'); for (const c of item.comments.slice(-10)) lines.push(`- c#${c.id}${c.replyToId == null ? '' : ` ↩ c#${c.replyToId}`} ${c.author}: ${c.body}`); }
   return lines.join('\n');
 }
 
 function pickItemSnapshot(item: MindItem): Record<string, unknown> { return { title: item.title, body: item.body, kind: item.kind, status: item.status, priority: item.priority, parentId: item.parentId, dueAt: item.dueAt, tags: item.tags }; }
 function reminderFromRow(r: Record<string, unknown>): MindReminder { return { id: Number(r.id), itemId: Number(r.item_id), scheduledTaskId: Number(r.scheduled_task_id), fireAt: Number(r.fire_at), channelId: r.channel_id == null ? null : String(r.channel_id), createdBy: String(r.created_by), createdAt: Number(r.created_at), firedAt: r.fired_at == null ? null : Number(r.fired_at), cancelledAt: r.cancelled_at == null ? null : Number(r.cancelled_at) }; }
+function claimFromRow(r: Record<string, unknown>): MindClaim { const expiresAt = Number(r.expires_at); return { itemId: Number(r.item_id), owner: String(r.owner), claimedAt: Number(r.claimed_at), renewedAt: Number(r.renewed_at), expiresAt, expired: expiresAt <= Date.now() }; }

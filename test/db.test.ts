@@ -34,11 +34,11 @@ test('runMigrations is idempotent and sets user_version', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const v1 = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-  assert.equal(v1, 9, 'user_version bumped to 9');
+  assert.equal(v1, 11, 'user_version bumped to 11');
  // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-  assert.equal(v2, 9);
+  assert.equal(v2, 11);
   db.close();
 });
 
@@ -61,7 +61,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.ok(tables.includes('fleet_sessions'));
   assert.ok(tables.includes('fleet_worktrees'));
   runMigrations(db); // second run: no throw
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
   db.close();
 });
 
@@ -138,7 +138,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
 
  // Assert schema version upgraded to the current level
   const finalVersion = (upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-  assert.equal(finalVersion, 9, 'user_version upgraded to 9');
+  assert.equal(finalVersion, 11, 'user_version upgraded to 11');
 
  // Assert fleet tables exist
   const tableNames = (upgradedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as { name: string }[])

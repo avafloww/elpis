@@ -1123,6 +1123,7 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
     archive: (ref: number | string, actor?: string) => requireMind().archive(parseMindId(ref), actor ?? mindActor()),
     restore: (ref: number | string, actor?: string) => requireMind().restore(parseMindId(ref), actor ?? mindActor()),
     comment: (ref: number | string, body: string, author?: string) => requireMind().addComment(parseMindId(ref), body, author ?? mindActor()),
+    reply: (ref: number | string, commentId: number, body: string, author?: string) => requireMind().addReply(parseMindId(ref), commentId, body, author ?? mindActor()),
     updateComment: (commentId: number, body: string, author?: string) => requireMind().updateComment(commentId, body, author ?? mindActor()),
     deleteComment: (commentId: number, actor?: string) => requireMind().deleteComment(commentId, actor ?? mindActor()),
     depends: (ref: number | string, on: number | string, actor?: string) => requireMind().addDependency(parseMindId(ref), parseMindId(on), actor ?? mindActor()),

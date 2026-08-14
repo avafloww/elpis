@@ -911,7 +911,7 @@ It is not productivity theatre and it is not only a task list.
 
 Core API: \`elpis.mind.add({ title, body?, kind?, status?, priority?, parentId?, tags?, dependsOn?, dueAt?, remindAt? })\`;
 \`.get(id)\`; \`.list(filters?)\`; \`.ready(limit?)\`; \`.update(id, patch)\`; \`.status(id, status)\`;
-\`.comment(id, body)\`; \`.done(id, comment?)\`; \`.cancel(id, comment?)\`; \`.depends(id, onId)\`;
+\`.comment(id, body)\`; \`.reply(id, commentId, body)\`; \`.done(id, comment?)\`; \`.cancel(id, comment?)\`; \`.depends(id, onId)\`;
 \`.unlinks(id, fromId)\`; \`.tag/.untag\`; \`.remind(id, at)\`; \`.graph(id)\`; \`.stats()\`.
 Use \`Object.keys(elpis.mind)\` only to inspect an unfamiliar or newly-added edge, not to rediscover the core surface.
 
