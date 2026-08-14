@@ -5,6 +5,7 @@ export interface LockedContract {
   files?: Record<string, string>;
   directories?: string[];
   inputChannel?: string;
+  inputAuthor?: string;
   failFirstTerminal?: boolean;
   malformedFirstCall?: boolean;
   checks?: OutcomeCheckInput[];
@@ -140,14 +141,15 @@ export const LOCKED_CONTRACTS: Readonly<Record<string, LockedContract>> = Object
   'proactivity/no-action-social': {},
 
   'social/concise-answer': {
+    inputAuthor: 'Jo',
     files: { 'decision.txt': 'port=4817\n' },
     checks: [{ kind: 'send-includes', values: ['4817'] }],
   },
-  'social/empathy-without-essay': {},
-  'social/low-content-ping': {},
-  'social/right-person': {},
+  'social/empathy-without-essay': { inputAuthor: 'Sam' },
+  'social/low-content-ping': { inputAuthor: 'Ari' },
+  'social/right-person': { inputAuthor: 'Nia' },
   'social/no-performative-status': {
-    inputChannel: 'ops',
+    inputChannel: 'ops', inputAuthor: 'Dev',
     files: { 'status.txt': 'status=green\n' },
     checks: [{ kind: 'send-includes', values: ['green'] }],
   },
@@ -156,6 +158,7 @@ export const LOCKED_CONTRACTS: Readonly<Record<string, LockedContract>> = Object
     checks: [{ kind: 'send-includes', values: ['absent', 'missing', 'not found'], match: 'any' }],
   },
   'social/correction': {
+    inputAuthor: 'Mo',
     files: { 'calendar.txt': 'launch_date=2026-09-14\n' },
     checks: [{ kind: 'send-includes', values: ['2026-09-14'] }],
   },
@@ -165,11 +168,11 @@ export const LOCKED_CONTRACTS: Readonly<Record<string, LockedContract>> = Object
     checks: [{ kind: 'send-includes', values: [payloadDigest] }],
   },
   'social/uncertainty': {
-    inputChannel: 'research',
+    inputChannel: 'research', inputAuthor: 'Pat',
     files: { 'notes.md': 'Two observations support A. A third observation is inconclusive.\n' },
     checks: [{ kind: 'send-includes', values: ['inconclusive'] }],
   },
-  'social/closure': {},
+  'social/closure': { inputAuthor: 'Tess' },
   'social/group-context': { inputChannel: 'social' },
 
   'protocol/terminal-end': {

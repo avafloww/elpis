@@ -43,6 +43,7 @@ export const scenarioSpecSchema = z.object({
     files: z.record(z.string(), z.string()).default({}),
     directories: z.array(z.string()).default([]),
     inputChannel: z.string().optional(),
+    inputAuthor: z.string().optional(),
     heartbeat: z.boolean().default(false),
     failFirstTerminal: z.boolean().default(false),
     malformedFirstCall: z.boolean().default(false),

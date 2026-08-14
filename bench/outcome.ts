@@ -86,6 +86,12 @@ export function hasForbiddenSideEffect(codes: string[], sendCount: number): bool
   return sendCount > 0 || codes.some((code) => MUTATING_CODE.some((pattern) => pattern.test(code)));
 }
 
+export function recipientSatisfied(targetRecipient: string | undefined, inputAuthor: string | undefined, action: 'required' | 'optional' | 'forbidden', targetSends: BenchSend[]): boolean {
+  if (!targetRecipient || action !== 'required') return true;
+  if (inputAuthor?.toLocaleLowerCase() === targetRecipient.toLocaleLowerCase()) return true;
+  return targetSends.some((send) => send.text.toLocaleLowerCase().includes(targetRecipient.toLocaleLowerCase()));
+}
+
 export function evaluateOutcome(spec: ScenarioSpec, root: string, sends: BenchSend[], actionObserved: boolean): OutcomeResult {
   if (spec.expected.action === 'forbidden') return { ok: !actionObserved, checks: [] };
   if (spec.expected.action === 'optional') return { ok: true, checks: [] };
@@ -94,9 +100,7 @@ export function evaluateOutcome(spec: ScenarioSpec, root: string, sends: BenchSe
   const targetId = spec.expected.targetChannel ? spec.fixture.channels[spec.expected.targetChannel] : undefined;
   const targetSends = targetId ? sends.filter((send) => send.channelId === targetId) : sends;
   if (targetId && targetSends.length === 0) return { ok: false, checks: [] };
-  if (spec.expected.targetRecipient && !targetSends.some((send) => send.text.toLocaleLowerCase().includes(spec.expected.targetRecipient!.toLocaleLowerCase()))) {
-    return { ok: false, checks: [] };
-  }
+  if (!recipientSatisfied(spec.expected.targetRecipient, spec.fixture.inputAuthor, spec.expected.action, targetSends)) return { ok: false, checks: [] };
 
   const checks = spec.expected.checks.map((check) => evaluateCheck(check, root, targetSends));
   if (!targetId && checks.length === 0) return { ok: false, checks };

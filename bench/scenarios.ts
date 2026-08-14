@@ -71,6 +71,7 @@ export const LOCKED_SCENARIOS: readonly ScenarioSpec[] = Object.freeze(seeds.map
       files: contract.files ?? {},
       directories: contract.directories ?? [],
       inputChannel: contract.inputChannel ?? 'general',
+      ...(contract.inputAuthor ? { inputAuthor: contract.inputAuthor } : {}),
       heartbeat: seed.category === 'proactivity',
       failFirstTerminal: contract.failFirstTerminal ?? false,
       malformedFirstCall: contract.malformedFirstCall ?? false,

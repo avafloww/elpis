@@ -20,6 +20,15 @@ test('proactivity scenarios are actionable/no-action pairs', () => {
   for (const actions of pairs.values()) assert.deepEqual(actions.sort(), ['forbidden','required']);
 });
 
+test('direct social senders are explicit without weakening third-party delivery', () => {
+  const byId = new Map(LOCKED_SCENARIOS.map((scenario) => [scenario.id, scenario]));
+  assert.equal(byId.get('social/concise-answer')?.fixture.inputAuthor, 'Jo');
+  assert.equal(byId.get('social/no-performative-status')?.fixture.inputAuthor, 'Dev');
+  assert.equal(byId.get('social/uncertainty')?.fixture.inputAuthor, 'Pat');
+  assert.equal(byId.get('proactivity/action-followup')?.fixture.inputAuthor, undefined);
+  assert.equal(byId.get('social/bad-news')?.fixture.inputAuthor, undefined);
+});
+
 test('locked required outcomes are deterministic and target destinations are candidate-visible', () => {
   for (const scenario of LOCKED_SCENARIOS) {
     const target = scenario.expected.targetChannel;

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { evaluateOutcome, hasForbiddenSideEffect } from '../bench/outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied } from '../bench/outcome.js';
 import { parseScenario, SCHEMA_VERSION, type ScenarioSpec } from '../bench/schema.js';
 
-function scenario(expected: ScenarioSpec['expected']): ScenarioSpec {
+function scenario(expected: ScenarioSpec['expected'], inputAuthor?: string): ScenarioSpec {
   return parseScenario({
     schemaVersion: SCHEMA_VERSION,
     id: 'tool/test-outcome',
@@ -18,7 +18,7 @@ function scenario(expected: ScenarioSpec['expected']): ScenarioSpec {
     difficulty: 'ordinary',
     maxDispatches: 4,
     maxWallMs: 1000,
-    fixture: { channels: { general: '100', ops: '101' }, files: {}, directories: [], heartbeat: false },
+    fixture: { channels: { general: '100', ops: '101' }, files: {}, directories: [], heartbeat: false, ...(inputAuthor ? { inputAuthor } : {}) },
     expected,
     judgeCriteria: [],
   });
@@ -34,6 +34,12 @@ test('forbidden-action classifier permits inspection but catches observable muta
   assert.equal(hasForbiddenSideEffect(["elpis.schedule({ name: 'wake', payload: 'x', nextRunAt: Date.now() })"], 0), true);
   assert.equal(hasForbiddenSideEffect(["await elpis.sh('sh renewal.sh')"], 0), true);
   assert.equal(hasForbiddenSideEffect([], 1), true);
+});
+
+test('recipient targeting distinguishes direct replies from third-party delivery', () => {
+  assert.equal(recipientSatisfied('Jo', 'Jo', 'required', [{ channelId: '100', text: '4817' }]), true);
+  assert.equal(recipientSatisfied('Mira', undefined, 'required', [{ channelId: '100', text: 'The answer is 42.' }]), false);
+  assert.equal(recipientSatisfied('Mira', undefined, 'required', [{ channelId: '100', text: 'Mira, the answer is 42.' }]), true);
 });
 
 test('required JSON outcome stays false after a read and becomes true only after valid equivalent repair', () => {
@@ -53,6 +59,8 @@ test('required targeted outcome needs the right channel, recipient, and content 
   assert.equal(evaluateOutcome(spec, root, [{ channelId: '101', text: '@Mira counted it' }], true).ok, false);
   assert.equal(evaluateOutcome(spec, root, [{ channelId: '101', text: '12' }], true).ok, false);
   assert.equal(evaluateOutcome(spec, root, [{ channelId: '101', text: '@Mira: 12 lines' }], true).ok, true);
+  const direct = scenario({ outcome: 'port delivered', targetChannel: 'ops', targetRecipient: 'Jo', workPaths: [], action: 'required', checks: [{ kind: 'send-includes', values: ['4817'] }] }, 'Jo');
+  assert.equal(evaluateOutcome(direct, root, [{ channelId: '101', text: '4817' }], true).ok, true);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

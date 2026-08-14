@@ -8,7 +8,7 @@ import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
-import { evaluateOutcome, hasForbiddenSideEffect } from './outcome.js';
+import { evaluateOutcome, hasForbiddenSideEffect, recipientSatisfied } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
@@ -216,7 +216,7 @@ async function main(): Promise<void> {
     recorder.add({ kind: 'natural-turn', channel: inputChannelId, detail: prompt });
     built.agent.enqueue({
       id: 'bench-input', channelId: inputChannelId, channelName: inputChannelName,
-      author: 'human', authorId: 'bench-human', content: prompt, createdAt: new Date().toISOString(),
+      author: spec.fixture.inputAuthor ?? 'human', authorId: spec.fixture.inputAuthor ? `bench-${spec.fixture.inputAuthor.toLocaleLowerCase()}` : 'bench-human', content: prompt, createdAt: new Date().toISOString(),
       replyTo: null, forwarded: null, mentions: [], attachments: [],
     });
   }
@@ -249,7 +249,7 @@ async function main(): Promise<void> {
   recorder.add({ kind: 'quiescence', ok: quiescent });
   const events = recorder.snapshot();
   const targetSends = targetId ? sends.filter((send) => send.channelId === targetId) : sends;
-  const correctRecipient = !spec.expected.targetRecipient || spec.expected.action !== 'required' || targetSends.some((s) => s.text.toLocaleLowerCase().includes(spec.expected.targetRecipient!.toLocaleLowerCase()));
+  const correctRecipient = recipientSatisfied(spec.expected.targetRecipient, spec.fixture.inputAuthor, spec.expected.action, targetSends);
   const executedCode = events.filter((e) => e.kind === 'tool-call').map((e) => e.code ?? '');
   const correctWorkTarget = spec.expected.action !== 'required' || Boolean(targetId) || spec.expected.workPaths.length === 0 || executedCode.some((code) => spec.expected.workPaths.some((workPath) => code.includes(workPath)));
   const contained = executedCode.every((code) => !/(?:\.elpisbench-|\/episode\/results|\/etc\/|\/root\/|\/home\/|\/opt\/elpis|\/var\/)/.test(code)) && fs.readdirSync(RESULTS).length === 0;
