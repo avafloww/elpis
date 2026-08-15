@@ -8,6 +8,11 @@ type FixtureOptions = {
   files?: Record<string, string>;
   expected?: Partial<ScenarioSpec['expected']>;
   restartAtDispatch?: number;
+  track?: ScenarioSpec['track'];
+  ingress?: ScenarioSpec['ingress'];
+  clockAt?: string;
+  mind?: ScenarioSpec['fixture']['mind'];
+  scheduler?: ScenarioSpec['fixture']['scheduler'];
 };
 
 export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
@@ -19,11 +24,14 @@ export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
     category: options.category ?? 'tool',
     title: 'engine-only fixture',
     prompt: options.prompt ?? 'write the requested test fixture',
+    track: options.track ?? 'micro',
+    ...(options.ingress ? { ingress: options.ingress } : {}),
     difficulty: options.difficulty ?? 'ordinary',
     maxDispatches: 8,
     maxWallMs: 30_000,
     fixture: {
       channels: { general: '100', ops: '101' }, files: options.files ?? { 'result.txt': 'before\n' }, directories: [],
+      ...(options.clockAt ? { clockAt: options.clockAt } : {}), mind: options.mind ?? [], scheduler: options.scheduler ?? [],
       inputChannel: 'general', heartbeat: false, ...(options.restartAtDispatch ? { restartAtDispatch: options.restartAtDispatch } : {}),
     },
     expected: {
@@ -36,6 +44,17 @@ export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
 
 export const ORDINARY_TEST_SCENARIO = engineTestScenario();
 export const HARD_TEST_SCENARIO = engineTestScenario({ id: 'tool/engine-hard', difficulty: 'hard-recovery' });
+export const SEEDED_HEARTBEAT_TEST_SCENARIO = engineTestScenario({
+  id: 'proactivity/engine-seeded-heartbeat', category: 'proactivity', track: 'production', ingress: { kind: 'heartbeat' },
+  clockAt: '2026-01-02T03:04:05.000Z',
+  mind: [
+    { key: 'project', title: 'Seeded project', kind: 'project', status: 'in_progress', priority: 1, body: '', parentKey: undefined, dependsOn: [], dueOffsetMs: null, tags: ['engine'] },
+    { key: 'done', title: 'Finished prerequisite', kind: 'task', status: 'done', priority: 2, body: '', parentKey: 'project', dependsOn: [], dueOffsetMs: null, tags: [] },
+    { key: 'ready', title: 'Ready leaf', kind: 'task', status: 'open', priority: 1, body: 'discover me from Mind', parentKey: 'project', dependsOn: ['done'], dueOffsetMs: 120_000, tags: ['ready'] },
+    { key: 'blocked', title: 'Blocked leaf', kind: 'task', status: 'open', priority: 2, body: '', parentKey: 'project', dependsOn: ['ready'], dueOffsetMs: null, tags: [] },
+  ],
+  scheduler: [{ name: 'seeded-future-task', kind: 'custom', channel: 'ops', payload: '[seeded future wake]', nextRunOffsetMs: 60_000, intervalMs: null, nagIntervalMs: null }],
+});
 export const RESTART_TEST_SCENARIO = engineTestScenario({
   id: 'tool/engine-restart', restartAtDispatch: 1, files: { 'stage-one.txt': '', 'stage-two.txt': '' },
   expected: { outcome: 'restart engine fixture', workPaths: ['stage-one.txt', 'stage-two.txt'], checks: [

@@ -8,8 +8,8 @@ import { buildTranscriptIndex } from '../bench/data/index.js';
 import { privacyScan, sanitizeEpisode, assertRemoteSanitizationAllowed, sourceOverlap } from '../bench/data/sanitize.js';
 import { publicEndpoint, publicizeEpisode } from '../bench/data/export.js';
 import { assignedTeachers, behavioralPreference, selectTeacherCandidates, teacherWeight, teachersAfterFirstAttempt } from '../bench/data/teachers.js';
-import { HARD_TEST_SCENARIO, ORDINARY_TEST_SCENARIO } from './bench-scenario-fixtures.js';
-import { SCHEMA_VERSION, type Episode } from '../bench/schema.js';
+import { HARD_TEST_SCENARIO, ORDINARY_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { parseScenario, SCHEMA_VERSION, type Episode } from '../bench/schema.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 
 test('journal epochs handle rapid swaps and boundary ambiguity',()=>{
@@ -37,6 +37,20 @@ test('sanitization removes contacts/secrets/paths and public export pseudonymize
   assert.match(String(publicizeEpisode({...episode,task:'synthetic'},'salt').provenance[0].apiEndpoint),/^opaque:/);
   assert.throws(()=>publicizeEpisode({...episode,source:'private-real'},'salt'),/permanently private/);
   assert.throws(()=>assertRemoteSanitizationAllowed(true,false),/allow_private_input/); assert.ok(sourceOverlap('x'.repeat(200),'x'.repeat(200))>0.5);
+});
+
+test('structured world state requires a clock and valid graph/channel references', () => {
+  const noClock = structuredClone(SEEDED_HEARTBEAT_TEST_SCENARIO) as typeof SEEDED_HEARTBEAT_TEST_SCENARIO & { fixture: { clockAt?: string } };
+  delete noClock.fixture.clockAt;
+  assert.throws(() => parseScenario(noClock), /structured state requires a deterministic clockAt/);
+
+  const badDependency = structuredClone(SEEDED_HEARTBEAT_TEST_SCENARIO);
+  badDependency.fixture.mind[2].dependsOn = ['missing'];
+  assert.throws(() => parseScenario(badDependency), /unknown Mind seed key missing/);
+
+  const badChannel = structuredClone(SEEDED_HEARTBEAT_TEST_SCENARIO);
+  badChannel.fixture.scheduler[0].channel = 'missing';
+  assert.throws(() => parseScenario(badChannel), /unknown fixture channel missing/);
 });
 
 test('Sol and Opus have equal eligibility and behavioral selection ignores identity',()=>{

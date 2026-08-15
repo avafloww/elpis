@@ -115,7 +115,7 @@ export async function runScenario(config: BenchConfig, scenario: ScenarioSpec, p
   const workDir = ensurePrivateDir(path.join(episodeRoot, 'work'));
   const resultDir = ensurePrivateDir(path.join(episodeRoot, 'results'));
   const clockFile = path.join(episodeRoot, 'clock');
-  prepareEpisodeMounts(workDir, resultDir, clockFile);
+  prepareEpisodeMounts(workDir, resultDir, clockFile, scenario.fixture.clockAt ? new Date(scenario.fixture.clockAt) : new Date());
   const runId = digest;
   const synthetic = opts.oracle || opts.noToolBaseline || opts.candidate;
   const runControl: EpisodeRunControl = {

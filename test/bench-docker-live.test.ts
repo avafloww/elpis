@@ -11,7 +11,7 @@ import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
 import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
-import { ORDINARY_TEST_SCENARIO, RESTART_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
 const image = process.env.ELPISBENCH_IMAGE ?? 'elpisbench:latest';
@@ -67,7 +67,7 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     ],
     image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
   };
-  const scenario = ORDINARY_TEST_SCENARIO;
+  const scenario = SEEDED_HEARTBEAT_TEST_SCENARIO;
   try {
     const record = await runScenario(config, scenario, 'oracle', { oracle: true });
     assert.equal(Object.values(record.gates).every(Boolean), true);
@@ -86,6 +86,18 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
       assert.ok(tables.includes('mind_items'));
       assert.ok(tables.includes('scheduled_tasks'));
       assert.ok(tables.includes('channels'));
+      const items = db.prepare('SELECT title, status, parent_id, due_at FROM mind_items ORDER BY id').all() as Array<{ title: string; status: string; parent_id: number | null; due_at: number | null }>;
+      assert.equal(items.length, 4);
+      assert.deepEqual(items.map((item) => [item.title, item.status]), [
+        ['Seeded project', 'in_progress'], ['Finished prerequisite', 'done'], ['Ready leaf', 'open'], ['Blocked leaf', 'open'],
+      ]);
+      assert.equal(items[2].parent_id, 1);
+      assert.equal(items[2].due_at, Date.parse('2026-01-02T03:06:05.000Z'));
+      const dependencies = db.prepare('SELECT item_id, depends_on_id FROM mind_dependencies ORDER BY item_id').all().map((row) => ({ item_id: Number((row as { item_id: number }).item_id), depends_on_id: Number((row as { depends_on_id: number }).depends_on_id) }));
+      assert.deepEqual(dependencies, [{ item_id: 3, depends_on_id: 2 }, { item_id: 4, depends_on_id: 3 }]);
+      const scheduledRow = db.prepare('SELECT name, channel_id, payload, next_run_at FROM scheduled_tasks').get() as { name: string; channel_id: string; payload: string; next_run_at: number };
+      const scheduled = { name: String(scheduledRow.name), channel_id: String(scheduledRow.channel_id), payload: String(scheduledRow.payload), next_run_at: Number(scheduledRow.next_run_at) };
+      assert.deepEqual(scheduled, { name: 'seeded-future-task', channel_id: '101', payload: '[seeded future wake]', next_run_at: Date.parse('2026-01-02T03:05:05.000Z') });
     } finally { db.close(); }
     const sessionDir = path.join(work, 'sessions', 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));

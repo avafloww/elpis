@@ -21,6 +21,10 @@ import { parseEpisodeBootstrap } from './bootstrap.js';
 import { resolveCandidateIngress } from './ingress.js';
 import { contentDigest } from './store.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
+import { openDatabase } from '../src/store/db.js';
+import { MindService } from '../src/store/mind.js';
+import { Scheduler } from '../src/store/scheduler.js';
+import { noopLogger } from '../src/lib/log.js';
 
 process.umask(0o077);
 
@@ -52,6 +56,46 @@ class HostLLM implements LLM {
   async advance(ms: number): Promise<void> { await this.request('advance-clock', { ms }); }
 }
 
+function seedStructuredState(scenario: ScenarioSpec): void {
+  if (scenario.fixture.mind.length === 0 && scenario.fixture.scheduler.length === 0) return;
+  if (fs.existsSync(path.join(WORK, 'agent.db'))) return;
+  const baseTime = Date.parse(scenario.fixture.clockAt!);
+  const db = openDatabase(WORK);
+  const scheduler = new Scheduler({ db, logger: noopLogger, onTaskWake: () => {} });
+  const mind = new MindService({ db, scheduler, logger: noopLogger });
+  const ids = new Map<string, number>();
+  try {
+    for (const item of scenario.fixture.mind) {
+      const created = mind.create({
+        title: item.title, body: item.body, kind: item.kind, status: item.status,
+        priority: item.priority, dueAt: item.dueOffsetMs == null ? null : baseTime + item.dueOffsetMs,
+        tags: item.tags, actor: 'fixture',
+      });
+      ids.set(item.key, created.id);
+    }
+    for (const item of scenario.fixture.mind) {
+      const id = ids.get(item.key)!;
+      if (item.parentKey) mind.update(id, { parentId: ids.get(item.parentKey)! }, 'fixture');
+      for (const dependency of item.dependsOn) mind.addDependency(id, ids.get(dependency)!, 'fixture');
+    }
+    for (const task of scenario.fixture.scheduler) {
+      scheduler.create({
+        name: task.name, kind: task.kind,
+        channelId: task.channel ? scenario.fixture.channels[task.channel] : null,
+        payload: task.payload, nextRunAt: baseTime + task.nextRunOffsetMs,
+        intervalMs: task.intervalMs, nagIntervalMs: task.nagIntervalMs,
+      });
+    }
+    db.prepare(`UPDATE mind_items SET created_at = ?, updated_at = ?, closed_at = CASE WHEN closed_at IS NULL THEN NULL ELSE ? END WHERE created_by = 'fixture'`).run(baseTime, baseTime, baseTime);
+    db.prepare(`UPDATE mind_dependencies SET created_at = ? WHERE created_by = 'fixture'`).run(baseTime);
+    db.prepare(`UPDATE mind_events SET created_at = ? WHERE actor = 'fixture'`).run(baseTime);
+    db.prepare('UPDATE scheduled_tasks SET created_at = ?').run(Math.floor(baseTime / 1000));
+  } finally {
+    scheduler.stop();
+    db.close();
+  }
+}
+
 function seedFixture(scenario: ScenarioSpec): void {
   fs.mkdirSync(WORK, { recursive: true });
   const ensure = (file: string, content: string) => {
@@ -75,6 +119,7 @@ function seedFixture(scenario: ScenarioSpec): void {
       else ensure(file, defaultFixture(file));
     }
   }
+  seedStructuredState(scenario);
 }
 
 function defaultFixture(file: string): string {

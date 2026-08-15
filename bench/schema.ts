@@ -34,6 +34,29 @@ const expectedSchema = z.object({
   checks: z.array(outcomeCheckSchema).default([]),
 });
 
+const mindSeedSchema = z.object({
+  key: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  title: z.string().min(1),
+  body: z.string().default(''),
+  kind: z.enum(['task', 'project', 'idea', 'question', 'reminder']).default('task'),
+  status: z.enum(['inbox', 'open', 'in_progress', 'waiting', 'done', 'cancelled']).default('open'),
+  priority: z.number().int().min(0).max(4).default(2),
+  parentKey: z.string().regex(/^[a-z][a-z0-9-]*$/).optional(),
+  dependsOn: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).default([]),
+  dueOffsetMs: z.number().int().nullable().default(null),
+  tags: z.array(z.string()).default([]),
+});
+
+const schedulerSeedSchema = z.object({
+  name: z.string().min(1),
+  kind: z.enum(['reminder', 'reminder-nag', 'heartbeat', 'custom']).default('custom'),
+  channel: z.string().optional(),
+  payload: z.string(),
+  nextRunOffsetMs: z.number().int(),
+  intervalMs: z.number().int().positive().nullable().default(null),
+  nagIntervalMs: z.number().int().positive().nullable().default(null),
+});
+
 const scenarioSpecBase = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
   id: z.string().regex(/^[a-z]+\/[a-z0-9-]+$/),
@@ -53,6 +76,9 @@ const scenarioSpecBase = z.object({
     channels: z.record(z.string(), z.string()),
     files: z.record(z.string(), z.string()).default({}),
     directories: z.array(z.string()).default([]),
+    clockAt: z.string().datetime().optional(),
+    mind: z.array(mindSeedSchema).default([]),
+    scheduler: z.array(schedulerSeedSchema).default([]),
     inputChannel: z.string().optional(),
     inputAuthor: z.string().optional(),
     heartbeat: z.boolean().default(false),
@@ -67,6 +93,21 @@ const scenarioSpecBase = z.object({
 export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) => {
   if (scenario.track === 'production' && !scenario.ingress) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'production scenarios require explicit candidate ingress' });
   if (scenario.track === 'micro' && (scenario.ingress || scenario.resumeIngress)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'micro scenarios derive ingress from the prompt' });
+  const keys = new Set<string>();
+  if ((scenario.fixture.mind.length > 0 || scenario.fixture.scheduler.length > 0) && !scenario.fixture.clockAt) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'clockAt'], message: 'structured state requires a deterministic clockAt' });
+  }
+  for (const [index, item] of scenario.fixture.mind.entries()) {
+    if (keys.has(item.key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'mind', index, 'key'], message: `duplicate Mind seed key ${item.key}` });
+    keys.add(item.key);
+  }
+  for (const [index, item] of scenario.fixture.mind.entries()) {
+    if (item.parentKey && !keys.has(item.parentKey)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'mind', index, 'parentKey'], message: `unknown Mind seed key ${item.parentKey}` });
+    for (const dependency of item.dependsOn) if (!keys.has(dependency)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'mind', index, 'dependsOn'], message: `unknown Mind seed key ${dependency}` });
+  }
+  for (const [index, task] of scenario.fixture.scheduler.entries()) {
+    if (task.channel && !scenario.fixture.channels[task.channel]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'scheduler', index, 'channel'], message: `unknown fixture channel ${task.channel}` });
+  }
 });
 export type ScenarioSpec = z.infer<typeof scenarioSpecSchema>;
 

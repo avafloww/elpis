@@ -46,6 +46,14 @@ all capabilities dropped, `no-new-privileges`, resource limits, and a
 `/home/agent/data`; host control state is outside that brain. Provider clients
 and credentials remain on the host behind a JSONL stdio gateway.
 
+Engine fixtures can seed a deterministic world through `fixture.clockAt`, keyed
+Mind items with parent/dependency edges, and scheduler tasks whose times are
+offsets from that clock. Seeding runs through the production SQLite migrations,
+`MindService`, and `Scheduler` before the production runtime boots. Structured
+state without a declared clock is rejected, so container startup latency cannot
+silently change the world. These generic fixtures test the engine; they are not
+validated benchmark episodes.
+
 The engine retains typed outcome checks, append-only traces, restart replacement,
 blind judge packets, comparison/calibration machinery, and the private data
 pipeline. These mechanisms are testable, but they are not a benchmark corpus.
