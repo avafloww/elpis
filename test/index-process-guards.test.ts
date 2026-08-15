@@ -1,12 +1,15 @@
 // index-process-guards.test.ts — unit tests for the pure helpers backing
 // index.ts's process-level crash guards + unannounced-restart notice
-//. index.ts itself is side-effectful on import (it
-// runs main at module load), so only the two exported pure decisions are
-// tested directly here, not the module's boot sequence.
+//. Importing index.ts must remain side-effect free; the production entrypoint
+// calls the exported runtime composition only when executed directly.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isUnannouncedRestart, formatProcessErrorNotice } from '../src/index.js';
+import { createElpisRuntime, isUnannouncedRestart, formatProcessErrorNotice } from '../src/index.js';
+
+test('production runtime composition is exported without booting on import', () => {
+  assert.equal(typeof createElpisRuntime, 'function');
+});
 
 test('isUnannouncedRestart: non-empty resume + no marker → true', () => {
   assert.equal(isUnannouncedRestart(42, false), true);

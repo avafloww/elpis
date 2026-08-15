@@ -3,7 +3,7 @@
 
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadConfigFile, ensureDataDirectory } from './config.js';
+import { loadConfigFile, ensureDataDirectory, type Config } from './config.js';
 import { fetchContextWindow, createLLM, type LLM } from './llm/llm.js';
 import { createMemory, ensureFile } from './store/memory.js';
 import { createSandbox } from './sandbox/index.js';
@@ -39,6 +39,22 @@ import { createFleet } from './fleet/index.js';
 import { createUsageTracker } from './llm/usage-tracker.js';
 import { spawnText } from './lib/proc.js';
 
+export interface ElpisRuntimeAdapters {
+  loadConfigFile?: typeof loadConfigFile;
+  fetchContextWindow?: typeof fetchContextWindow;
+  createLLM?: typeof createLLM;
+  createDiscord?: typeof createDiscord;
+  createSandbox?: typeof createSandbox;
+}
+
+export interface ElpisRuntime {
+  config: Config;
+  agent: Agent;
+  discord: ReturnType<typeof createDiscord>;
+  scheduler: Scheduler;
+  mind: MindService;
+}
+
 /** True when boot resumed a non-empty transcript but no resume marker was
  * consumed — i.e. an external/crash restart the agent didn't initiate. */
 export function isUnannouncedRestart(resumedMessageCount: number, markerConsumed: boolean): boolean {
@@ -51,8 +67,8 @@ export function formatProcessErrorNotice(kind: 'unhandledRejection' | 'uncaughtE
   return `[harness ${kind}] ${msg.slice(0, 1500)}`;
 }
 
-async function main(): Promise<void> {
-  const config = loadConfigFile();
+export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): Promise<ElpisRuntime> {
+  const config = (adapters.loadConfigFile ?? loadConfigFile)();
   ensureDataDirectory(config.paths.dataDirectory);
 
  // The agent's structured-data store (channels + feedback signal). Opened once
@@ -82,7 +98,7 @@ async function main(): Promise<void> {
   const sessionsRoot = path.join(config.paths.dataDirectory, 'sessions');
   log('fetching context window for', config.llm.model, '...');
   const [maxContextTokens, initialTranscript] = await Promise.all([
-    fetchContextWindow(config, db),
+    (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
     (async () => loadMostRecentMain(sessionsRoot, { opaqueReplayIdentity: replayIdentityForConfig(config) }))(),
   ]);
   log('context window:', maxContextTokens, 'tokens');
@@ -202,7 +218,7 @@ async function main(): Promise<void> {
       return () => {};
     },
   });
-  const sandbox = createSandbox({
+  const sandbox = (adapters.createSandbox ?? createSandbox)({
     config,
     replayIdentity: replayIdentityForConfig(config),
     memory,
@@ -262,7 +278,7 @@ async function main(): Promise<void> {
     moderate: (channelId: string, reason?: string) => agent.moderateChannel(channelId, 'mute', 'self', reason),
   });
 
-  llm = createLLM(config, hub, db);
+  llm = (adapters.createLLM ?? createLLM)(config, hub, db);
   const density = createDensityModel(db, config.llm.model, config.logger);
   const tracker = createContextTracker(maxContextTokens, config.llm.completionReserveTokens, density);
  // Clamp the effective trigger to the real window and scale the fold-serialize
@@ -320,7 +336,7 @@ async function main(): Promise<void> {
     process.exit(1);
   });
 
-  const discord = createDiscord(config, agent, {
+  const discord = (adapters.createDiscord ?? createDiscord)(config, agent, {
     feedback,
     usage: usageTracker ? () => usageTracker.fetchNow() : undefined,
     mutes,
@@ -500,6 +516,8 @@ async function main(): Promise<void> {
   }
   process.on('unhandledRejection', (reason) => reportProcessError('unhandledRejection', reason));
   process.on('uncaughtException', (err) => reportProcessError('uncaughtException', err));
+
+  return { config, agent, discord, scheduler, mind };
 }
 
 // Only boot when this module is the actual process entry point (`tsx watch
@@ -510,7 +528,7 @@ async function main(): Promise<void> {
 const isEntryPoint = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isEntryPoint) {
-  main().catch((e) => {
+  createElpisRuntime().catch((e) => {
     console.error('[harness] fatal:', e);
     process.exit(1);
   });
