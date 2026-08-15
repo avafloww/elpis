@@ -20,7 +20,7 @@ const scenario = {
 };
 
 test('episode bootstrap validates scenario and run metadata without filesystem controls', () => {
-  const parsed = parseEpisodeBootstrap({ type: 'bootstrap', scenario, run: { runId: 'run-1', providerType: 'openai-compatible', model: 'candidate', image: 'sha256:test', harnessCommit: 'abc123' } });
+  const parsed = parseEpisodeBootstrap({ type: 'bootstrap', scenario, run: { runId: 'run-1', providerType: 'openai-compatible', model: 'candidate', api: 'responses', reasoningEffort: 'high', contextSize: 262144, completionReserveTokens: 8192, image: 'sha256:test', harnessCommit: 'abc123' } });
   assert.equal(parsed.spec.id, 'protocol/bootstrap');
   assert.equal(parsed.meta.model, 'candidate');
   assert.throws(() => parseEpisodeBootstrap({ type: 'response' }), /bootstrap missing or invalid/);

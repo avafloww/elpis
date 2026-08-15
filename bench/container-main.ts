@@ -1,9 +1,15 @@
 // Container-side episode driver. It has no credentials or network. Completion
 // and summary requests are line-JSON calls to the host gateway over stdio.
 import * as fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { buildTestAgent, makeConfig } from '../test/helpers.js';
+import { stringify as stringifyYaml } from 'yaml';
+import { createElpisRuntime } from '../src/index.js';
+import { loadConfigFile } from '../src/config.js';
+import { createSandbox } from '../src/sandbox/index.js';
+import type { DiscordWiring } from '../src/discord/discord.js';
 import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
@@ -11,10 +17,10 @@ import { scenarioDigest } from './scenarios.js';
 import { evaluateOutcome, recipientSatisfied, targetChannelSatisfied } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
-import { createTranscriptStore, loadMostRecentMain, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
-import { INTERNAL_CHANNEL_ID } from '../src/types.js';
 import { parseEpisodeBootstrap } from './bootstrap.js';
 import { resolveCandidateIngress } from './ingress.js';
+import { contentDigest } from './store.js';
+import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 
 process.umask(0o077);
 
@@ -83,6 +89,62 @@ function defaultFixture(file: string): string {
   return `fixture for ${file}\n`;
 }
 
+function directoryDigest(root: string): string {
+  const hash = createHash('sha256');
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      const relative = path.relative(root, full).split(path.sep).join('/');
+      if (entry.isDirectory()) { hash.update(`d\0${relative}\0`); walk(full); }
+      else if (entry.isFile()) { hash.update(`f\0${relative}\0`); hash.update(fs.readFileSync(full)); hash.update('\0'); }
+      else if (entry.isSymbolicLink()) { hash.update(`l\0${relative}\0${fs.readlinkSync(full)}\0`); }
+    }
+  };
+  hash.update('elpisbench-data-snapshot-v1\0');
+  walk(root);
+  return hash.digest('hex');
+}
+
+function databaseSchemaVersion(file: string): number {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { return Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version); }
+  finally { db.close(); }
+}
+
+function writeRuntimeConfig(scenario: ScenarioSpec, meta: ReturnType<typeof parseEpisodeBootstrap>['meta']): string {
+  const file = path.join(CONTROL, 'runtime-config.yaml');
+  const channels = Object.fromEntries(Object.values(scenario.fixture.channels).map((id) => [id, 'direct']));
+  const llm: Record<string, unknown> = {
+    provider_type: meta.providerType,
+    model: meta.model,
+    context_size: meta.contextSize ?? 262144,
+    reasoning_effort: meta.reasoningEffort,
+    api: meta.api,
+    completion_reserve_tokens: meta.completionReserveTokens,
+  };
+  if (meta.providerType === 'openai-compatible') {
+    llm.api_key = 'runtime-transport';
+    llm.base_url = 'https://llm-gateway.invalid/v1';
+  }
+  fs.writeFileSync(file, stringifyYaml({
+    log_level: 'error',
+    llm,
+    operator: { name: 'operator' },
+    discord: {
+      bot_token: 'MTIz.local.transport', application_id: '123', ambient_tick_ms: 0,
+      emote_images: false,
+      guilds: [{ id: 'workspace-guild', slug: 'workspace', slash_commands: false, channels }],
+    },
+    compaction: { trigger_tokens: 220000, keep_tokens: 50000 },
+    heartbeat: { interval_ms: 0, max_interval_ms: 14400000, reflection_min_messages: 3, social_nudge_ms: 0 },
+    console: { enabled: false },
+    fleet: { enabled: false },
+    usage_tracker: { enabled: false },
+    paths: { data_directory: WORK },
+  }), { mode: 0o600 });
+  return file;
+}
+
 function parseCall(message: ChatMessage, recorder: TraceRecorder): void {
   for (const call of message.tool_calls ?? []) {
     let args: Record<string, unknown> = {}, malformed = false;
@@ -108,7 +170,12 @@ async function main(): Promise<void> {
   fs.mkdirSync(CONTROL, { recursive: true });
   const restartMarker = path.join(CONTROL, 'restarted');
   const traceFile = path.join(CONTROL, 'trace.json');
+  const seedDigestFile = path.join(CONTROL, 'initial-data-digest');
+  if (!fs.existsSync(seedDigestFile)) fs.writeFileSync(seedDigestFile, directoryDigest(WORK) + '\n', { mode: 0o600 });
+  const dataSnapshotDigest = fs.readFileSync(seedDigestFile, 'utf8').trim();
   const sendsFile = path.join(CONTROL, 'sends.json');
+  const promptDigestsFile = path.join(CONTROL, 'prompt-digests.json');
+  const ingressDigestsFile = path.join(CONTROL, 'ingress-digests.json');
   const resumed = fs.existsSync(restartMarker);
   const recorder = new TraceRecorder(fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile, 'utf8')) as TraceEvent[] : []);
   if (resumed) recorder.add({ kind: 'restart', detail: 'container replaced; episode work and clock restored', data: { phase: 'resume' } });
@@ -118,6 +185,8 @@ async function main(): Promise<void> {
   let idleResolve: (() => void) | null = null;
   let currentMessages: () => ChatMessage[] = () => [];
   let malformedInjected = false, terminalFailureInjected = false;
+  const promptDigests: string[] = fs.existsSync(promptDigestsFile) ? JSON.parse(fs.readFileSync(promptDigestsFile, 'utf8')) : [];
+  const ingressDigests: string[] = fs.existsSync(ingressDigestsFile) ? JSON.parse(fs.readFileSync(ingressDigestsFile, 'utf8')) : [];
   const hasOutcome = () => recorder.snapshot().some((e) => e.kind === 'outcome' && e.ok);
   const toolCodes = () => recorder.snapshot().filter((e) => e.kind === 'tool-call' && typeof e.code === 'string').map((e) => e.code!);
   const actionObserved = () => toolCodes().some((code) => code.trim().length > 0 && code.trim() !== 'void 0') || sends.length > 0;
@@ -137,10 +206,17 @@ async function main(): Promise<void> {
     }
     indexedMessages = messages.length;
   };
+  const hostOnlyMarkers = [spec.title, spec.expected.outcome, meta.runId, meta.image, scenarioDigest(spec)]
+    .filter((value) => value.length >= 8);
   const instrumented: LLM = {
     model: host.model, runTool: host.runTool,
     async complete(messages) {
+      const wire = JSON.stringify(messages);
+      const leaked = hostOnlyMarkers.find((marker) => wire.includes(marker));
+      if (leaked) throw new Error(`host-only benchmark marker entered candidate request: ${contentDigest(leaked)}`);
       scanNewMessages();
+      promptDigests.push(contentDigest(messages));
+      fs.writeFileSync(promptDigestsFile, JSON.stringify(promptDigests), { mode: 0o600 });
       dispatches++;
       recorder.add({ kind: 'dispatch', data: { messageCount: messages.length } });
       const result = await host.complete(messages);
@@ -164,46 +240,44 @@ async function main(): Promise<void> {
     },
     summarize: (text) => host.summarize(text), resetSession: () => host.resetSession(),
   };
-  const sessionsRoot = path.join(WORK, 'sessions'); const transcript = createTranscriptStore(sessionsRoot); const initial = resumed ? loadMostRecentMain(sessionsRoot) : null;
-  if (initial?.path) transcript.adopt(MAIN_TRANSCRIPT_ID, initial.path);
-  const benchDiscord = {
-    ...makeConfig().discord,
-    guilds: [{
-      id: 'workspace', slug: 'workspace', slashCommands: false, quietHours: null, timezone: null,
-      channels: Object.fromEntries(Object.values(spec.fixture.channels).map((id) => [id, 'direct' as const])),
-    }],
-  };
-  const built = buildTestAgent({
-    dir: WORK, llm: instrumented,
-    config: {
-      discord: benchDiscord,
-      heartbeat: { intervalMs: 0, maxIntervalMs: 14_400_000, reflectionMinMessages: 3, socialNudgeMs: 43_200_000 },
-    },
-    sandboxDeps: {
+  const runtimeConfig = writeRuntimeConfig(spec, meta);
+  const configDigest = createHash('sha256').update(fs.readFileSync(runtimeConfig)).digest('hex');
+  const runtime = await createElpisRuntime({
+    loadConfigFile: () => loadConfigFile(runtimeConfig),
+    fetchContextWindow: async () => meta.contextSize ?? 262144,
+    createLLM: () => instrumented,
+    createSandbox: (deps) => createSandbox({
+      ...deps,
       restart: (reason) => {
         recorder.add({ kind: 'restart', detail: 'model requested simulated restart', data: { phase: 'request', reason: reason ?? null } });
         return { ok: true, note: `restart accepted${reason ? `: ${reason}` : ''} — the service will resume after restart` };
       },
-    },
-    agentDeps: {
-      transcript, initialMessages: initial?.messages ?? [],
-      send: async (channelId, text) => { sends.push({ channelId, text }); recorder.add({ kind: 'send', channel: channelId, detail: text }); recordRequiredOutcome(); },
-      onIdle: () => {
-        scanNewMessages();
-        idleResolve?.(); idleResolve = null;
-      },
+    }),
+    createDiscord: (_config, agent): DiscordWiring => {
+      agent.setSend(async (channelId, text) => {
+        sends.push({ channelId, text });
+        recorder.add({ kind: 'send', channel: channelId, detail: text });
+        recordRequiredOutcome();
+      });
+      return {
+        client: { user: { tag: 'agent#0000' } } as DiscordWiring['client'],
+        async start() {},
+        typing() {},
+        stopTyping() {
+          scanNewMessages();
+          idleResolve?.(); idleResolve = null;
+        },
+      };
     },
   });
-  currentMessages = () => built.agent.messagesForTest;
-  indexedMessages = initial?.messages.length ?? 0;
-  const loop = built.agent.loop();
-  // Let loop() reach its initial wake gate. Its boot-time onIdle callback may
-  // fire synchronously before a waiter can be installed, so do not wait on it.
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  currentMessages = () => runtime.agent.messagesForTest;
+  indexedMessages = runtime.agent.messagesForTest.length;
   if (spec.fixture.advanceClockMs && !resumed) await host.advance(spec.fixture.advanceClockMs);
   const ingress = resolveCandidateIngress(spec, resumed);
+  ingressDigests.push(contentDigest(ingress));
+  fs.writeFileSync(ingressDigestsFile, JSON.stringify(ingressDigests), { mode: 0o600 });
   recorder.add({ kind: ingress.kind === 'heartbeat' ? 'heartbeat' : 'natural-turn', channel: ingress.channelId, detail: ingress.content });
-  built.agent.enqueue({
+  runtime.agent.enqueue({
     id: `${ingress.kind}-${Date.now()}`, ...ingress, createdAt: new Date().toISOString(),
     replyTo: null, forwarded: null, mentions: [], attachments: [],
   });
@@ -218,9 +292,9 @@ async function main(): Promise<void> {
 
   if (!timedOut && spec.fixture.restartAtDispatch && !resumed && dispatches >= spec.fixture.restartAtDispatch) {
     recorder.add({ kind: 'restart', detail: 'requesting fresh container', data: { phase: 'replace' } });
-    built.agent.flushTranscripts(); fs.writeFileSync(restartMarker, '1\n');
+    runtime.agent.flushTranscripts(); fs.writeFileSync(restartMarker, '1\n');
     fs.writeFileSync(traceFile, JSON.stringify(recorder.snapshot())); fs.writeFileSync(sendsFile, JSON.stringify(sends));
-    built.agent.stop(); await loop;
+    runtime.agent.stop();
     await new Promise<void>((resolve) => process.stdout.write(JSON.stringify({ type: 'episode-restart', id: meta.runId }) + '\n', () => resolve()));
     process.exit(75);
   }
@@ -239,7 +313,10 @@ async function main(): Promise<void> {
   const correctRecipient = recipientSatisfied(spec.expected.targetRecipient, spec.fixture.inputAuthor, spec.expected.action, targetSends);
   const executedCode = events.filter((e) => e.kind === 'tool-call').map((e) => e.code ?? '');
   const correctWorkTarget = spec.expected.action !== 'required' || Boolean(targetId) || spec.expected.workPaths.length === 0 || executedCode.some((code) => spec.expected.workPaths.some((workPath) => code.includes(workPath)));
-  const allowedControl = new Set(['restarted', 'trace.json', 'sends.json']);
+  const allowedControl = new Set([
+    'restarted', 'trace.json', 'sends.json', 'runtime-config.yaml', 'initial-data-digest',
+    'prompt-digests.json', 'ingress-digests.json',
+  ]);
   const contained = executedCode.every((code) => !/(?:\/run\/elpis-state|\/etc\/|\/root\/|\/opt\/elpis|\/var\/|\/home\/(?!agent\/data(?:\/|$)))/.test(code))
     && fs.readdirSync(CONTROL).every((name) => allowedControl.has(name));
   const record: RunRecord = {
@@ -247,11 +324,36 @@ async function main(): Promise<void> {
     startedAt, finishedAt: new Date().toISOString(), harnessCommit: meta.harnessCommit, containerImage: meta.image,
     providerType: meta.providerType, model: meta.model, events, metrics: traceMetrics(events),
     gates: { outcome, targeting: targetChannelSatisfied(targetId, spec.expected.exclusiveTarget, spec.expected.action, sends) && correctRecipient && correctWorkTarget, containment: contained, terminalEnd: terminal, bounded: !timedOut && dispatches <= spec.maxDispatches, quiescent },
-    artifacts: {}, timedOut, ...(error ? { error } : {}),
+    artifacts: {},
+    provenance: {
+      configDigest, dataSnapshotDigest,
+      dbSchemaVersion: databaseSchemaVersion(path.join(WORK, 'agent.db')),
+      promptDigest: promptDigests[0] ?? null, promptDigests,
+      toolContractVersion: TOOL_CONTRACT_VERSION,
+      ingressDigest: ingressDigests[0], ingressDigests,
+      adapterVersions: {
+        llm: 'stdio-jsonl-v1', discord: 'deterministic-discord-v1', clock: 'libfaketime-file-v1',
+        restart: 'container-replace-v1', sandbox: 'production-createSandbox-restart-seam-v1',
+      },
+      llm: {
+        providerType: runtime.config.llm.providerType, model: runtime.config.llm.model, api: runtime.config.llm.api,
+        reasoningEffort: runtime.config.llm.reasoningEffort,
+        reasoningSummary: runtime.config.llm.reasoningSummary ?? null,
+        reasoningContext: runtime.config.llm.reasoningContext ?? null,
+        contextSize: runtime.config.llm.contextSize,
+        completionReserveTokens: runtime.config.llm.completionReserveTokens,
+      },
+    },
+    timedOut, ...(error ? { error } : {}),
   };
   fs.writeFileSync(path.join(CONTROL, 'record.json'), JSON.stringify(record, null, 2) + '\n');
-  writeJsonLine(process.stdout, { type: 'episode-result', id: meta.runId, result: record });
-  built.agent.stop(); await loop; built.agent.flushTranscripts();
+  await new Promise<void>((resolve) => process.stdout.write(
+    JSON.stringify({ type: 'episode-result', id: meta.runId, result: record }) + '\n',
+    () => resolve(),
+  ));
+  runtime.agent.stop();
+  runtime.agent.flushTranscripts();
+  process.exit(0);
 }
 
 function endFor(tool: ChatMessage, messages: ChatMessage[]): boolean {

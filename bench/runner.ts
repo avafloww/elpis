@@ -117,7 +117,17 @@ export async function runScenario(config: BenchConfig, scenario: ScenarioSpec, p
   const clockFile = path.join(episodeRoot, 'clock');
   prepareEpisodeMounts(workDir, resultDir, clockFile);
   const runId = digest;
-  const runControl: EpisodeRunControl = { runId, providerType: (opts.oracle || opts.noToolBaseline || opts.candidate) ? 'openai-compatible' : provider.provider_type, model: opts.oracle ? 'elpisbench-oracle' : opts.noToolBaseline ? 'elpisbench-no-tool-baseline' : opts.candidate ? 'grpo-candidate' : provider.model, image, harnessCommit: harnessCommit() };
+  const synthetic = opts.oracle || opts.noToolBaseline || opts.candidate;
+  const runControl: EpisodeRunControl = {
+    runId,
+    providerType: synthetic ? 'openai-compatible' : provider.provider_type,
+    model: opts.oracle ? 'elpisbench-oracle' : opts.noToolBaseline ? 'elpisbench-no-tool-baseline' : opts.candidate ? 'grpo-candidate' : provider.model,
+    api: synthetic ? 'responses' : provider.api,
+    reasoningEffort: synthetic ? 'none' : (provider.reasoning_effort ?? null),
+    contextSize: synthetic ? 262144 : (provider.context_size ?? null),
+    completionReserveTokens: 8192,
+    image, harnessCommit: harnessCommit(),
+  };
   const llm = opts.oracle ? oracleLLM(scenario) : opts.noToolBaseline ? noToolBaselineLLM(scenario) : opts.candidate ? candidateLLM(opts.candidate) : providerLLM(provider, config.data_directory ?? privateDataRoot());
   const gateway: CompletionGateway = {
     complete: (messages) => llm.complete(messages as Parameters<LLM['complete']>[0]),

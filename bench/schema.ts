@@ -102,12 +102,27 @@ export const hardGatesSchema = z.object({
 });
 export type HardGates = z.infer<typeof hardGatesSchema>;
 
+export const runProvenanceSchema = z.object({
+  configDigest: z.string(), dataSnapshotDigest: z.string(), dbSchemaVersion: z.number().int().nonnegative(),
+  promptDigest: z.string().nullable(), promptDigests: z.array(z.string()),
+  toolContractVersion: z.string(), ingressDigest: z.string(), ingressDigests: z.array(z.string()),
+  adapterVersions: z.record(z.string(), z.string()),
+  llm: z.object({
+    providerType: z.enum(['openai-compatible', 'anthropic-oauth', 'codex-oauth']), model: z.string(),
+    api: z.enum(['auto', 'responses', 'chat']), reasoningEffort: z.string().nullable(), reasoningSummary: z.string().nullable(),
+    reasoningContext: z.string().nullable(), contextSize: z.number().int().positive().nullable(),
+    completionReserveTokens: z.number().int().positive(),
+  }),
+});
+export type RunProvenance = z.infer<typeof runProvenanceSchema>;
+
 export const runRecordSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION), runId: z.string(), scenarioId: z.string(),
   scenarioDigest: z.string(), startedAt: z.string(), finishedAt: z.string(),
   harnessCommit: z.string(), containerImage: z.string(), providerType: z.enum(['openai-compatible', 'anthropic-oauth', 'codex-oauth']),
   model: z.string(), events: z.array(traceEventSchema), metrics: traceMetricsSchema,
   gates: hardGatesSchema, artifacts: z.record(z.string(), z.string()).default({}),
+  provenance: runProvenanceSchema.optional(),
   timedOut: z.boolean(), error: z.string().optional(),
 });
 export type RunRecord = z.infer<typeof runRecordSchema>;

@@ -1,13 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { parse as parseYaml } from 'yaml';
 import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
 import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
-import { ORDINARY_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
+import { ORDINARY_TEST_SCENARIO, RESTART_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
 const image = process.env.ELPISBENCH_IMAGE ?? 'elpisbench:latest';
@@ -65,7 +69,49 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
   };
   const scenario = ORDINARY_TEST_SCENARIO;
   try {
-    await runScenario(config, scenario, 'oracle', { oracle: true });
+    const record = await runScenario(config, scenario, 'oracle', { oracle: true });
+    assert.equal(Object.values(record.gates).every(Boolean), true);
+    const episodeNames = fs.readdirSync(path.join(dataDirectory, 'episodes'));
+    assert.equal(episodeNames.length, 1);
+    const episodeRoot = path.join(dataDirectory, 'episodes', episodeNames[0]);
+    const work = path.join(episodeRoot, 'work');
+    const results = path.join(episodeRoot, 'results');
+    assert.equal(fs.existsSync(path.join(work, 'agent.db')), true);
+    const db = new DatabaseSync(path.join(work, 'agent.db'), { readOnly: true });
+    try {
+      const version = db.prepare('PRAGMA user_version').get() as { user_version: number };
+      assert.ok(version.user_version >= 11);
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()
+        .map((row) => String((row as { name: string }).name));
+      assert.ok(tables.includes('mind_items'));
+      assert.ok(tables.includes('scheduled_tasks'));
+      assert.ok(tables.includes('channels'));
+    } finally { db.close(); }
+    const sessionDir = path.join(work, 'sessions', 'discord', 'main');
+    assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
+    const runtimeConfig = parseYaml(fs.readFileSync(path.join(results, 'runtime-config.yaml'), 'utf8')) as {
+      paths: { data_directory: string }; console: { enabled: boolean }; fleet: { enabled: boolean };
+    };
+    assert.equal(runtimeConfig.paths.data_directory, '/home/agent/data');
+    assert.equal(runtimeConfig.console.enabled, false);
+    assert.equal(runtimeConfig.fleet.enabled, false);
+    assert.ok(record.provenance);
+    assert.match(record.provenance.configDigest, /^[a-f0-9]{64}$/);
+    assert.equal(
+      record.provenance.configDigest,
+      createHash('sha256').update(fs.readFileSync(path.join(results, 'runtime-config.yaml'))).digest('hex'),
+    );
+    assert.equal(record.provenance.dataSnapshotDigest, fs.readFileSync(path.join(results, 'initial-data-digest'), 'utf8').trim());
+    assert.ok(record.provenance.dbSchemaVersion >= 11);
+    assert.equal(record.provenance.toolContractVersion, TOOL_CONTRACT_VERSION);
+    assert.equal(record.provenance.promptDigest, record.provenance.promptDigests[0]);
+    assert.ok(record.provenance.promptDigests.length >= 1);
+    assert.equal(record.provenance.ingressDigests.length, 1);
+    assert.equal(record.provenance.llm.model, 'elpisbench-oracle');
+    assert.equal(record.provenance.llm.contextSize, 262144);
+    assert.equal(record.provenance.adapterVersions.discord, 'deterministic-discord-v1');
+    const containerSource = fs.readFileSync(path.join(process.cwd(), 'bench', 'container-main.ts'), 'utf8');
+    assert.doesNotMatch(containerSource, /buildTestAgent|test\/helpers/);
     const wrong: string[] = [];
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -76,6 +122,39 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     };
     walk(dataDirectory);
     assert.deepEqual(wrong, []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('live production runtime preserves state across a fresh container restart', { skip: !live }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpisbench-restart-live-'));
+  const dataDirectory = path.join(root, 'data');
+  const provider = { provider_type: 'openai-compatible' as const, model: 'oracle-unused', base_url: 'https://oracle.invalid/v1', api_key: 'unused', api: 'auto' as const };
+  const config: BenchConfig = {
+    version: 1, default_provider: 'oracle', generator_provider: 'oracle', providers: { oracle: provider },
+    judges: [
+      { id: 'a', provider: 'oracle', family: 'one', teacher_pool: true },
+      { id: 'b', provider: 'oracle', family: 'two', teacher_pool: true },
+      { id: 'c', provider: 'oracle', family: 'three', teacher_pool: false },
+    ],
+    image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
+  };
+  try {
+    const record = await runScenario(config, RESTART_TEST_SCENARIO, 'oracle', { oracle: true });
+    assert.equal(Object.values(record.gates).every(Boolean), true);
+    const restarts = record.events.filter((event) => event.kind === 'restart');
+    assert.ok(restarts.some((event) => event.data?.phase === 'replace'));
+    assert.ok(restarts.some((event) => event.data?.phase === 'resume'));
+    assert.ok(record.provenance);
+    assert.equal(record.provenance.ingressDigests.length, 2);
+    assert.ok(record.provenance.promptDigests.length >= 2);
+    assert.equal(record.provenance.promptDigest, record.provenance.promptDigests[0]);
+    const [episode] = fs.readdirSync(path.join(dataDirectory, 'episodes'));
+    const work = path.join(dataDirectory, 'episodes', episode, 'work');
+    assert.equal(fs.readFileSync(path.join(work, 'stage-one.txt'), 'utf8'), 'stage one\n');
+    assert.equal(fs.readFileSync(path.join(work, 'stage-two.txt'), 'utf8'), 'stage two\n');
+    assert.equal(fs.existsSync(path.join(work, 'agent.db')), true);
+    const sessionDir = path.join(work, 'sessions', 'discord', 'main');
+    assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -6,7 +6,6 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY test/helpers.ts ./test/helpers.ts
 COPY bench ./bench
 RUN npm run build
 ENV NODE_ENV=production LD_PRELOAD=/usr/local/lib/libfaketime-elpisbench.so.1
