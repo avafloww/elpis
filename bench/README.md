@@ -1,114 +1,71 @@
 # ElpisBench
 
-ElpisBench measures fluency in Elpis's one-tool `run(code, end?)` environment:
-tool competence, proactive judgment, protocol discipline, and concise social
-calibration. It also supplies a private-first SFT, DPO, and GRPO data pipeline.
-This replaces the former local/Proxmox benchmark; Docker is the only substrate.
+ElpisBench is the isolated execution, trace, and evaluation engine for measuring
+an Elpis inhabitant in a seeded world. The public repository intentionally ships
+**zero validated benchmark worlds**. No current command or score is a production
+capability baseline.
 
-## Security model
+The former 48-scenario corpus was removed because its prompts narrated hidden
+state and desired actions. Passing those scenarios mostly measured whether a
+model could follow answer-shaped instructions. An empty honest corpus is better
+than a convincing but invalid score.
 
-Each episode gets a fresh unprivileged container with a read-only root,
-`--network none`, all capabilities dropped, `no-new-privileges`, resource
-limits, and a `noexec,nosuid,nodev` tmpfs. Its only mounts are the scenario work
-directory, result directory, and read-only faketime clock. Simulated restarts
-replace the container and preserve only those episode mounts.
+## Required shape of a validated world
 
-Credentials and provider clients stay on the host. A JSONL stdio gateway serves
-completions, summaries, session resets, and clock advancement. The container
-never sees the transcript corpus or Docker socket.
+A candidate must not be told that it is under evaluation. It receives the same
+kind of ingress and information it would receive in production:
 
-Private data defaults to `~/.local/share/elpisbench` with `0700` directories and
-`0600` files. Real-derived episodes remain permanently private; public export
-rejects them. Remote sanitization fails closed unless `allow_private_input: true`.
+- the real production harness process from a pinned commit and image;
+- a private seeded data directory, config, and SQLite snapshot;
+- the exact bounded conversation prefix, SOUL, MEMORY, Mind, scheduler, files,
+  clock, channel map, attachments, and enabled tool surface for that branch;
+- an ordinary raw Discord event, literal `[heartbeat]`, scheduler notice,
+  harness wake, watch event, or restart continuation.
 
-## Setup and benchmark commands
+Only deterministic adapters replace the outside world: provider transport,
+Discord/event transport, wall clock, and process supervision. Each world is both
+a model benchmark and a production integration test covering boot/migrations,
+prompt and tool construction, routing, persistence, outbound sends, restart
+continuity, quiescence, and provenance.
+
+Scenario descriptions and expected outcomes remain host-only. Evaluation checks
+concrete state, delivery, and trace consequences after the turn. It does not
+classify model actions as forbidden; the container is the authority boundary and
+any action available inside it is in scope.
+
+Exact transcript-derived worlds are permanently private. Public artifacts may be
+reconstructed generic mechanisms only, never lightly redacted transcript data.
+Names, IDs, hosts, dates, personal memories, distinctive quotes, paths,
+attachments, credentials, and source provenance must not enter this repository.
+
+## Isolation engine
+
+Each episode gets an unprivileged container with a read-only root, no network,
+all capabilities dropped, `no-new-privileges`, resource limits, and a
+`noexec,nosuid,nodev` tmpfs. The seeded brain is mounted at
+`/home/agent/data`; host control state is outside that brain. Provider clients
+and credentials remain on the host behind a JSONL stdio gateway.
+
+The engine retains typed outcome checks, append-only traces, restart replacement,
+blind judge packets, comparison/calibration machinery, and the private data
+pipeline. These mechanisms are testable, but they are not a benchmark corpus.
+
+## Commands
 
 ```bash
 npm run bench -- init
-# edit ~/.local/share/elpisbench/config.yaml
-npm run bench -- auth login codex-oauth
-npm run bench -- auth login anthropic-oauth
 npm run bench -- image build
 npm run bench -- doctor
+npm run bench -- list        # [] until reviewed production worlds exist
+npm run bench -- run         # fails closed: no validated production scenarios
 
-npm run bench -- list
-npm run bench -- run tool/read-edit-verify
-npm run bench -- run                         # all 48 locked scenarios
-npm run bench -- run --oracle                # infrastructure hard-gate acceptance
-npm run bench -- run --baseline no-tool      # tool/protocol sensitivity baseline
-npm run bench -- judge <record...> --packets-only
-npm run bench -- judge <record...>           # run the three blind profiles
-npm run bench -- judge <record...> --scores scores.jsonl
-npm run bench -- compare old.json new.json
-npm run bench -- calibrate repeat-a.json repeat-b.json
-
-# opt-in live isolation/timeout checks (requires the built image)
-ELPISBENCH_DOCKER_LIVE=1 node --test --import tsx/esm test/bench-docker-live.test.ts
-```
-
-`doctor` is a hard preflight. Runs are content-addressed over scenario revision,
-image digest, provider settings, and harness commit, so reissuing an interrupted
-command reuses complete records.
-
-The locked suite has 16 tool-use, 12 proactive actionable/no-action, 12 social,
-and 8 protocol/adversarial scenarios. Generated scenarios are always
-`locked:false` and cannot enter it automatically.
-
-Each locked scenario has a concrete fixture contract: initial files and
-folders, the actual inbound room, optional deterministic fault injection, and
-typed outcome checks. Required work passes only when its file, JSON, directory,
-or target-send predicates are true after a successful tool result or send.
-Merely dispatching a tool is not an outcome. Cross-room and heartbeat targets
-must be named in the prompt; ordinary replies may use the inbound room. The
-scripted oracle produces ordinary tool calls that satisfy these same checks—no
-private success marker or candidate-only answer path. The no-tool baseline is
-the corresponding sensitivity check.
-
-Hard gates apply before the 35/25/20/20 weighted score. Extra sends and
-surplus model turns incur a small universal trajectory penalty; proactivity and
-protocol scenarios additionally charge post-outcome work, and other
-category-specific faults add to it. Three blind 0–4 judges
-are reduced by median while retaining evidence and may lower, but never erase,
-the deterministic mechanical score. A range over one is unstable, and
-instability over 10% makes comparisons inconclusive.
-
-## Private data commands
-
-```bash
 npm run bench -- data epochs journal.jsonl --out epochs.json
 npm run bench -- data index /read-only/sessions --out index.json
 npm run bench -- data extract index.json --out extracted.jsonl
 npm run bench -- data sanitize extracted.jsonl --out sanitized.jsonl
-npm run bench -- data generate "recover from one failed command" --out scenario.json
-npm run bench -- data validate scenario.json
-npm run bench -- data split sanitized.jsonl --out split.jsonl
-npm run bench -- data approve split.jsonl --by reviewer-name --out approved.jsonl
-npm run bench -- data preference approved.jsonl --out dpo.jsonl
-npm run bench -- data export approved.jsonl --out hf-private.jsonl
+npm run bench -- data validate artifact.json
 ```
 
-Indexing reconstructs turns, pairs calls/results, recovers sends, deduplicates
-restart/compaction overlap, rejects ambiguous/interrupted traces, and removes
-provider reasoning. Only exact/high model attribution enters model-specific
-mining. Sol and Opus 5 have equal eligibility and weighting; content hashing
-routes ordinary cases approximately 50/50 and hard cases to both.
-
-Sanitization consistently aliases secrets, identifiers, contacts, and paths,
-removes attachments, and runs an independent privacy and source-overlap scan.
-Manual approval remains required.
-
-## Optional training package
-
-```bash
-cd bench/training
-uv sync
-uv run elpisbench-preflight <model-or-tokenizer>
-uv run elpisbench-sft fixtures/sft.jsonl --dry-run
-uv run elpisbench-dpo fixtures/dpo.jsonl --dry-run
-uv run elpisbench-grpo protocol/terminal-end --groups 2 --dry-run --fake-service
-```
-
-Preflight checks tool rendering, object argument round-tripping, stable prefixes,
-assistant masking (or the need for a completion collator), and a golden
-render/tokenize/decode/replay. Failing models require an explicit local Jinja
-template. Initial tooling deliberately refuses real training.
+The next acceptance milestone is not a model score. It is one transcript-mined,
+evaluation-blind world whose seeded state, production ingress, real harness boot,
+privacy boundary, hidden consequence checks, and full provenance survive replay.

@@ -28,10 +28,10 @@ export function dockerRunArgs(opts: DockerEpisodeOptions): string[] {
     '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=128m',
     // Bind mounts are read-write by default. `rw` is valid with `-v` but is
     // not a standalone field in Docker's stricter `--mount` grammar.
-    '--mount', `type=bind,src=${work},dst=/episode/work`,
-    '--mount', `type=bind,src=${results},dst=/episode/results`,
-    '--mount', `type=bind,src=${clock},dst=/episode/clock,readonly`,
-    '--env', 'FAKETIME_TIMESTAMP_FILE=/episode/clock', '--env', 'FAKETIME_NO_CACHE=1',
+    '--mount', `type=bind,src=${work},dst=/home/agent/data`,
+    '--mount', `type=bind,src=${results},dst=/run/elpis-state`,
+    '--mount', `type=bind,src=${clock},dst=/run/elpis-clock,readonly`,
+    '--env', 'FAKETIME_TIMESTAMP_FILE=/run/elpis-clock', '--env', 'FAKETIME_NO_CACHE=1',
     // Node/libuv requires a genuinely monotonic timer source. Only wall-clock
     // APIs should observe benchmark clock jumps.
     '--env', 'FAKETIME_DONT_FAKE_MONOTONIC=1',

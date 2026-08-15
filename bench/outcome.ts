@@ -71,38 +71,22 @@ function evaluateCheck(check: OutcomeCheck, root: string, sends: BenchSend[]): C
   }
 }
 
-const MUTATING_CODE = [
-  /\bfs(?:\.promises)?\.(?:writeFile|appendFile|rm|unlink|rename|mkdir|copyFile|truncate|chmod|chown|symlink|link|utimes|createWriteStream|open)(?:Sync)?\s*\(/i,
-  /\belpis\.(?:edit|state|native|unschedule)\s*\(/i,
-  /\belpis\.schedule(?:\.(?:done|snooze|update))?\s*\(/i,
-  /\belpis\.memory\.(?:append|write|person)\s*\(/i,
-  /\belpis\.mind\.(?:remind|snoozeReminder|cancelReminder)\s*\(/i,
-  /\belpis\.(?:bg\.start|git\.(?:add|commit|push|commitAndPush)|browser\.|computer\.|motor\.|ssh\(|bsky\.(?:post|reply|like|follow))\b/i,
-  /\.mute\s*\(/i,
-  /\belpis\.(?:sh|sudo)\s*\(\s*['"`][^'"`]*(?:\brm\b|\bmv\b|\bcp\b|\btouch\b|\bmkdir\b|\bchmod\b|\bchown\b|sed\s+-i|systemctl\s+(?:restart|start|stop)|\b(?:sh|bash)\s+(?!-c\b)\S+)/i,
-];
-
-export function hasForbiddenSideEffect(codes: string[], sendCount: number): boolean {
-  return sendCount > 0 || codes.some((code) => MUTATING_CODE.some((pattern) => pattern.test(code)));
-}
-
-export function targetChannelSatisfied(targetId: string | undefined, exclusiveTarget: boolean, action: 'required' | 'optional' | 'forbidden', sends: BenchSend[]): boolean {
+export function targetChannelSatisfied(targetId: string | undefined, exclusiveTarget: boolean, action: 'required' | 'optional', sends: BenchSend[]): boolean {
   if (!targetId) return true;
   if (action !== 'required' && sends.length === 0) return true;
   const targetSends = sends.filter((send) => send.channelId === targetId);
   return targetSends.length > 0 && (!exclusiveTarget || targetSends.length === sends.length);
 }
 
-export function recipientSatisfied(targetRecipient: string | undefined, inputAuthor: string | undefined, action: 'required' | 'optional' | 'forbidden', targetSends: BenchSend[]): boolean {
+export function recipientSatisfied(targetRecipient: string | undefined, inputAuthor: string | undefined, action: 'required' | 'optional', targetSends: BenchSend[]): boolean {
   if (!targetRecipient || action !== 'required') return true;
   if (inputAuthor?.toLocaleLowerCase() === targetRecipient.toLocaleLowerCase()) return true;
   return targetSends.some((send) => send.text.toLocaleLowerCase().includes(targetRecipient.toLocaleLowerCase()));
 }
 
 export function evaluateOutcome(spec: ScenarioSpec, root: string, sends: BenchSend[], actionObserved: boolean): OutcomeResult {
-  if (spec.expected.action === 'forbidden') return { ok: !actionObserved, checks: [] };
-  if (spec.expected.action === 'optional') return { ok: true, checks: [] };
-  if (!actionObserved) return { ok: false, checks: [] };
+  if (spec.expected.action === 'optional' && spec.expected.checks.length === 0 && !spec.expected.targetChannel) return { ok: true, checks: [] };
+  if (spec.expected.action === 'required' && !actionObserved) return { ok: false, checks: [] };
 
   const targetId = spec.expected.targetChannel ? spec.fixture.channels[spec.expected.targetChannel] : undefined;
   const targetSends = targetId ? sends.filter((send) => send.channelId === targetId) : sends;

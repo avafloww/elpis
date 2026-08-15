@@ -8,7 +8,7 @@ import { buildTranscriptIndex } from '../bench/data/index.js';
 import { privacyScan, sanitizeEpisode, assertRemoteSanitizationAllowed, sourceOverlap } from '../bench/data/sanitize.js';
 import { publicEndpoint, publicizeEpisode } from '../bench/data/export.js';
 import { assignedTeachers, behavioralPreference, selectTeacherCandidates, teacherWeight, teachersAfterFirstAttempt } from '../bench/data/teachers.js';
-import { LOCKED_SCENARIOS } from '../bench/scenarios.js';
+import { HARD_TEST_SCENARIO, ORDINARY_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 import { SCHEMA_VERSION, type Episode } from '../bench/schema.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 
@@ -40,8 +40,8 @@ test('sanitization removes contacts/secrets/paths and public export pseudonymize
 });
 
 test('Sol and Opus have equal eligibility and behavioral selection ignores identity',()=>{
-  assert.equal(teacherWeight('sol'),teacherWeight('opus-5')); assert.equal(assignedTeachers(LOCKED_SCENARIOS.find(s=>s.difficulty==='hard-recovery')!).length,2);
-  assert.equal(teachersAfterFirstAttempt(LOCKED_SCENARIOS.find(s=>s.difficulty==='ordinary')!,false).length,2);
+  assert.equal(teacherWeight('sol'),teacherWeight('opus-5')); assert.equal(assignedTeachers(HARD_TEST_SCENARIO).length,2);
+  assert.equal(teachersAfterFirstAttempt(ORDINARY_TEST_SCENARIO,false).length,2);
   const base={passesSafety:true,passesTargeting:true,outcome:true,protocol:true,efficiency:1,socialScore:4,payload:null};
   const selected=selectTeacherCandidates([{...base,teacher:'sol',normalizedToolTrace:'a'},{...base,teacher:'opus-5',normalizedToolTrace:'b'}]); assert.equal(selected.length,2);
   assert.equal(behavioralPreference({...base,teacher:'sol',normalizedToolTrace:'a'},{...base,teacher:'opus-5',normalizedToolTrace:'b'}),0);

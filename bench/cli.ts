@@ -6,7 +6,7 @@ import { authLogin } from './auth.js';
 import { EXAMPLE_CONFIG, loadBenchConfig } from './config.js';
 import { assertDoctor, doctor } from './doctor.js';
 import { compareSummaries, buildSuiteSummary } from './scoring.js';
-import { LOCKED_SCENARIOS } from './scenarios.js';
+import { VALIDATED_SCENARIOS } from './scenarios.js';
 import { runScenario, providerLLM } from './runner.js';
 import { parseEpisode, parseRunRecord, scenarioSpecSchema, suiteSummarySchema, type Episode, type JudgeScore, type ScenarioSpec } from './schema.js';
 import { ensurePrivateDir, privateDataRoot, readJson, writePrivateJson } from './store.js';
@@ -39,26 +39,27 @@ async function main(): Promise<void> {
   const config = loadBenchConfig(configArg);
   if (command === 'doctor') { const checks = await doctor(config); output(checks); assertDoctor(checks); return; }
   if (command === 'auth' && argv.shift() === 'login') { await authLogin(argv.shift() ?? config.providers[config.default_provider].provider_type, config.data_directory ?? privateDataRoot()); return; }
-  if (command === 'list') { const category = take('--category'); return output(LOCKED_SCENARIOS.filter((s) => !category || s.category === category).map((s) => ({ id: s.id, category: s.category, title: s.title, difficulty: s.difficulty }))); }
+  if (command === 'list') { const category = take('--category'); return output(VALIDATED_SCENARIOS.filter((s) => !category || s.category === category).map((s) => ({ id: s.id, category: s.category, title: s.title, difficulty: s.difficulty }))); }
   if (command === 'run') {
     const oracle = flag('--oracle'); const baseline = take('--baseline'); if (oracle && baseline) throw new Error('--oracle and --baseline are mutually exclusive'); if (baseline && baseline !== 'no-tool') throw new Error('--baseline currently supports only no-tool');
-    assertDoctor(await doctor(config, { skipProviders: oracle || baseline === 'no-tool' })); const provider = take('--provider') ?? config.default_provider; const out = take('--out'); const ids = argv.length ? new Set(argv) : null;
-    const scenarios = LOCKED_SCENARIOS.filter((s) => !ids || ids.has(s.id)); if (!scenarios.length) throw new Error('no locked scenarios selected');
+    const provider = take('--provider') ?? config.default_provider; const out = take('--out'); const ids = argv.length ? new Set(argv) : null;
+    const scenarios = VALIDATED_SCENARIOS.filter((s) => !ids || ids.has(s.id)); if (!scenarios.length) throw new Error('no validated production scenarios are installed; ElpisBench cannot produce a benchmark score yet');
+    assertDoctor(await doctor(config, { skipProviders: oracle || baseline === 'no-tool' }));
     const completed = await mapConcurrent(scenarios, config.concurrency, async (scenario) => { process.stderr.write(`run ${scenario.id}\n`); return runScenario(config, scenario, provider, { oracle, noToolBaseline: baseline === 'no-tool' }); });
-    const summary = buildSuiteSummary(`suite-${Date.now()}`, completed.map((record) => ({ record, category: LOCKED_SCENARIOS.find((s) => s.id === record.scenarioId)!.category })));
+    const summary = buildSuiteSummary(`suite-${Date.now()}`, completed.map((record) => ({ record, category: VALIDATED_SCENARIOS.find((s) => s.id === record.scenarioId)!.category })));
     if (out) writePrivateJson(path.resolve(out), summary); return output(summary);
   }
   if (command === 'judge') {
     const scoresFile = take('--scores'); const packetsOnly = flag('--packets-only'); const recordFiles = argv.filter((v) => !v.startsWith('--'));
     const runs = recordFiles.map((file) => parseRunRecord(readJson(file))); const scores = scoresFile ? readJsonl<JudgeScore>(scoresFile) : [];
-    if (packetsOnly) return output({ profiles: config.judges, blindPackets: runs.map((record) => blindPacket(record, LOCKED_SCENARIOS.find((s) => s.id === record.scenarioId)!)) });
+    if (packetsOnly) return output({ profiles: config.judges, blindPackets: runs.map((record) => blindPacket(record, VALIDATED_SCENARIOS.find((s) => s.id === record.scenarioId)!)) });
     if (!scoresFile) {
       for (const record of runs) for (const profile of config.judges) {
-        const scenario = LOCKED_SCENARIOS.find((s) => s.id === record.scenarioId); if (!scenario) throw new Error(`unknown locked scenario ${record.scenarioId}`);
+        const scenario = VALIDATED_SCENARIOS.find((s) => s.id === record.scenarioId); if (!scenario) throw new Error(`unknown validated scenario ${record.scenarioId}`);
         scores.push(...await judgeRun(providerLLM(config.providers[profile.provider], config.data_directory ?? privateDataRoot()), profile, record, scenario, config.data_directory ?? privateDataRoot()));
       }
     }
-    const summary = buildSuiteSummary(`judged-${Date.now()}`, runs.map((record) => ({ record, category: LOCKED_SCENARIOS.find((s) => s.id === record.scenarioId)!.category, judges: scores.filter((s) => s.runId === record.runId) })));
+    const summary = buildSuiteSummary(`judged-${Date.now()}`, runs.map((record) => ({ record, category: VALIDATED_SCENARIOS.find((s) => s.id === record.scenarioId)!.category, judges: scores.filter((s) => s.runId === record.runId) })));
     return output(summary);
   }
   if (command === 'compare') { const a = suiteSummarySchema.parse(readJson(need(argv.shift(), 'compare requires summary A'))); const b = suiteSummarySchema.parse(readJson(need(argv.shift(), 'compare requires summary B'))); return output(compareSummaries(a, b)); }
@@ -87,7 +88,7 @@ async function dataCommand(config: ReturnType<typeof loadBenchConfig>): Promise<
   if (sub === 'export') { const publicMode = flag('--public'); const salt = take('--salt') ?? 'elpisbench-public-v1'; let rows = readJsonl<Episode>(need(argv.shift(), 'data export requires episodes.jsonl')).map(parseEpisode); if (publicMode) rows = rows.map((e) => publicizeEpisode(e, salt)); const exported = rows.map(toHuggingFaceRow); if (out) writeJsonl(path.resolve(out), exported); return output({ rows: exported.length, public: publicMode }); }
   if (sub === 'rollout') {
     if (!flag('--stdin')) throw new Error('data rollout currently accepts grouped candidates via --stdin'); const payload = JSON.parse(fs.readFileSync(0, 'utf8')) as { scenario: string; candidates: string[]; fake?: boolean };
-    const scenario = LOCKED_SCENARIOS.find((s) => s.id === payload.scenario); if (!scenario) throw new Error(`unknown scenario ${payload.scenario}`);
+    const scenario = VALIDATED_SCENARIOS.find((s) => s.id === payload.scenario); if (!scenario) throw new Error(`unknown scenario ${payload.scenario}`);
     if (payload.fake) return output(payload.candidates.map((_, i) => ({ gates: { outcome:true,targeting:true,containment:true,terminalEnd:true,bounded:true,quiescent:true }, metrics: { surplusModelTurns:i,failedCalls:0 } })));
     const runs = []; for (const candidate of payload.candidates) runs.push(await runScenario(config, scenario, config.default_provider, { candidate })); return output(runs);
   }
@@ -97,5 +98,5 @@ async function dataCommand(config: ReturnType<typeof loadBenchConfig>): Promise<
 }
 
 async function mapConcurrent<T, R>(items: readonly T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> { const results = new Array<R>(items.length); let next = 0; await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => { for (;;) { const index = next++; if (index >= items.length) return; results[index] = await fn(items[index]); } })); return results; }
-function help(): string { return `ElpisBench\n\nCommands:\n  init [file]\n  doctor\n  image build [--tag TAG]\n  auth login [anthropic-oauth|codex-oauth]\n  list [--category CATEGORY]\n  run [scenario ids...] [--provider NAME] [--oracle|--baseline no-tool] [--out FILE]\n  judge RECORD... [--scores JSONL]\n  compare A B\n  calibrate SUMMARY...\n  data epochs|index|extract|sanitize|generate|rollout|validate|split|approve|export|preference|overlap\n`; }
+function help(): string { return `ElpisBench (public validated corpus: 0; no benchmark score is currently available)\n\nCommands:\n  init [file]\n  doctor\n  image build [--tag TAG]\n  auth login [anthropic-oauth|codex-oauth]\n  list [--category CATEGORY]\n  run [scenario ids...] [--provider NAME] [--oracle|--baseline no-tool] [--out FILE]\n  judge RECORD... [--scores JSONL]\n  compare A B\n  calibrate SUMMARY...\n  data epochs|index|extract|sanitize|generate|rollout|validate|split|approve|export|preference|overlap\n`; }
 main().catch((error) => { process.stderr.write(`elpisbench: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

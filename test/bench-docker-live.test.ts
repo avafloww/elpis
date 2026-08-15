@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
 import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
-import { LOCKED_SCENARIOS } from '../bench/scenarios.js';
+import { ORDINARY_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
 const image = process.env.ELPISBENCH_IMAGE ?? 'elpisbench:latest';
@@ -39,8 +39,8 @@ test('live Docker boundary denies network/root writes/capabilities and applies d
     const output = execFileSync('docker', [
       'run', '--rm', '--user', `${uid}:${gid}`, '--read-only', '--network', 'none', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges:true', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=16m',
-      '--mount', `type=bind,src=${clock},dst=/episode/clock,readonly`,
-      '--env', 'FAKETIME_TIMESTAMP_FILE=/episode/clock', '--env', 'FAKETIME_NO_CACHE=1',
+      '--mount', `type=bind,src=${clock},dst=/run/elpis-clock,readonly`,
+      '--env', 'FAKETIME_TIMESTAMP_FILE=/run/elpis-clock', '--env', 'FAKETIME_NO_CACHE=1',
       '--env', 'FAKETIME_DONT_FAKE_MONOTONIC=1', '--entrypoint', 'node', image, '-e', script,
     ], { encoding: 'utf8' });
     assert.deepEqual(JSON.parse(output.trim()), {
@@ -63,7 +63,7 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     ],
     image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
   };
-  const scenario = LOCKED_SCENARIOS.find((item) => item.id === 'tool/read-edit-verify')!;
+  const scenario = ORDINARY_TEST_SCENARIO;
   try {
     await runScenario(config, scenario, 'oracle', { oracle: true });
     const wrong: string[] = [];

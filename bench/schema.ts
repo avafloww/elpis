@@ -17,17 +17,24 @@ export const outcomeCheckSchema = z.discriminatedUnion('kind', [
 export type OutcomeCheck = z.infer<typeof outcomeCheckSchema>;
 export type OutcomeCheckInput = z.input<typeof outcomeCheckSchema>;
 
+export const candidateIngressSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('discord'), content: z.string(), channel: z.string().min(1), author: z.string().min(1), authorId: z.string().optional() }),
+  z.object({ kind: z.literal('heartbeat') }),
+  z.object({ kind: z.enum(['scheduler', 'harness', 'watch']), content: z.string().min(1), author: z.string().default('agent') }),
+]);
+export type CandidateIngressSpec = z.infer<typeof candidateIngressSchema>;
+
 const expectedSchema = z.object({
   outcome: z.string().min(1),
   targetChannel: z.string().optional(),
   targetRecipient: z.string().optional(),
   exclusiveTarget: z.boolean().default(false),
   workPaths: z.array(z.string()).default([]),
-  action: z.enum(['required', 'forbidden', 'optional']).default('required'),
+  action: z.enum(['required', 'optional']).default('required'),
   checks: z.array(outcomeCheckSchema).default([]),
 });
 
-export const scenarioSpecSchema = z.object({
+const scenarioSpecBase = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
   id: z.string().regex(/^[a-z]+\/[a-z0-9-]+$/),
   revision: z.number().int().positive(),
@@ -35,6 +42,9 @@ export const scenarioSpecSchema = z.object({
   category: z.enum(categories),
   title: z.string().min(1),
   prompt: z.string().min(1),
+  track: z.enum(['micro', 'production']).default('micro'),
+  ingress: candidateIngressSchema.optional(),
+  resumeIngress: candidateIngressSchema.optional(),
   pairId: z.string().optional(),
   difficulty: z.enum(['ordinary', 'hard-recovery', 'adversarial', 'calibration']),
   maxDispatches: z.number().int().positive(),
@@ -53,6 +63,10 @@ export const scenarioSpecSchema = z.object({
   }),
   expected: expectedSchema,
   judgeCriteria: z.array(z.string()).default([]),
+});
+export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) => {
+  if (scenario.track === 'production' && !scenario.ingress) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'production scenarios require explicit candidate ingress' });
+  if (scenario.track === 'micro' && (scenario.ingress || scenario.resumeIngress)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'micro scenarios derive ingress from the prompt' });
 });
 export type ScenarioSpec = z.infer<typeof scenarioSpecSchema>;
 

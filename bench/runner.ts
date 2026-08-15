@@ -60,10 +60,7 @@ export function oracleCode(scenario: ScenarioSpec, call = 1): string {
     } else if (check.kind === 'send-includes') sendValues.push(...(check.match === 'any' ? check.values.slice(0, 1) : check.values));
   }
 
-  if (scenario.fixture.restartAtDispatch && call === 1) {
-    if (scenario.id === 'tool/restart-continuity') return `fs.writeFileSync('stage-one.txt', ${JSON.stringify('stage one\n')})`;
-    return 'void 0';
-  }
+  if (scenario.fixture.restartAtDispatch && call === 1) return 'void 0';
 
   const target = scenario.expected.targetChannel ? scenario.fixture.channels[scenario.expected.targetChannel] : undefined;
   if (target) {

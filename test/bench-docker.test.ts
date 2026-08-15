@@ -13,7 +13,8 @@ test('Docker episodes deny network/capabilities and mount only explicit episode 
   assert.match(joined,/--read-only/); assert.match(joined,/--network none/); assert.match(joined,/--cap-drop ALL/);
   assert.match(joined,/no-new-privileges:true/); assert.match(joined,/--pids-limit/); assert.match(joined,/--tmpfs/);
   assert.match(joined,/FAKETIME_DONT_FAKE_MONOTONIC=1/);
-  assert.doesNotMatch(joined,/docker\.sock/); assert.match(joined,/dst=\/episode\/work(?:\s|$)/); assert.match(joined,/dst=\/episode\/clock,readonly/);
+  assert.doesNotMatch(joined,/docker\.sock/); assert.match(joined,/dst=\/home\/agent\/data(?:\s|$)/); assert.match(joined,/dst=\/run\/elpis-clock,readonly/);
+  assert.doesNotMatch(joined,/\/episode\//);
   fs.rmSync(root,{recursive:true,force:true});
 });
 
