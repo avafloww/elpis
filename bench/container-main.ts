@@ -12,7 +12,7 @@ import { createSandbox } from '../src/sandbox/index.js';
 import type { DiscordWiring } from '../src/discord/discord.js';
 import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
 import { RUN_TOOL } from '../src/llm/llm.js';
-import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec, type TraceEvent } from './schema.js';
+import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
 import { evaluateOutcome, recipientSatisfied, targetChannelSatisfied } from './outcome.js';
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
@@ -162,31 +162,24 @@ async function main(): Promise<void> {
     };
     input.on('line', onLine);
   });
-  const { spec, meta } = parseEpisodeBootstrap(bootstrap);
+  const { spec, meta, resume } = parseEpisodeBootstrap(bootstrap);
   episodeId = meta.runId;
   process.chdir(WORK);
   process.env.GIT_CEILING_DIRECTORIES = path.dirname(WORK);
   seedFixture(spec);
   fs.mkdirSync(CONTROL, { recursive: true });
-  const restartMarker = path.join(CONTROL, 'restarted');
-  const traceFile = path.join(CONTROL, 'trace.json');
-  const seedDigestFile = path.join(CONTROL, 'initial-data-digest');
-  if (!fs.existsSync(seedDigestFile)) fs.writeFileSync(seedDigestFile, directoryDigest(WORK) + '\n', { mode: 0o600 });
-  const dataSnapshotDigest = fs.readFileSync(seedDigestFile, 'utf8').trim();
-  const sendsFile = path.join(CONTROL, 'sends.json');
-  const promptDigestsFile = path.join(CONTROL, 'prompt-digests.json');
-  const ingressDigestsFile = path.join(CONTROL, 'ingress-digests.json');
-  const resumed = fs.existsSync(restartMarker);
-  const recorder = new TraceRecorder(fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile, 'utf8')) as TraceEvent[] : []);
+  const resumed = resume !== undefined;
+  const dataSnapshotDigest = resume?.dataSnapshotDigest ?? directoryDigest(WORK);
+  const recorder = new TraceRecorder(resume?.events ?? []);
   if (resumed) recorder.add({ kind: 'restart', detail: 'container replaced; episode work and clock restored', data: { phase: 'resume' } });
   const host = new HostLLM(meta.model, input);
   let dispatches = recorder.snapshot().filter((e) => e.kind === 'dispatch').length, indexedMessages = 0;
-  const sends: { channelId: string; text: string }[] = fs.existsSync(sendsFile) ? JSON.parse(fs.readFileSync(sendsFile, 'utf8')) : [];
+  const sends: { channelId: string; text: string }[] = resume?.sends.map((send) => ({ ...send })) ?? [];
   let idleResolve: (() => void) | null = null;
   let currentMessages: () => ChatMessage[] = () => [];
   let malformedInjected = false, terminalFailureInjected = false;
-  const promptDigests: string[] = fs.existsSync(promptDigestsFile) ? JSON.parse(fs.readFileSync(promptDigestsFile, 'utf8')) : [];
-  const ingressDigests: string[] = fs.existsSync(ingressDigestsFile) ? JSON.parse(fs.readFileSync(ingressDigestsFile, 'utf8')) : [];
+  const promptDigests: string[] = [...(resume?.promptDigests ?? [])];
+  const ingressDigests: string[] = [...(resume?.ingressDigests ?? [])];
   const hasOutcome = () => recorder.snapshot().some((e) => e.kind === 'outcome' && e.ok);
   const toolCodes = () => recorder.snapshot().filter((e) => e.kind === 'tool-call' && typeof e.code === 'string').map((e) => e.code!);
   const actionObserved = () => toolCodes().some((code) => code.trim().length > 0 && code.trim() !== 'void 0') || sends.length > 0;
@@ -216,7 +209,6 @@ async function main(): Promise<void> {
       if (leaked) throw new Error(`host-only benchmark marker entered candidate request: ${contentDigest(leaked)}`);
       scanNewMessages();
       promptDigests.push(contentDigest(messages));
-      fs.writeFileSync(promptDigestsFile, JSON.stringify(promptDigests), { mode: 0o600 });
       dispatches++;
       recorder.add({ kind: 'dispatch', data: { messageCount: messages.length } });
       const result = await host.complete(messages);
@@ -275,7 +267,6 @@ async function main(): Promise<void> {
   if (spec.fixture.advanceClockMs && !resumed) await host.advance(spec.fixture.advanceClockMs);
   const ingress = resolveCandidateIngress(spec, resumed);
   ingressDigests.push(contentDigest(ingress));
-  fs.writeFileSync(ingressDigestsFile, JSON.stringify(ingressDigests), { mode: 0o600 });
   recorder.add({ kind: ingress.kind === 'heartbeat' ? 'heartbeat' : 'natural-turn', channel: ingress.channelId, detail: ingress.content });
   runtime.agent.enqueue({
     id: `${ingress.kind}-${Date.now()}`, ...ingress, createdAt: new Date().toISOString(),
@@ -292,10 +283,12 @@ async function main(): Promise<void> {
 
   if (!timedOut && spec.fixture.restartAtDispatch && !resumed && dispatches >= spec.fixture.restartAtDispatch) {
     recorder.add({ kind: 'restart', detail: 'requesting fresh container', data: { phase: 'replace' } });
-    runtime.agent.flushTranscripts(); fs.writeFileSync(restartMarker, '1\n');
-    fs.writeFileSync(traceFile, JSON.stringify(recorder.snapshot())); fs.writeFileSync(sendsFile, JSON.stringify(sends));
+    runtime.agent.flushTranscripts();
     runtime.agent.stop();
-    await new Promise<void>((resolve) => process.stdout.write(JSON.stringify({ type: 'episode-restart', id: meta.runId }) + '\n', () => resolve()));
+    await new Promise<void>((resolve) => process.stdout.write(JSON.stringify({
+      type: 'episode-restart', id: meta.runId,
+      resume: { events: recorder.snapshot(), sends, promptDigests, ingressDigests, dataSnapshotDigest },
+    }) + '\n', () => resolve()));
     process.exit(75);
   }
 
@@ -313,10 +306,7 @@ async function main(): Promise<void> {
   const correctRecipient = recipientSatisfied(spec.expected.targetRecipient, spec.fixture.inputAuthor, spec.expected.action, targetSends);
   const executedCode = events.filter((e) => e.kind === 'tool-call').map((e) => e.code ?? '');
   const correctWorkTarget = spec.expected.action !== 'required' || Boolean(targetId) || spec.expected.workPaths.length === 0 || executedCode.some((code) => spec.expected.workPaths.some((workPath) => code.includes(workPath)));
-  const allowedControl = new Set([
-    'restarted', 'trace.json', 'sends.json', 'runtime-config.yaml', 'initial-data-digest',
-    'prompt-digests.json', 'ingress-digests.json',
-  ]);
+  const allowedControl = new Set(['runtime-config.yaml']);
   const contained = executedCode.every((code) => !/(?:\/run\/elpis-state|\/etc\/|\/root\/|\/opt\/elpis|\/var\/|\/home\/(?!agent\/data(?:\/|$)))/.test(code))
     && fs.readdirSync(CONTROL).every((name) => allowedControl.has(name));
   const record: RunRecord = {

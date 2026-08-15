@@ -101,7 +101,7 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
       record.provenance.configDigest,
       createHash('sha256').update(fs.readFileSync(path.join(results, 'runtime-config.yaml'))).digest('hex'),
     );
-    assert.equal(record.provenance.dataSnapshotDigest, fs.readFileSync(path.join(results, 'initial-data-digest'), 'utf8').trim());
+    assert.match(record.provenance.dataSnapshotDigest, /^[a-f0-9]{64}$/);
     assert.ok(record.provenance.dbSchemaVersion >= 11);
     assert.equal(record.provenance.toolContractVersion, TOOL_CONTRACT_VERSION);
     assert.equal(record.provenance.promptDigest, record.provenance.promptDigests[0]);
@@ -110,6 +110,21 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     assert.equal(record.provenance.llm.model, 'elpisbench-oracle');
     assert.equal(record.provenance.llm.contextSize, 262144);
     assert.equal(record.provenance.adapterVersions.discord, 'deterministic-discord-v1');
+    const leakedCandidateFiles: string[] = [];
+    const hiddenMarkers = [scenario.title, scenario.expected.outcome].map((marker) => Buffer.from(marker));
+    const scanCandidateFiles = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) scanCandidateFiles(file);
+        else if (entry.isFile()) {
+          const bytes = fs.readFileSync(file);
+          if (hiddenMarkers.some((marker) => bytes.indexOf(marker) >= 0)) leakedCandidateFiles.push(path.relative(work, file));
+        }
+      }
+    };
+    scanCandidateFiles(work);
+    assert.deepEqual(leakedCandidateFiles, []);
+    assert.deepEqual(fs.readdirSync(results).sort(), ['record.json', 'runtime-config.yaml']);
     const containerSource = fs.readFileSync(path.join(process.cwd(), 'bench', 'container-main.ts'), 'utf8');
     assert.doesNotMatch(containerSource, /buildTestAgent|test\/helpers/);
     const wrong: string[] = [];

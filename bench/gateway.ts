@@ -1,7 +1,7 @@
 import * as readline from 'node:readline';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { CompleteResult } from '../src/llm/llm.js';
-import type { EpisodeBootstrap } from './bootstrap.js';
+import type { EpisodeBootstrap, EpisodeResumeState } from './bootstrap.js';
 
 export type GatewayRequest =
   | { type: 'complete'; id: string; messages: unknown[] }
@@ -9,7 +9,7 @@ export type GatewayRequest =
   | { type: 'reset-session'; id: string }
   | { type: 'advance-clock'; id: string; ms: number }
   | { type: 'episode-result'; id: string; result: unknown }
-  | { type: 'episode-restart'; id: string }
+  | { type: 'episode-restart'; id: string; resume: EpisodeResumeState }
   | { type: 'episode-error'; id: string; error: string };
 export type GatewayResponse = { type: 'response'; id: string; ok: true; value?: unknown } | { type: 'response'; id: string; ok: false; error: string };
 
@@ -34,7 +34,7 @@ export function serveGateway(child: ChildProcessWithoutNullStreams, gateway: Com
       let request: GatewayRequest;
       try { request = JSON.parse(line) as GatewayRequest; } catch { return; }
       if (request.type === 'episode-result') { resolve(request.result); return; }
-      if (request.type === 'episode-restart') { resolve({ restart: true }); return; }
+      if (request.type === 'episode-restart') { resolve({ restart: true, resume: request.resume }); return; }
       if (request.type === 'episode-error') { reject(new Error(request.error)); return; }
       try {
         let value: unknown;

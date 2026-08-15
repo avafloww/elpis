@@ -12,7 +12,7 @@ import { parseRunRecord, type RunRecord, type ScenarioSpec } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
 import { artifactPath, contentDigest, ensurePrivateDir, privateDataRoot, readJson, writePrivateJson } from './store.js';
 import { stampGeneration } from '../src/llm/provenance.js';
-import type { EpisodeRunControl } from './bootstrap.js';
+import { episodeResumeStateSchema, type EpisodeResumeState, type EpisodeRunControl } from './bootstrap.js';
 
 function imageIdentity(image: string): string {
   // A locally built image has an immutable image ID but no RepoDigests entry
@@ -137,11 +137,13 @@ export async function runScenario(config: BenchConfig, scenario: ScenarioSpec, p
   };
   const name = `elpisbench-${digest.slice(0, 12)}`;
   let raw: unknown;
+  let resume: EpisodeResumeState | undefined;
   for (let replacements = 0; ; replacements++) {
     if (replacements > 1) throw new Error('episode requested more than one simulated restart');
     const child = startEpisodeContainer({ image: config.image, workDir, resultDir, clockFile, name, limits: { timeoutMs: scenario.maxWallMs + 30_000 } });
-    raw = await withContainerTimeout(child, name, serveGateway(child, gateway, { type: 'bootstrap', scenario, run: runControl }), scenario.maxWallMs + 30_000);
+    raw = await withContainerTimeout(child, name, serveGateway(child, gateway, { type: 'bootstrap', scenario, run: runControl, ...(resume ? { resume } : {}) }), scenario.maxWallMs + 30_000);
     if (!(typeof raw === 'object' && raw !== null && (raw as { restart?: unknown }).restart === true)) break;
+    resume = episodeResumeStateSchema.parse((raw as { resume?: unknown }).resume);
     llm.resetSession?.();
   }
   const result = parseRunRecord(raw);
