@@ -1,3 +1,5 @@
+import type { ExtensionContext, ExtensionDefinition } from '../src/extensions.js';
+
 /**
  * Working Elpis extension example.
  *
@@ -18,7 +20,7 @@ export const extension = {
 
   // activate may be synchronous or async. Return a plain API object containing
   // functions, primitives, arrays, and other plain objects.
-  activate(context: { agentName(): string; log(level: 'info' | 'warn' | 'error', ...args: unknown[]): void; runLog(...args: unknown[]): void }) {
+  activate(context: ExtensionContext) {
     context.log('info', 'example extension activated');
     return {
       greet(name: string) {
@@ -30,4 +32,4 @@ export const extension = {
       },
     };
   },
-};
+} satisfies ExtensionDefinition;

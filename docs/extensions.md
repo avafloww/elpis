@@ -27,6 +27,8 @@ A complete commented example lives at [`docs/example.ext.ts`](example.ext.ts). C
 A module exports a named plain object called `extension`:
 
 ```ts
+import type { ExtensionDefinition } from '../src/extensions.js';
+
 export const extension = {
   description: 'Small example tools.',
   prompt: `\`elpis.ext.example.greet(name)\` returns a greeting.`,
@@ -37,7 +39,7 @@ export const extension = {
       },
     };
   },
-};
+} satisfies ExtensionDefinition;
 ```
 
 All fields are optional, but a useful extension normally supplies `prompt`, `activate`, or both.
