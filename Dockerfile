@@ -8,10 +8,12 @@ RUN npm run build && npm prune --omit=dev --legacy-peer-deps
 
 FROM node:24-trixie-slim AS runtime
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git openssh-client tini \
+  && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl file git jq less openssh-client procps \
+    python3 python3-pip python3-venv ripgrep tini wget \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 elpis \
-  && useradd --uid 10001 --gid 10001 --home-dir /data/home --shell /usr/sbin/nologin elpis
+  && useradd --uid 10001 --gid 10001 --home-dir /data/home --shell /bin/bash elpis
 WORKDIR /opt/elpis
 COPY --from=build --chown=root:root /opt/elpis/package.json /opt/elpis/package-lock.json ./
 COPY --from=build --chown=root:root /opt/elpis/node_modules ./node_modules
@@ -23,7 +25,7 @@ RUN chmod 0555 /usr/local/bin/elpis-container-entrypoint \
   && chmod 0444 /etc/elpis/restricted \
   && chown 10001:10001 /data
 ENV NODE_ENV=production \
-    ELPIS_CONFIG=/data/config.yaml \
+    ELPIS_CONFIG=/config.yaml \
     HOME=/data/home \
     TMPDIR=/data/tmp
 VOLUME ["/data"]

@@ -1,6 +1,6 @@
 # Configuration
 
-Elpis reads `config.yaml` from the repository root by default. `ELPIS_CONFIG` may point to another file, as the restricted image does with `/data/config.yaml`. Keep the file mode `0600` and never commit it.
+Elpis reads `config.yaml` from the repository root by default. `ELPIS_CONFIG` may point to another file, as the restricted image does with a read-only `/config.yaml` bind. Keep the file mode `0600` and never commit it.
 
 ```bash
 cp config.example.yaml config.yaml

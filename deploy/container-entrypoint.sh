@@ -13,7 +13,7 @@ fi
 mkdir -p "$HOME" "$TMPDIR"
 chmod 0700 "$HOME" "$TMPDIR"
 if [ ! -r "$ELPIS_CONFIG" ]; then
-  echo "elpis: config not readable at $ELPIS_CONFIG; mount a completed config.yaml in /data" >&2
+  echo "elpis: config not readable at $ELPIS_CONFIG; mount a completed config.yaml read-only at /config.yaml" >&2
   exit 78
 fi
 exec "$@"
