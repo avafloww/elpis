@@ -265,7 +265,7 @@ elpis.restart("picking up new build")
 Restarting terminates this process immediately, so any state not written to your brain
 (DATA_DIRECTORY) is lost. Write first, restart second.`;
   const extensionManagementLine = restricted
-    ? `Extensions are loaded by the operator at boot. Their prompt strings and APIs remain fixed until the runtime is restarted externally.`
+    ? `You may write extensions under \`DATA_DIR/extensions/\`. They are discovered only at boot; because restart is operator-controlled in this profile, a new or changed extension takes effect only after an external restart. Prompt strings and APIs remain fixed between boots.`
     : `To add or change one, write \`DATA_DIR/extensions/<name>.ext.ts\`, inspect the commented working example at \`HARNESS_ROOT/docs/example.ext.ts\`, then restart Elpis. Filename normalization determines the namespace; prompt strings and APIs are copied once and remain fixed until that restart.`;
   const shellCwdLine = restricted
     ? `The default \`elpis.sh\` timeout is 60s. **cwd defaults to DATA_DIR**. Work inside writable mounted data; the image and host are operator-managed.`
