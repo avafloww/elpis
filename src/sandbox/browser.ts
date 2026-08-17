@@ -71,11 +71,9 @@ export function createBrowserTools(options: BrowserToolsOptions): Record<string,
       open: (url?: string, opts: { browser?: 'chrome' | 'firefox' | 'webkit' | 'msedge'; headless?: boolean; persistent?: boolean; profile?: string; timeout?: number } = {}) => {
         const args = url ? [stringArg(url, 'url')] : [];
         if (opts.browser) args.push(`--browser=${opts.browser}`);
-        if (!opts.headless) {
-          args.push('--headed');
-          if (options.maximizedChromiumConfig && (!opts.browser || opts.browser === 'chrome' || opts.browser === 'msedge')) {
-            args.push(`--config=${options.maximizedChromiumConfig}`);
-          }
+        if (!opts.headless) args.push('--headed');
+        if (options.maximizedChromiumConfig && (!opts.browser || (!opts.headless && (opts.browser === 'chrome' || opts.browser === 'msedge')))) {
+          args.push(`--config=${options.maximizedChromiumConfig}`);
         }
         if (opts.persistent) args.push('--persistent');
         if (opts.profile) args.push(`--profile=${opts.profile}`);

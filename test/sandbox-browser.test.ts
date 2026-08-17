@@ -29,7 +29,7 @@ test('browser namespace maps default and named sessions to argument arrays', asy
   });
 
   await browser.session('headless').open('https://example.com', { headless: true });
-  assert.deepEqual(calls[1].args, ['-s=headless', 'open', 'https://example.com', '--json']);
+  assert.deepEqual(calls[1].args, ['-s=headless', 'open', 'https://example.com', `--config=${config}`, '--json']);
 
   await browser.session('work_2').fill('e5', 'hello world', { submit: true });
   assert.deepEqual(calls[2].args, ['-s=work_2', 'fill', 'e5', 'hello world', '--submit', '--json']);
