@@ -917,15 +917,20 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     if (deps.writeState) deps.writeState(merged);
     return merged;
   };
- // native(text) — append a signed first-person note to notes/<agent-slug>-native.md.
- // A small identity-practice helper, personal to the agent: a place to write in
- // their own voice without hand-crafting timestamps or paths.
-  e.native = (text: string) => {
-    if (!deps.native) {
-      return { ok: false, path: '', note: 'elpis.native() is not configured in this sandbox' };
-    }
-    return deps.native(text);
+  const extensionRoot = Object.create(null) as Record<string, unknown>;
+  for (const summary of deps.extensions?.summaries ?? []) {
+    extensionRoot[summary.namespace] = deps.extensions?.apis[summary.namespace];
+  }
+  extensionRoot.$failures = () => deps.extensions?.failures ?? [];
+  extensionRoot.$help = (namespace?: string) => {
+    const summaries = deps.extensions?.summaries ?? [];
+    if (namespace === undefined) return summaries;
+    if (typeof namespace !== 'string') throw new Error('elpis.ext.$help(namespace) requires a string namespace');
+    const found = summaries.find((summary) => summary.namespace === namespace);
+    if (!found) throw new Error(`unknown extension namespace: ${namespace}`);
+    return found;
   };
+  e.ext = Object.freeze(extensionRoot);
 
  // A transient, voluntary causal scratchpad. The fragment is not written to a
  // side file: the run call + returned value already place it in conversation

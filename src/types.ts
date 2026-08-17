@@ -6,6 +6,7 @@ import type { Logger } from './lib/log.js';
 import type { ChatMessage, StandaloneCompleteOptions, StandaloneCompleteResult } from './llm/llm.js';
 import type { MindService } from './store/mind.js';
 import type { ReplayIdentity } from './llm/provenance.js';
+import type { ExtensionRegistry } from './extensions.js';
 
 /** Reserved provenance label for heartbeat / harness-internal traffic. In the monocontext model,
  * (monocontext) this is no longer a separate context — it is a transcript
@@ -76,6 +77,8 @@ export interface SandboxDeps {
   logbuf: string[];
   /** Hot-reloaded inhabitant name (SOUL.md frontmatter), used for self-authored records. */
   agentName?: () => string;
+  /** Boot-loaded, deeply frozen data-directory extension registry. */
+  extensions?: ExtensionRegistry;
   /** Structured metadata for the most recent inbound Discord message. */
   inbound?: InboundMessage | null;
   /** Background jobs + futures registry (A3/A5). Shared across the sandbox. */
@@ -121,8 +124,6 @@ export interface SandboxDeps {
   /** Read the agent's self-set transient state object from state.json.
  * Returns {} if missing or malformed. */
   readState?: () => Record<string, unknown>;
-  /** Append a native first-person note to notes/<agent-slug>-native.md. Returns the path. */
-  native?: (text: string) => { ok: boolean; path: string };
   /** Write the agent's self-set transient state object to state.json. */
   writeState?: (state: Record<string, unknown>) => void;
   /** Trigger Discord's typing indicator in a channel. Used by channel(id).typing(). */

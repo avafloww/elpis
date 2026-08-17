@@ -19,6 +19,7 @@ DATA_DIRECTORY/
 ├── sessions/
 ├── browser/
 ├── computer/
+├── extensions/
 ├── motor/
 ├── private/
 └── bg/
@@ -34,6 +35,7 @@ The exact set grows as capabilities are used.
 - `NOW.md` records current focus.
 - `state.json` is an optional self-set state snapshot.
 - `ponder/` holds unresolved thinking without turning it into a commitment.
+- `extensions/*.ext.ts` contains trusted local harness plugins; these execute with service-user authority and belong in encrypted backups.
 
 Existing files are never replaced by boot defaults.
 

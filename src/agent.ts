@@ -353,6 +353,8 @@ export interface AgentDeps {
   /** Dependency-aware external cortex. Optional so focused Agent tests and
  * embedders can omit it; production always wires the canonical service. */
   mind?: MindService;
+  /** Boot-frozen deterministic prompt blocks from data-directory extensions. */
+  extensionPrompt?: string;
   llm: LLM;
   tracker: ContextTracker;
   compactor: Compactor;
@@ -1941,6 +1943,7 @@ export class Agent {
       fleetEnabled: this.config.fleet?.enabled,
       guildCount: this.config.discord.guilds.length,
       externalThinking: this.config.llm.externalThinking,
+      extensionPrompt: this.deps.extensionPrompt,
     });
     const externalThinkingHint = this.config.llm.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`

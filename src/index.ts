@@ -28,7 +28,7 @@ import { Scheduler } from './store/scheduler.js';
 import { MindService } from './store/mind.js';
 import { createFeedbackStore } from './store/feedback.js';
 import { readState, writeState } from './store/state.js';
-import { appendNativeNote } from './store/native.js';
+import { loadExtensions } from './extensions.js';
 import { readAgentName } from './store/soul.js';
 import { setLogSink } from './lib/log.js';
 import { ConsoleHub, type MetaInfo } from './console/hub.js';
@@ -45,6 +45,7 @@ export interface ElpisRuntimeAdapters {
   createLLM?: typeof createLLM;
   createDiscord?: typeof createDiscord;
   createSandbox?: typeof createSandbox;
+  loadExtensions?: typeof loadExtensions;
 }
 
 export interface ElpisRuntime {
@@ -53,6 +54,7 @@ export interface ElpisRuntime {
   discord: ReturnType<typeof createDiscord>;
   scheduler: Scheduler;
   mind: MindService;
+  extensions: Awaited<ReturnType<typeof loadExtensions>>;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -89,6 +91,17 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // ./notes.txt, ...) land in the agent's brain by default.
   process.chdir(config.paths.dataDirectory);
   log('sandbox cwd:', config.paths.dataDirectory);
+  const extensions = await (adapters.loadExtensions ?? loadExtensions)({
+    dataDirectory: config.paths.dataDirectory,
+    harnessRoot: config.paths.harnessRoot,
+    agentName: () => readAgentName(config.paths.soulPath),
+    log: (level, ...args) => {
+      if (level === 'warn') config.logger.warn(...args);
+      else if (level === 'error') config.logger.error(...args);
+      else config.logger.info(...args);
+    },
+  });
+  log(`extensions loaded: ${extensions.summaries.length}; skipped: ${extensions.failures.length}`);
 
  // These two are independent — a network probe (context window) and a disk
  // read (most-recent transcript) — so kick them off together rather than
@@ -222,6 +235,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     config,
     replayIdentity: replayIdentityForConfig(config),
     memory,
+    extensions,
     send: async (channelId: string, content: string, opts?: { files?: import('./types.js').OutboundAttachment[] }) => agent.send(channelId, content, opts),
     logbuf: [],
     agentName: () => readAgentName(config.paths.soulPath),
@@ -266,10 +280,6 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // Self-set transient state: read fresh every turn, write from sandbox.
     readState: () => readState(config.paths.dataDirectory),
     writeState: (s) => writeState(config.paths.dataDirectory, s),
- // Native first-person note helper: appends a signed entry to
- // notes/<agent-slug>-native.md. The name is read fresh per call (soul.ts)
- // so a rename in SOUL.md frontmatter takes effect without a restart.
-    native: (text: string) => appendNativeNote(config.paths.dataDirectory, text, readAgentName(config.paths.soulPath)),
  // Leveled logger for sandbox verbs that need an operator-visible journal line
  // outside the model's tool-result buffer (elpis.metacog.*).
     logger: config.logger,
@@ -311,6 +321,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     sandbox,
     memory,
     mind,
+    extensionPrompt: extensions.prompt,
     setCurrentInbound: (msg: InboundMessage | null) => { inboundRef.current = msg; },
     llm,
     tracker,
@@ -517,7 +528,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   process.on('unhandledRejection', (reason) => reportProcessError('unhandledRejection', reason));
   process.on('uncaughtException', (err) => reportProcessError('uncaughtException', err));
 
-  return { config, agent, discord, scheduler, mind };
+  return { config, agent, discord, scheduler, mind, extensions };
 }
 
 // Only boot when this module is the actual process entry point (`tsx watch

@@ -77,6 +77,8 @@ export interface PromptInputs {
   guildCount?: number;
   /** Boot-constant: when true, document and encourage the model-facing think tool. */
   externalThinking?: boolean;
+  /** Boot-frozen extension prompt blocks, sorted and normalized by the loader. */
+  extensionPrompt?: string;
 }
 
 /** Max total chars of people/ file content injected into one prompt. Bounds
@@ -257,6 +259,17 @@ Keep assistant \`content\` empty or as close to empty as the provider permits; a
 \`.\` is transport residue, not speech or scratchpad. Put cognition in \`think\`, actions in \`run\`, and
 anything meant for another person—including progress updates—through \`elpis.channel(...).send()\`.`
     : '';
+  const extensionSection = `### \`elpis.ext\` — trusted local extensions
+TypeScript/JavaScript modules from \`DATA_DIR/extensions/*.ext.{ts,mts,js,mjs}\` are imported into the main harness process at boot, then exposed as deeply frozen APIs under \`elpis.ext.<filename_namespace>\`. They are trusted host code, not a security sandbox.
+
+- \`elpis.ext.$help()\` → frozen summaries for every loaded extension: \`{ namespace, file, description, members }[]\`.
+- \`elpis.ext.$help(namespace)\` → one loaded extension summary; unknown names throw.
+- \`elpis.ext.$failures()\` → frozen records for extensions skipped at boot: \`{ file, namespace, stage, error }[]\`.
+- A failed extension exposes neither API nor prompt text; other extensions and Elpis continue loading.
+
+To add or change one, write \`DATA_DIR/extensions/<name>.ext.ts\`, inspect the commented working example at \`HARNESS_ROOT/docs/example.ext.ts\`, then restart Elpis. Filename normalization determines the namespace; prompt strings and APIs are copied once and remain fixed until that restart.
+
+${input.extensionPrompt || 'No extensions are loaded.'}`;
   const assistantContentContract = input.externalThinking
     ? 'Assistant `content` blocks are transport residue only: keep them empty or minimal. They are never speech; use `think` for cognition and `elpis.channel(...).send()` for anything meant for another person.'
     : 'Assistant `content` blocks exist only as a space to think to yourself. If you never send a message through the send call, nobody will see your content.';
@@ -458,6 +471,8 @@ In the JavaScript sandbox, the following tools and objects are available as glob
 
 ### \`elpis.focus(string)\`
 Records whatever your current focus is in \`NOW.md\`.
+
+${extensionSection}
 
 ### \`elpis.marginalia(text)\` — voluntary causal scratchpad
 
