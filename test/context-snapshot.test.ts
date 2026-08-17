@@ -82,12 +82,12 @@ function fakeMind(items: MindItem[], stats: MindStats) {
 
 test('formatMindFrontier: commitments and held thoughts stay distinct; bodies stay behind get()', () => {
   const items = [
-    mindItem({ id: 7, title: 'Ship it', body: 'private implementation body', status: 'in_progress', effectiveStatus: 'in_progress' }),
+    mindItem({ id: 7, title: 'Ship it', body: 'private implementation body', status: 'in_progress', effectiveStatus: 'in_progress', createdBy: 'mcp:codex-worker-7' }),
     mindItem({ id: 8, title: 'Wait honestly', status: 'waiting', effectiveStatus: 'waiting' }),
     mindItem({ id: 9, title: 'A half thought', kind: 'idea', status: 'open', effectiveStatus: 'open' }),
   ];
   const card = formatMindFrontier(fakeMind(items, { active: 3, ready: 1, blocked: 0, waiting: 1, overdue: 0, done: 0, inbox: 0 }))!;
-  assert.match(card, /in progress:[\s\S]*#7 \[in progress\]/);
+  assert.match(card, /in progress:[\s\S]*#7 \[in progress\][^\n]*by mcp:codex-worker-7/);
   assert.match(card, /waiting commitments:[\s\S]*#8 \[waiting\]/);
   assert.match(card, /held thoughts — recorded, not promised; do not auto-act:[\s\S]*#9/);
   assert.ok(!card.includes('private implementation body'), 'frontier must not duplicate item bodies');

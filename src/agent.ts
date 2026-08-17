@@ -99,7 +99,7 @@ function mindFrontierLine(item: MindItem): string {
     ? `blocked by ${item.blockedBy.map((x) => `#${x.id}`).join(',')}`
     : item.effectiveStatus.replace('_', ' ');
   const due = item.dueAt == null ? '' : ` · due ${new Date(item.dueAt).toISOString()}`;
-  return `#${item.id} [${blocked}] [p${item.priority}] ${item.title}${due}`;
+  return `#${item.id} [${blocked}] [p${item.priority}] ${item.title}${due} · by ${item.createdBy}`;
 }
 
 /** Compact live external-cortex card. Bodies and comments stay behind get(id):
