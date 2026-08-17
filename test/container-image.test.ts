@@ -7,6 +7,8 @@ const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 test('official image hard-codes the restricted non-root runtime contract', () => {
   const docker = read('Dockerfile');
+  assert.equal((docker.match(/FROM node:24-trixie-slim/g) ?? []).length, 2);
+  assert.doesNotMatch(docker, /bookworm/);
   assert.match(docker, /touch \/etc\/elpis\/restricted/);
   assert.match(docker, /chmod 0444 \/etc\/elpis\/restricted/);
   assert.match(docker, /ELPIS_CONFIG=\/data\/config\.yaml/);
