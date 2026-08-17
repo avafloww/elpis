@@ -283,9 +283,7 @@ await elpis.sh("npm test", { cwd: HARNESS_ROOT, timeout: 120000 })`;
   const sudoSection = restricted ? '' : `### \`elpis.sudo(cmd, opts?)\`
 Same async contract as \`elpis.sh\` but prefixed with sudo. This VM is yours; sudo is passwordless.`;
   const lifecycleSection = restricted ? `### \`elpis.restart(reason?)\`
-Flush transcripts and ask the namespaced Kubernetes lifecycle broker to refresh this harness from its configured image. The broker endpoint is fixed at boot; you cannot choose a deployment, image, command, or Kubernetes credential. A failed request leaves the current container running. An accepted request makes this your last turn before reboot; a \`[restart complete]\` message wakes you afterward.
-
-\`elpis.deploy\` is deliberately absent: source and image publication remain outside this restricted runtime.` : `### \`elpis.restart(reason?)\`
+Flush transcripts and ask the namespaced Kubernetes lifecycle broker to refresh this harness from its configured image. The broker endpoint is fixed at boot; you cannot choose a deployment, image, command, or Kubernetes credential. A failed request leaves the current container running. An accepted request makes this your last turn before reboot; a \`[restart complete]\` message wakes you afterward.` : `### \`elpis.restart(reason?)\`
 Flush transcripts then spawn a detached systemctl restart of the harness.
 Returns a note; this is your last turn before reboot. Prefer it over raw \`systemctl\`.
 
