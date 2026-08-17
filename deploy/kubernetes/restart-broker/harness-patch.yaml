@@ -1,5 +1,5 @@
 # Merge these fields into the namespace's elpis-harness Deployment.
-# The broker can patch this named Deployment and no other workload.
+# The broker locates its Pod by these fixed labels and never mutates this spec.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
