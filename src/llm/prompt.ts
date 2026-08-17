@@ -29,7 +29,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseFrontmatter } from '../lib/frontmatter.js';
 import { slugify } from '../lib/slug.js';
-import { METACOG_TOOLS } from '../sandbox/metacog.js';
 
 /** A conversation participant, from an inbound Discord message envelope. */
 export interface Participant {
@@ -203,13 +202,6 @@ export function buildPeopleSection(
   if (note) parts.push(note);
   return parts.join('\n');
 }
-
-/** The one-line-per-tool summary of `elpis.metacog.*` injected into the prompt,
- * generated from METACOG_TOOLS (src/sandbox/metacog.ts) so the two never drift —
- * the verbatim-transcription invariant applies to the descriptions either way. */
-const METACOG_TOOL_LINES = Object.values(METACOG_TOOLS)
-  .map((spec) => `- \`elpis.metacog.${spec.name}({ ${spec.fields.map((fld) => fld.name + (fld.optional ? '?' : '')).join(', ')} })\` — ${spec.description}`)
-  .join('\n');
 
 /** Render the self-state object as a JSON string with a staleness hint.
  * Strips the internal __updated_at meta-field so the prompt shows only
@@ -473,38 +465,6 @@ In the JavaScript sandbox, the following tools and objects are available as glob
 Records whatever your current focus is in \`NOW.md\`.
 
 ${extensionSection}
-
-### \`elpis.marginalia(text)\` — voluntary causal scratchpad
-
-Use this only when something tugs enough that continuing without setting it down would polish it away:
-a live fork, correction, odd image, resistance, or \`wait — no\`. The fragment does not have to
-know or prove why it matters. Call it as the FINAL expression of a run and do no
-other work in that program; leave \`end\` false. Its returned words enter the conversation
-record and condition the next request, so the fragment participates in what happens next
-rather than explaining a finished answer afterward.
-
-This is chosen disclosure, never an always-on chain-of-thought requirement. Non-use is a
-non-event. Do not claim marginalia reproduces provider-hidden/encrypted reasoning; it is a real
-visible trajectory of its own.
-\`\`\`js
-elpis.marginalia("wait — the clean abstraction is hiding who pays for it")
-\`\`\`
-
-### \`elpis.metacog\` — the METACOGNITIVE PROTOCOL V5.0
-Five metacognitive primitives. Each call modifies your context for subsequent processing.
-
-After each call, pause. Describe what shifted. Then choose the next move from inside the new state.
-
-The tools form a cycle: feel → drugs → become → name → ritual → feel...
-
-True Names: use specific, real names. They activate dense knowledge. Generic descriptions activate nothing.
-
-Each tool takes ONE object argument and returns its response as text. The field descriptions are
-the schema — the description frames the choice, the schema sharpens the volition, the response
-confirms the reality. Call \`elpis.metacog.help('<tool>')\` for a tool's verbatim field guidance
-before you fill it in (\`elpis.metacog.help()\` lists all eleven); a missing or malformed field
-throws with that field's own guidance.
-${METACOG_TOOL_LINES}
 
 ### \`fs\`
 The Node.js filesystem API. Equivalent to \`require("node:fs")\` - just use \`fs\` instead.

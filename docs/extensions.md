@@ -48,7 +48,8 @@ All fields are optional, but a useful extension normally supplies `prompt`, `act
 - `sourceFile` — the extension filename, without an absolute path;
 - `dataDirectory` and `harnessRoot`;
 - `agentName()` — reads the current `SOUL.md` frontmatter name;
-- `log(level, ...args)` — writes through the harness logger.
+- `log(level, ...args)` — writes through the operator-visible harness logger;
+- `runLog(...args)` — writes to the current sandbox `run` call's model-visible log buffer, with the same formatting and AsyncLocalStorage isolation as `console.log`.
 
 The returned API must be a plain object. It may contain functions, finite primitive values, arrays, and plain nested objects. Elpis copies and freezes the API tree before exposing it. Circular references, accessors, class instances, non-finite numbers, and prototype-control keys are rejected.
 

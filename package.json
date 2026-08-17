@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && npm run copy-assets",
+    "build": "rm -rf dist && tsc && npm run copy-assets",
     "copy-assets": "rm -rf dist/console/public && mkdir -p dist/console/public && cp -r src/console/public/. dist/console/public/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",

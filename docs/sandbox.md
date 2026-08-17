@@ -74,9 +74,9 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.motor` for bounded screenshot-to-action control;
 - optional `elpis.fleet` for coding workers.
 
-### Metacognitive instruments
+### Local extensions
 
-`elpis.metacog` exposes opt-in focusing, perspective, naming, synthesis, and stress-test forms. These calls change context and record chosen structure; they are not claims about hidden model state.
+Inhabitant-specific practices belong in trusted `DATA_DIRECTORY/extensions/` modules rather than the core sandbox. Loaded APIs appear under `elpis.ext`; see [extensions.md](extensions.md).
 
 The runtime prompt is the canonical exhaustive API reference presented to the inhabitant. New capabilities must update implementation, tests, and that prompt together.
 

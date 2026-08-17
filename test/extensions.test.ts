@@ -188,10 +188,12 @@ test('failure diagnostics cannot make optional extensions a boot dependency', as
 test('the exact documented example copies, loads, and runs', async () => {
   const data = tempData();
   fs.copyFileSync(path.join(process.cwd(), 'docs', 'example.ext.ts'), path.join(data, 'extensions', 'example.ext.ts'));
-  const registry = await loadExtensions({ dataDirectory: data, harnessRoot: process.cwd(), agentName: () => 'Aster' });
+  const runLogs: string[] = [];
+  const registry = await loadExtensions({ dataDirectory: data, harnessRoot: process.cwd(), agentName: () => 'Aster', runLog: (...args) => runLogs.push(args.join(' ')) });
   assert.deepEqual(registry.failures, []);
   const example = registry.apis.example as { greet(name: string): string };
   assert.equal(example.greet('Bramble'), 'hello, Bramble — from Aster');
+  assert.deepEqual(runLogs, ['example.greet: Bramble']);
   assert.match(registry.prompt, /elpis\.ext\.example\.greet/);
   fs.rmSync(data, { recursive: true, force: true });
 });
@@ -204,7 +206,8 @@ test('extension prompt blocks are injected once at the stable tool-documentation
   assert.match(prompt, /elpis\.ext\.\$help\(namespace\)/);
   assert.match(prompt, /elpis\.ext\.\$failures\(\)/);
   assert.match(prompt, /failed extension exposes neither API nor prompt text/i);
-  assert.ok(prompt.indexOf(marker) < prompt.indexOf('### `elpis.marginalia'));
+  assert.ok(prompt.indexOf(marker) < prompt.indexOf('### `fs`'));
+  assert.doesNotMatch(prompt, /elpis\.(?:marginalia|metacog)/);
   const empty = buildPrompt({ soul: '', memory: '', now: '', harnessRoot: '/h', dataDirectory: '/d' });
   assert.match(empty, /No extensions are loaded\./);
   assert.doesNotMatch(empty, /alpha-only-instruction/);

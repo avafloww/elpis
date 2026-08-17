@@ -18,10 +18,11 @@ export const extension = {
 
   // activate may be synchronous or async. Return a plain API object containing
   // functions, primitives, arrays, and other plain objects.
-  activate(context: { agentName(): string; log(level: 'info' | 'warn' | 'error', ...args: unknown[]): void }) {
+  activate(context: { agentName(): string; log(level: 'info' | 'warn' | 'error', ...args: unknown[]): void; runLog(...args: unknown[]): void }) {
     context.log('info', 'example extension activated');
     return {
       greet(name: string) {
+        context.runLog('example.greet:', name);
         if (typeof name !== 'string' || !name.trim()) {
           throw new TypeError('elpis.ext.example.greet(name): name must be a non-empty string');
         }

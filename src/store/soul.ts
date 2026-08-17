@@ -1,7 +1,7 @@
 // soul.ts — the agent's identity lives in the DATA DIRECTORY, never in the
 // harness. SOUL.md may open with a YAML frontmatter envelope whose `name:`
 // scalar is the agent's name; everything the harness renders a name into
-// (native notes, moderation notes, fleet dispatch guidance) derives it from
+// (extension signatures, moderation notes, fleet dispatch guidance) derives it from
 // here. The harness source itself never hardcodes an agent name.
 //
 // parseSoul splits the file into { name, body } BYTE-PRESERVINGLY: the body

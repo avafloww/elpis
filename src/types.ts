@@ -2,7 +2,6 @@ import type { InboundMessage } from './agent.js';
 import type { BgRegistry } from './sandbox/bg.js';
 import type { SshRegistry } from './sandbox/ssh.js';
 import type { FleetHandle } from './fleet/index.js';
-import type { Logger } from './lib/log.js';
 import type { ChatMessage, StandaloneCompleteOptions, StandaloneCompleteResult } from './llm/llm.js';
 import type { MindService } from './store/mind.js';
 import type { ReplayIdentity } from './llm/provenance.js';
@@ -157,10 +156,6 @@ export interface SandboxDeps {
   onFutureSettled?: (id: string, value: unknown, rejected: boolean, logs?: string, sends?: { channel: string; text: string }[]) => void;
   /** Fleet registry (elpis.fleet.*): spawn/manage detached sub-agent runners. */
   fleet?: FleetHandle;
-  /** Leveled harness logger (journal/console-pane). Used by sandbox verbs that
- * need an operator-visible side-channel OUTSIDE the model's tool-result buffer
- * — e.g. elpis.metacog.* logs which primitive fired, for the operator. */
-  logger?: Logger;
   /** The killswitch's self-mute path : backs
  * channel(id).mute(reason). SELF-MUTE ONLY — there is no release or deafen
  * member on the sandbox handle; that asymmetry is deliberate (Agent.moderateChannel

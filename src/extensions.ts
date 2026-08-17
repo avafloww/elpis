@@ -16,6 +16,7 @@ export interface ExtensionContext {
   readonly harnessRoot: string;
   readonly agentName: () => string;
   readonly log: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
+  readonly runLog: (...args: unknown[]) => void;
 }
 
 export interface ExtensionDefinition {
@@ -52,6 +53,7 @@ export interface LoadExtensionsOptions {
   harnessRoot: string;
   agentName: () => string;
   log?: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
+  runLog?: (...args: unknown[]) => void;
   importModule?: (filePath: string) => Promise<Record<string, unknown>>;
 }
 
@@ -222,6 +224,7 @@ export async function loadExtensions(options: LoadExtensionsOptions): Promise<Ex
         harnessRoot: options.harnessRoot,
         agentName: options.agentName,
         log,
+        runLog: (...args: unknown[]) => options.runLog?.(...args),
       });
       stage = 'activation';
       let rawApi: unknown = definition.activate ? await definition.activate(context) : {};

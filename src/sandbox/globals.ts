@@ -30,7 +30,6 @@ import { createBrowserTools } from './browser.js';
 import { createComputerTools, displayShellCommand } from './computer.js';
 import { createMotorController } from './motor.js';
 import { bskyPost, bskyFeed, bskyNotifications, bskyReply, bskyLike, bskyFollow, bskyTimeline } from './bsky.js';
-import { createMetacog } from './metacog.js';
 import type { SshRegistry, SshHandle } from './ssh.js';
 import { parseMindId } from '../store/mind.js';
 
@@ -157,6 +156,13 @@ export function coerceNextRunAt(v: unknown): number {
   return v;
 }
 
+export function createRunLogger(fallback: string[]): (...args: unknown[]) => void {
+  return (...args: unknown[]) => {
+    const buf = runScope.getStore()?.logbuf ?? fallback;
+    buf.push(args.map(fmtArg).join(' '));
+  };
+}
+
 export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const g: Record<string, unknown> = {};
  // Every harness verb is built onto `e`, then deep-frozen and hung off
@@ -203,10 +209,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // deps.logbuf for any log emitted outside a run (belt-and-braces; shouldn't
  // happen). Returns undefined (not the buffer length) so a run ending in
  // console.log(...) does NOT clobber `_` with a meaningless number.
-  const makeLog = () => (...a: unknown[]) => {
-    const buf = runScope.getStore()?.logbuf ?? deps.logbuf;
-    buf.push(a.map(fmtArg).join(' '));
-  };
+  const makeLog = () => createRunLogger(deps.logbuf);
   g.console = {
     log: makeLog(),
     error: makeLog(),
@@ -931,36 +934,6 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     return found;
   };
   e.ext = Object.freeze(extensionRoot);
-
- // A transient, voluntary causal scratchpad. The fragment is not written to a
- // side file: the run call + returned value already place it in conversation
- // history, where the next model request can actually condition on it.
-  e.marginalia = (text: string) => {
-    if (typeof text !== 'string') throw new TypeError('elpis.marginalia(text): text must be a string');
-    const fragment = text.trim();
-    if (!fragment || fragment.length > 2_000) {
-      throw new Error('elpis.marginalia(text): text must be 1..2000 characters after trimming');
-    }
-    return `MARGINALIA — ${fragment}\n\nThis chosen fragment is now part of the causal record. Continue from it; do not claim it reproduces hidden reasoning.`;
-  };
-
- // metacog — the METACOGNITIVE PROTOCOL V5.0 (inanna-malick/metacog), ported
- // locally: eleven tools under one namespace, `elpis.metacog.feel({…})` …
- // `elpis.metacog.tether({…})`. Each takes the upstream tool's arguments as ONE
- // object and returns the upstream response text as a plain string (which the
- // preview renders raw, so it lands in the tool result the way the MCP
- // content-block would). `elpis.metacog.help(tool?)` prints the verbatim
- // schema. Descriptions, field guidance and responses are transcribed, not
- // paraphrased — see metacog.ts. No memory/SOUL/routing is touched; the only
- // side effect is a one-line harness log entry per call for the operator.
- // `echo` is the model-visible half of the journal: makeLog writes into the
- // CURRENT run's log buffer (same sink as console.log), so each call shows up
- // in the tool result's logs, not just on the operator's stderr.
-  e.metacog = createMetacog({
-    logger: deps.logger,
-    inbound: () => deps.inbound ?? null,
-    echo: makeLog(),
-  });
 
  // channel(idOrRef) -> { send(text), id, name } for outbound Discord messages.
  //: an explicit target is ALWAYS required — there is no "current channel"

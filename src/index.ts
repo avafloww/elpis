@@ -18,7 +18,7 @@ import { createEmoteRegistry } from './discord/emotes.js';
 import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID } from './types.js';
 import { createBgRegistry } from './sandbox/bg.js';
 import { createSshRegistry } from './sandbox/ssh.js';
-import { runScope } from './sandbox/globals.js';
+import { createRunLogger, runScope } from './sandbox/globals.js';
 import { consumeResumeMarker } from './store/resume.js';
 import { readUnseenChangelogs, formatChangelogNotice, markChangelogsSeen } from './store/changelog.js';
 import { createChannelDirectory } from './store/channels.js';
@@ -91,10 +91,12 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // ./notes.txt, ...) land in the agent's brain by default.
   process.chdir(config.paths.dataDirectory);
   log('sandbox cwd:', config.paths.dataDirectory);
+  const extensionLogbuf: string[] = [];
   const extensions = await (adapters.loadExtensions ?? loadExtensions)({
     dataDirectory: config.paths.dataDirectory,
     harnessRoot: config.paths.harnessRoot,
     agentName: () => readAgentName(config.paths.soulPath),
+    runLog: createRunLogger(extensionLogbuf),
     log: (level, ...args) => {
       if (level === 'warn') config.logger.warn(...args);
       else if (level === 'error') config.logger.error(...args);
@@ -237,7 +239,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     memory,
     extensions,
     send: async (channelId: string, content: string, opts?: { files?: import('./types.js').OutboundAttachment[] }) => agent.send(channelId, content, opts),
-    logbuf: [],
+    logbuf: extensionLogbuf,
     agentName: () => readAgentName(config.paths.soulPath),
     get inbound() { return inboundRef.current; },
     bg: bgRegistry,
@@ -280,9 +282,6 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // Self-set transient state: read fresh every turn, write from sandbox.
     readState: () => readState(config.paths.dataDirectory),
     writeState: (s) => writeState(config.paths.dataDirectory, s),
- // Leveled logger for sandbox verbs that need an operator-visible journal line
- // outside the model's tool-result buffer (elpis.metacog.*).
-    logger: config.logger,
  // Killswitch self-mute: the sandbox can only ever mute itself —
  // moderateChannel's actor is hardcoded 'self' here, never 'operator'.
     moderate: (channelId: string, reason?: string) => agent.moderateChannel(channelId, 'mute', 'self', reason),

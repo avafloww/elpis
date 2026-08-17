@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGlobals } from '../src/sandbox/globals.js';
+import { buildGlobals, createRunLogger, runScope } from '../src/sandbox/globals.js';
 import type { ExtensionRegistry } from '../src/extensions.js';
 
 const config = { paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' }, sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null } };
@@ -33,4 +33,15 @@ test('elpis.ext exists with empty help when no extensions are loaded', () => {
   assert.deepEqual(elpis.ext.$help(), []);
   assert.deepEqual(elpis.ext.$failures(), []);
   assert.deepEqual(Object.keys(elpis.ext).sort(), ['$failures', '$help']);
+});
+
+test('extension runLog follows the active run scope and otherwise uses its shared fallback', () => {
+  const fallback: string[] = [];
+  const log = createRunLogger(fallback);
+  const scoped: string[] = [];
+  runScope.run({ logbuf: scoped, childPids: new Set(), sends: [] }, () => log('inside', 42));
+  assert.deepEqual(scoped, ['inside 42']);
+  assert.deepEqual(fallback, []);
+  log('outside', 7);
+  assert.deepEqual(fallback, ['outside 7']);
 });

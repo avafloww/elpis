@@ -14,7 +14,6 @@ const sandbox = createSandbox({
   config,
   memory,
   logbuf: [],
-  logger: config.logger,
 });
 
 const rl = readline.createInterface({

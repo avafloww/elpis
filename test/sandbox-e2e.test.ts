@@ -319,20 +319,6 @@ test('e2e: await elpis.sh() returns same shape (async-first, A5)', async () => {
   assert.match(prev.preview || '', /stdout/);
 });
 
-test('e2e: marginalia returns a transient causal fragment without writing a side file', async () => {
-  const notesDir = path.join(tmp, 'notes');
-  const before = fs.existsSync(notesDir) ? new Set(fs.readdirSync(notesDir, { recursive: true })) : new Set();
-  const r = await sandbox.run('elpis.marginalia("wait — the first framing ate the hand")');
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview || '', /MARGINALIA/);
-  assert.match(r.preview || '', /first framing ate the hand/);
-  const after = fs.existsSync(notesDir) ? new Set(fs.readdirSync(notesDir, { recursive: true })) : new Set();
-  assert.deepEqual(after, before);
-  const empty = await sandbox.run('elpis.marginalia("   ")');
-  assert.equal(empty.ok, false);
-  assert.match(String(empty.error), /1\.\.2000 characters/);
-});
-
 // ---------- memory tests ----------
 
 
