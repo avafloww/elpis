@@ -536,15 +536,21 @@ NEW)
 \`\`\`
 
 ### \`elpis.fill(template, vars)\`
-Opt-in \`{{key}}\` substitution into a string — the way to inject a computed value into an
-edit/write when a raw heredoc (which carries text verbatim) can't. Replaces each
-\`{{name}}\` with \`vars.name\`; throws if a placeholder has no value or a value is unused.
+Opt-in \`{{key}}\` substitution into a string — use it whenever a raw heredoc needs a
+computed value before an edit, write, send, or other operation. Raw heredocs carry
+\`\${...}\` verbatim; they never interpolate JavaScript. Replaces each \`{{name}}\` with
+\`vars.name\`; throws if a placeholder has no value or a value is unused.
 \`\`\`js
 const patch = elpis.fill(<<<NEW
   const timeout = {{timeout}};
   const retries = {{retries}};
 NEW, { timeout: 5000, retries: 3 })
 elpis.edit("src/config.ts", oldBlock, patch)
+
+const message = elpis.fill(<<<MSG
+Mind idea #{{id}} is recorded.
+MSG, { id: idea.id })
+await elpis.channel("home/general").send(message)
 \`\`\`
 
 ### \`elpis.sh(cmd, opts?)\`
