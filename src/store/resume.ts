@@ -28,9 +28,13 @@ export interface ResumeMarker {
 
 const MARKER_FILE = '.resume-after-restart.json';
 
-/** Written by the sandbox restart()/deploy() globals just before they spawn the
- * systemctl restart. Best-effort: a marker-write failure must never block the
- * restart itself. */
+/** Written by the sandbox restart()/deploy() globals just before they hand off
+ * to systemd or the restricted lifecycle broker. Best-effort: a marker-write
+ * failure must never block the restart itself. */
+export function clearResumeMarker(dataDirectory: string): void {
+  try { fs.unlinkSync(path.join(dataDirectory, MARKER_FILE)); } catch { /* best-effort */ }
+}
+
 export function writeResumeMarker(dataDirectory: string, reason?: string): void {
   const marker: ResumeMarker = {
     reason: reason ?? null,

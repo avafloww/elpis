@@ -1,0 +1,19 @@
+# Optional when the namespace has default-deny egress. 10.43.0.1 is the
+# default k3s kubernetes.default Service ClusterIP; verify it in your cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elpis-restart-broker-egress-kubernetes-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: elpis
+      app.kubernetes.io/component: restart-broker
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443

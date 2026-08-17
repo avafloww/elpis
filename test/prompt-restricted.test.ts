@@ -7,8 +7,10 @@ test('restricted prompt removes host ownership privilege and self-deployment cla
   assert.match(p, /running in a restricted container/);
   assert.match(p, /## Your restricted runtime/);
   assert.match(p, /You may write extensions under `DATA_DIR\/extensions\/`/);
-  assert.match(p, /takes effect only after an external restart/);
-  for (const absent of ['You own this server', 'passwordless sudo', 'You can modify your own harness', 'elpis.sudo(cmd', 'elpis.restart(reason', 'elpis.deploy(reason', 'HARNESS_ROOT', 'harness-source commits']) assert.equal(p.includes(absent), false, absent);
+  assert.match(p, /call `elpis\.restart\(\)` to ask the namespaced broker/);
+  assert.match(p, /### `elpis\.restart\(reason\?\)`/);
+  assert.match(p, /cannot choose a deployment, image, command, or Kubernetes credential/);
+  for (const absent of ['You own this server', 'passwordless sudo', 'You can modify your own harness', 'elpis.deploy(reason', 'HARNESS_ROOT', 'harness-source commits']) assert.equal(p.includes(absent), false, absent);
 });
 test('normal prompt retains self-managed host capabilities', () => {
   const p = build({ ...base, profile: { restricted: false, source: 'normal' } });

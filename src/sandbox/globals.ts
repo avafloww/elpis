@@ -22,7 +22,8 @@ import { SDK_EFFORT_LEVELS, type Config } from '../config.js';
 import { resolveBuiltinModules, type BuiltinModuleId } from '../builtin-modules.js';
 import { parseFrontmatter } from '../lib/frontmatter.js';
 import { appendDatedBullet } from '../store/memory.js';
-import { writeResumeMarker } from '../store/resume.js';
+import { clearResumeMarker, writeResumeMarker } from '../store/resume.js';
+import { requestRestrictedRestart } from '../lib/restart-request.js';
 import { restartHarnessService } from '../lib/lifecycle.js';
 import { slugifyName, authorHasPeopleFile } from './people.js';
 import { formatRead } from './read.js';
@@ -828,11 +829,24 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     return { ok: true, note: `${notePrefix}${reason ? `: ${reason}` : ''} — this is your last turn before reboot; you'll get a [restart complete] message when you're back` };
   };
 
- // restart — flush transcripts then spawn a detached systemctl restart.
- // Replaces the raw `elpis.sh("systemctl --user restart elpis-harness")`
- // ritual that SIGTERMs the harness mid-tool-call (confusing result, dangling
- // transcript). Returns a note so the agent knows this is its last turn.
-  if (!profile.restricted) e.restart = (reason?: string) => triggerRestart(reason, 'restarting');
+ // restart — normal hosts hand off to systemd; restricted containers submit
+ // one fixed refresh request to their namespaced Kubernetes broker.
+  const triggerRestrictedRestart = async (reason?: string) => {
+    if (deps.restart) return deps.restart(reason);
+    deps.flushTranscripts?.();
+    writeResumeMarker(deps.config.paths.dataDirectory, reason);
+    try {
+      await (deps.requestRestrictedRestart ?? requestRestrictedRestart)(reason);
+    } catch (error) {
+      clearResumeMarker(deps.config.paths.dataDirectory);
+      return { ok: false, note: `restart request failed: ${error instanceof Error ? error.message : String(error)} — the current container is still running` };
+    }
+    return { ok: true, note: `restart accepted${reason ? `: ${reason}` : ''} — the Kubernetes broker will refresh this container; this is your last turn before reboot and you'll get a [restart complete] message when back` };
+  };
+  e.restart = profile.restricted
+    ? (reason?: string) => triggerRestrictedRestart(reason)
+    : (reason?: string) => triggerRestart(reason, 'restarting');
+
 
  // deploy — build the harness, then restart ONLY if the build succeeded.
  // Replaces the easy-to-forget `npm run build` + elpis.restart two-step:

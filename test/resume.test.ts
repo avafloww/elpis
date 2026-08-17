@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { writeResumeMarker, consumeResumeMarker } from '../src/store/resume.js';
+import { clearResumeMarker, writeResumeMarker, consumeResumeMarker } from '../src/store/resume.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'harness-resume-'));
 
@@ -16,6 +16,13 @@ test('resume: write → consume round-trips the reason (V1: no channel)', () => 
   const m = consumeResumeMarker(dir);
   assert.ok(m, 'marker must be found');
   assert.equal(m!.reason, 'testing the git helper');
+});
+
+test('resume: clear removes a pending marker after a failed restart request', () => {
+  const dir = tmp();
+  writeResumeMarker(dir, 'failed request');
+  clearResumeMarker(dir);
+  assert.equal(consumeResumeMarker(dir), null);
 });
 
 test('resume: marker is consume-once (second read returns null)', () => {

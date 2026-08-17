@@ -51,7 +51,7 @@ sudo ./deploy/install.sh
 
 The installer is intended for a new dedicated host. Read [`docs/install.md`](docs/install.md) before using it on an existing system.
 
-For a restricted container deployment, use `ghcr.io/avafloww/elpis:latest` and follow [`docs/container.md`](docs/container.md).
+For a restricted container deployment, use `ghcr.io/avafloww/elpis:latest` and follow [`docs/container.md`](docs/container.md). For the namespaced Kubernetes lifecycle broker, see [`docs/kubernetes.md`](docs/kubernetes.md).
 
 For a manual development checkout:
 
@@ -121,6 +121,7 @@ Read [`AGENTS.md`](AGENTS.md) before changing load-bearing loop, persistence, co
 
 - [`docs/architecture.md`](docs/architecture.md) — runtime and data flow
 - [`docs/container.md`](docs/container.md) — restricted non-root GHCR deployment
+- [`docs/kubernetes.md`](docs/kubernetes.md) — namespaced restricted restart broker and target three-Pod boundary
 - [`docs/context.md`](docs/context.md) — monocontext and request assembly
 - [`docs/compaction.md`](docs/compaction.md) — background folding and quality gates
 - [`docs/persistence.md`](docs/persistence.md) — files, SQLite, transcripts, and custody

@@ -94,8 +94,11 @@ export interface SandboxDeps {
   /** Flush transcripts before a self-restart (D5). Optional. */
   flushTranscripts?: () => void;
   /** Test/contained-runtime seam for elpis.restart. Omitted in production,
-   * where the sandbox performs the real resume-marker + systemctl choreography. */
+   * where the sandbox performs the real resume-marker + lifecycle choreography. */
   restart?: (reason?: string) => { ok: true; note: string };
+  /** Restricted-runtime transport seam. Production uses the boot-configured
+   * internal Kubernetes broker endpoint; tests may intercept it. */
+  requestRestrictedRestart?: (reason?: string) => Promise<void>;
   /** Called around elpis.sleep/wait's timer : a sleep is the agent
  * *choosing to wait*, so the typing indicator must not show through it.
  * sleepPause clears typing on the 0->1 depth edge; sleepResume re-fires it

@@ -52,12 +52,45 @@ test('selected motor with excluded computer is unavailable rather than disabled'
   await assert.rejects(((e.motor as Record<string, unknown>).step as (...args: unknown[]) => Promise<unknown>)('x'), /requires an active computer module/);
 });
 
-test('restricted profile removes sudo, restart, and deploy entirely', () => {
+test('restricted profile keeps brokered restart but removes sudo and deploy', () => {
   const e = globals(makeConfig({ modules: { enabled: [], disabled: [] } }), true);
-  for (const key of ['sudo', 'restart', 'deploy']) {
+  for (const key of ['sudo', 'deploy']) {
     assert.equal(Object.keys(e).includes(key), false);
     assert.equal(e[key], undefined);
   }
+  assert.equal(typeof e.restart, 'function');
   assert.equal(typeof e.sh, 'function');
   assert.equal(typeof e.git, 'object');
+});
+
+test('restricted restart flushes and preserves resume state only when broker accepts', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'restricted-restart-'));
+  let flushed = 0;
+  let requested: string | undefined;
+  const config = makeConfig({ paths: { ...makeConfig().paths, dataDirectory: dir } });
+  const acceptedDeps = {
+    config,
+    modules: resolveBuiltinModules(config),
+    profile: { restricted: true, source: 'sentinel' },
+    memory: { read: () => '', append: () => undefined, overwrite: () => undefined },
+    logbuf: [],
+    flushTranscripts: () => { flushed += 1; },
+    requestRestrictedRestart: async (reason?: string) => { requested = reason; },
+  } as unknown as SandboxDeps;
+  const accepted = buildGlobals(acceptedDeps).elpis as Record<string, unknown>;
+  const result = await (accepted.restart as (reason?: string) => Promise<{ ok: boolean; note: string }>)('load extension');
+  assert.equal(result.ok, true);
+  assert.equal(flushed, 1);
+  assert.equal(requested, 'load extension');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, '.resume-after-restart.json'), 'utf8')).reason, 'load extension');
+
+  acceptedDeps.requestRestrictedRestart = async () => { throw new Error('broker unavailable'); };
+  const rejected = buildGlobals(acceptedDeps).elpis as Record<string, unknown>;
+  const failure = await (rejected.restart as () => Promise<{ ok: boolean; note: string }>)();
+  assert.equal(failure.ok, false);
+  assert.match(failure.note, /broker unavailable/);
+  assert.equal(fs.existsSync(path.join(dir, '.resume-after-restart.json')), false);
 });

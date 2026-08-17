@@ -42,6 +42,8 @@ docker run -d --name elpis \
 
 `/data` is the only persistent writable home. Configuration is a separate read-only bind at `/config.yaml`; it does not live inside the agent-writable data volume. The entrypoint refuses to start without a readable config, a writable `/data`, or the baked restriction sentinel. `ELPIS_CONFIG` defaults to `/config.yaml`.
 
+For Kubernetes, including the narrow lifecycle broker behind restricted `elpis.restart()`, see [`kubernetes.md`](kubernetes.md). The standalone image does not carry Docker or Kubernetes lifecycle credentials.
+
 Extensions remain inhabitant-authored under `/data/extensions`. Elpis discovers them only at boot, so a new or changed extension does not activate until the operator restarts the container; its loaded API and prompt block then remain frozen for that boot.
 
 The restriction profile is defense in depth, not a substitute for the container boundary. Do not run the image privileged, mount the Docker socket, or bind writable host source into `/opt/elpis`. Keep configuration mounted read-only and do not place it inside `/data`. Keep the root filesystem read-only and grant only the network and volumes the inhabitant actually needs.

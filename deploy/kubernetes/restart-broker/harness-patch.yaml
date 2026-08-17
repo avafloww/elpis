@@ -1,0 +1,29 @@
+# Merge these fields into the namespace's elpis-harness Deployment.
+# The broker can patch this named Deployment and no other workload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elpis-harness
+  labels:
+    app.kubernetes.io/name: elpis
+    app.kubernetes.io/component: harness
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elpis
+        app.kubernetes.io/component: harness
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: harness
+          image: ghcr.io/avafloww/elpis:latest
+          imagePullPolicy: Always
+          env:
+            - name: ELPIS_RESTART_ENDPOINT
+              value: http://elpis-restart-broker:8080/v1/restart

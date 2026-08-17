@@ -32,6 +32,16 @@ test('extractUtterance: returns the inline utterance, dropping the envelope', ()
   assert.equal(extractUtterance(env('can you check the build?', { mentions: ['@rowan'] })), 'can you check the build?');
 });
 
+test('real inbound reply reminder follows the envelope but is not part of the utterance', () => {
+  const built = formatInboundEnvelope(
+    { channelName: 'dev', author: 'bramble', createdAt: 't', content: 'hello', replyTo: null, forwarded: null, mentions: [], attachments: [] },
+    '12:34',
+    true,
+  );
+  assert.match(built, /<\/incoming-message>\nREMINDER: use elpis\.channel\(\.\.\.\)\.send\(\.\.\.\) to respond\. Returned turn content will be discarded, not sent\.$/);
+  assert.equal(extractUtterance(built), 'hello');
+});
+
 test('extractUtterance: multi-line utterance survives, envelope does not', () => {
   assert.equal(extractUtterance(env('line one\nline two')), 'line one\nline two');
 });

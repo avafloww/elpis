@@ -67,7 +67,9 @@ export interface EnvelopeMessage {
 /** Build the XML inbound envelope shown to the agent. The `local-time` attribute is a
  * display convenience for the agent; the authoritative `time` attribute is the ISO
  * timestamp stored in the transcript. */
-export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string): string {
+export const INBOUND_REPLY_REMINDER = 'REMINDER: use elpis.channel(...).send(...) to respond. Returned turn content will be discarded, not sent.';
+
+export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string, includeReplyReminder = false): string {
   const localTime = localMarker.replace(/^\[|\]$/g, '');
   const attrs = [
  // Absence (null/undefined), not falsiness, is what omits `guild=` — an empty
@@ -105,6 +107,7 @@ export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string): 
  // the utterance is everything between them and the closing tag.
   parts.push(neutralizeEnvelopeTags(m.content || '(no text content)'));
   parts.push('</incoming-message>');
+  if (includeReplyReminder) parts.push(INBOUND_REPLY_REMINDER);
   return parts.join('\n');
 }
 

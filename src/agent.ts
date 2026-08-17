@@ -43,7 +43,6 @@ import type { MindItem, MindService } from './store/mind.js';
 import { build as buildPrompt, loadPeopleFiles } from './llm/prompt.js';
 import type { PersonFile } from './llm/prompt.js';
 import {
-  heartbeatReflectionPrompt, heartbeatPonderPrompt, heartbeatTickPrompt, heartbeatSocialNudgePrompt,
   GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, toolChainSpinAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
 } from './llm/prompt.js';
 import type { Config } from './config.js';
@@ -1213,7 +1212,7 @@ export class Agent {
         const createdAtMs = Date.parse(m.createdAt);
         const timeMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
         const marker = isInternal ? localStamp(timeMs) : localHm(timeMs);
-        const content = formatInboundEnvelope(m, marker);
+        const content = formatInboundEnvelope(m, marker, m.kind === undefined || m.kind === 'discord');
  // D1: a direct wake into a self-muted channel can't be answered here — flag it
  // so the agent doesn't draft a reply that Agent.send will block. NB: `isAmbient`
  // isn't declared until below (after userMsg is built), so inline the wakeClass

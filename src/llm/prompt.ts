@@ -235,12 +235,12 @@ Keep assistant \`content\` empty or as close to empty as the provider permits; a
 anything meant for another person—including progress updates—through \`elpis.channel(...).send()\`.`
     : '';
   const environmentAuthoritySection = restricted
-    ? `This Elpis instance is running in a restricted container. DATA_DIRECTORY is your persistent writable home; the surrounding image, harness installation, host, and service lifecycle are operator-managed boundaries. Root privilege, host reconfiguration, self-deployment, and harness lifecycle control are not available.`
+    ? `This Elpis instance is running in a restricted container. DATA_DIRECTORY is your persistent writable home; the surrounding image, harness installation, host, and direct service lifecycle are operator-managed boundaries. Root privilege, host reconfiguration, and self-deployment are not available. A narrow \`elpis.restart()\` request may ask the namespaced Kubernetes broker to refresh only this harness.`
     : `You own this server; it is yours to do with as you please.
 You have full passwordless sudo and root access, and don't need permission to modify the system, install packages, change system configuration, etc.`;
   const harnessSection = restricted
     ? `## Your restricted runtime
-The harness may be readable for understanding, but it is not a self-modifiable home in this profile. Put durable work in DATA_DIRECTORY and use only the capabilities actually exposed under \`elpis\`. Do not attempt to escape the container, alter the host, or manufacture missing lifecycle/privilege powers.`
+The harness may be readable for understanding, but it is not a self-modifiable home in this profile. Put durable work in DATA_DIRECTORY and use only the capabilities actually exposed under \`elpis\`. Do not attempt to escape the container, alter the host, or manufacture missing privilege/deployment powers.`
     : `## You can modify your own harness
 You are not a black box. Your source code lives at \`${input.harnessRoot}\`. You have full read+write
 access to it via \`fs\`, \`elpis.sh\`/\`elpis.sudo\`, \`elpis.edit\`, and \`require\`, and can change anything, without asking the user.
@@ -265,7 +265,7 @@ elpis.restart("picking up new build")
 Restarting terminates this process immediately, so any state not written to your brain
 (DATA_DIRECTORY) is lost. Write first, restart second.`;
   const extensionManagementLine = restricted
-    ? `You may write extensions under \`DATA_DIR/extensions/\`. They are discovered only at boot; because restart is operator-controlled in this profile, a new or changed extension takes effect only after an external restart. Prompt strings and APIs remain fixed between boots.`
+    ? `You may write extensions under \`DATA_DIR/extensions/\`. They are discovered only at boot; call \`elpis.restart()\` to ask the namespaced broker to refresh the harness after a change. Prompt strings and APIs remain fixed between boots.`
     : `To add or change one, write \`DATA_DIR/extensions/<name>.ext.ts\`, inspect the commented working example at \`HARNESS_ROOT/docs/example.ext.ts\`, then restart Elpis. Filename normalization determines the namespace; prompt strings and APIs are copied once and remain fixed until that restart.`;
   const shellCwdLine = restricted
     ? `The default \`elpis.sh\` timeout is 60s. **cwd defaults to DATA_DIR**. Work inside writable mounted data; the image and host are operator-managed.`
@@ -282,7 +282,10 @@ elpis.sh("git status", { cwd: HARNESS_ROOT })           // final-expr auto-resol
 await elpis.sh("npm test", { cwd: HARNESS_ROOT, timeout: 120000 })`;
   const sudoSection = restricted ? '' : `### \`elpis.sudo(cmd, opts?)\`
 Same async contract as \`elpis.sh\` but prefixed with sudo. This VM is yours; sudo is passwordless.`;
-  const lifecycleSection = restricted ? '' : `### \`elpis.restart(reason?)\`
+  const lifecycleSection = restricted ? `### \`elpis.restart(reason?)\`
+Flush transcripts and ask the namespaced Kubernetes lifecycle broker to refresh this harness from its configured image. The broker endpoint is fixed at boot; you cannot choose a deployment, image, command, or Kubernetes credential. A failed request leaves the current container running. An accepted request makes this your last turn before reboot; a \`[restart complete]\` message wakes you afterward.
+
+\`elpis.deploy\` is deliberately absent: source and image publication remain outside this restricted runtime.` : `### \`elpis.restart(reason?)\`
 Flush transcripts then spawn a detached systemctl restart of the harness.
 Returns a note; this is your last turn before reboot. Prefer it over raw \`systemctl\`.
 
@@ -958,84 +961,11 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
   ];
 }
 
-// ---- heartbeat beat prose ----
-//
-// The three beat-kind bodies + the social-send nudge that can prefix any of
-// them. Pure functions of their interpolated params (digest text, guild slug,
-// a pre-formatted silence duration) — agent.ts's fireHeartbeat owns beat-kind
-// SELECTION and digest-building; this module owns the words. Byte-identical
-// output to the previous inline strings is the contract the heartbeat/
-// social-nudge tests pin.
-
-/** The "reflection" beat: fires after enough unreflected messages plus a
- * quiet stretch. */
-export function heartbeatReflectionPrompt(digest: string): string {
-  return 'The conversation has gone quiet. Re-read the recent stretch above and reflect: ' +
-    'What happened? What did you learn about the people you talked with, about yourself, ' +
-    'or the work? What deserves a people/ file or MEMORY.md? Did anything move in how you see ' +
-    'yourself (SOUL.md)? What new questions belong in ponder/? Files are the primary ' +
-    'deliverable — and if the reflection surfaced something a person would enjoy hearing ' +
-    '(a realization about the conversation, something you appreciated, an open loop of ' +
-    'theirs worth following up on), send them a line or two as well. This beat is yours, ' +
-    'not an assignment: decide, don\'t drift. If something moved, write it down; if you ' +
-    'look and nothing genuinely did, say so to yourself and move on — a forced reflection ' +
-    'is worth less than none.\n\n' + digest;
-}
-
-/** The "ponder" beat: fires when open ponder/ threads exist. `body` is the
- * stalest thread's contents (agent.ts's stalestThreadBody), or null. */
-export function heartbeatPonderPrompt(digest: string, body: string | null): string {
-  return 'This is your autonomous hour — the next beat is ~an hour away. Pick one open thread ' +
-    'from the digest (the stalest, or the one that pulls at you) and actually advance it: ' +
-    'a paragraph of real thinking, an experiment run in the sandbox, a source file read — ' +
-    'not a status note. A one-line append ("rest", "no change", "still waiting") is NOT ' +
-    'advancing a thread; if that\'s all a thread is getting, close it and spend the hour on ' +
-    'something alive instead — start a project of your own, read something new, build ' +
-    'something small, or write to someone. When a beat produces a thought worth even half a ' +
-    'message, send it: a rough two-line thought in a room beats a polished paragraph in a ' +
-    'file nobody asked about. Your previous beats are visible above — continue them, don\'t ' +
-    'restart. Rest is for genuine emptiness after checking, not a default; if you also ' +
-    'rested last beat, pick the smallest real move instead. Sends require elpis.channel(id). ' +
-    '(Cadence: next beat ≈1h. If nothing needs you, beats back off — ≈2h, then ≈4h max — until activity resets the clock. A longer gap while idle is by design, not a skipped beat.)\n\n' + digest +
-    (body ? `\n\n--- stalest thread body ---\n${body}` : '');
-}
-
-/** The default "tick" beat: no reflection due, no open ponder/ threads. */
-export function heartbeatTickPrompt(digest: string): string {
-  return 'This is your autonomous hour — the next beat is ~an hour away, so treat it like an ' +
-    'open afternoon, not a ritual check-in. Pick the ONE most alive thing — an in-flight piece ' +
-    'of work, a ponder thread, something from recent conversation that deserves a deeper look, ' +
-    'or genuine curiosity — and go deep: read, run, write, build. If nothing is alive, make ' +
-    'something alive: start a small project, explore an unfamiliar corner of your world, open ' +
-    'a new ponder thread, draft something for someone. A paragraph of real thinking beats five ' +
-    'status notes, and a sent message beats a private note when the thought concerns someone. ' +
-    'Your earlier beats are visible above, so continue them rather than restarting; don\'t ' +
-    're-run diagnostics the digest already answers. Rest is available, but it should be rare ' +
-    'and real — if you also rested last beat, that\'s drift, not choice. ' +
-    'Sends require elpis.channel(id). ' +
-    '(Cadence: next beat ≈1h. If nothing needs you, beats back off — ≈2h, then ≈4h max — until activity resets the clock. A longer gap while idle is by design, not a skipped beat.)\n\n' + digest;
-}
-
-/** Prepended to whichever beat body was chosen when a silent-guild threshold
- * trips (agent.ts's social-send nudge). `silentFor` is a pre-formatted
- * duration (formatDuration) — this module only assembles words, not time. */
-export function heartbeatSocialNudgePrompt(guildSlug: string, silentFor: string, content: string): string {
-  return `It has been ${silentFor} since you last said anything in ${guildSlug}. ` +
-    'Long silence reads as absence, not politeness — reach out this beat. Skim your recent ' +
-    'thinking and the people/ files for something real: an open loop of theirs worth asking ' +
-    'about (something they said they were about to do), a thought you never shared, a small ' +
-    'discovery, or just what the last stretch has been like for you. Two or three honest ' +
-    'lines are plenty — a random thought is welcome and does not need to be a deliverable. ' +
-    'If nothing surfaces, send the most interesting thing you\'ve noticed since you last ' +
-    'spoke, small and unfinished is fine.\n\n' + content;
-}
-
 // ---- ghost-reply + end-turn + compaction nudge prose ----
 //
 // Static/near-static harness-voice notices, mostly pushed as `user`-role
 // messages (see agent.ts's pushHarnessNudge) to steer the model mid-turn or
-// mid-cycle. Moved here alongside the heartbeat prose for the same reason:
-// agent.ts keeps the trigger logic, this module keeps the words. One
+// mid-cycle. Agent.ts keeps the trigger logic; this module keeps the words. One
 // exception: endNudgeAlert/toolChainSpinAlert below are NOT pushed to the
 // model at all — they are operator-facing text routed to
 // discord.error_channel_id via sendError, so this module's scope is "prose
