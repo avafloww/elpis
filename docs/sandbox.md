@@ -55,7 +55,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.remember`, `elpis.memory`;
 - `elpis.focus`, `elpis.state`, `elpis.ponder`;
 - `elpis.mind`;
-- `elpis.schedule`, `elpis.unschedule`, `elpis.tasks`.
+- `elpis.schedule`, including `.list()` and `.remove(ref)`.
 
 ### Conversation and waiting
 

@@ -1,6 +1,6 @@
 # Configuration
 
-Elpis reads `config.yaml` from the repository root. Copy `config.example.yaml`, keep the result mode `0600`, and never commit it.
+Elpis reads `config.yaml` from the repository root by default. `ELPIS_CONFIG` may point to another file, as the restricted image does with `/data/config.yaml`. Keep the file mode `0600` and never commit it.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -84,10 +84,26 @@ These limits control accidents and resource use; they do not make the sandbox ho
 
 The console defaults to `127.0.0.1:8787`. Keep it loopback-only and put an authenticated TLS reverse proxy in front if remote access is needed.
 
-## Optional integrations
+## `modules`
 
-- `kagi.api_key` enables search and page extraction.
-- `bluesky` enables AT Protocol posting and reading.
+Built-in optional modules are `kagi`, `bsky`, `browser`, `computer`, `motor`, and `fleet`. Configure exactly one policy:
+
+- `enabled: [...]` is an allowlist; `enabled: []` requests none;
+- `disabled: [...]` is a denylist; `disabled: []` requests all;
+- omitting `modules` preserves the normal request-all default.
+
+Supplying both keys, naming an unknown module, or repeating an ID is a boot error. Module state is resolved once at boot:
+
+- **disabled**: excluded by policy, absent from `Object.keys(elpis)`, and direct access is `undefined`;
+- **unavailable**: selected but missing credentials, dependencies, or runtime support; enumerable with precise rejecting stubs, but omitted from the prompt;
+- **active**: real API plus prompt documentation.
+
+`motor` requires an active `computer`; `fleet` also requires `fleet.enabled`. The official restricted image makes the desktop/browser/motor/fleet stack unavailable.
+
+## Optional integration settings
+
+- `kagi.api_key` supplies search and page-extraction credentials.
+- `bluesky` supplies AT Protocol credentials and service configuration.
 - `fleet` configures optional coding-worker sessions, model aliases, effort values, and lifecycle limits.
 
 ## `paths`

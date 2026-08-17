@@ -6,7 +6,6 @@ const inputs = {
   soul: 'SOUL_BODY_MARKER_XYZ',
   memory: 'MEMORY_MARKER_XYZ',
   now: 'NOW_MARKER_XYZ',
-  state: { mood: 'ok' },
   harnessRoot: '/HR',
   dataDirectory: '/DD',
   participants: [{ authorId: '1', author: 'Clover' }],

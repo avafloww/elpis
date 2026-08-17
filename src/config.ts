@@ -3,6 +3,7 @@ import * as url from 'node:url';
 import * as fs from 'node:fs';
 import { parse as parseYaml, YAMLParseError } from 'yaml';
 import { createLogger, parseLogLevel, type LogLevel, type Logger } from './lib/log.js';
+import { BUILTIN_MODULE_IDS, type BuiltinModuleId } from './builtin-modules.js';
 
 /** The Claude Agent SDK alias slots backed by ANTHROPIC_DEFAULT_<ALIAS>_MODEL. */
 export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -150,6 +151,12 @@ export interface Config {
     previewMaxBytes: number;
     logMaxBytes: number;
   };
+  modules: {
+    /** Non-null means allowlist mode: only named built-ins are requested. */
+    enabled: BuiltinModuleId[] | null;
+    /** Denylist mode when enabled is null: every built-in except these is requested. */
+    disabled: BuiltinModuleId[];
+  };
   console: {
     enabled: boolean;
     mcpEnabled: boolean;
@@ -285,9 +292,10 @@ export function ensureDataDirectory(dataDirectory: string): void {
 
 type YamlTree = Record<string, unknown>;
 
-/** Default location of the config file: alongside the harness source root. */
+/** Default location of the config file. ELPIS_CONFIG lets immutable images keep
+ * operator configuration on a writable mounted volume. */
 export function defaultConfigPath(): string {
-  return path.join(resolveHarnessRoot(), 'config.yaml');
+  return process.env.ELPIS_CONFIG || path.join(resolveHarnessRoot(), 'config.yaml');
 }
 
 /** Read a dotted key path out of the parsed tree. Returns undefined for any
@@ -737,6 +745,28 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       previewMaxBytes: numOr(tree, 'sandbox.preview_max_bytes', 16384, f),
       logMaxBytes: numOr(tree, 'sandbox.log_max_bytes', 32768, f),
     },
+    modules: (() => {
+      const enabledPresent = at(tree, 'modules.enabled') !== undefined;
+      const disabledPresent = at(tree, 'modules.disabled') !== undefined;
+      if (enabledPresent && disabledPresent) {
+        throw new Error(`${f}: \`modules.enabled\` and \`modules.disabled\` are mutually exclusive`);
+      }
+      const validate = (key: 'enabled' | 'disabled'): BuiltinModuleId[] => {
+        const values = strListOr(tree, `modules.${key}`, [], f);
+        const seen = new Set<string>();
+        return values.map((value, index) => {
+          if (!(BUILTIN_MODULE_IDS as readonly string[]).includes(value)) {
+            throw new Error(`${f}: key \`modules.${key}[${index}]\` names unknown module '${value}' (expected one of: ${BUILTIN_MODULE_IDS.join(', ')})`);
+          }
+          if (seen.has(value)) throw new Error(`${f}: key \`modules.${key}\` contains duplicate module '${value}'`);
+          seen.add(value);
+          return value as BuiltinModuleId;
+        });
+      };
+      return enabledPresent
+        ? { enabled: validate('enabled'), disabled: [] }
+        : { enabled: null, disabled: disabledPresent ? validate('disabled') : [] };
+    })(),
     console: {
       enabled: boolOr(tree, 'console.enabled', true, f),
       mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, f),

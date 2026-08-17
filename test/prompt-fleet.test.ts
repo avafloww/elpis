@@ -1,7 +1,4 @@
-// test/prompt-fleet.test.ts — the `### elpis.fleet` prompt section is swapped
-// for a "not available — do the work yourself" note when the fleet is disabled
-// by config (fleet.enabled: false → PromptInputs.fleetEnabled: false). Omitted
-// or true keeps the full verb documentation.
+// test/prompt-fleet.test.ts — fleet docs appear only while the module is active.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,16 +26,11 @@ test('fleetEnabled: true keeps the full fleet section', () => {
   assert.doesNotMatch(prompt, /fleet is disabled/);
 });
 
-test('fleetEnabled: false swaps the section for the not-available note', () => {
+test('fleetEnabled: false omits the unavailable fleet from the prompt', () => {
   const prompt = build({ ...baseInputs, fleetEnabled: false });
- // The heading stays (so `elpis.fleet` is findable when the model wonders
- // about it) but every verb doc line is gone.
-  assert.match(prompt, /### `elpis\.fleet`/);
-  assert.match(prompt, /fleet is disabled in this harness's config/);
-  assert.match(prompt, /perform code changes and other work yourself/);
-  assert.doesNotMatch(prompt, /elpis\.fleet\.run/);
-  assert.doesNotMatch(prompt, /elpis\.fleet\.send/);
-  assert.doesNotMatch(prompt, /elpis\.fleet\.dismiss/);
+  assert.doesNotMatch(prompt, /### `elpis\.fleet`/);
+  assert.doesNotMatch(prompt, /elpis\.fleet\./);
+  assert.doesNotMatch(prompt, /fleet is disabled/);
 });
 
 test('the effort opt list still renders when the fleet is enabled', () => {

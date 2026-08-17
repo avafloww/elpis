@@ -12,8 +12,6 @@ const baseDeps = () => ({
     kagi: { apiKey: null },
     bluesky: null,
   },
-  readState: () => ({}),
-  writeState: () => {},
 });
 
 test('elpis.bsky.post throws a clear not-configured error without bluesky config', async () => {

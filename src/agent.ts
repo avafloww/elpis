@@ -47,9 +47,9 @@ import {
   GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, toolChainSpinAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
 } from './llm/prompt.js';
 import type { Config } from './config.js';
+import type { BuiltinModuleRegistry, RuntimeProfile } from './builtin-modules.js';
 import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID } from './types.js';
 import { localHm, localStamp } from './lib/time.js';
-import { readState } from './store/state.js';
 import { parseSoul, DEFAULT_AGENT_NAME } from './store/soul.js';
 import type { ChannelDirectory } from './store/channels.js';
 import type { MuteStore } from './store/mutes.js';
@@ -355,6 +355,10 @@ export interface AgentDeps {
   mind?: MindService;
   /** Boot-frozen deterministic prompt blocks from data-directory extensions. */
   extensionPrompt?: string;
+  /** Boot-resolved built-in modules; also used by the sandbox. */
+  modules?: BuiltinModuleRegistry;
+  /** Boot-frozen host/container authority profile. */
+  profile?: RuntimeProfile;
   llm: LLM;
   tracker: ContextTracker;
   compactor: Compactor;
@@ -426,7 +430,6 @@ export class Agent {
   private memoryView = '';
   private peopleView: PersonFile[] = [];
   private nowView = '';
-  private stateView: Record<string, unknown> = {};
   private busy = false;
   private consecutiveIdleTicks = 0;
   private consecutive400 = 0;
@@ -1809,7 +1812,6 @@ export class Agent {
     const dataDir = this.config.paths.dataDirectory;
     try { this.peopleView = loadPeopleFiles(dataDir); } catch { this.peopleView = []; }
     this.nowView = readFileOr(path.join(dataDir, 'NOW.md'));
-    try { this.stateView = readState(dataDir); } catch { this.stateView = {}; }
   }
 
   /** Test/diagnostics accessors. */
@@ -1934,7 +1936,6 @@ export class Agent {
       soul,
       memory: this.memoryView,
       now: this.nowView,
-      state: this.stateView,
       harnessRoot: this.config.paths.harnessRoot,
       dataDirectory: this.config.paths.dataDirectory,
       participants,
@@ -1944,6 +1945,8 @@ export class Agent {
       guildCount: this.config.discord.guilds.length,
       externalThinking: this.config.llm.externalThinking,
       extensionPrompt: this.deps.extensionPrompt,
+      modules: this.deps.modules,
+      profile: this.deps.profile,
     });
     const externalThinkingHint = this.config.llm.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`

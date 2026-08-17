@@ -6,6 +6,7 @@ import type { ChatMessage, StandaloneCompleteOptions, StandaloneCompleteResult }
 import type { MindService } from './store/mind.js';
 import type { ReplayIdentity } from './llm/provenance.js';
 import type { ExtensionRegistry } from './extensions.js';
+import type { BuiltinModuleRegistry, RuntimeProfile } from './builtin-modules.js';
 
 /** Reserved provenance label for heartbeat / harness-internal traffic. In the monocontext model,
  * (monocontext) this is no longer a separate context — it is a transcript
@@ -55,6 +56,7 @@ export interface SandboxDeps {
     };
     kagi: { apiKey: string | null };
     bluesky: { service: string; identifier: string; appPassword: string } | null;
+    modules?: { enabled: import('./builtin-modules.js').BuiltinModuleId[] | null; disabled: import('./builtin-modules.js').BuiltinModuleId[] };
     /** `efforts` — the elpis.fleet.run() effort guard validates against
  * the configured level set before it ever reaches the registry. Optional:
  * a harness wired without a fleet section falls back to the Agent SDK's
@@ -78,6 +80,10 @@ export interface SandboxDeps {
   agentName?: () => string;
   /** Boot-loaded, deeply frozen data-directory extension registry. */
   extensions?: ExtensionRegistry;
+  /** Boot-resolved built-in module availability; shared with prompt rendering. */
+  modules?: BuiltinModuleRegistry;
+  /** Boot-frozen host/container authority profile. */
+  profile?: RuntimeProfile;
   /** Structured metadata for the most recent inbound Discord message. */
   inbound?: InboundMessage | null;
   /** Background jobs + futures registry (A3/A5). Shared across the sandbox. */
@@ -120,11 +126,6 @@ export interface SandboxDeps {
  * ("message delivered to <label> (<id>)") so a wrong-room send is visible in the
  * very next tool result ( mis-target guardrail, now guild-aware — ). */
   channelLabel?: (id: string) => string;
-  /** Read the agent's self-set transient state object from state.json.
- * Returns {} if missing or malformed. */
-  readState?: () => Record<string, unknown>;
-  /** Write the agent's self-set transient state object to state.json. */
-  writeState?: (state: Record<string, unknown>) => void;
   /** Trigger Discord's typing indicator in a channel. Used by channel(id).typing(). */
   typing?: (channelId: string) => void;
   /** Enqueue a watch-mode message: image frames from local paths delivered as

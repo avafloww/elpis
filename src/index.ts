@@ -27,8 +27,8 @@ import { openDatabase } from './store/db.js';
 import { Scheduler } from './store/scheduler.js';
 import { MindService } from './store/mind.js';
 import { createFeedbackStore } from './store/feedback.js';
-import { readState, writeState } from './store/state.js';
 import { loadExtensions } from './extensions.js';
+import { detectRuntimeProfile, resolveBuiltinModules, type BuiltinModuleRegistry, type RuntimeProfile } from './builtin-modules.js';
 import { readAgentName } from './store/soul.js';
 import { setLogSink } from './lib/log.js';
 import { ConsoleHub, type MetaInfo } from './console/hub.js';
@@ -55,6 +55,8 @@ export interface ElpisRuntime {
   scheduler: Scheduler;
   mind: MindService;
   extensions: Awaited<ReturnType<typeof loadExtensions>>;
+  modules: BuiltinModuleRegistry;
+  profile: RuntimeProfile;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -71,6 +73,8 @@ export function formatProcessErrorNotice(kind: 'unhandledRejection' | 'uncaughtE
 
 export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): Promise<ElpisRuntime> {
   const config = (adapters.loadConfigFile ?? loadConfigFile)();
+  const profile = detectRuntimeProfile();
+  const modules = resolveBuiltinModules(config, profile);
   ensureDataDirectory(config.paths.dataDirectory);
 
  // The agent's structured-data store (channels + feedback signal). Opened once
@@ -86,6 +90,8 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   ensureFile(config.paths.memoryPath, '# Agent Memory\n');
 
   const log = (...a: unknown[]) => config.logger.info(...a);
+  log(`runtime profile: ${profile.restricted ? `restricted (${profile.source})` : 'normal'}`);
+  log(`built-in modules: ${modules.statuses.map((status) => `${status.id}=${status.state}`).join(', ')}`);
 
  // The sandbox cwd is the DATA_DIRECTORY so relative file writes (./SOUL.md,
  // ./notes.txt, ...) land in the agent's brain by default.
@@ -238,6 +244,8 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     replayIdentity: replayIdentityForConfig(config),
     memory,
     extensions,
+    modules,
+    profile,
     send: async (channelId: string, content: string, opts?: { files?: import('./types.js').OutboundAttachment[] }) => agent.send(channelId, content, opts),
     logbuf: extensionLogbuf,
     agentName: () => readAgentName(config.paths.soulPath),
@@ -280,8 +288,6 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     scheduler,
     mind,
  // Self-set transient state: read fresh every turn, write from sandbox.
-    readState: () => readState(config.paths.dataDirectory),
-    writeState: (s) => writeState(config.paths.dataDirectory, s),
  // Killswitch self-mute: the sandbox can only ever mute itself —
  // moderateChannel's actor is hardcoded 'self' here, never 'operator'.
     moderate: (channelId: string, reason?: string) => agent.moderateChannel(channelId, 'mute', 'self', reason),
@@ -321,6 +327,8 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     memory,
     mind,
     extensionPrompt: extensions.prompt,
+    modules,
+    profile,
     setCurrentInbound: (msg: InboundMessage | null) => { inboundRef.current = msg; },
     llm,
     tracker,
@@ -527,7 +535,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   process.on('unhandledRejection', (reason) => reportProcessError('unhandledRejection', reason));
   process.on('uncaughtException', (err) => reportProcessError('uncaughtException', err));
 
-  return { config, agent, discord, scheduler, mind, extensions };
+  return { config, agent, discord, scheduler, mind, extensions, modules, profile };
 }
 
 // Only boot when this module is the actual process entry point (`tsx watch

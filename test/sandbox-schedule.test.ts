@@ -1,7 +1,7 @@
 // test/sandbox-schedule.test.ts — validation for elpis.schedule/unschedule at
 // the sandbox-global level: coerceNextRunAt's epoch-ms/ISO/
 // Date coercion, elpis.schedule's required-field checks, elpis.schedule.update,
-// and elpis.unschedule's unified id-or-name keying.
+// and elpis.schedule.remove's unified id-or-name keying.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGlobals, coerceNextRunAt } from '../src/sandbox/globals.js';
@@ -102,25 +102,25 @@ test('elpis.schedule.update: null clears snoozeUntil', () => {
   assert.equal(cleared.snoozeUntil, null);
 });
 
-test('elpis.unschedule: deletes by numeric id', async () => {
+test('elpis.schedule.remove: deletes by numeric id', async () => {
   const scheduler = fakeScheduler();
   const g = buildGlobals({ config: baseConfig(), scheduler } as unknown as SandboxDeps);
-  const elpis = g.elpis as { schedule: (opts: unknown) => { id: number }; unschedule: (ref: number | string) => Promise<boolean> };
+  const elpis = g.elpis as { schedule: ((opts: unknown) => { id: number }) & { remove: (ref: number | string) => Promise<boolean> } };
   const task = elpis.schedule({ name: 'by-id', payload: 'y', nextRunAt: Date.now() });
-  assert.equal(await elpis.unschedule(task.id), true);
+  assert.equal(await elpis.schedule.remove(task.id), true);
 });
 
-test('elpis.unschedule: deletes by name', async () => {
+test('elpis.schedule.remove: deletes by name', async () => {
   const scheduler = fakeScheduler();
   const g = buildGlobals({ config: baseConfig(), scheduler } as unknown as SandboxDeps);
-  const elpis = g.elpis as { schedule: (opts: unknown) => { id: number }; unschedule: (ref: number | string) => Promise<boolean> };
+  const elpis = g.elpis as { schedule: ((opts: unknown) => { id: number }) & { remove: (ref: number | string) => Promise<boolean> } };
   elpis.schedule({ name: 'by-name', payload: 'y', nextRunAt: Date.now() });
-  assert.equal(await elpis.unschedule('by-name'), true);
+  assert.equal(await elpis.schedule.remove('by-name'), true);
 });
 
-test('elpis.unschedule: throws a teachable error for an unknown name', async () => {
+test('elpis.schedule.remove: throws a teachable error for an unknown name', async () => {
   const scheduler = fakeScheduler();
   const g = buildGlobals({ config: baseConfig(), scheduler } as unknown as SandboxDeps);
-  const elpis = g.elpis as { unschedule: (ref: number | string) => Promise<boolean> };
-  await assert.rejects(() => elpis.unschedule('nope'), /no task named 'nope'/);
+  const elpis = g.elpis as { schedule: { remove: (ref: number | string) => Promise<boolean> } };
+  await assert.rejects(() => elpis.schedule.remove('nope'), /no task named 'nope'/);
 });

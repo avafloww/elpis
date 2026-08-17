@@ -1,6 +1,8 @@
 # Installation
 
-The supported production target is a fresh dedicated Debian 13 VM or machine. The installer provisions a powerful resident agent, including passwordless sudo; do not run it casually on a shared host.
+The supported full-capability production target is a fresh dedicated Debian 13 VM or machine. The installer provisions a powerful resident agent, including passwordless sudo; do not run it casually on a shared host.
+
+For a non-root, read-only-harness deployment, use the [restricted container](container.md) published at `ghcr.io/avafloww/elpis:latest`.
 
 ## Automated install
 

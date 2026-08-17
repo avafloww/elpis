@@ -578,7 +578,7 @@ test('A6: elpis.inbound getter stays live', async () => {
 test('elpis carries the full verb surface', async () => {
   const expected = ['sh', 'sudo', 'grep', 'read', 'edit', 'fill', 'channel', 'remember', 'ponder',
     'restart', 'deploy', 'focus', 'preview', 'git', 'memory', 'bg', 'inbound', 'search', 'extract',
-    'sleep', 'wait', 'timeout', 'schedule', 'unschedule', 'tasks', 'state', 'ext', 'motor'];
+    'sleep', 'wait', 'timeout', 'schedule', 'ext', 'motor'];
   const r = await sandbox.run('Object.keys(elpis).sort().join(",")');
   for (const k of expected) assert.match(r.preview ?? '', new RegExp(`\\b${k}\\b`));
 });

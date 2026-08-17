@@ -171,8 +171,8 @@ test('fleet.enabled: false in config yields a disabled-by-config error, not "not
   const elpis = g.elpis as {
     fleet: { run: (p: string, o?: unknown) => Promise<unknown>; list: () => unknown };
   };
-  await assert.rejects(() => elpis.fleet.run('x'), /disabled in config.*do the work yourself/);
-  assert.throws(() => elpis.fleet.list(), /fleet\.enabled: false/);
+  await assert.rejects(() => elpis.fleet.run('x'), /unavailable.*fleet.enabled: false/);
+  await assert.rejects(() => Promise.resolve(elpis.fleet.list()), /unavailable.*fleet.enabled: false/);
 });
 
 test('an off-list effort is rejected by the GLOBAL before deps.fleet is called', async () => {

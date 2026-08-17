@@ -18,7 +18,8 @@ import type { SandboxDeps } from '../types.js';
 import type { BgStartOpts } from './bg.js';
 import type { FleetHandle } from '../fleet/index.js';
 import { INTERNAL_CHANNEL_ID } from '../types.js';
-import { SDK_EFFORT_LEVELS } from '../config.js';
+import { SDK_EFFORT_LEVELS, type Config } from '../config.js';
+import { resolveBuiltinModules, type BuiltinModuleId } from '../builtin-modules.js';
 import { parseFrontmatter } from '../lib/frontmatter.js';
 import { appendDatedBullet } from '../store/memory.js';
 import { writeResumeMarker } from '../store/resume.js';
@@ -62,7 +63,7 @@ const baseRequire = createRequire(import.meta.url);
 // rewrote) is re-read. Bare specifiers (node: builtins, node_modules) stay
 // cached — no package-singleton breakage, no heavy re-init. Trade-off: a helper
 // that holds module-level state across calls loses it on re-require (fine for
-// scratch helpers; use elpis.state for durable state). 
+// scratch helpers; use files or Mind for durable state).
 // The cache-bust below is a no-op for ES modules (this package is
 // `"type": "module"`, so all of dist/ is ESM and require routes through the
 // ESM loader, whose map require.cache does not index). We cannot evict that
@@ -168,6 +169,24 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // Every harness verb is built onto `e`, then deep-frozen and hung off
  // `g.elpis` at the end of this function — see the deepFreeze call below.
   const e: Record<string, unknown> = {};
+  const modules = deps.modules ?? resolveBuiltinModules(deps.config as unknown as Config);
+  const profile = deps.profile ?? { restricted: false, source: 'normal' as const };
+  const unavailableFunction = (key: string, reason: string) => async (..._args: unknown[]) => {
+    throw new Error(`elpis.${key}: unavailable — ${reason}`);
+  };
+  const unavailableObject = (key: string, reason: string) => new Proxy(Object.freeze({}), {
+    get(_target, property) {
+      if (property === Symbol.toStringTag) return 'UnavailableModule';
+      return unavailableFunction(`${key}.${String(property)}`, reason);
+    },
+  });
+  const installUnavailableModule = (id: BuiltinModuleId) => {
+    if (modules.state(id) !== 'unavailable') return;
+    const reason = modules.reason(id) ?? `${id} module is unavailable`;
+    for (const key of modules.statuses.find((status) => status.id === id)?.keys ?? []) {
+      e[key] = id === 'kagi' ? unavailableFunction(key, reason) : unavailableObject(key, reason);
+    }
+  };
 
  // Protect a bare reserved global from silent clobbering: plain assignment
  // (`elpis = 5`, which the transform does NOT rewrite) throws instead of
@@ -331,7 +350,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   e.sh = sh;
   const sudo = (cmd: string, opts?: { cwd?: string; timeout?: number; maxBuffer?: number }) =>
     guardShPromise(shImpl(`sudo ${cmd}`, opts), 'elpis.sudo');
-  e.sudo = sudo;
+  if (!profile.restricted) e.sudo = sudo;
 
  // grep(pattern, opts?) — recursive text search, defaulting to the harness
  // src/ tree. Replaces the fs.readFileSync + indexOf probing the agent fell
@@ -535,7 +554,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     }
     return deps.fleet;
   };
-  e.fleet = {
+  const fleetApi = {
  // async-wrapped (not just "return requireFleet...") so a missing-fleet
  // or bad-effort throw surfaces as a REJECTED PROMISE, matching FleetHandle's
  // own Promise-returning contract — a caller that `await`s consistently sees
@@ -554,6 +573,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     diff: async (ref: string, opts?: Parameters<FleetHandle['diff']>[1]) => requireFleet().diff(ref, opts),
     dismiss: async (ref: string, opts?: Parameters<FleetHandle['dismiss']>[1]) => requireFleet().dismiss(ref, opts),
   };
+  if (modules.isActive('fleet')) e.fleet = fleetApi;
+  else installUnavailableModule('fleet');
 
  // memory.person(name, text) — append a dated bullet to people/<name>.md,
  // creating it with a frontmatter stub (ids pre-filled from inbound when the
@@ -682,8 +703,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   g.queueMicrotask = queueMicrotask;
   g.crypto = crypto;
  // web search + page extraction via Kagi (`kagi.api_key`); bodies in web.ts
-  e.search = (query: string, opts?: { limit?: number; workflow?: string }) => kagiSearch(deps, query, opts);
-  e.extract = (url: string, opts?: { timeout?: number; format?: string }) => kagiExtract(deps, url, opts);
+  if (modules.isActive('kagi')) {
+    e.search = (query: string, opts?: { limit?: number; workflow?: string }) => kagiSearch(deps, query, opts);
+    e.extract = (url: string, opts?: { timeout?: number; format?: string }) => kagiExtract(deps, url, opts);
+  } else installUnavailableModule('kagi');
 
  // Browser and whole-desktop control share the one real Xorg seat. Headless
  // Playwright ignores these variables; headed sessions render onto the exact
@@ -695,77 +718,91 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // browser automation: a thin, structured wrapper over the locally pinned
  // Playwright CLI. Session state + screenshots live under DATA_DIR/browser so
  // repeated run calls and harness restarts can keep the same page open.
-  const browserDir = path.join(deps.config.paths.dataDirectory, 'browser');
-  const browserBin = path.join(deps.config.paths.harnessRoot, 'node_modules', '.bin', 'playwright-cli');
-  const maximizedChromiumConfig = path.join(browserDir, 'maximized-chromium.config.json');
-  const maximizedConfigBody = JSON.stringify({
-    browser: { browserName: 'chromium', launchOptions: { args: ['--start-maximized'] }, contextOptions: { viewport: null } },
-  }, null, 2) + '\n';
-  fs.mkdirSync(browserDir, { recursive: true });
-  if (!fs.existsSync(maximizedChromiumConfig) || fs.readFileSync(maximizedChromiumConfig, 'utf8') !== maximizedConfigBody) {
-    fs.writeFileSync(maximizedChromiumConfig, maximizedConfigBody);
-  }
-  e.browser = createBrowserTools({
-    browserDir,
-    maximizedChromiumConfig,
-    watch: deps.watch,
-    run: async (args, opts) => {
-      if (!fs.existsSync(browserBin)) throw new Error('elpis.browser: local playwright-cli is not installed; run npm install in HARNESS_ROOT');
-      const command = [sh.q(browserBin), ...args.map((arg) => sh.q(arg))].join(' ');
-      return shImpl(`env DISPLAY=${sh.q(computerDisplay)} XAUTHORITY=${sh.q(computerXauthority)} ${command}`, {
-        cwd: browserDir,
-        timeout: opts?.timeout ?? 60_000,
-        maxBuffer: SH_MAX_BUFFER,
-      });
-    },
-  });
+  if (modules.isActive('browser')) {
+    const browserDir = path.join(deps.config.paths.dataDirectory, 'browser');
+    const browserBin = path.join(deps.config.paths.harnessRoot, 'node_modules', '.bin', 'playwright-cli');
+    const maximizedChromiumConfig = path.join(browserDir, 'maximized-chromium.config.json');
+    const maximizedConfigBody = JSON.stringify({
+      browser: { browserName: 'chromium', launchOptions: { args: ['--start-maximized'] }, contextOptions: { viewport: null } },
+    }, null, 2) + '\n';
+    fs.mkdirSync(browserDir, { recursive: true });
+    if (!fs.existsSync(maximizedChromiumConfig) || fs.readFileSync(maximizedChromiumConfig, 'utf8') !== maximizedConfigBody) {
+      fs.writeFileSync(maximizedChromiumConfig, maximizedConfigBody);
+    }
+    e.browser = createBrowserTools({
+      browserDir,
+      maximizedChromiumConfig,
+      watch: deps.watch,
+      run: async (args, opts) => {
+        if (!fs.existsSync(browserBin)) throw new Error('elpis.browser: local playwright-cli is not installed; run npm install in HARNESS_ROOT');
+        const command = [sh.q(browserBin), ...args.map((arg) => sh.q(arg))].join(' ');
+        return shImpl(`env DISPLAY=${sh.q(computerDisplay)} XAUTHORITY=${sh.q(computerXauthority)} ${command}`, {
+          cwd: browserDir,
+          timeout: opts?.timeout ?? 60_000,
+          maxBuffer: SH_MAX_BUFFER,
+        });
+      },
+    });
+  } else installUnavailableModule('browser');
+
+  type MotorComputerApi = {
+    screenshot(opts: { filename: string }): Promise<{ file: string }>;
+    hold(keys: string[], durationMs: number): Promise<unknown>;
+  };
+  let computerApi: MotorComputerApi | null = null;
 
  // Real Xorg :0 is a root system service driving the VM VGA; Openbox/tint2
  // are a user service. The sandbox supplies window/input/clipboard/screenshot
  // control and injects the display credentials into each short command.
-  const computer = createComputerTools({
-    computerDir,
-    display: computerDisplay,
-    xauthority: computerXauthority,
-    serviceName: 'elpis-desktop',
-    xorgServiceName: 'elpis-xorg',
-    watch: deps.watch,
-    run: (command, opts) => shImpl(
-      displayShellCommand(command, computerDisplay, computerXauthority),
-      { cwd: computerDir, timeout: opts?.timeout ?? 60_000, maxBuffer: SH_MAX_BUFFER },
-    ),
-  });
-  e.computer = computer;
-  const computerApi = computer as {
-    screenshot(opts: { filename: string }): Promise<{ file: string }>;
-    hold(keys: string[], durationMs: number): Promise<unknown>;
-  };
-  e.motor = createMotorController({
-    dataDirectory: deps.config.paths.dataDirectory,
-    completeStandalone: (messages, opts) => {
-      if (!deps.completeStandalone) throw new Error('elpis.motor: configured LLM provider has no isolated standalone completion path');
-      return deps.completeStandalone(messages, opts);
-    },
-    screenshot: (filename) => computerApi.screenshot({ filename }),
-    hold: (keys, durationMs) => computerApi.hold(keys, durationMs),
-    replayIdentity: deps.replayIdentity ?? null,
-  });
+  if (modules.isActive('computer')) {
+    const computer = createComputerTools({
+      computerDir,
+      display: computerDisplay,
+      xauthority: computerXauthority,
+      serviceName: 'elpis-desktop',
+      xorgServiceName: 'elpis-xorg',
+      watch: deps.watch,
+      run: (command, opts) => shImpl(
+        displayShellCommand(command, computerDisplay, computerXauthority),
+        { cwd: computerDir, timeout: opts?.timeout ?? 60_000, maxBuffer: SH_MAX_BUFFER },
+      ),
+    });
+    e.computer = computer;
+    computerApi = computer as unknown as MotorComputerApi;
+  } else installUnavailableModule('computer');
+
+  if (modules.isActive('motor')) {
+    if (!computerApi) throw new Error('motor module resolved enabled without computer dependency');
+    const motorComputer = computerApi;
+    e.motor = createMotorController({
+      dataDirectory: deps.config.paths.dataDirectory,
+      completeStandalone: (messages, opts) => {
+        if (!deps.completeStandalone) throw new Error('elpis.motor: configured LLM provider has no isolated standalone completion path');
+        return deps.completeStandalone(messages, opts);
+      },
+      screenshot: (filename) => motorComputer.screenshot({ filename }),
+      hold: (keys, durationMs) => motorComputer.hold(keys, durationMs),
+      replayIdentity: deps.replayIdentity ?? null,
+    });
+  } else installUnavailableModule('motor');
 
  // bluesky/atproto (`bluesky.*` config); bodies in bsky.ts
-  const bskyCfg = () => {
-    const c = deps.config.bluesky;
-    if (!c) throw new Error('bsky: not configured — set bluesky.identifier + bluesky.app_password in config.yaml');
-    return c;
-  };
-  e.bsky = {
-    post: async (text: string) => bskyPost(bskyCfg(), text),
-    reply: async (text: string, parent: { uri: string; cid: string }, root?: { uri: string; cid: string }) => bskyReply(bskyCfg(), text, parent, root),
-    like: async (uri: string, cid: string) => bskyLike(bskyCfg(), uri, cid),
-    follow: async (did: string) => bskyFollow(bskyCfg(), did),
-    feed: async (limit = 10) => bskyFeed(bskyCfg(), limit),
-    timeline: async (limit = 20) => bskyTimeline(bskyCfg(), limit),
-    notifications: async (limit = 10) => bskyNotifications(bskyCfg(), limit),
-  };
+  if (modules.isActive('bsky')) {
+    const bskyCfg = () => {
+      const c = deps.config.bluesky;
+      if (!c) throw new Error('bsky: not configured — set bluesky.identifier + bluesky.app_password in config.yaml');
+      return c;
+    };
+    e.bsky = {
+      post: async (text: string) => bskyPost(bskyCfg(), text),
+      reply: async (text: string, parent: { uri: string; cid: string }, root?: { uri: string; cid: string }) => bskyReply(bskyCfg(), text, parent, root),
+      like: async (uri: string, cid: string) => bskyLike(bskyCfg(), uri, cid),
+      follow: async (did: string) => bskyFollow(bskyCfg(), did),
+      feed: async (limit = 10) => bskyFeed(bskyCfg(), limit),
+      timeline: async (limit = 20) => bskyTimeline(bskyCfg(), limit),
+      notifications: async (limit = 10) => bskyNotifications(bskyCfg(), limit),
+    };
+  } else installUnavailableModule('bsky');
 
  // preview(x, opts?) — the same bounded, type-aware renderer the harness uses
  // for run results, callable on demand so the agent can drill into a value
@@ -795,7 +832,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // Replaces the raw `elpis.sh("systemctl --user restart elpis-harness")`
  // ritual that SIGTERMs the harness mid-tool-call (confusing result, dangling
  // transcript). Returns a note so the agent knows this is its last turn.
-  e.restart = (reason?: string) => triggerRestart(reason, 'restarting');
+  if (!profile.restricted) e.restart = (reason?: string) => triggerRestart(reason, 'restarting');
 
  // deploy — build the harness, then restart ONLY if the build succeeded.
  // Replaces the easy-to-forget `npm run build` + elpis.restart two-step:
@@ -803,7 +840,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // stale code, and building without checking the exit code deploys a broken
  // build. On failure the tail of the compiler output is returned and NO
  // restart happens.
-  e.deploy = async (reason?: string, opts?: { allowDirty?: boolean }) => {
+  const deploy = async (reason?: string, opts?: { allowDirty?: boolean }) => {
     const root = deps.config.paths.harnessRoot;
  // Ship-step gate: refuse to restart into code that isn't in git.
  // A dirty tree or unpushed commit means a fresh checkout of origin would NOT
@@ -843,6 +880,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     }
     return triggerRestart(reason, 'built and restarting');
   };
+  if (!profile.restricted) e.deploy = deploy;
 
  // git helpers — stage, commit, and push without the easy-to-forget cwd / exit-code
  // dance. Defaults to the DATA dir (the brain repo) — that's where memory/notes/
@@ -907,18 +945,6 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   e.focus = (text: string) => {
     fs.writeFileSync(nowPath, text);
     return { ok: true, note: 'NOW.md updated — visible in every room' };
-  };
- // state(updates?) — read or update the agent's self-set transient state from
- // state.json. With no argument, returns the current object. With an argument,
- // shallow-merges it into the existing state and writes the file. Values are
- // whatever the agent wants to track from turn to turn (mood, energy, posture).
- // This is *not* MEMORY.md: it is hot-reloaded each turn and meant to be small.
-  e.state = (updates?: Record<string, unknown>) => {
-    const current = deps.readState ? deps.readState() : {};
-    if (updates === undefined) return current;
-    const merged = { ...current, ...updates };
-    if (deps.writeState) deps.writeState(merged);
-    return merged;
   };
   const extensionRoot = Object.create(null) as Record<string, unknown>;
   for (const summary of deps.extensions?.summaries ?? []) {
@@ -1163,25 +1189,17 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
     if (patch.snoozeUntil !== undefined) p.snoozeUntil = patch.snoozeUntil === null ? null : coerceNextRunAt(patch.snoozeUntil);
     return requireScheduler().update(id, p);
   };
-  e.schedule = scheduleGlobal;
-
- // unschedule(ref) — delete by numeric id OR by name (keying unified with
- // schedule.done/snooze, which are name-keyed). 
- // list is typed unknown[] on the dep interface; cast to the minimal shape.
-  e.unschedule = async (ref: number | string) => {
+  scheduleGlobal.remove = async (ref: number | string) => {
     const sched = requireScheduler();
     if (typeof ref === 'string') {
-      const task = (sched.list() as Array<{ id: number; name: string }>).find((t) => t.name === ref);
-      if (!task) throw new Error(`elpis.unschedule: no task named '${ref}'`);
+      const task = (sched.list() as Array<{ id: number; name: string }>).find((entry) => entry.name === ref);
+      if (!task) throw new Error(`elpis.schedule.remove: no task named '${ref}'`);
       return sched.delete(task.id);
     }
     return sched.delete(ref);
   };
-
- // tasks — list all scheduled tasks.
-  e.tasks = () => {
-    return requireScheduler().list();
-  };
+  scheduleGlobal.list = () => requireScheduler().list();
+  e.schedule = scheduleGlobal;
 
  // timeout(promise, ms) — race a promise against a timer. Resolves/rejects with the
  // promise's result if it settles before the timeout, otherwise rejects with an Error

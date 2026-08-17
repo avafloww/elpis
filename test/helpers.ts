@@ -86,6 +86,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       socialNudgeMs: 12 * 60 * 60 * 1000,
     },
     sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 },
+    modules: { enabled: null, disabled: [] },
     console: { enabled: false, mcpEnabled: false, port: 8787, host: '127.0.0.1' },
     kagi: { apiKey: null },
     bluesky: null,

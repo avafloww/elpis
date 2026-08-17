@@ -11,7 +11,6 @@ DATA_DIRECTORY/
 ├── SOUL.md
 ├── MEMORY.md
 ├── NOW.md
-├── state.json
 ├── agent.db
 ├── people/
 ├── ponder/
@@ -33,7 +32,6 @@ The exact set grows as capabilities are used.
 - `MEMORY.md` holds durable general memory.
 - `people/*.md` holds person-specific memory with optional external IDs.
 - `NOW.md` records current focus.
-- `state.json` is an optional self-set state snapshot.
 - `ponder/` holds unresolved thinking without turning it into a commitment.
 - `extensions/*.ext.ts` contains trusted local harness plugins; these execute with service-user authority and belong in encrypted backups.
 

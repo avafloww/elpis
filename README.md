@@ -4,7 +4,7 @@ Elpis is a self-hosted, single-agent runtime built around one programmable tool:
 
 It gives an agent a durable home rather than a stateless chat session: one continuous conversation across Discord rooms and a local web console, a filesystem-backed identity and memory, restart-safe transcripts, scheduled and autonomous wakes, a dependency-aware work graph, and the ability to inspect and maintain its own runtime.
 
-> **Security model:** Elpis is designed for a dedicated machine or VM operated for one trusted agent. The sandbox is a coordination boundary, not a hostile-code boundary. The agent can deliberately shell out, use passwordless sudo when provisioned by the installer, edit the harness, and restart services.
+> **Security model:** Full-capability Elpis is designed for a dedicated machine or VM operated for one trusted agent. The sandbox is a coordination boundary, not a hostile-code boundary. The agent can deliberately shell out, use passwordless sudo when provisioned by the installer, edit the harness, and restart services. The official [restricted container](docs/container.md) is a separate non-root, read-only-harness profile with a narrower capability surface.
 
 ## Core model
 
@@ -50,6 +50,8 @@ sudo ./deploy/install.sh
 ```
 
 The installer is intended for a new dedicated host. Read [`docs/install.md`](docs/install.md) before using it on an existing system.
+
+For a restricted container deployment, use `ghcr.io/avafloww/elpis:latest` and follow [`docs/container.md`](docs/container.md).
 
 For a manual development checkout:
 
@@ -118,6 +120,7 @@ Read [`AGENTS.md`](AGENTS.md) before changing load-bearing loop, persistence, co
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — runtime and data flow
+- [`docs/container.md`](docs/container.md) — restricted non-root GHCR deployment
 - [`docs/context.md`](docs/context.md) — monocontext and request assembly
 - [`docs/compaction.md`](docs/compaction.md) — background folding and quality gates
 - [`docs/persistence.md`](docs/persistence.md) — files, SQLite, transcripts, and custody

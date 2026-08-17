@@ -160,6 +160,16 @@ sandbox:
   preview_max_bytes: 16384
   log_max_bytes: 32768
 
+# Optional built-in modules (kagi, bsky, browser, computer, motor, fleet) use
+# exactly ONE selection policy:
+#   enabled: [browser, computer]  # allowlist: only these are requested
+#   disabled: [bsky, motor]       # denylist: all except these are requested
+# An empty enabled list requests none. An empty disabled list requests all and
+# preserves the normal default. Kagi/Bluesky still require credentials, motor
+# requires an active computer module, and fleet still requires fleet.enabled.
+modules:
+  disabled: []
+
 console:
   enabled: true
   # Exposes the canonical Mind graph to authenticated external MCP clients at

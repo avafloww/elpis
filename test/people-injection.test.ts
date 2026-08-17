@@ -136,7 +136,7 @@ test('people-injection: build() is byte-stable across turns for a fixed snapshot
   writePerson(dir, 'bramble', ['discord:111'], 'a durable fact');
   const files = loadPeopleFiles(dir);
   const inputs = {
-    soul: '# soul\n', memory: 'mem', now: 'focus', state: { mood: 'ok' },
+    soul: '# soul\n', memory: 'mem', now: 'focus',
     harnessRoot: '/x', dataDirectory: dir, peopleFiles: files,
   };
   const turnA = build({ ...inputs, participants: [{ authorId: '111', author: 'Bramble' }, { authorId: '2', author: 'Abe' }] });
