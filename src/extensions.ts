@@ -62,12 +62,15 @@ function compareText(a: string, b: string): number {
 export function normalizeExtensionNamespace(fileName: string): string {
   const match = EXTENSION_FILE.exec(fileName);
   if (!match) throw new Error(`extension file must match <name>.ext.ts: ${fileName}`);
-  let namespace = match[1]
+  const words = match[1]
     .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!namespace) throw new Error(`extension filename has no usable namespace: ${fileName}`);
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+  if (words.length === 0) throw new Error(`extension filename has no usable namespace: ${fileName}`);
+  let namespace = words[0] + words.slice(1).map((word) => word[0].toUpperCase() + word.slice(1)).join('');
   if (/^[0-9]/.test(namespace)) namespace = `_${namespace}`;
   return namespace;
 }

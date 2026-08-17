@@ -13,10 +13,10 @@ Extension files use one of these suffixes:
 - `.ext.js`
 - `.ext.mjs`
 
-The filename owns the namespace. Elpis strips the extension suffix, normalizes the remaining name to lowercase ASCII letters, numbers, and underscores, and prefixes names that begin with a number. For example:
+The filename owns the namespace. Elpis strips the extension suffix, splits punctuation, underscores, spaces, and case boundaries into words, then emits lower camelCase ASCII. Names that begin with a number receive a leading underscore. For example:
 
 - `unn.ext.ts` → `elpis.ext.unn`
-- `My tools.ext.ts` → `elpis.ext.my_tools`
+- `My tools.ext.ts` → `elpis.ext.myTools`
 
 Files are activated sequentially in normalized namespace order, independent of filesystem iteration order. If two files normalize to the same namespace, both are quarantined and recorded as failures while the rest of Elpis continues starting.
 

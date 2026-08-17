@@ -260,7 +260,7 @@ Keep assistant \`content\` empty or as close to empty as the provider permits; a
 anything meant for another person—including progress updates—through \`elpis.channel(...).send()\`.`
     : '';
   const extensionSection = `### \`elpis.ext\` — trusted local extensions
-TypeScript/JavaScript modules from \`DATA_DIR/extensions/*.ext.{ts,mts,js,mjs}\` are imported into the main harness process at boot, then exposed as deeply frozen APIs under \`elpis.ext.<filename_namespace>\`. They are trusted host code, not a security sandbox.
+TypeScript/JavaScript modules from \`DATA_DIR/extensions/*.ext.{ts,mts,js,mjs}\` are imported into the main harness process at boot, then exposed as deeply frozen APIs under \`elpis.ext.<filenameNamespace>\`. They are trusted host code, not a security sandbox.
 
 - \`elpis.ext.$help()\` → frozen summaries for every loaded extension: \`{ namespace, file, description, members }[]\`.
 - \`elpis.ext.$help(namespace)\` → one loaded extension summary; unknown names throw.

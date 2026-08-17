@@ -2,7 +2,7 @@
  * Working Elpis extension example.
  *
  * Copy this file to DATA_DIRECTORY/extensions/example.ext.ts, edit it, then
- * restart the harness. The filename becomes the sandbox namespace, so this file
+ * restart the harness. The filename becomes a lower-camelCase sandbox namespace, so this file
  * is exposed as elpis.ext.example.
  *
  * Extensions are trusted host code. They run inside the main Node.js process

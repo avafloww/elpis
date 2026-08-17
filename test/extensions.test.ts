@@ -18,7 +18,9 @@ function touch(data: string, name: string): void {
 
 test('extension namespaces are filename-owned and dot-safe', () => {
   assert.equal(normalizeExtensionNamespace('Unn.ext.ts'), 'unn');
-  assert.equal(normalizeExtensionNamespace('My odd-tool.ext.mts'), 'my_odd_tool');
+  assert.equal(normalizeExtensionNamespace('My odd-tool.ext.mts'), 'myOddTool');
+  assert.equal(normalizeExtensionNamespace('alreadyCamel.ext.ts'), 'alreadyCamel');
+  assert.equal(normalizeExtensionNamespace('HTTP tools.ext.ts'), 'httpTools');
   assert.equal(normalizeExtensionNamespace('42.ext.js'), '_42');
   assert.throws(() => normalizeExtensionNamespace('nope.ts'), /must match/);
 });
