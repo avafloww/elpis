@@ -973,7 +973,7 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
 // Static/near-static harness-voice notices, mostly pushed as `user`-role
 // messages (see agent.ts's pushHarnessNudge) to steer the model mid-turn or
 // mid-cycle. Agent.ts keeps the trigger logic; this module keeps the words. One
-// exception: endNudgeAlert/toolChainSpinAlert below are NOT pushed to the
+// exception: endNudgeAlert below is NOT pushed to the
 // model at all — they are operator-facing text routed to
 // discord.error_channel_id via sendError, so this module's scope is "prose
 // templates," not strictly "model prompts."
@@ -1003,21 +1003,6 @@ export function endNudgeAlert(count: number): string {
   return `[harness] the model has produced ${count} no-run-call responses since its last ` +
     'successful end — it is not ending its turn, and the harness does not force-end. Each ' +
     'cycle costs a full context read. Intervene if this does not clear.';
-}
-
-/** Operator alert for the OTHER unbounded loop shape (final-review fix wave,
- * ): the model IS calling `run` — the response has tool_calls —
- * but no call has landed a successful `end: true`. Since the
- * counter only increments on FAILED/blocked dispatches (throwing run or
- * block, unknown tool): a successful run with `end` unset is ordinary
- * multi-step work, not a spin. `count` has the same non-strict-streak
- * caveat as `endNudgeAlert`'s. There is no force-end here either — this is
- * how THIS spin becomes visible instead. */
-export function toolChainSpinAlert(count: number): string {
-  return `[harness] the model has had ${count} FAILED or blocked run calls since its last ` +
-    'successful end — it IS calling run (this is not the no-run-call shape), but the runs ' +
-    'keep failing, so no end: true has landed. The harness does not force-end. Each cycle ' +
-    'costs a full context read. Intervene if this does not clear.';
 }
 
 /** Operator alert for a failed compaction cycle: every summarize attempt in

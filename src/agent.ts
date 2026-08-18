@@ -43,7 +43,7 @@ import type { MindItem, MindService } from './store/mind.js';
 import { build as buildPrompt, loadPeopleFiles } from './llm/prompt.js';
 import type { PersonFile } from './llm/prompt.js';
 import {
-  GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, toolChainSpinAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
+  GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
 } from './llm/prompt.js';
 import type { Config } from './config.js';
 import type { BuiltinModuleRegistry, RuntimeProfile } from './builtin-modules.js';
@@ -481,13 +481,6 @@ export class Agent {
  * successful end either. Drives the operator alert only — it never caps
  * the nudging (spec ). */
   private endNudgeCount = 0;
-  /** Count of tool-dispatch responses (a run WAS called) that did not land a
- * successful `end: true`, since the last successful end — the sibling
- * counter to `endNudgeCount` for the OTHER unbounded loop shape (final-
- * review fix wave, ). Same non-strict-streak caveat as above:
- * not reset by an interleaved no-run-call nudge or ghost bounce. Reset in
- * finishTurn/clearContext. Alert-only, never caps the chain. */
-  private toolChainContinueCount = 0;
   private lastInbound: InboundMessage | null = null;
   /** Provenance stamp for messages pushed during the current turn. */
   private turnChannel: string = INTERNAL_CHANNEL_ID;
@@ -1160,13 +1153,8 @@ export class Agent {
     this.compactionCycleInFlight = false;
     this.failedCompactionCycles = 0;
     this.compactionRetryNotBefore = 0;
- // A spin's counters must not survive the clear — the fresh post-clear
- // spin (if the model keeps not ending) is exactly the one the operator
- // most wants to hear about, and a stale count above the threshold would
- // never re-cross it to re-alert. Both spin-shape counters, not just one
- // (review finding: this reset was missed once already for the sibling).
+ // A no-run-call spin count must not survive a context clear.
     this.endNudgeCount = 0;
-    this.toolChainContinueCount = 0;
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;
@@ -1498,11 +1486,6 @@ export class Agent {
  // falls through to the turn-end region below instead of continuing the
  // chain. Declared out here because that region sits past the block.
       let endedByFlag = false;
- // Whether any dispatch in this response FAILED (unknown tool or run threw). Gates the tool-chain spin counter: a SUCCESSFUL
- // run with end unset is ordinary multi-step work, not a spin — counting
- // it alerted the operator during perfectly normal long turns.
-      let sawFailedDispatch = false;
-
       if (resp.message.tool_calls && resp.message.tool_calls.length > 0) {
         this.logger.info('[agent] tool dispatch | count=', resp.message.tool_calls.length);
         for (const tc of resp.message.tool_calls) {
@@ -1521,7 +1504,6 @@ export class Agent {
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
             endedByFlag = false;
-            if (!thoughts) sawFailedDispatch = true;
             continue;
           }
           if (tc.function.name !== 'run') {
@@ -1534,7 +1516,6 @@ export class Agent {
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
             endedByFlag = false;
-            sawFailedDispatch = true;
             continue;
           }
           let code: string;
@@ -1579,7 +1560,6 @@ export class Agent {
  // above — otherwise one call's `end: true` could swallow
  // a sibling call's failure the model never gets to see.
           endedByFlag = wantsEnd && result.ok;
-          if (!result.ok) sawFailedDispatch = true;
         }
         if (callEpoch !== this.epoch) {
           this.logger.warn('context cleared during tool dispatch — discarding turn');
@@ -1595,30 +1575,7 @@ export class Agent {
  // is also unbreakable. Graceful shutdown, NOT a force-end fallback.
           if (this.stopped) break turn;
           this.hasNewInput = true;
- // Second unbounded-loop shape (final-review fix wave, ): a
- // run IS being called here, it just never lands a successful
- // `end: true`. Counted only when a dispatch FAILED (throwing run,
- // unknown tool) — that's the spin signal. A
- // SUCCEEDED run with `end` unset is ordinary multi-step work and
- // must NOT count: long legitimate turns used to trip this alert
- // constantly ( false-positive fix). Instrumented on the
- // same threshold/cadence as the no-run-call nudge, WITHOUT capping
- // or force-ending it (that stays banned).
-          if (sawFailedDispatch) {
-            this.toolChainContinueCount++;
-            if (shouldAlertOnSpin(this.toolChainContinueCount)) {
-              void this.sendError(toolChainSpinAlert(this.toolChainContinueCount));
-            }
-          }
-          this.logger.warn('[agent] turn end | tool-chain continuing | queued=', this.inbound.length,
-            '| since-last-end=', this.toolChainContinueCount);
- // No console.endNudge divider here: that surface's rendering is
- // hardcoded to "end-turn nudge — N since last end, no run call", which
- // would misdescribe this shape (a run IS being called) and conflate
- // its count with the sibling counter under one label. Reusing it
- // would be a second, misleading convention on top of an existing
- // one — the repo prohibits that — so this shape gets an operator
- // Discord alert (above) but no console divider.
+          this.logger.warn('[agent] turn end | tool-chain continuing | queued=', this.inbound.length);
           continue;
         }
  // fall through to the turn-end region below — NOT yet a confirmed
@@ -1775,7 +1732,6 @@ export class Agent {
     this.mindFrontierTailMessagesThisTurn = 0;
     this.externalThinkForcedThisTurn = false;
     this.endNudgeCount = 0;
-    this.toolChainContinueCount = 0;
     if (this.rescheduleBeat) {
       const idle = this.lastBeatKind === 'tick' && this.sendsThisTurn === 0;
       this.reschedulePendingBeat(idle);
@@ -1869,10 +1825,6 @@ export class Agent {
 
   /** Test-only: the no-run-call nudge count since the last successful end. */
   get endNudgeCountForTest(): number { return this.endNudgeCount; }
-
-  /** Test-only: the tool-chain-never-ends count since the last successful end
- * (final-review fix wave, 's sibling counter). */
-  get toolChainContinueCountForTest(): number { return this.toolChainContinueCount; }
 
   get inboundQueueLengthForTest(): number {
     return this.inbound.length;
