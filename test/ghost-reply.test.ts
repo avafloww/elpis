@@ -378,8 +378,10 @@ test('a ghost reply in a config-denied channel does NOT bounce', async () => {
   await microtask();
 
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
-  assert.ok(users.some((m) => m.content.includes('sending to this room is disabled by configuration')),
-    'a direct config-denied wake is annotated');
+  assert.ok(users.some((m) => m.content.includes("can't reply to this message due to channel configuration (allow_send=false)")),
+    'a direct config-denied wake carries the policy-aware note');
+  assert.ok(!users.some((m) => m.content.includes('REMINDER: use elpis.channel')),
+    'a config-denied wake never suggests the impossible send action');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'a config-denied turn channel must not bounce a ghost reply');
   agent.stop();
