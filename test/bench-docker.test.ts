@@ -5,6 +5,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { advanceClockFile, dockerRunArgs, prepareEpisodeMounts } from '../bench/docker.js';
 
+const repositoryRoot = path.resolve(import.meta.dirname, '..');
+
+test('bench image files are present in the allowlisted Docker context', () => {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'bench/docker/Dockerfile'), 'utf8');
+  const ignoreLines = new Set(fs.readFileSync(path.join(repositoryRoot, '.dockerignore'), 'utf8').split(/\r?\n/));
+  assert.match(dockerfile, /COPY bench \.\/bench/);
+  assert.equal(ignoreLines.has('!bench/'), true);
+  assert.equal(ignoreLines.has('!bench/**'), true);
+});
+
 test('Docker episodes deny network/capabilities and mount only explicit episode paths', () => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'bench-docker-')), work=path.join(root,'work'), results=path.join(root,'results'), clock=path.join(root,'clock');
   prepareEpisodeMounts(work,results,clock,new Date('2026-01-01T00:00:00Z'));

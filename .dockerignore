@@ -4,5 +4,7 @@
 !tsconfig.json
 !src/
 !src/**
+!bench/
+!bench/**
 !deploy/
 !deploy/container-entrypoint.sh
