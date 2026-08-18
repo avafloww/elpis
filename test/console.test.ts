@@ -695,3 +695,10 @@ test('hub: endNudge appends an endnudge entry and broadcasts one message frame',
   assert.ok(typeof entry.id === 'number');
   assert.ok(entry.ts && entry.ts > 0, 'stamped with a wall-clock time');
 });
+
+test('client room controls show config send locks without offering a redundant mute', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '../src/console/public/app.js'), 'utf8');
+  assert.match(src, /r\.allowSend === false[\s\S]*send disabled by config/);
+  assert.match(src, /if \(r\.allowSend !== false\)[\s\S]*modKids\.push\(muteBtn\)/);
+});

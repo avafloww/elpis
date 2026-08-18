@@ -25,15 +25,34 @@
 // guilds — config validation already rejects both at parse time, so this is
 // a note about the function's own contract, not a live hazard.
 
-import type { GuildConfig, ChannelTier } from '../config.js';
+import type { GuildConfig, ChannelMode } from '../config.js';
 import type { MuteType } from '../store/mutes.js';
 
 export type WakeClass = 'wake' | 'ambient' | 'drop';
-export interface ChannelPolicy { guild: GuildConfig; tier: ChannelTier; }
+export type SendDeniedBy = 'guild' | 'channel' | 'default' | null;
+export interface ChannelPolicy {
+  guild: GuildConfig;
+  tier: ChannelMode;
+  allowSend: boolean;
+  sendDeniedBy: SendDeniedBy;
+  source: 'channel' | 'default';
+}
 export interface GuildIndex {
   byChannel: Map<string, ChannelPolicy>;
   byGuildId: Map<string, GuildConfig>;
   bySlug: Map<string, GuildConfig>;
+}
+
+function policyFor(guild: GuildConfig, channelId: string, tier: ChannelMode, source: 'channel' | 'default'): ChannelPolicy {
+  const guildAllows = guild.allowSend !== false;
+  const localAllows = source === 'channel'
+    ? guild.channelAllowSend?.[channelId] !== false
+    : guild.defaultAllowSend === true;
+  return {
+    guild, tier, source,
+    allowSend: guildAllows && localAllows,
+    sendDeniedBy: !guildAllows ? 'guild' : localAllows ? null : source,
+  };
 }
 
 export function buildGuildIndex(guilds: GuildConfig[]): GuildIndex {
@@ -43,9 +62,17 @@ export function buildGuildIndex(guilds: GuildConfig[]): GuildIndex {
   for (const g of guilds) {
     byGuildId.set(g.id, g);
     bySlug.set(g.slug, g);
-    for (const [cid, tier] of Object.entries(g.channels)) byChannel.set(cid, { guild: g, tier });
+    for (const [cid, tier] of Object.entries(g.channels)) byChannel.set(cid, policyFor(g, cid, tier, 'channel'));
   }
   return { byChannel, byGuildId, bySlug };
+}
+
+export function resolveChannelPolicy(guildId: string | null | undefined, channelId: string, index: GuildIndex): ChannelPolicy | null {
+  const explicit = index.byChannel.get(channelId);
+  if (explicit) return guildId && explicit.guild.id !== guildId ? null : explicit;
+  if (!guildId) return null;
+  const guild = index.byGuildId.get(guildId);
+  return guild ? policyFor(guild, channelId, guild.defaultTier ?? 'drop', 'default') : null;
 }
 
 export interface WakeInput {
@@ -58,9 +85,8 @@ export interface WakeInput {
 export type MuteLookup = (channelId: string) => MuteType | null;
 
 export function classifyInbound(input: WakeInput, index: GuildIndex, muteType: MuteLookup): WakeClass {
-  if (!index.byGuildId.has(input.guildId)) return 'drop';
-  const policy = index.byChannel.get(input.channelId);
-  if (!policy || policy.guild.id !== input.guildId) return 'drop';  // allowlist
+  const policy = resolveChannelPolicy(input.guildId, input.channelId, index);
+  if (!policy || policy.tier === 'drop') return 'drop';
   const mute = muteType(input.channelId);
   if (mute === 'deafen') return 'drop';
   if (input.authorIsBot) return 'ambient';      // agents never wake immediately (§6)
@@ -101,10 +127,9 @@ export function inQuietHours(guild: GuildConfig, now: Date): boolean {
 }
 
 /** Would an ambient message in this channel count toward firing the tick, right now? */
-export function countsForTick(channelId: string, index: GuildIndex, muteType: MuteLookup, now: Date): boolean {
-  const policy = index.byChannel.get(channelId);
-  if (!policy) return false;
-  if (policy.tier === 'quiet') return false;
+export function countsForTick(channelId: string, index: GuildIndex, muteType: MuteLookup, now: Date, guildId?: string | null): boolean {
+  const policy = resolveChannelPolicy(guildId ?? index.byChannel.get(channelId)?.guild.id, channelId, index);
+  if (!policy || policy.tier === 'drop' || policy.tier === 'quiet') return false;
   if (muteType(channelId) !== null) return false;
   if (inQuietHours(policy.guild, now)) return false;
   return true;

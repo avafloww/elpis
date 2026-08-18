@@ -54,7 +54,7 @@ import type { ChannelDirectory } from './store/channels.js';
 import type { MuteStore } from './store/mutes.js';
 import type { RunResult } from './types.js';
 import type { ConsoleHub, RoomFact, UsageInfo, ContextSnapshot } from './console/hub.js';
-import { buildGuildIndex, countsForTick, type GuildIndex } from './discord/wake.js';
+import { buildGuildIndex, countsForTick, resolveChannelPolicy, type ChannelPolicy, type GuildIndex } from './discord/wake.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { formatInboundEnvelope, parseEnvelope, type InboundMessageAttachment } from './lib/envelope.js';
@@ -546,7 +546,7 @@ export class Agent {
  * id `fireAmbientTick` checks against `countsForTick` — the two differ
  * only for a thread. Cleared right before every LLM call:
  * everything in it is about to be seen. */
-  private ambientUnseen: { channelId: string; policyChannelId: string; at: number }[] = [];
+  private ambientUnseen: { channelId: string; policyChannelId: string; guildId: string | null; at: number }[] = [];
   /** The periodic ambient-tick timer (`discord.ambientTickMs`); null when
  * disabled or not yet started. */
   private ambientTimer: NodeJS.Timeout | null = null;
@@ -595,10 +595,22 @@ export class Agent {
     this.deps.onIdle = onIdle;
   }
 
-  /** Explicitly show the typing indicator for a channel (elpis.channel(id).typing()) —
- * the same mechanism the loop's automatic "about to call the LLM" indicator uses. */
+  /** Resolve the effective configuration policy for a channel or its thread parent. */
+  private policyForChannel(channelId: string): ChannelPolicy | null {
+    const parentId = this.deps.channels?.parentOf(channelId) ?? null;
+    const policyChannelId = parentId && parentId !== channelId ? parentId : channelId;
+    const guildId = this.deps.channels?.guildOf(policyChannelId)
+      ?? this.deps.channels?.guildOf(channelId)
+      ?? this.guildIndex.byChannel.get(policyChannelId)?.guild.id
+      ?? null;
+    return resolveChannelPolicy(guildId, policyChannelId, this.guildIndex);
+  }
+
+  /** Explicitly show typing only where configuration permits a later send. */
   typing(channelId: string): void {
     if (channelId === CONSOLE_CHANNEL_ID) return;
+    const policy = this.policyForChannel(channelId);
+    if (policy && !policy.allowSend) return;
     this.deps.onThinking?.(channelId);
   }
 
@@ -616,6 +628,10 @@ export class Agent {
     }
     if (!this.deps.send) {
       throw new Error('no send handler wired');
+    }
+    const configPolicy = this.policyForChannel(channelId);
+    if (configPolicy && !configPolicy.allowSend) {
+      throw new Error(`sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`);
     }
  // Killswitch: a muted or deafened channel refuses every send,
  // regardless of caller (sandbox channel.send, heartbeat, anything that
@@ -644,7 +660,7 @@ export class Agent {
     await this.deps.send(channelId, content, opts);
  // After the await: a failed delivery must not count as having spoken
  // (the social nudge reads this as "when did anything last reach a room").
- // A channel outside the configured allowlist (e.g. a legacy NULL-guild
+ // A channel outside any configured guild policy (e.g. a legacy NULL-guild
  // directory row) resolves to no slug — nothing to stamp.
     const slug = this.slugForChannel(channelId);
     if (slug) this.lastSendAt.set(slug, Date.now());
@@ -936,12 +952,12 @@ export class Agent {
     if (this.busy) return;
     const queued = this.inbound
       .filter((m) => m.wakeClass === 'ambient')
-      .map((m) => ({ channelId: m.channelId, policyChannelId: m.policyChannelId ?? m.channelId, at: Date.parse(m.createdAt) || Date.now() }));
+      .map((m) => ({ channelId: m.channelId, policyChannelId: m.policyChannelId ?? m.channelId, guildId: m.guildId ?? null, at: Date.parse(m.createdAt) || Date.now() }));
     const pending = [...this.ambientUnseen, ...queued];
     if (pending.length === 0) return;
     const now = new Date();
     const muteType = (id: string) => this.deps.mutes?.get(id)?.type ?? null;
-    if (!pending.some((p) => countsForTick(p.policyChannelId, this.guildIndex, muteType, now))) return;
+    if (!pending.some((p) => countsForTick(p.policyChannelId, this.guildIndex, muteType, now, p.guildId))) return;
     const earliest = Math.min(...pending.map((p) => p.at));
     const labels = joinRoomLabels([...new Set(pending.map((p) => this.qualifiedChannelLabel(p.channelId)))]);
     this.enqueueInternal(
@@ -991,6 +1007,10 @@ export class Agent {
     if (!mutes) return { ok: false, note: 'mute store not wired' };
     const label = this.qualifiedChannelLabel(channelId);
     const existing = mutes.get(channelId);
+    const configPolicy = this.policyForChannel(channelId);
+    if (action === 'mute' && configPolicy && !configPolicy.allowSend) {
+      return { ok: false, note: `${label} sending is already disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)` };
+    }
     if (actor === 'self' && action !== 'mute') {
  // Highest-signal refusal this feature produces: a self actor attempting
  // a release is exactly the "the glitch concluded the mute should lift"
@@ -1220,7 +1240,11 @@ export class Agent {
         const drainMute = this.deps.mutes?.get(m.channelId)?.type
           ?? (m.policyChannelId ? this.deps.mutes?.get(m.policyChannelId)?.type : undefined)
           ?? null;
-        const contentText = muteAnnotation(content, drainMute, !isInternal && m.wakeClass !== 'ambient');
+        const mutedText = muteAnnotation(content, drainMute, !isInternal && m.wakeClass !== 'ambient');
+        const sendPolicy = isInternal ? null : resolveChannelPolicy(m.guildId, m.policyChannelId ?? m.channelId, this.guildIndex);
+        const contentText = sendPolicy && !sendPolicy.allowSend && m.wakeClass !== 'ambient'
+          ? `${mutedText}\n[harness: sending to this room is disabled by configuration (${sendPolicy.sendDeniedBy} allow_send=false). You can hear this message but channel.send will refuse delivery.]`
+          : mutedText;
         const imageParts = m.attachments && m.attachments.length > 0 ? await buildImageContentParts(m.attachments) : [];
         const userMsg: ChatMessage = imageParts.length > 0
           ? { role: 'user', content: contentText, contentParts: [{ type: 'text', text: contentText }, ...imageParts] }
@@ -1241,7 +1265,7 @@ export class Agent {
  // turn channel. The world is alive, though: heartbeats + presence see it.
           this.seenRealInbound = true;
           if (m.authorId) this.participants.set(m.authorId, { author: m.author, lastSeenAt: Date.now() });
-          this.ambientUnseen.push({ channelId: m.channelId, policyChannelId: m.policyChannelId ?? m.channelId, at: timeMs });
+          this.ambientUnseen.push({ channelId: m.channelId, policyChannelId: m.policyChannelId ?? m.channelId, guildId: m.guildId ?? null, at: timeMs });
         } else {
           if (!this.realUserTurn) this.sendsThisTurn = 0;
           this.realUserTurn = true;
@@ -1603,12 +1627,14 @@ export class Agent {
       const turnMute = this.deps.mutes?.get(this.turnChannel)?.type
         ?? (turnParent && turnParent !== this.turnChannel ? this.deps.mutes?.get(turnParent)?.type : undefined)
         ?? null;
+      const turnSendAllowed = this.policyForChannel(this.turnChannel)?.allowSend !== false;
       if (
         this.realUserTurn &&
         !this.nudgeFired &&
         this.sendsThisTurn === 0 &&
         reply && hasReplySubstance(reply) &&
         turnMute !== 'mute' &&
+        turnSendAllowed &&
         callEpoch === this.epoch
       ) {
         this.nudgeFired = true;
@@ -2000,7 +2026,7 @@ export class Agent {
  * history, plus the reserved #internal room. Counts come from the live
  * history's per-message `channel` stamp; names from the persistent directory;
  * presence = distinct authors seen in that room. Configured channels (every
- * guild's allowlist) render FIRST, grouped by guild — so an operator can mute
+ * explicit channel overrides) render FIRST, grouped by guild — so an operator can mute
  * a channel before it ever speaks, not only after. Directory-known channels
  * outside the config (legacy / NULL-guild) follow. Returns bare facts, in a
  * fixed deterministic order (configured channels by guild order/sorted id,
@@ -2026,21 +2052,25 @@ export class Agent {
     const rooms: RoomFact[] = [];
     for (const g of this.config.discord.guilds) {
       for (const id of Object.keys(g.channels).sort()) {
+        const policy = resolveChannelPolicy(g.id, id, this.guildIndex)!;
         rooms.push({
           id, name: nameOf(id),
           count: counts.get(id) ?? 0, presence: authors.get(id)?.size ?? 0,
-          group: 'discord', guildSlug: g.slug, tier: g.channels[id],
+          group: 'discord', guildSlug: g.slug, tier: policy.tier,
+          allowSend: policy.allowSend, sendDeniedBy: policy.sendDeniedBy,
           muteState: this.deps.mutes?.get(id)?.type ?? null,
         });
       }
     }
     for (const e of dirEntries) {
       if (e.id === CONSOLE_CHANNEL_ID || rooms.some((r) => r.id === e.id)) continue;
+      const policy = resolveChannelPolicy(e.guildId, e.parentId ?? e.id, this.guildIndex);
       rooms.push({
         id: e.id, name: e.name,
         count: counts.get(e.id) ?? 0, presence: authors.get(e.id)?.size ?? 0,
         group: 'discord', guildSlug: e.guildId ? this.slugForGuildId(e.guildId) : null,
-        tier: null, muteState: this.deps.mutes?.get(e.id)?.type ?? null,
+        tier: policy?.tier ?? null, allowSend: policy?.allowSend ?? true, sendDeniedBy: policy?.sendDeniedBy ?? null,
+        muteState: this.deps.mutes?.get(e.id)?.type ?? null,
       });
     }
     rooms.push({
@@ -2049,7 +2079,7 @@ export class Agent {
       count: counts.get(CONSOLE_CHANNEL_ID) ?? 0,
       presence: authors.get(CONSOLE_CHANNEL_ID)?.size ?? 0,
       group: 'harness',
-      guildSlug: null, tier: null, muteState: null,
+      guildSlug: null, tier: null, allowSend: true, sendDeniedBy: null, muteState: null,
     });
     rooms.push({
       id: INTERNAL_CHANNEL_ID,
@@ -2057,7 +2087,7 @@ export class Agent {
       count: counts.get(INTERNAL_CHANNEL_ID) ?? 0,
       presence: 0,
       group: 'harness',
-      guildSlug: null, tier: null, muteState: null,
+      guildSlug: null, tier: null, allowSend: true, sendDeniedBy: null, muteState: null,
     });
     return rooms;
   }
@@ -2132,12 +2162,12 @@ export class Agent {
   private slugForGuildId(guildId: string | null): string | null {
     return guildId ? this.guildIndex.byGuildId.get(guildId)?.slug ?? null : null;
   }
-  /** A channel's guild slug, for stamping `lastSendAt`. Checks the
- * configured allowlist first (`guildIndex.byChannel`); a THREAD's own
- * channel id is never in that allowlist (threads inherit their parent's
+  /** A channel's guild slug, for stamping `lastSendAt`. Checks explicit
+ * channel policy first (`guildIndex.byChannel`); a THREAD's own id has no
+ * explicit policy (threads inherit their parent's
  * policy — see `resolvePolicyChannelId` in discord.ts), so it falls back to
  * the persistent channel directory's `guildOf`, which is stamped with the
- * real guild id off the inbound message itself (not the allowlist) and so
+ * real guild id off the inbound message itself and so
  * covers threads too — a send into a thread must still count as having
  * spoken in that guild, or thread activity would look like silence. */
   private slugForChannel(channelId: string): string | null {
@@ -2158,8 +2188,19 @@ export class Agent {
   private guildFullyMuted(slug: string): boolean {
     const g = this.guildIndex.bySlug.get(slug);
     if (!g) return false;
-    const ids = Object.keys(g.channels);
-    return ids.every((id) => this.deps.mutes?.get(id) != null);
+    const ids = new Set(Object.keys(g.channels));
+    for (const entry of this.deps.channels?.all() ?? []) {
+      if (this.guildIdFor(entry) === g.id) ids.add(entry.id);
+    }
+    const sendable = [...ids].filter((id) => {
+      const parentId = this.deps.channels?.parentOf(id) ?? id;
+      return resolveChannelPolicy(g.id, parentId, this.guildIndex)?.allowSend === true;
+    });
+    if (sendable.length === 0) return true;
+    return sendable.every((id) => {
+      const parentId = this.deps.channels?.parentOf(id) ?? null;
+      return this.deps.mutes?.get(id) != null || (parentId != null && this.deps.mutes?.get(parentId) != null);
+    });
   }
   /** Guilds by outbound silence, longest first, with a fully-muted guild
  * omitted. Shared by the heartbeat digest's quiet block and the social

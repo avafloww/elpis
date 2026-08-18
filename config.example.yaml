@@ -101,13 +101,14 @@ discord:
   # comprehend the motion. Clamped to [1, 8]; 1 = a single static frame.
   # ffmpeg missing/failing degrades to the raw first frame automatically.
   emote_keyframes: 4
-  # REQUIRED — every guild the bot lives in, each with its own EXHAUSTIVE
-  # channel allowlist (channel id -> tier). A channel not listed here is
-  # never heard at all — not even to accumulate context.
+  # REQUIRED — every guild the bot lives in. Unlisted guilds are never heard.
+  # default_tier controls unlisted channels and defaults to drop (the historical
+  # exhaustive-allowlist behavior). Modes are drop, direct, social, and quiet.
   #
-  #   tier: direct  — the bot responds to (nearly) every message
-  #        social — ambient/ambient-batched participation
-  #        quiet  — heard but the bot rarely/never initiates
+  # Outbound policy is independent and deny-only. Guild allow_send defaults true
+  # and is a master gate. Explicit scalar channels imply allow_send: true;
+  # policy objects can override it. Unlisted channels use default_allow_send,
+  # which defaults false. Runtime mute/deafen may deny further, never re-enable.
   #
   # slug must be unique, lowercase, and not all-digits (^[a-z0-9][a-z0-9-]*$,
   # not ^\d+$) — it's the human-readable handle for the guild. quiet_hours is
@@ -133,12 +134,18 @@ discord:
         "333333333333333333": social
     - id: "444444444444444444"
       slug: friends
-      # No reason for the command surface to exist in a friend server.
+      # Listen everywhere at the ambient cadence, but send only to one explicit
+      # output room. This is the conservative digest-agent pattern.
+      default_tier: social
+      allow_send: true
+      default_allow_send: false
       slash_commands: false
       quiet_hours: "2300-0900"
       timezone: America/New_York
       channels:
-        "555555555555555555": social
+        "555555555555555555":
+          tier: drop
+          allow_send: true
         "666666666666666666": quiet
 
 compaction:

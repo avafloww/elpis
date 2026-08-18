@@ -186,3 +186,25 @@ test('discord ingest: mention markup in the body is resolved to names before it 
   );
   agent.stop();
 });
+
+test('discord ingest: guild default tier admits unknown channels and explicit drop overrides it', async () => {
+  const listenGuild: GuildConfig = {
+    id: 'g1', slug: 'alpha', slashCommands: false, quietHours: null, timezone: null,
+    defaultTier: 'social', allowSend: true, defaultAllowSend: false,
+    channels: { '1003': 'drop' }, channelAllowSend: { '1003': false },
+  };
+  const { agent, config } = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds: [listenGuild], ambientTickMs: 60_000 } },
+    tmpPrefix: 'harness-discord-default-tier-',
+  });
+  const { client } = createDiscord(config, agent);
+  const seen: string[] = [];
+  (agent as unknown as { enqueue: (m: { channelId: string }) => void }).enqueue = (m) => { seen.push(m.channelId); };
+
+  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-default', guildId: 'g1', channelId: '9999', content: 'ambient digest material' }));
+  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-drop', guildId: 'g1', channelId: '1003', content: 'must not enter' }));
+  await flush();
+
+  assert.deepEqual(seen, ['9999']);
+  agent.stop();
+});

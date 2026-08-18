@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGuildIndex, classifyInbound, inQuietHours, countsForTick } from '../src/discord/wake.js';
+import { buildGuildIndex, classifyInbound, inQuietHours, countsForTick, resolveChannelPolicy } from '../src/discord/wake.js';
 import type { GuildConfig } from '../src/config.js';
 
 const guilds: GuildConfig[] = [
@@ -99,4 +99,40 @@ test('countsForTick: social counts; quiet-tier and muted never; quiet-hours supp
   assert.equal(countsForTick('2001', idx, noMutes, new Date('2026-07-22T23:30:00Z')), false);
   assert.equal(countsForTick('2001', idx, noMutes, now), true);
   assert.equal(countsForTick('1001', idx, noMutes, now), true);  // direct counts (bot-ambient case)
+});
+
+test('wake: guild default tier hears unknown channels while the omitted default still drops', () => {
+  const listenGuild: GuildConfig = {
+    id: 'g-listen', slug: 'listen', slashCommands: false, quietHours: null, timezone: null,
+    defaultTier: 'social', allowSend: true, defaultAllowSend: false,
+    channels: {}, channelAllowSend: {},
+  };
+  const listen = buildGuildIndex([listenGuild]);
+  assert.equal(classifyInbound({ ...human, guildId: 'g-listen', channelId: '9999' }, listen, noMutes), 'ambient');
+  assert.equal(countsForTick('9999', listen, noMutes, new Date('2026-01-01T12:00:00Z'), 'g-listen'), true);
+  assert.equal(classifyInbound({ ...human, guildId: 'g1', channelId: '9999' }, idx, noMutes), 'drop');
+});
+
+test('wake: explicit drop overrides a listen-all guild receive default', () => {
+  const g: GuildConfig = {
+    id: 'g', slug: 'g', slashCommands: false, quietHours: null, timezone: null,
+    defaultTier: 'social', allowSend: true, defaultAllowSend: false,
+    channels: { '10': 'drop' }, channelAllowSend: { '10': true },
+  };
+  assert.equal(classifyInbound({ ...human, guildId: 'g', channelId: '10' }, buildGuildIndex([g]), noMutes), 'drop');
+});
+
+test('policy: guild master deny dominates explicit allow; explicit channel overrides conservative default', () => {
+  const base: GuildConfig = {
+    id: 'g', slug: 'g', slashCommands: false, quietHours: null, timezone: null,
+    defaultTier: 'social', allowSend: true, defaultAllowSend: false,
+    channels: { '20': 'quiet' }, channelAllowSend: { '20': true },
+  };
+  const open = buildGuildIndex([base]);
+  assert.equal(resolveChannelPolicy('g', '99', open)?.allowSend, false);
+  assert.equal(resolveChannelPolicy('g', '99', open)?.sendDeniedBy, 'default');
+  assert.equal(resolveChannelPolicy('g', '20', open)?.allowSend, true);
+  const locked = buildGuildIndex([{ ...base, allowSend: false }]);
+  assert.equal(resolveChannelPolicy('g', '20', locked)?.allowSend, false);
+  assert.equal(resolveChannelPolicy('g', '20', locked)?.sendDeniedBy, 'guild');
 });

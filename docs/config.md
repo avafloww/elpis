@@ -33,7 +33,7 @@ The inhabitant's name does **not** come from this section. It comes from `SOUL.m
 
 ## `discord`
 
-`discord.bot_token` is required. `discord.guilds` is an exhaustive allowlist: unlisted guilds and channels are not ingested.
+`discord.bot_token` is required. `discord.guilds` is exhaustive for guilds: an unlisted guild is never ingested. Each listed guild has a receive default and optional channel overrides.
 
 Each guild has:
 
@@ -41,11 +41,16 @@ Each guild has:
 - optional slash-command registration;
 - optional PluralKit resolution;
 - optional quiet hours and timezone;
-- channel IDs mapped to `direct`, `social`, or `quiet` wake tiers.
+- `default_tier`: `drop` (the default), `direct`, `social`, or `quiet` for channels absent from `channels`;
+- `channels`: channel IDs mapped to a scalar receive mode or an object with `tier` and `allow_send`;
+- `allow_send`: a guild-wide master send gate, default `true`;
+- `default_allow_send`: send policy for unlisted channels, default `false`.
 
-`direct` rooms wake eagerly. `social` rooms use the social wake classifier. `quiet` rooms are ingested as ambient context unless explicitly addressed.
+`drop` rejects inbound messages. `direct` wakes eagerly. `social` uses the social wake classifier. `quiet` is ingested as ambient context unless explicitly addressed. An explicit `tier: drop` channel may still be output-only when its `allow_send` is true.
 
-Other Discord settings control attachment inlining, animated emote keyframes, ambient draining, and the error-notice channel.
+Outbound precedence is deny-only: guild `allow_send: false` denies every channel; otherwise an explicit channel's `allow_send` applies (scalar channel entries preserve compatibility and mean true), while an unlisted channel uses `default_allow_send`. A runtime mute or deafen may deny further but never re-enable a configuration denial. Agent sends and the final Discord transport both enforce the result. The Console shows configuration locks and omits redundant mute controls.
+
+A listen-all digest agent can use `default_tier: social`, keep `default_allow_send: false`, and give only its digest channel `allow_send: true`. Other Discord settings control attachment inlining, animated emote keyframes, ambient draining, and the error-notice channel.
 
 ## `compaction`
 

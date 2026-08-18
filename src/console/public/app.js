@@ -207,7 +207,9 @@
     } else {
       kids.push(el('span', { class: 'ep-room-count', text: String(r.count) }));
     }
-    if (r.group === 'discord' && r.muteState) {
+    if (r.group === 'discord' && r.allowSend === false) {
+      kids.push(el('span', { class: 'ep-room-configlock', text: '🔒', title: `send disabled by config (${r.sendDeniedBy || 'policy'} allow_send=false)` }));
+    } else if (r.group === 'discord' && r.muteState) {
       kids.push(el('span', { class: 'ep-room-mutestate', text: r.muteState === 'deafen' ? '🙉' : '🔇', title: `${r.muteState} active` }));
     }
     const b = el('button', { class: 'ep-roombtn' + (isInternal ? ' dashed' : '') + (state.room === r.id ? ' active' : ''), 'data-room-btn': r.id }, kids);
@@ -219,25 +221,33 @@
  // would never let it happen from markup; appendChild lets it happen from
  // script, and assistive tech handles button-in-button inconsistently).
     const modKids = [];
-    const muteBtn = el('button', { class: 'ep-modbtn', text: r.muteState ? '↺' : '🔇', title: r.muteState ? 'release (unmute/undeafen)' : 'mute — the agent hears, cannot speak' });
-    muteBtn.onclick = () => {
-      const action = r.muteState ? (r.muteState === 'deafen' ? 'undeafen' : 'unmute') : 'mute';
-      let reason;
-      if (action === 'mute') {
-        reason = promptReason();
-        if (reason === null) return; // cancelled — abort, do not moderate
-      }
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'moderate', channelId: r.id, action, reason }));
-    };
-    modKids.push(muteBtn);
+    if (r.allowSend !== false) {
+      const muteBtn = el('button', { class: 'ep-modbtn', text: r.muteState ? '↺' : '🔇', title: r.muteState ? 'release (unmute/undeafen)' : 'mute — the agent hears, cannot speak' });
+      muteBtn.onclick = () => {
+        const action = r.muteState ? (r.muteState === 'deafen' ? 'undeafen' : 'unmute') : 'mute';
+        let reason;
+        if (action === 'mute') {
+          reason = promptReason();
+          if (reason === null) return;
+        }
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'moderate', channelId: r.id, action, reason }));
+      };
+      modKids.push(muteBtn);
+    }
     if (!r.muteState || r.muteState === 'mute') {
       const deafBtn = el('button', { class: 'ep-modbtn', text: '🙉', title: 'deafen — channel stops entering the agent\'s context (implies mute)' });
       deafBtn.onclick = () => {
         const reason = promptReason();
-        if (reason === null) return; // cancelled — abort, do not moderate
+        if (reason === null) return;
         if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'moderate', channelId: r.id, action: 'deafen', reason }));
       };
       modKids.push(deafBtn);
+    } else if (r.allowSend === false) {
+      const undeafenBtn = el('button', { class: 'ep-modbtn', text: '↺', title: 'release deafen — configuration still blocks sending' });
+      undeafenBtn.onclick = () => {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'moderate', channelId: r.id, action: 'undeafen' }));
+      };
+      modKids.push(undeafenBtn);
     }
     return el('div', { class: 'ep-room-row' }, [b, el('div', { class: 'ep-room-mods' }, modKids)]);
   }

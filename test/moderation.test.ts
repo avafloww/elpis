@@ -182,3 +182,31 @@ test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, car
 
   cleanup();
 });
+
+test('config send deny blocks delivery and makes runtime mute redundant', async () => {
+  const lockedGuilds: GuildConfig[] = [{
+    id: 'g-lock', slug: 'locked', slashCommands: false, quietHours: null, timezone: null,
+    allowSend: true, defaultTier: 'drop', defaultAllowSend: false,
+    channels: { '4001': 'social' }, channelAllowSend: { '4001': false },
+  }];
+  const { agent, sent, cleanup } = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds: lockedGuilds } },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      return { mutes: createMuteStore(db), channels: createChannelDirectory(db, tmpDir, lockedGuilds) };
+    },
+    tmpPrefix: 'harness-config-send-deny-',
+  });
+
+  await assert.rejects(agent.send('4001', 'must not leave'), /sending.*disabled by configuration/i);
+  assert.equal(sent.length, 0);
+  const muted = agent.moderateChannel('4001', 'mute', 'self');
+  assert.equal(muted.ok, false);
+  assert.match(muted.note, /already disabled by configuration/i);
+  const room = agent.roomsSnapshot().find((r) => r.id === '4001');
+  assert.equal(room?.allowSend, false);
+  assert.equal(room?.sendDeniedBy, 'channel');
+  assert.equal((agent as unknown as { guildFullyMuted: (slug: string) => boolean }).guildFullyMuted('locked'), true,
+    'a guild with no config-permitted output room is structurally unspeakable');
+  cleanup();
+});

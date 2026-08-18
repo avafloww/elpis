@@ -56,7 +56,7 @@ test('per-guild lastSendAt: a send stamps only its own guild', async () => {
 test('a send into a thread stamps the parent guild', async () => {
   const { agent, cleanup } = buildAgent();
   try {
-    channelDirectory(agent).set('thread-9', 'my-thread', 'g1');
+    channelDirectory(agent).set('thread-9', 'my-thread', 'g1', '1001');
     const old = Date.now() - 1_000_000;
     lastSendAt(agent).set('alpha', old);
     await agent.send('thread-9', 'hi from the thread');

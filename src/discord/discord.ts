@@ -66,7 +66,7 @@ import type { Config } from '../config.js';
 import { classifyEmoji, type FeedbackStore, type Verdict } from '../store/feedback.js';
 import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
 import type { CacheInfo } from '../llm/cache-stats.js';
-import { buildGuildIndex, classifyInbound, type WakeInput, type GuildIndex } from './wake.js';
+import { buildGuildIndex, classifyInbound, resolveChannelPolicy, type WakeInput, type GuildIndex } from './wake.js';
 import type { MuteStore } from '../store/mutes.js';
 import type { EmoteRegistry } from './emotes.js';
 import { restartHarnessService } from '../lib/lifecycle.js';
@@ -845,7 +845,7 @@ export function createDiscord(
 ): DiscordWiring {
   const log = config.logger;
   const restartHook = deps?.restartHook ?? defaultRestartHook(config);
- // Built once — never per message. Ingest is now allowlist-exhaustive: only
+ // Built once — never per message. Unlisted guilds still fail closed; channel
  // channels listed in a guild's `channels` map reach the classifier at all.
   const guildIndex = buildGuildIndex(config.discord.guilds);
   const pluralKit = new PluralKitResolver();
@@ -853,7 +853,7 @@ export function createDiscord(
  // `<policyChannelId>:<reason>` per boot — the log line is how the operator
  // discovers channel ids to add, so it must name the channel/guild readably
  // rather than being silent, but it must not spam on every message in a
- // chatty unlisted channel. Keying on the RESOLVED policy channel id (a
+ // repeatedly dropped channel. Keying on the RESOLVED policy channel id (a
  // thread's parent, not the thread itself) means every thread under one
  // unlisted/deafened parent collapses into a single entry instead of
  // growing unboundedly over a long uptime; keying on `reason` too means a
@@ -922,7 +922,10 @@ export function createDiscord(
  * channel is resolved from the cache once too and reused across ticks. */
   const typing = (channelId: string): void => {
     stopTyping();
-    if (resolveTypingGuildId(channelId, guildIndex, threadParentOf) !== typingGuildId) return;
+    const resolvedGuildId = resolveTypingGuildId(channelId, guildIndex, threadParentOf);
+    if (resolvedGuildId !== typingGuildId) return;
+    const policyChannelId = threadParentOf(channelId) ?? channelId;
+    if (resolveChannelPolicy(resolvedGuildId, policyChannelId, guildIndex)?.allowSend !== true) return;
     const ch = client.channels.cache.get(channelId);
     const fire = () => fireTypingOn(ch);
     fire();
@@ -940,7 +943,7 @@ export function createDiscord(
 
  // Threads/forum posts carry their own channel id, distinct from their
  // parent — resolvePolicyChannelId maps to the parent for every
- // per-channel POLICY decision below (allowlist, mute/deafen, drop
+ // per-channel POLICY decision below (receive mode, mute/deafen, drop
  // logging, the ambient_tick_ms=0 escape hatch). The thread's own id/name
  // is kept separately (`channel`/`channelName` below) for the enqueued
  // message's provenance — that's genuinely where the message was.
@@ -949,14 +952,14 @@ export function createDiscord(
     const policyChannelId = resolvePolicyChannelId(message.channelId, channel.isThread(), threadParentId);
     const policyChannelName = channel.isThread() ? channelDisplayName(channel.parent) : channelDisplayName(channel);
 
-    const policy = guildIndex.byChannel.get(policyChannelId);
-    const inGuild = guildIndex.byGuildId.has(message.guildId);
-    if (!inGuild) return;                                    // unconfigured guild: silent, as today
-    if (!policy) {                                            // unlisted channel (or its parent): allowlist drop, logged once per boot
-      const key = `${policyChannelId}:unlisted`;
+    const guild = guildIndex.byGuildId.get(message.guildId);
+    if (!guild) return;
+    const policy = resolveChannelPolicy(message.guildId, policyChannelId, guildIndex);
+    if (!policy || policy.tier === 'drop') {
+      const key = `${policyChannelId}:config-drop`;
       if (!droppedLogged.has(key)) {
         droppedLogged.add(key);
-        log.info(`dropping #${policyChannelName} (${policyChannelId}) in ${guildIndex.byGuildId.get(message.guildId)!.slug} — not in config`);
+        log.info(`dropping #${policyChannelName} (${policyChannelId}) in ${guild.slug} — receive mode is drop`);
       }
       return;
     }
@@ -1113,7 +1116,7 @@ export function createDiscord(
  // proper repeating indicator once it actually begins the LLM call — reuses
  // the channel object already in hand (no cache/fetch needed) and the SAME
  // gate constant (typingGuildId) the repeating typing above uses.
-    if (cls === 'wake' && policy.guild.id === typingGuildId) {
+    if (cls === 'wake' && policy.guild.id === typingGuildId && policy.allowSend) {
       fireTypingOn(channel);
     }
   });
@@ -1479,6 +1482,14 @@ export function createDiscord(
     log.debug(`outbound send #${channelId} (${text.length} chars)`);
     const channel = await client.channels.fetch(channelId);
     if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+    const isThread = 'isThread' in channel && typeof channel.isThread === 'function' && channel.isThread();
+    const parentId = isThread && 'parentId' in channel ? channel.parentId : null;
+    const policyChannelId = resolvePolicyChannelId(channelId, isThread, typeof parentId === 'string' ? parentId : null);
+    const guildId = 'guildId' in channel && typeof channel.guildId === 'string' ? channel.guildId : null;
+    const configPolicy = resolveChannelPolicy(guildId, policyChannelId, guildIndex);
+    if (configPolicy && !configPolicy.allowSend) {
+      throw new Error(`sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`);
+    }
  // Rewrite @Name → <@id> against the target channel's own guild directory
  // (a DM/uncached channel has no 'guild' — outboundMentionDirectory(null)
  // is a no-op map, so text passes through unchanged).

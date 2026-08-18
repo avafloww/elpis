@@ -38,8 +38,12 @@ export interface RoomFact {
   /** The configured guild's slug, or null for the internal room / an
  * unconfigured (legacy, NULL-guild) directory channel. */
   guildSlug: string | null;
-  /** The channel's configured tier, or null when unconfigured / internal. */
-  tier: 'direct' | 'social' | 'quiet' | null;
+  /** The channel's effective receive mode, or null when unconfigured / internal. */
+  tier: 'drop' | 'direct' | 'social' | 'quiet' | null;
+  /** Whether configuration permits outbound messages before runtime mute state. */
+  allowSend: boolean;
+  /** Which configuration layer denies send, or null when configuration allows it. */
+  sendDeniedBy: 'guild' | 'channel' | 'default' | null;
   /** The killswitch state, or null when neither muted nor deafened. */
   muteState: 'mute' | 'deafen' | null;
 }

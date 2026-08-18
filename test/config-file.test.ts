@@ -438,6 +438,10 @@ test('configFile: guilds list parses with tiers, quiet hours, defaults', () => {
   assert.equal(home.slug, 'home');
   assert.equal(home.slashCommands, true);
   assert.deepEqual(home.channels, { '1001': 'direct', '1002': 'social' });
+  assert.equal(home.defaultTier, 'drop');
+  assert.equal(home.allowSend, true);
+  assert.equal(home.defaultAllowSend, false);
+  assert.deepEqual(home.channelAllowSend, { '1001': true, '1002': true });
   assert.equal(home.quietHours, null);
   assert.equal(friends.slashCommands, false);
   assert.deepEqual(friends.quietHours, { start: 23 * 60, end: 9 * 60 });
@@ -463,9 +467,21 @@ test('configFile: top-level operator identity parses name, pronouns, and Discord
   assert.deepEqual(c.operator, { name: 'Bramble', pronouns: 'she/they', discordId: '5' });
 });
 
-test('configFile: per-guild default_tier is a hard error', () => {
-  const body = GUILDS.replace('slug: home', 'slug: home\n      default_tier: social');
-  assert.throws(() => loadConfigFile(fixture(body)), /default_tier/);
+test('configFile: guild receive/send defaults and channel object overrides parse', () => {
+  const body = GUILDS
+    .replace('slug: home', 'slug: home\n      default_tier: social\n      default_allow_send: false\n      allow_send: true')
+    .replace('        "1002": social', '        "1002":\n          tier: drop\n          allow_send: false');
+  const home = loadConfigFile(fixture(body)).discord.guilds[0];
+  assert.equal(home.defaultTier, 'social');
+  assert.equal(home.allowSend, true);
+  assert.equal(home.defaultAllowSend, false);
+  assert.deepEqual(home.channels, { '1001': 'direct', '1002': 'drop' });
+  assert.deepEqual(home.channelAllowSend, { '1001': true, '1002': false });
+});
+
+test('configFile: guild/channel send policy fields are strict booleans', () => {
+  assert.throws(() => loadConfigFile(fixture(GUILDS.replace('slug: home', 'slug: home\n      allow_send: nope'))), /allow_send.*true or false/s);
+  assert.throws(() => loadConfigFile(fixture(GUILDS.replace('"1002": social', '"1002":\n          tier: social\n          allow_send: nope'))), /allow_send.*true or false/s);
 });
 
 test('configFile: tier "muted" is rejected pointing at quiet', () => {
@@ -473,9 +489,19 @@ test('configFile: tier "muted" is rejected pointing at quiet', () => {
   assert.throws(() => loadConfigFile(fixture(body)), /muted.*quiet/s);
 });
 
-test('configFile: guild without channels is a hard error', () => {
+test('configFile: a drop-default guild still requires an explicit channel map', () => {
   const body = GUILDS.replace(/      channels:\n        "2001": social\n        "2002": quiet\n/, '');
   assert.throws(() => loadConfigFile(fixture(body)), /channels/);
+});
+
+test('configFile: a listen-all guild may omit channels entirely', () => {
+  const body = GUILDS
+    .replace('slug: friends-a', 'slug: friends-a\n      default_tier: social')
+    .replace(/      channels:\n        "2001": social\n        "2002": quiet\n/, '');
+  const friends = loadConfigFile(fixture(body)).discord.guilds[1];
+  assert.equal(friends.defaultTier, 'social');
+  assert.deepEqual(friends.channels, {});
+  assert.deepEqual(friends.channelAllowSend, {});
 });
 
 test('configFile: slug rules — all-digits, bad chars, duplicates all throw', () => {
@@ -529,7 +555,7 @@ test('configFile: a non-digit channel key throws', () => {
 
 test('configFile: an invalid tier other than the special-cased "muted" throws listing the valid set', () => {
   const body = GUILDS.replace('"1002": social', '"1002": loud');
-  assert.throws(() => loadConfigFile(fixture(body)), /tier must be one of direct\|social\|quiet \(got "loud"\)/);
+  assert.throws(() => loadConfigFile(fixture(body)), /tier must be one of drop\|direct\|social\|quiet \(got "loud"\)/);
 });
 
 test('configFile: discord.guilds present but empty throws', () => {

@@ -29,9 +29,10 @@ export interface FleetModelOverride {
 /** A channel's wake tier — how eagerly the agent responds in it. Later tasks
  * (the wake classifier) consume this; only parses and carries it. */
 export type ChannelTier = 'direct' | 'social' | 'quiet';
+export type ChannelMode = 'drop' | ChannelTier;
 
-/** One entry in `discord.guilds`. `channels` is an EXHAUSTIVE allowlist —
- * channels not listed here are dropped entirely, never heard. */
+/** One entry in `discord.guilds`. Explicit channels override the guild's
+ * receive/send defaults; omitted fields preserve the historical allowlist. */
 export interface GuildConfig {
   id: string;
   slug: string;
@@ -42,8 +43,16 @@ export interface GuildConfig {
   quietHours: { start: number; end: number } | null;
   /** IANA tz for quiet_hours; null = host tz. */
   timezone: string | null;
-  /** channel id → tier. Exhaustive allowlist; unlisted channels are dropped. */
-  channels: Record<string, ChannelTier>;
+  /** Receive mode for unlisted channels. Absent/`drop` preserves the historical allowlist. */
+  defaultTier?: ChannelMode;
+  /** Hard send gate for the whole guild. false dominates every channel setting. */
+  allowSend?: boolean;
+  /** Send default for unlisted channels. Conservative false when omitted. */
+  defaultAllowSend?: boolean;
+  /** Explicit channel id → receive mode. */
+  channels: Record<string, ChannelMode>;
+  /** Explicit channel id → send permission. Scalar channel entries parse as true. */
+  channelAllowSend?: Record<string, boolean>;
 }
 
 export interface Config {
@@ -121,8 +130,8 @@ export interface Config {
     /** Keyframes extracted (via ffmpeg) per ANIMATED emote/sticker so the
  * agent can comprehend the motion. 1 = attach a single static frame. */
     emoteKeyframes: number;
-    /** Every guild the bot is live in, each with its own exhaustive channel
- * allowlist. A guild/channel not listed here is never heard. */
+    /** Every guild the bot is live in, each with safe receive/send defaults
+ * and optional per-channel overrides. Unlisted guilds are never heard. */
     guilds: GuildConfig[];
   };
   compaction: {
@@ -363,6 +372,7 @@ function optNum(tree: YamlTree, dotted: string, file: string): number | null {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
 const TIER_VALUES = ['direct', 'social', 'quiet'] as const;
+const CHANNEL_MODE_VALUES = ['drop', ...TIER_VALUES] as const;
 
 /** Parse `quiet_hours: "HHMM-HHMM"` into minutes-since-midnight. Wraparound
  * (start > end) is legal — the consumer handles it. Absent/null = none. */
@@ -384,9 +394,8 @@ function validTimezone(tz: string): boolean {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 }
 
-/** Parse `discord.guilds`: a non-empty list of guild entries, each with an
- * exhaustive channel→tier allowlist. Every failure mode is a boot-time error
- * naming the offending guild/channel — see the per-check messages below. */
+/** Parse `discord.guilds`: a non-empty list with safe receive/send defaults and
+ * optional explicit channel overrides. Every malformed policy is a boot error. */
 function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
   const raw = at(tree, 'discord.guilds');
   if (raw === undefined || raw === null) {
@@ -402,8 +411,17 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       throw new Error(`${f}: each \`discord.guilds\` entry must be a map with id/slug/channels`);
     }
     const g = entry as Record<string, unknown>;
-    if (g.default_tier !== undefined) {
-      throw new Error(`${f}: \`default_tier\` has been removed — list every channel explicitly under \`channels:\` with a tier (direct|social|quiet). Unlisted channels are dropped.`);
+    const defaultTier = g.default_tier === undefined ? 'drop' : g.default_tier;
+    if (typeof defaultTier !== 'string' || !CHANNEL_MODE_VALUES.includes(defaultTier as ChannelMode)) {
+      throw new Error(`${f}: guild \`default_tier\` must be one of drop|direct|social|quiet (got ${JSON.stringify(defaultTier)})`);
+    }
+    const allowSend = g.allow_send === undefined ? true : g.allow_send;
+    if (typeof allowSend !== 'boolean') {
+      throw new Error(`${f}: guild \`allow_send\` must be true or false (got ${JSON.stringify(allowSend)})`);
+    }
+    const defaultAllowSend = g.default_allow_send === undefined ? false : g.default_allow_send;
+    if (typeof defaultAllowSend !== 'boolean') {
+      throw new Error(`${f}: guild \`default_allow_send\` must be true or false (got ${JSON.stringify(defaultAllowSend)})`);
     }
     if (g.id === undefined || g.id === null || g.id === '') {
       throw new Error(`${f}: guild entry missing a non-empty string \`id\``);
@@ -423,19 +441,37 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     if (seenSlugs.has(slug)) throw new Error(`${f}: duplicate guild slug "${slug}" in \`discord.guilds\``);
     seenSlugs.add(slug);
     const chRaw = g.channels;
-    if (!chRaw || typeof chRaw !== 'object' || Array.isArray(chRaw) || Object.keys(chRaw).length === 0) {
-      throw new Error(`${f}: guild '${slug}' requires a non-empty \`channels\` map (channel id → direct|social|quiet). Only listed channels are heard.`);
+    if (chRaw !== undefined && (!chRaw || typeof chRaw !== 'object' || Array.isArray(chRaw))) {
+      throw new Error(`${f}: guild '${slug}' \`channels\` must be a map of channel ids to modes or policy objects`);
     }
-    const channels: Record<string, ChannelTier> = {};
-    for (const [cid, tier] of Object.entries(chRaw as Record<string, unknown>)) {
+    const channelEntries = Object.entries((chRaw ?? {}) as Record<string, unknown>);
+    if (channelEntries.length === 0 && defaultTier === 'drop') {
+      throw new Error(`${f}: guild '${slug}' uses default_tier=drop and requires a non-empty \`channels\` map`);
+    }
+    const channels: Record<string, ChannelMode> = {};
+    const channelAllowSend: Record<string, boolean> = {};
+    for (const [cid, rawPolicy] of channelEntries) {
       if (!/^\d+$/.test(cid)) throw new Error(`${f}: guild '${slug}' channel key "${cid}" must be a raw Discord channel id (digits)`);
+      let tier: unknown = rawPolicy;
+      let channelSend: unknown = true;
+      if (rawPolicy && typeof rawPolicy === 'object' && !Array.isArray(rawPolicy)) {
+        const obj = rawPolicy as Record<string, unknown>;
+        const unknown = Object.keys(obj).filter((key) => key !== 'tier' && key !== 'allow_send');
+        if (unknown.length > 0) throw new Error(`${f}: guild '${slug}' channel "${cid}" has unknown policy key(s): ${unknown.join(', ')}`);
+        tier = obj.tier;
+        channelSend = obj.allow_send === undefined ? true : obj.allow_send;
+      }
       if (tier === 'muted') throw new Error(`${f}: guild '${slug}' channel "${cid}": tier \`muted\` has been renamed \`quiet\` ("mute" now refers to the killswitch)`);
-      if (typeof tier !== 'string' || !TIER_VALUES.includes(tier as ChannelTier)) {
-        throw new Error(`${f}: guild '${slug}' channel "${cid}" tier must be one of direct|social|quiet (got ${JSON.stringify(tier)})`);
+      if (typeof tier !== 'string' || !CHANNEL_MODE_VALUES.includes(tier as ChannelMode)) {
+        throw new Error(`${f}: guild '${slug}' channel "${cid}" tier must be one of drop|direct|social|quiet (got ${JSON.stringify(tier)})`);
+      }
+      if (typeof channelSend !== 'boolean') {
+        throw new Error(`${f}: guild '${slug}' channel "${cid}" \`allow_send\` must be true or false (got ${JSON.stringify(channelSend)})`);
       }
       if (seenChannels.has(cid)) throw new Error(`${f}: channel id "${cid}" appears in more than one guild`);
       seenChannels.add(cid);
-      channels[cid] = tier as ChannelTier;
+      channels[cid] = tier as ChannelMode;
+      channelAllowSend[cid] = channelSend;
     }
     const timezone = typeof g.timezone === 'string' && g.timezone !== '' ? g.timezone : null;
     const quietHours = parseQuietHours(g.quiet_hours, slug, f);
@@ -456,7 +492,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       }
       pluralKit = g.pluralkit;
     }
-    guilds.push({ id, slug, slashCommands, pluralKit, quietHours, timezone, channels });
+    guilds.push({ id, slug, slashCommands, pluralKit, quietHours, timezone, defaultTier: defaultTier as ChannelMode, allowSend, defaultAllowSend, channels, channelAllowSend });
   }
   return guilds;
 }
@@ -719,7 +755,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     })(),
     discord: (() => {
       if (at(tree, 'discord.guild_id') !== undefined) {
-        throw new Error(`${f}: \`discord.guild_id\` has been replaced by the \`discord.guilds\` list — see config.example.yaml for the per-guild shape (id, slug, channels allowlist)`);
+        throw new Error(`${f}: \`discord.guild_id\` has been replaced by the \`discord.guilds\` list — see config.example.yaml for the per-guild shape (id, slug, receive/send policy)`);
       }
       if (at(tree, 'discord.owner_id') !== undefined) {
         throw new Error(`${f}: \`discord.owner_id\` has been renamed \`operator.discord_id\``);

@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hasReplySubstance, type Agent } from '../src/agent.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { buildTestAgent, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
 
 function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; onCall: ((n: number) => void) | null } {
   let i = 0;
@@ -346,6 +346,42 @@ test('D1: a ghost reply in a muted channel does NOT bounce (a reply legitimately
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'a muted turn channel must not bounce a ghost reply');
+  agent.stop();
+});
+
+test('a ghost reply in a config-denied channel does NOT bounce', async () => {
+  const ghost = 'I would love to help you with that. Let me think through the best approach here. ' +
+    'There are several considerations to weigh: the reversibility of the action, the blast radius, ' +
+    'and whether the user has already given explicit consent. I think the safest path is to start ' +
+    'with the reversible step and confirm before anything destructive. Here is my plan in detail.';
+  const llm = scriptedLLM([
+    { message: { role: 'assistant', content: ghost }, stripped: false,
+      usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
+    EMPTY_END,
+  ]);
+  const guilds = [{
+    id: 'g1', slug: 'home', slashCommands: false, quietHours: null, timezone: null,
+    defaultTier: 'drop' as const, allowSend: true, defaultAllowSend: false,
+    channels: { '100': 'direct' as const }, channelAllowSend: { '100': false },
+  }];
+  const { agent } = buildTestAgent({
+    llm,
+    config: { discord: { ...makeConfig().discord, guilds } },
+  });
+  const { promise: done, resolve: signal } = Promise.withResolvers<void>();
+  llm.onCall = (n) => { if (n === 2) signal(); };
+
+  void agent.loop();
+  agent.enqueue({ ...userMsg(), guildId: 'g1' });
+  await done;
+  await microtask();
+  await microtask();
+
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  assert.ok(users.some((m) => m.content.includes('sending to this room is disabled by configuration')),
+    'a direct config-denied wake is annotated');
+  assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
+    'a config-denied turn channel must not bounce a ghost reply');
   agent.stop();
 });
 
