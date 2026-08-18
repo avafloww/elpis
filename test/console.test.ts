@@ -91,7 +91,7 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   assert.match(src, /ws\.send\(JSON\.stringify\(\{ t: 'chat', nonce, content \}\)\)/);
   assert.match(src, /case 'chatResult':[\s\S]*pendingChats\.delete/);
   assert.match(src, /restoreStream\(m\.stream \|\| null\)/);
-  assert.match(src, /ensureStream[\s\S]*requestAnimationFrame[\s\S]*scrollHeight/);
+  assert.match(src, /ensureStream[\s\S]*requestAnimationFrame[\s\S]*threadFollow\.afterGrowth/);
   assert.match(src, /composerText\.addEventListener\('focus',[\s\S]*state\.room !== 'console'[\s\S]*setRoom\('console'\)/);
   assert.match(src, /const harness = rooms\.filter[\s\S]*for \(const r of harness\)[\s\S]*const guilds =/);
   assert.match(src, /function spotlightMatches[\s\S]*data-related-rooms[\s\S]*includes\(active\)/);
@@ -638,6 +638,8 @@ test('client context pane quietly debounces refreshes on live message events', (
   assert.match(src, /function scheduleContextRefresh\(\)/);
   assert.match(src, /requestContext\(true\)/, 'automatic refresh is quiet');
   assert.match(src, /case 'message':[\s\S]*?appendEntry\(m\.msg\);\s*scheduleContextRefresh\(\);/);
+  assert.match(src, /function renderContext\(\)[\s\S]*contextFollow\.capture\(\)[\s\S]*contextFollow\.restore\(position\)/, 'Context refresh preserves a paused reader position');
+  assert.doesNotMatch(src, /ctxBody\.scrollTop = ctxBody\.scrollHeight/, 'Context no longer forces every refresh to latest');
 });
 
 test('handleClientMessage: context answers null when unwired or when the source throws', async () => {

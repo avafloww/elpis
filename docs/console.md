@@ -11,6 +11,8 @@ Elpis Console is a local web interface for observing and interacting with the ru
 
 The room rail filters the displayed thread without creating separate histories.
 
+Thread and Context follow new activity only while the reader is already near the bottom. Scrolling up pauses follow mode and reveals a `↓ latest` control in that view; clicking it jumps to the newest item and resumes following. Context refreshes preserve the paused scroll position instead of forcing the pane down.
+
 ## Streaming
 
 Provider deltas reach the browser incrementally. A pending stream is visually distinct from committed history; committed messages replace the pending overlay. Context refreshes only after committed history changes because it represents the next complete request, not partial output.

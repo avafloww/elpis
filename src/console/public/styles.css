@@ -37,12 +37,14 @@ details > summary::-webkit-details-marker { display: none; }
 .mono { font-family: 'IBM Plex Mono', monospace; }
 
 /* ---- top bar ---- */
-.ep-topbar { height: 62px; flex: none; display: flex; align-items: center; gap: 18px; padding: 0 22px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.ep-brand { display: flex; align-items: center; gap: 10px; }
-.ep-flower { color: var(--gold); font-size: 18px; animation: ep-float 4s ease-in-out infinite; }
+.ep-topbar { height: 62px; flex: none; display: flex; align-items: center; gap: 18px; padding: 0 22px 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.ep-brand { display: flex; align-items: center; gap: 10px; flex: none; min-width: 0; }
+.ep-brand-lockup { display: flex; align-items: center; flex: none; height: 42px; }
+.ep-brand-logo { display: block; width: auto; height: 42px; max-width: none; }
+.ep-brand-logo-dark { display: none; }
+.ep-app[data-theme="dark"] .ep-brand-logo-light { display: none; }
+.ep-app[data-theme="dark"] .ep-brand-logo-dark { display: block; }
 .ep-flower-gold { color: var(--gold); }
-.ep-brand-name { font-family: 'Cormorant Garamond', serif; font-size: 25px; font-weight: 700; letter-spacing: 0.06em; color: var(--ink); }
-.ep-brand-sub { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); align-self: flex-end; padding-bottom: 6px; }
 
 .ep-meter { display: flex; flex-direction: column; gap: 4px; width: 320px; margin-left: 14px; }
 .ep-meter-head { display: flex; justify-content: space-between; align-items: baseline; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--soft); }
@@ -144,6 +146,7 @@ details > summary::-webkit-details-marker { display: none; }
 .ep-view-tools { display: flex; align-items: center; gap: 9px; flex: none; }
 .ep-view-tools[hidden] { display: none; }
 .ep-lens { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--soft); }
+.ep-latest-btn { color: var(--gold); border-color: var(--gold); white-space: nowrap; }
 .ep-stream { flex: 1; overflow-y: auto; padding: 18px 22px 26px; display: flex; flex-direction: column; gap: 16px; }
 .ep-backfill { text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--faint); padding: 4px 0; }
 #stream-body, #stream-live { display: flex; flex-direction: column; gap: 16px; }

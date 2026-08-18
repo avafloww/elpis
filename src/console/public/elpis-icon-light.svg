@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Elpis icon, light theme</title>
+  <desc id="desc">A living eight-petaled rosette growing from one continuous orbit.</desc>
+  <defs>
+    <radialGradient id="elpis-light-surface" cx="42%" cy="28%" r="82%">
+      <stop offset="0" stop-color="#fbfbf6"/>
+      <stop offset="0.58" stop-color="#f2f2e9"/>
+      <stop offset="1" stop-color="#e7ece4"/>
+    </radialGradient>
+    <linearGradient id="elpis-light-thread" x1="101" y1="431" x2="429" y2="85" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8a76b0"/>
+      <stop offset="0.34" stop-color="#5f86ba"/>
+      <stop offset="0.66" stop-color="#5f9d7d"/>
+      <stop offset="1" stop-color="#b3892f"/>
+    </linearGradient>
+    <linearGradient id="elpis-light-petal-gold" x1="256" y1="142" x2="256" y2="249" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#efdba0"/>
+      <stop offset="0.60" stop-color="#c99b3f"/>
+      <stop offset="1" stop-color="#8c681f"/>
+    </linearGradient>
+    <linearGradient id="elpis-light-petal-green" x1="256" y1="163" x2="256" y2="249" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c4dfd3"/>
+      <stop offset="0.58" stop-color="#70a98e"/>
+      <stop offset="1" stop-color="#46765e"/>
+    </linearGradient>
+    <path id="elpis-light-long-petal" d="M256 247 C232 225 230 190 256 142 C282 190 280 225 256 247 Z"/>
+    <path id="elpis-light-short-petal" d="M256 249 C238 231 238 201 256 166 C274 201 274 231 256 249 Z"/>
+  </defs>
+  <g aria-label="Elpis living-thread mark">
+    <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#elpis-light-surface)"/>
+    <rect x="34" y="34" width="444" height="444" rx="102" fill="none" stroke="#b3892f" stroke-opacity="0.24" stroke-width="2"/>
+
+    <path d="M113 378
+           C72 322 68 239 101 172
+           C140 94 226 60 307 79
+           C390 98 447 171 449 256
+           C451 340 398 415 320 442
+           C251 466 181 450 139 416
+           C164 436 200 429 230 408
+           C266 382 274 347 256 318" fill="none" stroke="#33352b" stroke-opacity="0.10" stroke-width="33" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M113 378
+           C72 322 68 239 101 172
+           C140 94 226 60 307 79
+           C390 98 447 171 449 256
+           C451 340 398 415 320 442
+           C251 466 181 450 139 416
+           C164 436 200 429 230 408
+           C266 382 274 347 256 318" fill="none" stroke="url(#elpis-light-thread)" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M113 378
+           C72 322 68 239 101 172
+           C140 94 226 60 307 79
+           C390 98 447 171 449 256
+           C451 340 398 415 320 442
+           C251 466 181 450 139 416
+           C164 436 200 429 230 408
+           C266 382 274 347 256 318" fill="none" stroke="#ffffff" stroke-opacity="0.30" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <g stroke="#33352b" stroke-opacity="0.09" stroke-width="2" stroke-linejoin="round">
+      <use href="#elpis-light-long-petal" fill="url(#elpis-light-petal-gold)"/>
+      <use href="#elpis-light-long-petal" fill="url(#elpis-light-petal-gold)" transform="rotate(90 256 256)"/>
+      <use href="#elpis-light-long-petal" fill="url(#elpis-light-petal-gold)" transform="rotate(180 256 256)"/>
+      <use href="#elpis-light-long-petal" fill="url(#elpis-light-petal-gold)" transform="rotate(270 256 256)"/>
+
+      <use href="#elpis-light-short-petal" fill="url(#elpis-light-petal-green)" transform="rotate(45 256 256)"/>
+      <use href="#elpis-light-short-petal" fill="url(#elpis-light-petal-green)" transform="rotate(135 256 256)"/>
+      <use href="#elpis-light-short-petal" fill="url(#elpis-light-petal-green)" transform="rotate(225 256 256)"/>
+      <use href="#elpis-light-short-petal" fill="url(#elpis-light-petal-green)" transform="rotate(315 256 256)"/>
+    </g>
+
+    <circle cx="256" cy="256" r="35" fill="#efd89d"/>
+    <rect x="246" y="246" width="20" height="20" rx="5" fill="#33352b" transform="rotate(45 256 256)"/>
+  </g>
+</svg>

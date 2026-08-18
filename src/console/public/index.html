@@ -8,6 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="./styles.css">
+<link id="elpis-favicon" data-elpis-favicon rel="icon" type="image/svg+xml" href="./elpis-icon-light.svg">
+<script src="./elpis-branding.js" defer></script>
 <script src="./marked.umd.js"></script>
 </head>
 <body>
@@ -17,10 +19,11 @@
 
   <!-- ============ top bar ============ -->
   <div class="ep-topbar">
-    <div class="ep-brand">
-      <span class="ep-flower">❋</span>
-      <div class="ep-brand-name">ELPIS</div>
-      <div class="ep-brand-sub">harness console</div>
+    <div class="ep-brand" role="img" aria-label="Elpis harness console">
+      <span class="ep-brand-lockup" aria-hidden="true">
+        <img class="ep-brand-logo ep-brand-logo-light" src="./elpis-logo-light.svg" alt="">
+        <img class="ep-brand-logo ep-brand-logo-dark" src="./elpis-logo-dark.svg" alt="">
+      </span>
     </div>
 
     <!-- context usage meter -->
@@ -82,6 +85,7 @@
         </nav>
         <span class="ep-spacer"></span>
         <div class="ep-view-tools" id="stream-tools">
+          <button class="ep-toggle ep-latest-btn" id="stream-latest" type="button" title="Jump to the latest Thread activity" hidden>↓ latest</button>
           <span class="ep-compacting" id="compacting" hidden>⟳ compacting…</span>
           <span class="ep-lens" id="lens-label">all rooms</span>
           <button class="ep-toggle ep-cot-btn" id="cot-toggle" title="Show or hide all chains of thought"><span class="ep-flower-gold">❋</span> CoT <span id="cot-label">shown</span></button>
@@ -89,6 +93,7 @@
           <button class="ep-toggle ep-cot-btn" id="previews-toggle" title="Show or hide all tool-result previews" hidden>Preview <span id="previews-label">hidden</span></button>
         </div>
         <div class="ep-view-tools" id="context-tools" hidden>
+          <button class="ep-toggle ep-latest-btn" id="ctx-latest" type="button" title="Jump to the latest Context message" hidden>↓ latest</button>
           <span class="ep-ctx-stat" id="ctx-stat">—</span>
           <button class="ep-toggle ep-ctx-btn" id="ctx-refresh" title="Re-request the current context window">↻ refresh</button>
           <button class="ep-toggle ep-ctx-btn" id="ctx-copy-json" title="Copy the full request body (model + tools + messages) as pretty JSON">⧉ JSON</button>
@@ -159,6 +164,7 @@
   </div>
 
 </div>
+<script src="./scroll-follow.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

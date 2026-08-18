@@ -692,17 +692,15 @@
  // ================= stream plumbing =================
   const body = $('stream-body');
   const streamEl = $('stream');
-
-  function atBottom() { return streamEl.scrollHeight - streamEl.scrollTop - streamEl.clientHeight < 80; }
+  const threadFollow = window.ElpisScrollFollow.createScrollFollower(streamEl, $('stream-latest'), 80);
 
   function appendEntry(entry) {
-    const stick = atBottom();
     const node = renderEntry(entry);
     node.dataset.entryId = entry.id;
     body.appendChild(node);
     if (state.oldestId == null || entry.id < state.oldestId) state.oldestId = entry.id;
     applySpotlightNode(node);
-    if (stick) streamEl.scrollTop = streamEl.scrollHeight;
+    threadFollow.afterGrowth();
   }
   function applySpotlightNode(n) {
     n.classList.toggle('dimmed', !spotlightMatches(n, state.room));
@@ -721,11 +719,14 @@
     body.insertBefore(frag, body.firstChild);
  // preserve visual position
     streamEl.scrollTop = prevTop + (streamEl.scrollHeight - prevH);
+    threadFollow.sync();
     applySpotlight();
     applyCot();
   }
 
   function resetStream(messages) {
+    const position = threadFollow.capture();
+    const restoring = body.childNodes.length > 0;
     body.innerHTML = '';
     state.oldestId = null;
     for (const m of messages) {
@@ -736,7 +737,8 @@
     }
     applyCot();
     applySpotlight();
-    streamEl.scrollTop = streamEl.scrollHeight;
+    if (restoring) threadFollow.restore(position);
+    else threadFollow.toLatest();
   }
 
  // backfill on scroll-to-top
@@ -760,7 +762,7 @@
     ]);
     liveEl.appendChild(wait);
     stream = { id: streamId, channel, content: '', reasoning: '', wait, bubble: null, reasoningEl: null };
-    if (!streamEl.hidden) requestAnimationFrame(() => { streamEl.scrollTop = streamEl.scrollHeight; });
+    if (!streamEl.hidden) requestAnimationFrame(() => threadFollow.afterGrowth());
     return stream;
   }
 
@@ -796,12 +798,11 @@
     if (saved.content || saved.reasoning) materializeStream(s);
     if (saved.content) { s.content = saved.content; s.bubble.firstChild.textContent = saved.content; }
     if (saved.reasoning) { s.reasoning = saved.reasoning; s.reasoningEl.hidden = false; s.reasoningEl.textContent = saved.reasoning; }
-    if (!streamEl.hidden) requestAnimationFrame(() => { streamEl.scrollTop = streamEl.scrollHeight; });
+    if (!streamEl.hidden) requestAnimationFrame(() => threadFollow.afterGrowth());
   }
 
   function onDelta(msg) {
     const s = ensureStream(msg.streamId, msg.channel);
-    const stick = atBottom();
     materializeStream(s);
     if (msg.kind === 'content') {
       s.content += msg.text;
@@ -811,7 +812,7 @@
       s.reasoningEl.hidden = false;
       s.reasoningEl.textContent = s.reasoning;
     }
-    if (stick) streamEl.scrollTop = streamEl.scrollHeight;
+    threadFollow.afterGrowth();
   }
 
  // ================= context explorer =================
@@ -823,6 +824,7 @@
  // the pane is open, committed history events quietly debounce a fresh build.
   const ctxEl = $('ctx');
   const ctxBody = $('ctx-body');
+  const contextFollow = window.ElpisScrollFollow.createScrollFollower(ctxBody, $('ctx-latest'), 80);
   const mindEl = $('mind');
   let ctxData = null;   // last ContextSnapshot received (null = unavailable)
   let ctxReqSeq = 0;    // stale responses (reqId < latest) are dropped
@@ -847,7 +849,7 @@
     ctxRefreshTimer = null;
     if (inCtx) requestContext();
     else if (inMind) requestMindSnapshot();
-    else streamEl.scrollTop = streamEl.scrollHeight;
+    else threadFollow.afterGrowth();
   }
   $('stream-toggle').onclick = () => setView('stream');
   $('view-toggle').onclick = () => setView('context');
@@ -998,10 +1000,12 @@
   }
 
   function renderContext() {
+    const position = contextFollow.capture();
     ctxBody.innerHTML = '';
     if (!ctxData) {
       $('ctx-stat').textContent = 'unavailable';
       ctxBody.appendChild(el('div', { class: 'ep-ctx-empty', text: 'context snapshot unavailable' }));
+      contextFollow.restore(position);
       return;
     }
     const msgs = ctxData.messages || [];
@@ -1011,7 +1015,7 @@
       `${msgs.length} messages · ~${Math.max(1, Math.ceil(chars / 4)).toLocaleString()} tok est · ${ctxData.model || ''}` +
       (ctxData.reasoning_effort ? ` · effort ${ctxData.reasoning_effort}` : '');
     msgs.forEach((m, i) => ctxBody.appendChild(ctxMsgBlock(m, i)));
-    ctxBody.scrollTop = ctxBody.scrollHeight;
+    contextFollow.restore(position);
   }
 
  // ================= logs =================
