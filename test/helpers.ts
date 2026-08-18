@@ -27,6 +27,7 @@ import { openDatabase } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
 import { Scheduler } from '../src/store/scheduler.js';
 import type { Config } from '../src/config.js';
+import { legacyLlmModelRegistry } from '../src/llm/model-registry.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
 import { noopLogger } from '../src/lib/log.js';
@@ -64,6 +65,12 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       reasoningSummary: null,
       reasoningContext: null,
       completionReserveTokens: 8192,
+      registrySource: 'legacy',
+      registry: legacyLlmModelRegistry({
+        providerType: 'openai-compatible', apiKey: 'stub', baseUrl: 'http://stub', model: 'stub', contextSize: null,
+        reasoningEffort: 'high', externalThinking: false, streamIdleTimeoutMs: 180_000, callTimeoutMs: 1_200_000,
+        api: 'auto', reasoningSummary: null, reasoningContext: null,
+      }, { motorEnabled: true }),
     },
     operator: { name: 'operator', pronouns: null, discordId: null },
     discord: {

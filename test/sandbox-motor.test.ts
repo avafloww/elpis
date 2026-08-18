@@ -49,11 +49,10 @@ test('motor step sends an ephemeral screenshot, acts once, waits, and appends a 
       return { content: '{"keys":["Up","f"],"duration_ms":250,"wait_ms":50,"done":false,"reason":"advance and fire"}', usage, requestId: 'resp_1', model: opts?.model, reasoningEffort: opts?.reasoningEffort }; 
     },
   });
-  const result = await motor.step('reach the exit', { traceId: 'step-case', settleMs: 25, model: 'gpt-5.6-luna', reasoningEffort: 'low' });
+  const result = await motor.step('reach the exit', { traceId: 'step-case', settleMs: 25, reasoningEffort: 'low' });
   assert.deepEqual(holds, [{ keys: ['Up', 'f'], durationMs: 250 }]);
   assert.deepEqual(waits, [75]);
   assert.equal(receivedOpts.cacheKey, 'motor-step-case');
-  assert.equal(receivedOpts.model, 'gpt-5.6-luna');
   assert.equal(receivedOpts.reasoningEffort, 'low');
   assert.ok(receivedOpts.signal instanceof AbortSignal);
   assert.equal(received[0].role, 'system');
@@ -63,7 +62,6 @@ test('motor step sends an ephemeral screenshot, acts once, waits, and appends a 
   assert.match((received[1].contentParts?.[1] as any).image_url.url, /^data:image\/png;base64,/);
   assert.equal(result.action.reason, 'advance and fire');
   assert.equal(result.requestId, 'resp_1');
-  assert.equal(result.model, 'gpt-5.6-luna');
   assert.equal(result.reasoningEffort, 'low');
   const lines = fs.readFileSync(result.traceFile, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(lines.length, 1);

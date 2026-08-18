@@ -430,6 +430,9 @@ export async function streamResponsesComplete(
           ...extraBody,
           stream: true,
         } as unknown as Record<string, unknown>;
+        for (const [key, value] of Object.entries(baseRequest)) {
+          if (value === undefined) delete baseRequest[key];
+        }
         const request = transformRequest ? transformRequest(baseRequest) : baseRequest;
         config.logger.info('[llm/responses] stage=request-start');
         const stream = await awaitBeforeProgressDeadline(client.responses.create(

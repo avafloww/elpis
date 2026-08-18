@@ -44,6 +44,8 @@ import {
   type LLMUsage,
   type LLM,
   type AnthropicThinkingBlock,
+  type StandaloneCompleteOptions,
+  type StandaloneCompleteResult,
 } from './llm.js';
 import { endpointAt, stampGeneration } from './provenance.js';
 
@@ -256,6 +258,7 @@ async function postAnthropic(
   store: OAuthStore,
   body: Record<string, unknown>,
   stream: boolean,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const token = await store.getAccessToken();
   const url = `${config.llm.baseUrl.replace(/\/+$/, '')}/v1/messages?beta=true`;
@@ -273,6 +276,7 @@ async function postAnthropic(
       'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: serialized,
+    signal,
     dispatcher,
   } as RequestInit & { dispatcher: Agent });
   if (!res.ok) {
@@ -295,6 +299,7 @@ async function anthropicComplete(
   store: OAuthStore,
   messages: ChatMessage[],
   hub: ConsoleHub | undefined,
+  options: { toolFree?: boolean; signal?: AbortSignal } = {},
 ): Promise<CompleteResult> {
   try {
       try { hub?.streamStart(); } catch { /* observer only */ }
@@ -307,13 +312,10 @@ async function anthropicComplete(
         max_tokens: MAX_OUTPUT_TOKENS,
         system,
         messages: wire,
-        tools: [anthropicRunTool()],
- // One run per turn (the harness norm; `end` marks the FINAL run call).
- // Forcing single tool use also removes the interleaved-thinking replay
- // hazard: with parallel tool use, one response could emit
- // [thinking, tool_use, thinking, tool_use], which the block-capture
- // (separate thinking/tool arrays) can't faithfully re-interleave.
-        tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+        ...(options.toolFree ? {} : {
+          tools: [anthropicRunTool()],
+          tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+        }),
         thinking: anthropicThinkingParam(),
         stream: true,
       };
@@ -336,9 +338,11 @@ async function anthropicComplete(
       let usage: AnthropicUsage = {};
       let requestId: string | undefined;
       const controller = new AbortController();
+      if (options.signal?.aborted) controller.abort();
+      else options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
       try {
-        const res = await postAnthropic(config, store, body, true);
+        const res = await postAnthropic(config, store, body, true, controller.signal);
         requestId = res.headers.get('request-id') ?? res.headers.get('x-request-id') ?? undefined;
         for await (const evt of parseSSE(res, controller.signal)) {
           if (evt.type === 'message_start') {
@@ -465,6 +469,29 @@ export function createAnthropicOAuthLLM(
   return {
     model: config.llm.model,
     runTool: RUN_TOOL,
+    async completeStandalone(messages: ChatMessage[], opts: StandaloneCompleteOptions = {}): Promise<StandaloneCompleteResult> {
+      if (messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0)) {
+        throw new Error('standalone completion does not accept tool messages or tool calls');
+      }
+      if (opts.model && opts.model !== config.llm.model) {
+        throw new Error(`standalone model must use the configured role target ${config.llm.model}`);
+      }
+      const isolated = opts.reasoningEffort === undefined
+        ? config
+        : { ...config, llm: { ...config.llm, reasoningEffort: opts.reasoningEffort } };
+      const result = await anthropicComplete(isolated, store, messages, undefined, { toolFree: true, signal: opts.signal });
+      return {
+        content: result.message.content ?? '',
+        ...(result.message.reasoning_content ? { reasoningContent: result.message.reasoning_content } : {}),
+        usage: result.usage,
+        ...(result.requestId ? { requestId: result.requestId } : {}),
+        model: isolated.llm.model,
+        providerType: 'anthropic-oauth',
+        apiSurface: 'anthropic-messages',
+        apiEndpoint: endpointAt(isolated.llm.baseUrl, 'v1/messages'),
+        ...(isolated.llm.reasoningEffort ? { reasoningEffort: isolated.llm.reasoningEffort } : {}),
+      };
+    },
     async complete(messages: ChatMessage[]): Promise<CompleteResult> {
       const result = await anthropicComplete(config, store, messages, hub);
       stampGeneration(result.message, {

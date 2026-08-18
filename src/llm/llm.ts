@@ -16,7 +16,8 @@
 import OpenAI from 'openai';
 import { Agent } from 'undici';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Config } from '../config.js';
+import { configForLlmRole, type Config } from '../config.js';
+import type { LlmRole } from './model-registry.js';
 import type { ConsoleHub } from '../console/hub.js';
 // llm.ts ⇄ responses.ts import each other (this module routes to the Responses
 // path; that module reuses this one's helpers). Safe in ESM because every
@@ -791,16 +792,19 @@ export async function streamComplete(
   config: Config,
   messages: ChatMessage[],
   hub?: ConsoleHub,
+  options: { toolFree?: boolean; signal?: AbortSignal } = {},
 ): Promise<CompleteResult> {
   try {
     try { hub?.streamStart(); } catch { /* observer must never break generation */ }
     const controller = new AbortController();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
     const prepared = prepareForApi(messages);
     const charsSent = computeCharsSent(prepared, false);
     const base = {
       model: config.llm.model,
       messages: prepared.map(toApiMessage),
-      tools: [RUN_TOOL],
+      ...(options.toolFree ? {} : { tools: [RUN_TOOL] }),
       stream: true as const,
       stream_options: { include_usage: true as const },
     };
@@ -866,12 +870,63 @@ export async function streamComplete(
   }
 }
 
+function standaloneResult(result: CompleteResult, config: Config, surface: 'responses' | 'chat-completions'): StandaloneCompleteResult {
+  return {
+    content: result.message.content ?? '',
+    ...(result.message.reasoning_content ? { reasoningContent: result.message.reasoning_content } : {}),
+    ...(result.message.reasoning_items ? { reasoningItems: result.message.reasoning_items } : {}),
+    usage: result.usage,
+    ...(result.requestId ? { requestId: result.requestId } : {}),
+    model: config.llm.model,
+    providerType: 'openai-compatible',
+    apiSurface: surface,
+    apiEndpoint: endpointAt(config.llm.baseUrl, surface === 'responses' ? 'responses' : 'chat/completions'),
+    ...(config.llm.reasoningEffort ? { reasoningEffort: config.llm.reasoningEffort } : {}),
+  };
+}
+
+function standaloneConfig(config: Config, opts: StandaloneCompleteOptions): Config {
+  if (opts.model && opts.model !== config.llm.model) {
+    throw new Error(`standalone model must use the configured role target ${config.llm.model}`);
+  }
+  return opts.reasoningEffort === undefined
+    ? config
+    : { ...config, llm: { ...config.llm, reasoningEffort: opts.reasoningEffort } };
+}
+
+export function createLLMForRole(config: Config, role: LlmRole, hub?: ConsoleHub, db?: DatabaseSync): LLM {
+  return createLLM(configForLlmRole(config, role), hub, db);
+}
+
+export interface LlmRoleClients {
+  main: LLM;
+  classifier: LLM;
+  motor: LLM | null;
+}
+
+export function createLlmRoleClients(
+  config: Config,
+  options: {
+    hub?: ConsoleHub;
+    db?: DatabaseSync;
+    motorActive: boolean;
+    create?: (config: Config, hub?: ConsoleHub, db?: DatabaseSync) => LLM;
+  },
+): LlmRoleClients {
+  const create = options.create ?? createLLM;
+  return {
+    main: create(configForLlmRole(config, 'main'), options.hub, options.db),
+    classifier: create(configForLlmRole(config, 'classifier'), undefined, options.db),
+    motor: options.motorActive ? create(configForLlmRole(config, 'motor'), undefined, options.db) : null,
+  };
+}
+
 export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): LLM {
 
  // Anthropic subscription path: no OpenAI client, native Messages API over the
  // stored OAuth credential (in elpis.db, refresh handled by the store).
   if (config.llm.providerType === 'anthropic-oauth') {
-    if (!db) throw new Error('createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 4th argument)');
+    if (!db) throw new Error('createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 3rd argument)');
     const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
     if (!store.isLoggedIn()) {
       config.logger.warn(`llm: no Anthropic OAuth credential in ${store.location} — run \`npm run oauth-login\` before the first turn (calls will fail until then)`);
@@ -883,7 +938,7 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
  // Responses stream parser; codex-client.ts owns OAuth/header injection and
  // pins requests to the canonical ChatGPT backend.
   if (config.llm.providerType === 'codex-oauth') {
-    if (!db) throw new Error('createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 4th argument)');
+    if (!db) throw new Error('createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 3rd argument)');
     const store = new OAuthStore(db, OPENAI_CODEX_CREDENTIAL_KEY, refreshOpenAICodexToken);
     if (!store.isLoggedIn()) {
       config.logger.warn(`llm: no OpenAI Codex OAuth credential in ${store.location} — run \`npm run oauth-login -- codex\` before the first turn (calls will fail until then)`);
@@ -986,6 +1041,27 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
     client,
     model: config.llm.model,
     runTool: RUN_TOOL,
+    async completeStandalone(messages: ChatMessage[], opts: StandaloneCompleteOptions = {}): Promise<StandaloneCompleteResult> {
+      if (messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0)) {
+        throw new Error('standalone completion does not accept tool messages or tool calls');
+      }
+      const isolated = standaloneConfig(config, opts);
+      return routeCall(
+        async () => standaloneResult(
+          await streamResponsesComplete(client, isolated, messages, undefined, {
+            tools: undefined,
+            ...(opts.cacheKey ? { prompt_cache_key: opts.cacheKey } : {}),
+          }, undefined, opts.signal),
+          isolated,
+          'responses',
+        ),
+        async () => standaloneResult(
+          await streamComplete(client, isolated, messages, undefined, { toolFree: true, signal: opts.signal }),
+          isolated,
+          'chat-completions',
+        ),
+      );
+    },
     async complete(messages: ChatMessage[], _options: CompleteOptions = {}): Promise<CompleteResult> {
       return routeCall(
         async () => {

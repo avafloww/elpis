@@ -4,6 +4,15 @@ import * as fs from 'node:fs';
 import { parse as parseYaml, YAMLParseError } from 'yaml';
 import { createLogger, parseLogLevel, type LogLevel, type Logger } from './lib/log.js';
 import { BUILTIN_MODULE_IDS, type BuiltinModuleId } from './builtin-modules.js';
+import {
+  createLlmModelRegistry,
+  legacyLlmModelRegistry,
+  type LegacyLlmDefinition,
+  type LlmModelRegistry,
+  type LlmProviderDefinition,
+  type LlmProviderType,
+  type LlmRole,
+} from './llm/model-registry.js';
 
 /** The Claude Agent SDK alias slots backed by ANTHROPIC_DEFAULT_<ALIAS>_MODEL. */
 export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -55,54 +64,14 @@ export interface GuildConfig {
   channelAllowSend?: Record<string, boolean>;
 }
 
+export interface LlmConfig extends LegacyLlmDefinition {
+  completionReserveTokens: number;
+  registry: LlmModelRegistry;
+  registrySource: 'canonical' | 'legacy';
+}
+
 export interface Config {
-  llm: {
-    /** Which wire surface backs the brain LLM. 'openai-compatible' (default)
- * uses `api_key`/`base_url` against an OpenAI-shaped endpoint (Chat
- * Completions or Responses per `api`). 'anthropic-oauth' drives a Claude
- * Pro/Max subscription over the native Anthropic Messages API, using an
- * OAuth credential established out-of-band (npm run oauth-login).
- * 'codex-oauth' drives the ChatGPT Codex Responses backend using a
- * device-code OAuth grant. OAuth providers do not use `api_key`. */
-    providerType: 'openai-compatible' | 'anthropic-oauth' | 'codex-oauth';
-    /** OpenAI-compatible API key. Required for 'openai-compatible'; unused (may
- * be empty) for OAuth providers, where auth is the OAuth Bearer token. */
-    apiKey: string;
-    baseUrl: string;
-    model: string;
-    /** Manually specified context window (tokens). When set, the harness uses
- * it directly and does NOT call models/info — required for endpoints that
- * don't implement that route. null = probe the endpoint. */
-    contextSize: number | null;
-    /** Reasoning effort for reasoning-capable models. When set, the endpoint
- * returns chain-of-thought in `reasoning_content` instead of leaking it
- * into `content`. null means "don't send the param". */
-    reasoningEffort: string | null;
-    /** Replace provider-hidden reasoning with a visible external `think` tool.
- * Initially supported on the Codex Responses path only. */
-    externalThinking: boolean;
-    /** Abort a streaming completion after this long with no meaningful SSE progress. 0 disables. */
-    streamIdleTimeoutMs: number;
-    /** Outer fail-safe for the entire LLM complete() call. 0 disables. */
-    callTimeoutMs: number;
-    /** Which API surface to speak. 'auto' (default) tries the OpenAI Responses
- * API — the reasoning-preserving modern surface — and permanently falls
- * back to Chat Completions for the process lifetime when the endpoint
- * 404s the route. 'responses'/'chat' force one surface, no fallback. */
-    api: 'auto' | 'responses' | 'chat';
-    /** Responses-API `reasoning.summary` ('auto' | 'concise' | 'detailed').
- * Opt-in: when set, the endpoint emits human-readable reasoning summaries
- * which the harness stores in `reasoning_content` (console + compaction
- * summarizer visibility). null = don't send (some orgs/models reject it). */
-    reasoningSummary: string | null;
-    /** Responses-API `reasoning.context` ('current_turn' | 'all_turns' |
- * 'auto') — how much of the replayed reasoning history the endpoint
- * renders into model context (newer models, e.g. GPT-5.6). null = don't
- * send the param (endpoint default). */
-    reasoningContext: string | null;
-    /** Subtracted from the context window for the usable budget (room to reply). */
-    completionReserveTokens: number;
-  };
+  llm: LlmConfig;
   operator: {
     name: string;
     pronouns: string | null;
@@ -626,6 +595,183 @@ export function normalizeCodexBaseUrl(raw: string | null, file = 'config.yaml'):
   return canonical;
 }
 
+function rawMap(value: unknown, key: string, file: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${file}: key '${key}' must be a mapping`);
+  return value as Record<string, unknown>;
+}
+
+function rawString(map: Record<string, unknown>, key: string, dotted: string, file: string, required = false): string | null {
+  const value = map[key];
+  if (value === undefined || value === null || value === '') {
+    if (required) throw new Error(`${file}: missing required key '${dotted}' (expected a non-empty string)`);
+    return null;
+  }
+  if (typeof value !== 'string') throw new Error(`${file}: key '${dotted}' must be a non-empty string`);
+  return value;
+}
+
+function rawNumber(map: Record<string, unknown>, key: string, dotted: string, file: string): number | null {
+  const value = map[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${file}: key '${dotted}' must be a finite number or null`);
+  return value;
+}
+
+function rawBoolean(map: Record<string, unknown>, key: string, dotted: string, file: string, fallback: boolean): boolean {
+  const value = map[key];
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== 'boolean') throw new Error(`${file}: key '${dotted}' must be true or false`);
+  return value;
+}
+
+function providerType(value: string | null, dotted: string, file: string): LlmProviderType {
+  const type = value ?? 'openai-compatible';
+  if (type !== 'openai-compatible' && type !== 'anthropic-oauth' && type !== 'codex-oauth') {
+    throw new Error(`${file}: '${dotted}' must be openai-compatible, anthropic-oauth, or codex-oauth`);
+  }
+  return type;
+}
+
+function apiSurface(value: string | null, dotted: string, file: string): 'auto' | 'responses' | 'chat' {
+  const api = value ?? 'auto';
+  if (api !== 'auto' && api !== 'responses' && api !== 'chat') throw new Error(`${file}: '${dotted}' must be auto, responses, or chat`);
+  return api;
+}
+
+function providerBaseUrl(type: LlmProviderType, configured: string | null, dotted: string, file: string): string {
+  if (type === 'anthropic-oauth') return configured ?? 'https://api.anthropic.com';
+  if (type === 'codex-oauth') return normalizeCodexBaseUrl(configured, file);
+  if (!configured) throw new Error(`${file}: missing required key '${dotted}'`);
+  return configured;
+}
+
+function projectLlmRegistry(registry: LlmModelRegistry, completionReserveTokens: number, source: 'canonical' | 'legacy'): LlmConfig {
+  const main = registry.targets.main;
+  return {
+    providerType: main.provider.providerType,
+    apiKey: main.provider.apiKey,
+    baseUrl: main.provider.baseUrl,
+    model: main.name,
+    contextSize: main.contextSize,
+    reasoningEffort: main.reasoningEffort,
+    externalThinking: main.provider.externalThinking,
+    streamIdleTimeoutMs: main.provider.streamIdleTimeoutMs,
+    callTimeoutMs: main.provider.callTimeoutMs,
+    api: main.provider.api,
+    reasoningSummary: main.reasoningSummary,
+    reasoningContext: main.reasoningContext,
+    completionReserveTokens,
+    registry,
+    registrySource: source,
+  };
+}
+
+export function configForLlmRole(config: Config, role: LlmRole): Config {
+  const target = config.llm.registry.targets[role];
+  if (!target) throw new Error(`config: llm.roles.${role} is not configured`);
+  return {
+    ...config,
+    llm: {
+      ...config.llm,
+      providerType: target.provider.providerType,
+      apiKey: target.provider.apiKey,
+      baseUrl: target.provider.baseUrl,
+      model: target.name,
+      contextSize: target.contextSize,
+      reasoningEffort: target.reasoningEffort,
+      externalThinking: target.provider.externalThinking,
+      streamIdleTimeoutMs: target.provider.streamIdleTimeoutMs,
+      callTimeoutMs: target.provider.callTimeoutMs,
+      api: target.provider.api,
+      reasoningSummary: target.reasoningSummary,
+      reasoningContext: target.reasoningContext,
+    },
+  };
+}
+
+function parseLlmConfig(tree: YamlTree, file: string, logger: Logger): LlmConfig {
+  const completionReserveTokens = numOr(tree, 'llm.completion_reserve_tokens', 8192, file);
+  const canonical = at(tree, 'llm.providers') !== undefined || at(tree, 'llm.roles') !== undefined;
+  if (!canonical) {
+    const type = providerType(optStr(tree, 'llm.provider_type', file), 'llm.provider_type', file);
+    const oauth = type !== 'openai-compatible';
+    const api = apiSurface(optStr(tree, 'llm.api', file), 'llm.api', file);
+    if (type === 'codex-oauth' && api === 'chat') throw new Error(`${file}: llm.api=chat is not supported for provider_type=codex-oauth (Codex uses Responses)`);
+    const configuredBaseUrl = optStr(tree, 'llm.base_url', file);
+    const externalThinking = boolOr(tree, 'llm.external_thinking', false, file);
+    if (externalThinking && type !== 'codex-oauth') throw new Error(`${file}: llm.external_thinking currently requires llm.provider_type=codex-oauth`);
+    const legacy: LegacyLlmDefinition = {
+      providerType: type,
+      apiKey: oauth ? (optStr(tree, 'llm.api_key', file) ?? '') : reqStr(tree, 'llm.api_key', file),
+      baseUrl: providerBaseUrl(type, configuredBaseUrl, 'llm.base_url', file),
+      model: reqStr(tree, 'llm.model', file),
+      contextSize: optNum(tree, 'llm.context_size', file),
+      reasoningEffort: optStr(tree, 'llm.reasoning_effort', file) ?? 'high',
+      externalThinking,
+      streamIdleTimeoutMs: numOr(tree, 'llm.stream_idle_timeout_ms', externalThinking ? 60_000 : 180_000, file),
+      callTimeoutMs: numOr(tree, 'llm.call_timeout_ms', externalThinking ? 120_000 : 1_200_000, file),
+      api,
+      reasoningSummary: optStr(tree, 'llm.reasoning_summary', file),
+      reasoningContext: optStr(tree, 'llm.reasoning_context', file),
+    };
+    logger.warn('config: legacy flat llm keys are deprecated; migrate to llm.providers + llm.roles');
+    return projectLlmRegistry(legacyLlmModelRegistry(legacy, { motorEnabled: true }), completionReserveTokens, 'legacy');
+  }
+
+  const legacyKeys = ['provider_type','api_key','base_url','model','context_size','reasoning_effort','external_thinking','stream_idle_timeout_ms','call_timeout_ms','api','reasoning_summary','reasoning_context'];
+  const mixed = legacyKeys.filter((key) => at(tree, `llm.${key}`) !== undefined);
+  if (mixed.length > 0) throw new Error(`${file}: canonical llm.providers/roles cannot be mixed with legacy llm keys: ${mixed.join(', ')}`);
+  const providersRaw = rawMap(at(tree, 'llm.providers'), 'llm.providers', file);
+  const providers: Record<string, LlmProviderDefinition> = {};
+  for (const [providerId, value] of Object.entries(providersRaw)) {
+    const dotted = `llm.providers.${providerId}`;
+    const raw = rawMap(value, dotted, file);
+    const allowed = new Set(['provider_type','api_key','base_url','api','external_thinking','stream_idle_timeout_ms','call_timeout_ms','models']);
+    const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
+    if (unknown.length) throw new Error(`${file}: unknown key(s) under '${dotted}': ${unknown.join(', ')}`);
+    const type = providerType(rawString(raw, 'provider_type', `${dotted}.provider_type`, file), `${dotted}.provider_type`, file);
+    const api = apiSurface(rawString(raw, 'api', `${dotted}.api`, file), `${dotted}.api`, file);
+    if (type === 'codex-oauth' && api === 'chat') throw new Error(`${file}: '${dotted}.api=chat' is not supported for codex-oauth`);
+    const externalThinking = rawBoolean(raw, 'external_thinking', `${dotted}.external_thinking`, file, false);
+    const configuredBaseUrl = rawString(raw, 'base_url', `${dotted}.base_url`, file);
+    const modelsRaw = rawMap(raw.models, `${dotted}.models`, file);
+    const models: LlmProviderDefinition['models'] = {};
+    for (const [modelId, modelValue] of Object.entries(modelsRaw)) {
+      const modelDotted = `${dotted}.models.${modelId}`;
+      const model = rawMap(modelValue, modelDotted, file);
+      const modelAllowed = new Set(['name','context_size','reasoning_effort','reasoning_summary','reasoning_context']);
+      const modelUnknown = Object.keys(model).filter((key) => !modelAllowed.has(key));
+      if (modelUnknown.length) throw new Error(`${file}: unknown key(s) under '${modelDotted}': ${modelUnknown.join(', ')}`);
+      models[modelId] = {
+        name: rawString(model, 'name', `${modelDotted}.name`, file, true)!,
+        contextSize: rawNumber(model, 'context_size', `${modelDotted}.context_size`, file),
+        reasoningEffort: rawString(model, 'reasoning_effort', `${modelDotted}.reasoning_effort`, file) ?? 'high',
+        reasoningSummary: rawString(model, 'reasoning_summary', `${modelDotted}.reasoning_summary`, file),
+        reasoningContext: rawString(model, 'reasoning_context', `${modelDotted}.reasoning_context`, file),
+      };
+    }
+    providers[providerId] = {
+      providerType: type,
+      apiKey: type === 'openai-compatible' ? rawString(raw, 'api_key', `${dotted}.api_key`, file, true)! : (rawString(raw, 'api_key', `${dotted}.api_key`, file) ?? ''),
+      baseUrl: providerBaseUrl(type, configuredBaseUrl, `${dotted}.base_url`, file),
+      api,
+      externalThinking,
+      streamIdleTimeoutMs: rawNumber(raw, 'stream_idle_timeout_ms', `${dotted}.stream_idle_timeout_ms`, file) ?? (externalThinking ? 60_000 : 180_000),
+      callTimeoutMs: rawNumber(raw, 'call_timeout_ms', `${dotted}.call_timeout_ms`, file) ?? (externalThinking ? 120_000 : 1_200_000),
+      models,
+    };
+  }
+  const rolesRaw = rawMap(at(tree, 'llm.roles'), 'llm.roles', file);
+  const unknownRoles = Object.keys(rolesRaw).filter((key) => key !== 'main' && key !== 'classifier' && key !== 'motor');
+  if (unknownRoles.length) throw new Error(`${file}: unknown llm.roles key(s): ${unknownRoles.join(', ')}`);
+  const registry = createLlmModelRegistry({providers, roles: {
+    main: rawString(rolesRaw, 'main', 'llm.roles.main', file, true)!,
+    classifier: rawString(rolesRaw, 'classifier', 'llm.roles.classifier', file, true)!,
+    motor: rawString(rolesRaw, 'motor', 'llm.roles.motor', file),
+  }});
+  return projectLlmRegistry(registry, completionReserveTokens, 'canonical');
+}
+
 const DUR_UNITS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 
 /** Parse a "friendly duration": a bare number of milliseconds, or a string
@@ -698,53 +844,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   const fleetBaseUrl = normalizeAnthropicBaseUrl(optStr(tree, 'fleet.base_url', f), logger);
 
   return {
-    llm: (() => {
-      const providerType = (() => {
-        const v = optStr(tree, 'llm.provider_type', f) ?? 'openai-compatible';
-        if (v !== 'openai-compatible' && v !== 'anthropic-oauth' && v !== 'codex-oauth') {
-          throw new Error(`${f}: llm.provider_type must be one of openai-compatible | anthropic-oauth | codex-oauth (got ${JSON.stringify(v)})`);
-        }
-        return v;
-      })();
- // OAuth providers authenticate with a credential established via
- // `npm run oauth-login`, so api_key is optional. Codex is deliberately
- // pinned to ChatGPT's canonical backend to prevent bearer exfiltration.
-      const isOAuth = providerType !== 'openai-compatible';
-      const api = (() => {
-        const v = optStr(tree, 'llm.api', f) ?? 'auto';
-        if (v !== 'auto' && v !== 'responses' && v !== 'chat') {
-          throw new Error(`${f}: llm.api must be one of auto | responses | chat (got ${JSON.stringify(v)})`);
-        }
-        if (providerType === 'codex-oauth' && v === 'chat') {
-          throw new Error(`${f}: llm.api=chat is not supported for provider_type=codex-oauth (Codex uses Responses)`);
-        }
-        return v;
-      })();
-      const configuredBaseUrl = optStr(tree, 'llm.base_url', f);
-      const externalThinking = boolOr(tree, 'llm.external_thinking', false, f);
-      if (externalThinking && providerType !== 'codex-oauth') {
-        throw new Error(`${f}: llm.external_thinking currently requires llm.provider_type=codex-oauth`);
-      }
-      return {
-      providerType,
-      apiKey: isOAuth ? (optStr(tree, 'llm.api_key', f) ?? '') : reqStr(tree, 'llm.api_key', f),
-      baseUrl: providerType === 'anthropic-oauth'
-        ? (configuredBaseUrl ?? 'https://api.anthropic.com')
-        : providerType === 'codex-oauth'
-          ? normalizeCodexBaseUrl(configuredBaseUrl, f)
-          : reqStr(tree, 'llm.base_url', f),
-      model: reqStr(tree, 'llm.model', f),
-      contextSize: optNum(tree, 'llm.context_size', f),
-      reasoningEffort: optStr(tree, 'llm.reasoning_effort', f) ?? 'high',
-      externalThinking,
-      streamIdleTimeoutMs: numOr(tree, 'llm.stream_idle_timeout_ms', externalThinking ? 60_000 : 180_000, f),
-      callTimeoutMs: numOr(tree, 'llm.call_timeout_ms', externalThinking ? 120_000 : 1_200_000, f),
-      api,
-      reasoningSummary: optStr(tree, 'llm.reasoning_summary', f),
-      reasoningContext: optStr(tree, 'llm.reasoning_context', f),
-      completionReserveTokens: numOr(tree, 'llm.completion_reserve_tokens', 8192, f),
-      };
-    })(),
+    llm: parseLlmConfig(tree, f, logger),
     operator: (() => {
       const name = optStr(tree, 'operator.name', f) ?? 'operator';
       if (!name.trim()) throw new Error(`${f}: key \`operator.name\` must not be empty`);

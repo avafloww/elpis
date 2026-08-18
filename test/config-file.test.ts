@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { loadConfigFile, parseDuration, normalizeAnthropicBaseUrl, SDK_EFFORT_LEVELS } from '../src/config.js';
+import { configForLlmRole, loadConfigFile, parseDuration, normalizeAnthropicBaseUrl, SDK_EFFORT_LEVELS } from '../src/config.js';
 import { noopLogger } from '../src/lib/log.js';
 
 // A bot token whose first segment base64-decodes to a digit string, so the
@@ -35,6 +35,40 @@ llm:
   api_key: sk-test
   base_url: https://example.test/v1
   model: test-model
+discord:
+  bot_token: ${TOKEN}
+  guilds:
+    - id: "guild-1"
+      slug: home
+      channels:
+        "1001": direct
+paths:
+  data_directory: /tmp/harness-config-test
+`;
+
+const CANONICAL_OK = `
+llm:
+  completion_reserve_tokens: 4096
+  providers:
+    openrouter:
+      provider_type: openai-compatible
+      api_key: sk-test
+      base_url: https://example.test/v1
+      api: responses
+      models:
+        sol:
+          name: openai/gpt-5.6-sol
+          context_size: 272000
+          reasoning_effort: high
+          reasoning_context: all_turns
+        motor:
+          name: openai/gpt-5.6-mini
+          context_size: 128000
+          reasoning_effort: low
+  roles:
+    main: openrouter/sol
+    classifier: openrouter/sol
+    motor: openrouter/motor
 discord:
   bot_token: ${TOKEN}
   guilds:
@@ -79,6 +113,33 @@ function fixture(body: string): string {
   fs.writeFileSync(p, body, 'utf8');
   return p;
 }
+
+test('configFile: canonical provider/model registry resolves roles and projects main compatibility fields', () => {
+  const c = loadConfigFile(fixture(CANONICAL_OK));
+  assert.equal(c.llm.registrySource, 'canonical');
+  assert.equal(c.llm.registry.roles.main, 'openrouter/sol');
+  assert.equal(c.llm.registry.targets.classifier.ref, 'openrouter/sol');
+  assert.equal(c.llm.registry.targets.motor?.name, 'openai/gpt-5.6-mini');
+  assert.equal(c.llm.model, 'openai/gpt-5.6-sol');
+  assert.equal(c.llm.contextSize, 272000);
+  assert.equal(c.llm.api, 'responses');
+  assert.equal(c.llm.completionReserveTokens, 4096);
+  const motor = configForLlmRole(c, 'motor');
+  assert.equal(motor.llm.model, 'openai/gpt-5.6-mini');
+  assert.equal(motor.llm.reasoningEffort, 'low');
+  assert.equal(motor.llm.registry, c.llm.registry);
+});
+
+test('configFile: canonical and legacy llm shapes cannot be mixed', () => {
+  const mixed = CANONICAL_OK.replace('  completion_reserve_tokens:', '  model: accidental-wire-name\n  completion_reserve_tokens:');
+  assert.throws(() => loadConfigFile(fixture(mixed)), /cannot be mixed.*model/);
+});
+
+test('configFile: canonical roles must reference configured provider-local model ids', () => {
+  assert.throws(() => loadConfigFile(fixture(CANONICAL_OK.replace('classifier: openrouter/sol', 'classifier: missing/sol'))), /unknown provider/);
+  assert.throws(() => loadConfigFile(fixture(CANONICAL_OK.replace('classifier: openrouter/sol', 'classifier: openrouter/missing'))), /unknown model/);
+  assert.throws(() => loadConfigFile(fixture(CANONICAL_OK.replace('    classifier: openrouter/sol\n', ''))), /llm.roles.classifier/);
+});
 
 test('configFile: required keys present → loads core fields', () => {
   const c = loadConfigFile(fixture(MINIMAL_OK));

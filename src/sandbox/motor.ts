@@ -24,7 +24,6 @@ export interface MotorAction {
 export interface MotorStepOptions {
   context?: string;
   cacheKey?: string;
-  model?: string;
   reasoningEffort?: string;
   retries?: number;
   /** Per provider attempt. Aborts the in-flight standalone stream, not just the caller's wait. */
@@ -228,9 +227,7 @@ export function createMotorController(deps: MotorControllerDeps): Record<string,
       recent ? `Recent actions (oldest first):\n${recent}` : 'Recent actions: none',
       'Choose the next single action from this frame.',
     ].filter(Boolean).join('\n\n');
-    const expectedIdentity = deps.replayIdentity
-      ? { ...deps.replayIdentity, model: opts.model ?? deps.replayIdentity.model }
-      : null;
+    const expectedIdentity = deps.replayIdentity ?? null;
     const trustedPrior = priorTurn?.replaySourceId === replaySourceId &&
       sameReplayIdentity(priorTurn?.replayIdentity, expectedIdentity);
     const replayReasoningItems = trustedPrior ? priorTurn?.reasoningItems : undefined;
@@ -263,7 +260,6 @@ export function createMotorController(deps: MotorControllerDeps): Record<string,
       try {
         completion = await deps.completeStandalone(messages, {
           cacheKey: opts.cacheKey ?? `motor-${safeTraceId(traceId)}`,
-          ...(opts.model ? { model: opts.model } : {}),
           ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
           signal: controller.signal,
         });

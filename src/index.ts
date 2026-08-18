@@ -3,8 +3,8 @@
 
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadConfigFile, ensureDataDirectory, type Config } from './config.js';
-import { fetchContextWindow, createLLM, type LLM } from './llm/llm.js';
+import { configForLlmRole, loadConfigFile, ensureDataDirectory, type Config } from './config.js';
+import { fetchContextWindow, createLLM, createLlmRoleClients, type LLM, type LlmRoleClients } from './llm/llm.js';
 import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
 import { MemoryConsolidator, effectiveMemoryLimits } from './store/memory-consolidator.js';
 import { createSandbox } from './sandbox/index.js';
@@ -59,6 +59,7 @@ export interface ElpisRuntime {
   extensions: Awaited<ReturnType<typeof loadExtensions>>;
   modules: BuiltinModuleRegistry;
   profile: RuntimeProfile;
+  llms: LlmRoleClients;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -77,6 +78,9 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   const config = (adapters.loadConfigFile ?? loadConfigFile)();
   const profile = detectRuntimeProfile();
   const modules = resolveBuiltinModules(config, profile);
+  if (modules.isActive('motor') && !config.llm.registry.targets.motor) {
+    throw new Error('config: llm.roles.motor is required while the motor module is active');
+  }
   ensureDataDirectory(config.paths.dataDirectory);
   const migration = migrateDataLayout(config.paths.dataDirectory, {
     log: (message) => config.logger.info(message),
@@ -212,6 +216,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   if (!fleet) config.logger.info('fleet disabled by config (fleet.enabled: false) — no registry constructed');
   const inboundRef: { current: InboundMessage | null } = { current: null };
   let llm!: LLM;
+  let llms!: LlmRoleClients;
  //: the TTL reaper delivers an abandon notice through the same path as
  // settle notices. `agent` is defined below; the closure is only invoked at
  // runtime (reaper fires ≥60s in), long after `agent` is assigned.
@@ -249,7 +254,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   });
   const sandbox = (adapters.createSandbox ?? createSandbox)({
     config,
-    replayIdentity: replayIdentityForConfig(config),
+    replayIdentity: modules.isActive('motor') ? replayIdentityForConfig(configForLlmRole(config, 'motor')) : null,
     memory,
     extensions,
     modules,
@@ -289,8 +294,9 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // transcript). The frame-building lives on the Agent (enqueueWatch).
     watch: (paths: string[], note: string) => agent.enqueueWatch(paths, note),
     completeStandalone: (messages, opts) => {
-      if (!llm.completeStandalone) throw new Error('configured LLM provider has no isolated standalone completion path');
-      return llm.completeStandalone(messages, opts);
+      const motor = llms.motor;
+      if (!motor?.completeStandalone) throw new Error('configured motor role has no isolated standalone completion path');
+      return motor.completeStandalone(messages, opts);
     },
  // Persistent task scheduler exposed to schedule/unschedule/tasks globals.
     scheduler,
@@ -301,7 +307,13 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     moderate: (channelId: string, reason?: string) => agent.moderateChannel(channelId, 'mute', 'self', reason),
   });
 
-  llm = (adapters.createLLM ?? createLLM)(config, hub, db);
+  llms = createLlmRoleClients(config, {
+    hub,
+    db,
+    motorActive: modules.isActive('motor'),
+    create: adapters.createLLM ?? createLLM,
+  });
+  llm = llms.main;
   const density = createDensityModel(db, config.llm.model, config.logger);
   const memoryLimits = effectiveMemoryLimits(
     config.memory.consolidationThresholdTokens,
@@ -567,7 +579,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   process.on('unhandledRejection', (reason) => reportProcessError('unhandledRejection', reason));
   process.on('uncaughtException', (err) => reportProcessError('uncaughtException', err));
 
-  return { config, agent, discord, scheduler, mind, extensions, modules, profile };
+  return { config, agent, discord, scheduler, mind, extensions, modules, profile, llms };
 }
 
 // Only boot when this module is the actual process entry point (`tsx watch
