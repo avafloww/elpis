@@ -72,6 +72,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       errorChannelId: null,
       attachmentInlineMaxBytes: 32768,
       ambientTickMs: 0,
+      ambientAllowSend: true,
       emoteImages: true,
       emoteKeyframes: 4,
       guilds: [

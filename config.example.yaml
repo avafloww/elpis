@@ -93,6 +93,9 @@ discord:
   # Batching interval for ambient (non-direct-tier) inbound messages, in ms.
   # 0 disables batching — every message wakes the loop immediately.
   ambient_tick_ms: 600000
+  # Whether a room-context tick may send messages. false makes ambient turns
+  # receive-only: memory/files/tools remain available, but every send is denied.
+  ambient_allow_send: true
   # Attach the image of a custom emote/sticker the FIRST time it is used in
   # the current context window, so the agent reads the social cue instead of
   # guessing from `<:name:id>` markup. false disables the feature.

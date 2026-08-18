@@ -89,6 +89,11 @@ test('configFile: required keys present → loads core fields', () => {
   assert.equal(c.discord.guilds[0].id, 'guild-1');
 });
 
+test('configFile: ambient send permission is independently configurable', () => {
+  const c = loadConfigFile(fixture(MINIMAL_OK.replace('  bot_token:', '  ambient_allow_send: false\n  bot_token:')));
+  assert.equal(c.discord.ambientAllowSend, false);
+});
+
 test('configFile: defaults are applied when optionals are absent', () => {
   const c = loadConfigFile(fixture(MINIMAL_OK));
   assert.equal(c.llm.reasoningEffort, 'high');
@@ -97,6 +102,7 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.discord.errorChannelId, null);
   assert.deepEqual(c.operator, { name: 'operator', pronouns: null, discordId: null });
   assert.equal(c.discord.ambientTickMs, 600000);
+  assert.equal(c.discord.ambientAllowSend, true);
   assert.equal(c.sandbox.syncTimeoutMs, 15000);
   assert.equal(c.sandbox.asyncDeadlineMs, 120000);
   assert.equal(c.compaction.triggerTokens, 180000);

@@ -328,6 +328,10 @@ export interface InboundMessage {
  * falls back to `channelId` (internal/harness enqueues, and non-thread
  * Discord messages, where the two already coincide). */
   policyChannelId?: string;
+  /** Optional turn capability stamped by synthetic producers. observe_only
+   * hard-denies every outbound send for the outer turn unless a real person
+   * wake is drained alongside it. */
+  sendScope?: 'observe_only';
   /** Fired when the message is actually pushed into history (drain time), not
  * at enqueue — a message dropped before the drain (clear, crash, second
  * restart) never fires it. Used by the changelog notice to mark entries
@@ -451,6 +455,7 @@ export class Agent {
 
  // Turn-scoped flags (singleton under ).
   private sendsThisTurn = 0;
+  private turnSendScope: 'normal' | 'observe_only' = 'normal';
   private nudgeFired = false;
   private realUserTurn = false;
   /** Monotonic turn latch: true only when freshly drained input came from a
@@ -608,6 +613,7 @@ export class Agent {
 
   /** Explicitly show typing only where configuration permits a later send. */
   typing(channelId: string): void {
+    if (this.turnSendScope === 'observe_only') return;
     if (channelId === CONSOLE_CHANNEL_ID) return;
     const policy = this.policyForChannel(channelId);
     if (policy && !policy.allowSend) return;
@@ -619,6 +625,9 @@ export class Agent {
  * in-stream via the tool call + result, so it is NOT re-recorded as an
  * assistant message ( dropped the cross-channel duplication). */
   async send(channelId: string, content: string, opts?: { files?: import('./types.js').OutboundAttachment[] }): Promise<void> {
+    if (this.turnSendScope === 'observe_only') {
+      throw new Error('sending is disabled for this ambient observation turn (discord.ambient_allow_send=false)');
+    }
     if (channelId === CONSOLE_CHANNEL_ID) {
       if (opts?.files?.length) throw new Error('console attachments are not supported yet');
       this.sendsThisTurn++;
@@ -884,10 +893,11 @@ export class Agent {
       authorId?: string;
       attachments?: InboundMessageAttachment[];
       onDelivered?: () => void;
+      sendScope?: 'observe_only';
     },
   ): void {
     const author = extras.author ?? 'harness';
-    this.enqueue({
+    const message: InboundMessage = {
       id: extras.id,
       channelId: INTERNAL_CHANNEL_ID,
       channelName,
@@ -899,7 +909,9 @@ export class Agent {
       attachments: extras.attachments ?? [],
       kind,
       onDelivered: extras.onDelivered,
-    });
+    };
+    if (extras.sendScope) message.sendScope = extras.sendScope;
+    this.enqueue(message);
   }
 
   /** Watch mode (elpis.watch): deliver local image frames as one ephemeral
@@ -960,10 +972,14 @@ export class Agent {
     if (!pending.some((p) => countsForTick(p.policyChannelId, this.guildIndex, muteType, now, p.guildId))) return;
     const earliest = Math.min(...pending.map((p) => p.at));
     const labels = joinRoomLabels([...new Set(pending.map((p) => this.qualifiedChannelLabel(p.channelId)))]);
+    const observeOnly = !this.config.discord.ambientAllowSend;
+    const sendNotice = observeOnly
+      ? ' This is a receive-only observation turn: you may write memory/files and use other tools, but every channel.send will refuse delivery.'
+      : '';
     this.enqueueInternal(
       'harness', 'harness',
-      `[room context — ${pending.length} message${pending.length === 1 ? '' : 's'} since ${localHm(earliest).replace(/^\[|\]$/g, '')}, across ${labels}. This is what's been said around you, not a set of requests. Replying is optional; silence is a fine answer.]`,
-      { id: `ambient-${Date.now()}` },
+      `[room context — ${pending.length} message${pending.length === 1 ? '' : 's'} since ${localHm(earliest).replace(/^\[|\]$/g, '')}, across ${labels}. This is what's been said around you, not a set of requests. Replying is optional; silence is a fine answer.${sendNotice}]`,
+      { id: `ambient-${Date.now()}`, ...(observeOnly ? { sendScope: 'observe_only' as const } : {}) },
     );
   }
 
@@ -1200,6 +1216,10 @@ export class Agent {
   /** Route a harness-level error notice to the dedicated error channel, or
  * log-only when unset (: never spam a public room). */
   private async sendError(text: string): Promise<void> {
+    if (this.turnSendScope === 'observe_only') {
+      this.logger.warn(`[error-notice, ambient observe-only] ${text}`);
+      return;
+    }
     const ch = this.config.discord.errorChannelId;
     if (!ch) {
       this.logger.warn(`[error-notice, log-only] ${text}`);
@@ -1312,6 +1332,7 @@ export class Agent {
         continue;
       }
 
+      this.turnSendScope = !this.realUserTurn && this.lastInbound?.sendScope === 'observe_only' ? 'observe_only' : 'normal';
       this.turnChannelId = this.realUserTurn ? this.lastInbound?.channelId ?? null : null;
       this.sleepDepth = 0;
       this.deps.setCurrentInbound?.(this.lastInbound ?? null);
@@ -1747,6 +1768,7 @@ export class Agent {
   private finishTurn(): void {
     this.realUserTurn = false;
     this.personInputTurn = false;
+    this.turnSendScope = 'normal';
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;

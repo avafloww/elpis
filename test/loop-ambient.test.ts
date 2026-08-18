@@ -67,12 +67,12 @@ function stubMutes(muted: Record<string, MuteType>): MuteStore {
   };
 }
 
-function buildAgent(llm: LLM, opts: { mutes?: MuteStore } = {}) {
+function buildAgent(llm: LLM, opts: { mutes?: MuteStore; ambientAllowSend?: boolean } = {}) {
   const { agent, sent, tmpDir } = buildTestAgent({
     llm,
     config: {
       heartbeat: { intervalMs: 60_000, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 },
-      discord: { ...makeConfig().discord, guilds: FIXTURE_GUILDS },
+      discord: { ...makeConfig().discord, guilds: FIXTURE_GUILDS, ambientAllowSend: opts.ambientAllowSend ?? true },
     },
     agentDeps: opts.mutes ? { mutes: opts.mutes } : {},
     tmpPrefix: 'harness-loop-ambient-',
@@ -182,6 +182,33 @@ test('ambient: tick enqueues one room-context notice and one turn drains all amb
   assert.equal(persistedUsers[1].channel, '2001', 'transcript stamp: ambient message a-2 keeps its real room id');
   assert.equal(persistedUsers[2].channel, '1002', 'transcript stamp: ambient message a-3 keeps its real room id');
   assert.equal(persistedUsers[3].channel, 'internal', 'transcript stamp: the room-context notice is internal provenance');
+  agent.stop();
+});
+
+test('ambient: receive-only tick hard-denies room and console sends while preserving the turn', async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<CompleteResult>();
+  const llm = {
+    client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
+    complete: () => { started.resolve(); return release.promise; },
+    summarize: () => Promise.resolve('SUMMARY'),
+  } as LLM;
+  const { agent, sent } = buildAgent(llm, { ambientAllowSend: false });
+
+  void agent.loop();
+  agent.enqueue(ambientMsg('1002', 'a-1'));
+  agent.fireAmbientTick();
+  await started.promise;
+
+  await assert.rejects(() => agent.send('1002', 'must not leave'), /ambient observation turn.*ambient_allow_send=false/);
+  await assert.rejects(() => agent.send('console', 'maintenance hatch'), /ambient observation turn.*ambient_allow_send=false/);
+  assert.equal(sent.length, 0);
+  const notice = agent.messagesForTest.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+  assert.match(notice, /receive-only observation turn/);
+
+  release.resolve(EMPTY_END);
+  await microtask();
+  await microtask();
   agent.stop();
 });
 

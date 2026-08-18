@@ -122,6 +122,9 @@ export interface Config {
     /** Batching interval for ambient (non-direct-tier) inbound messages.
  * 0 disables batching (every message wakes the loop, today's behavior). */
     ambientTickMs: number;
+    /** Whether an ambient room-context tick may send during its model turn.
+     * false keeps observation/memory tools available but hard-denies every send. */
+    ambientAllowSend: boolean;
     /** Custom emote/sticker registry: attach the image of a custom emote or
  * sticker the first time it is used in the current context window, so
  * the agent can read the social cue instead of guessing from the
@@ -769,6 +772,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         errorChannelId: optStr(tree, 'discord.error_channel_id', f),
         attachmentInlineMaxBytes: numOr(tree, 'discord.attachment_inline_max_bytes', 32768, f),
         ambientTickMs: numOr(tree, 'discord.ambient_tick_ms', 600_000, f),
+        ambientAllowSend: boolOr(tree, 'discord.ambient_allow_send', true, f),
         emoteImages: boolOr(tree, 'discord.emote_images', true, f),
         emoteKeyframes: numOr(tree, 'discord.emote_keyframes', 4, f),
         guilds: parseGuilds(tree, f),
