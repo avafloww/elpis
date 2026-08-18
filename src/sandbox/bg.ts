@@ -78,6 +78,8 @@ export interface BgRegistry {
   settleFuture(id: string, value: unknown, rejected: boolean): boolean;
   /** Drop abandoned futures past their TTL. Returns ids dropped. */
   reapAbandoned(): string[];
+  /** Observe future cancellation/TTL abandonment. Normal settlement uses settleFuture. */
+  onFutureTerminal(listener: (id: string, outcome: 'cancelled' | 'abandoned') => void): () => void;
   /** Activate job lifecycle delivery after the Agent exists. Recovered jobs are
  * reconciled here; safe and idempotent. */
   activate(): void;
@@ -118,6 +120,7 @@ export function createBgRegistry(dataDirectory: string, opts?: BgRegistryOpts): 
  // childPids is the run's LIVE set (shared reference with the run scope), so it
  // reflects children spawned/exited AFTER detach, not just at detach time.
   const futures = new Map<string, { promise: Promise<unknown>; childPids: Set<number> }>();
+  const futureTerminalListeners = new Set<(id: string, outcome: 'cancelled' | 'abandoned') => void>();
 
   fs.mkdirSync(bgDir, { recursive: true });
   loadRegistry();
@@ -355,6 +358,9 @@ export function createBgRegistry(dataDirectory: string, opts?: BgRegistryOpts): 
  //: mark so a later settlement of the (uncancellable) promise is
  // ignored — no record overwrite, no spurious [bg settled] notice.
       j.cancelled = true;
+      for (const listener of futureTerminalListeners) {
+        try { listener(id, 'cancelled'); } catch { /* lifecycle observers are best-effort */ }
+      }
     }
     saveRegistry();
     return { ok: true, note: `cancelled ${id}` };
@@ -406,6 +412,9 @@ export function createBgRegistry(dataDirectory: string, opts?: BgRegistryOpts): 
         j.rejected = true;
         j.value = '[abandoned after TTL]';
         dropped.push(id);
+        for (const listener of futureTerminalListeners) {
+          try { listener(id, 'abandoned'); } catch { /* lifecycle observers are best-effort */ }
+        }
  //: deliver an abandon notice through the same path as settle notices
  // so the agent learns the future will never arrive.
         opts?.onAbandoned?.(id, j.value, j.originChannelId ?? '');
@@ -431,11 +440,17 @@ export function createBgRegistry(dataDirectory: string, opts?: BgRegistryOpts): 
   const reaper = setInterval(() => { reapAbandoned(); }, opts?.reapIntervalMs ?? 60_000);
   reaper.unref?.();
 
+  function onFutureTerminal(listener: (id: string, outcome: 'cancelled' | 'abandoned') => void): () => void {
+    futureTerminalListeners.add(listener);
+    return () => { futureTerminalListeners.delete(listener); };
+  }
+
   function dispose(): void {
     clearInterval(reaper);
     for (const timer of jobTimers.values()) clearTimeout(timer);
     jobTimers.clear();
+    futureTerminalListeners.clear();
   }
 
-  return { start, list, get, tail, cancel, registerFuture, settleFuture, reapAbandoned, activate, rearm, dispose };
+  return { start, list, get, tail, cancel, registerFuture, settleFuture, reapAbandoned, onFutureTerminal, activate, rearm, dispose };
 }

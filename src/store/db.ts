@@ -19,7 +19,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -291,6 +291,7 @@ export function runMigrations(db: DatabaseSync): void {
       lifecycle         TEXT NOT NULL CHECK (lifecycle IN ('ready','busy','detached','retired')),
       reminder_latched  INTEGER NOT NULL DEFAULT 0 CHECK (reminder_latched IN (0,1)),
       retire_requested  INTEGER NOT NULL DEFAULT 0 CHECK (retire_requested IN (0,1)),
+      cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1)),
       active_run_id     TEXT,
       next_run_seq      INTEGER NOT NULL DEFAULT 1 CHECK (next_run_seq >= 1),
       created_at        INTEGER NOT NULL,
@@ -327,6 +328,14 @@ export function runMigrations(db: DatabaseSync): void {
         SELECT RAISE(ABORT, 'sandbox aliases are never reused');
       END;
   `);
+
+  // v13: process-cold generation notices survive until the next selected run.
+  // Existing v12 databases gain the column idempotently; fresh databases already
+  // have it in the CREATE TABLE above.
+  const sandboxColumns = (db.prepare(`SELECT name FROM pragma_table_info('persistent_sandboxes')`).all() as { name: string }[]).map((r) => r.name);
+  if (!sandboxColumns.includes('cold_notice_pending')) {
+    db.exec('ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))');
+  }
 
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

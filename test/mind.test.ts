@@ -31,7 +31,7 @@ test('mind migrations are idempotent and create the complete schema', () => {
   runMigrations(db);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mind_%' ORDER BY name").all() as { name: string }[]).map((x) => x.name);
   assert.deepEqual(tables, ['mind_claims', 'mind_comments', 'mind_dependencies', 'mind_events', 'mind_items', 'mind_reminders', 'mind_tags']);
-  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 12);
+  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 13);
   db.close();
 });
 
@@ -272,7 +272,7 @@ test('archive is soft, ids parse from human forms, and detail formatting is usef
   db.close();
 });
 
-test('MindService state callback retires a bound sandbox after the Mind commit', () => {
+test('MindService state callback requests retirement after the Mind commit', () => {
   const db = database();
   const scheduler = schedulerStub();
   let nextUuid = 0;
@@ -296,6 +296,9 @@ test('MindService state callback retires a bound sandbox after the Mind commit',
   assert.equal(pending.lifecycle, 'busy');
   assert.equal(pending.retireRequested, true);
   assert.deepEqual(states, [{ id: item.id, status: 'done', archived: false }]);
-  assert.equal(registry.finishRun(sandbox.id, run.runId).lifecycle, 'retired');
+  const idle = registry.finishRun(sandbox.id, run.runId);
+  assert.equal(idle.lifecycle, 'ready');
+  assert.equal(idle.retireRequested, true);
+  assert.equal(registry.finalizeRetirement(sandbox.id).lifecycle, 'retired');
   db.close();
 });

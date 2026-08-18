@@ -166,6 +166,7 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.discord.ambientAllowSend, true);
   assert.equal(c.sandbox.syncTimeoutMs, 15000);
   assert.equal(c.sandbox.asyncDeadlineMs, 120000);
+  assert.equal(c.sandbox.persistentIdleGcMs, 24 * 60 * 60 * 1000);
   assert.equal(c.compaction.triggerTokens, 180000);
   assert.equal(c.compaction.keepTokens, 50000);
   assert.deepEqual(c.memory, { consolidationThresholdTokens: 32000, consolidationTargetTokens: 24000 });
@@ -266,6 +267,13 @@ test('configFile: compaction threshold validation (0 < keep < trigger)', () => {
   assert.throws(() => loadConfigFile(withCompaction('  keep_tokens: 200000\n  trigger_tokens: 100000\n')), /0 < keep/);
   const c = loadConfigFile(withCompaction('  trigger_tokens: 50000\n  keep_tokens: 10000\n'));
   assert.equal(c.compaction.triggerTokens, 50000);
+});
+
+test('configFile: sandbox idle GC duration is configurable and typed', () => {
+  const c = loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: 4321\n`));
+  assert.equal(c.sandbox.persistentIdleGcMs, 4321);
+  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: "abc"\n`)), /sandbox\.persistent_idle_gc_ms/);
+  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: -1\n`)), /must be non-negative/);
 });
 
 test('configFile: wrong-typed scalar throws naming the key', () => {

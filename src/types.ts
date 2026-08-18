@@ -29,12 +29,33 @@ export interface OutboundAttachment {
   name?: string;
 }
 
+export interface SandboxExecutionMetadata {
+  kind: 'ephemeral' | 'persistent';
+  alias?: string;
+  mindId?: number;
+  mindTitle?: string;
+  mindStatus?: string;
+  latestComment?: string | null;
+  executorId?: string;
+  generation?: number;
+  resetGeneration?: number;
+  runId?: string;
+  coldStart?: boolean;
+  retiring?: boolean;
+  statusReminder?: boolean;
+  classifierReminder?: boolean;
+}
+
 export interface RunResult {
   ok: boolean;
   preview?: string;
   savedAs?: '_';
   logs?: string;
   error?: string;
+  /** Harness-only execution classification; omitted from provider requests. */
+  failureKind?: 'preparse' | 'runtime';
+  /** Harness-only sandbox attribution. Provider wire translation must omit it. */
+  execution?: SandboxExecutionMetadata;
   /** Present when the run detached a still-pending promise into the bg registry (A5). */
   detached?: boolean;
   /** When detached, the bg id the result will be delivered as. */
@@ -46,11 +67,14 @@ export interface RunResult {
 }
 
 export interface SandboxDeps {
+  /** Capability surface. Full preserves the host-local control room; core is the fresh ephemeral allowlist. */
+  surface?: 'full' | 'core';
   /** Structural subset of `Config` — the groups the sandbox actually reads. */
   config: {
     sandbox: {
       syncTimeoutMs: number;
       asyncDeadlineMs: number;
+      persistentIdleGcMs: number;
       previewMaxBytes: number;
       logMaxBytes: number;
     };
@@ -142,6 +166,13 @@ export interface SandboxDeps {
   mind?: MindService;
   /** Bound Mind item for a persistent sandbox. Omitted in unbound control rooms. */
   mindDefaultId?: number;
+  /** Durable sandbox registry bridge exposed to core bootstrap code. */
+  sandboxRegistry?: {
+    create(mindId: number): unknown;
+    get(ref: string): unknown;
+    getByMind(mindId: number): unknown;
+    list(): unknown[];
+  };
   /** Persistent task scheduler. Used by schedule()/unschedule() globals. */
   scheduler?: {
     create(opts: { name: string; kind?: string; channelId?: string | null; payload: string; nextRunAt: number; intervalMs?: number | null; nagIntervalMs?: number | null; parentId?: number | null }): unknown;

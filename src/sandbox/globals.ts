@@ -207,8 +207,9 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     Object.defineProperty(g, key, { value: v, writable: false, configurable: false });
   };
 
- // last value (populated by run)
-  g._ = undefined;
+ // Persistent full sandboxes retain the last completion value. Fresh core
+ // sandboxes deliberately have no `_` global or cross-run last-value state.
+  if (deps.surface !== 'core') g._ = undefined;
 
  // inbound — structured metadata for the Discord message currently being
  // processed (or null on heartbeats). A LIVE getter over deps.inbound (the
@@ -1161,6 +1162,20 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
     snoozeReminder: (reminderId: number, until: unknown, actor?: string) => requireMind().snoozeReminder(reminderId, coerceNextRunAt(until), actor ?? mindActor()),
     cancelReminder: (reminderId: number, actor?: string) => requireMind().cancelReminder(reminderId, actor ?? mindActor()),
   };
+  const requireSandboxRegistry = (): NonNullable<SandboxDeps['sandboxRegistry']> => {
+    if (!deps.sandboxRegistry) throw new Error('elpis.sandbox is not wired in this harness');
+    return deps.sandboxRegistry;
+  };
+  e.sandbox = {
+    create: (opts: { mindId: number | string }) => {
+      if (!opts || typeof opts !== 'object') throw new Error('elpis.sandbox.create({ mindId }): opts is required');
+      return requireSandboxRegistry().create(parseMindId(opts.mindId));
+    },
+    get: (alias: string) => requireSandboxRegistry().get(alias),
+    forMind: (mindId: number | string) => requireSandboxRegistry().getByMind(parseMindId(mindId)),
+    list: () => requireSandboxRegistry().list(),
+  };
+
   (e.mind as Record<string, unknown>).bound = {
     id: () => boundMindId(),
     get: () => requireMind().get(boundMindId()),
@@ -1268,6 +1283,15 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
       if (timer) clearTimeout(timer);
     }
   };
+
+  if (deps.surface === 'core') {
+    const coreElpis = new Set([
+      'inbound', 'channel', 'memory', 'remember', 'focus', 'ponder', 'mind', 'sandbox',
+      'schedule', 'sleep', 'wait', 'timeout', 'preview', 'fill',
+    ]);
+    for (const key of Object.keys(e)) if (!coreElpis.has(key)) delete e[key];
+    for (const key of Object.keys(g)) if (key !== 'console') delete g[key];
+  }
 
  // Deep-freeze the whole verb namespace, then hang it off `g.elpis` — the
  // ONLY way an agent script reaches a harness verb. Frozen means both the

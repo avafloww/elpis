@@ -135,6 +135,8 @@ export interface Config {
     syncTimeoutMs: number;
     /** How long a turn waits before DETACHING a run's promise into bg. */
     asyncDeadlineMs: number;
+    /** Closed persistent sandboxes remain warm until idle for this duration. */
+    persistentIdleGcMs: number;
     previewMaxBytes: number;
     logMaxBytes: number;
   };
@@ -901,6 +903,11 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     sandbox: {
       syncTimeoutMs: numOr(tree, 'sandbox.sync_timeout_ms', 15000, f),
       asyncDeadlineMs: numOr(tree, 'sandbox.async_deadline_ms', 120000, f),
+      persistentIdleGcMs: (() => {
+        const value = numOr(tree, 'sandbox.persistent_idle_gc_ms', 24 * 60 * 60 * 1000, f);
+        if (value < 0) throw new Error(`${f}: sandbox.persistent_idle_gc_ms must be non-negative`);
+        return value;
+      })(),
       previewMaxBytes: numOr(tree, 'sandbox.preview_max_bytes', 16384, f),
       logMaxBytes: numOr(tree, 'sandbox.log_max_bytes', 32768, f),
     },

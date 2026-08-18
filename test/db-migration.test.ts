@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { openDatabase } from '../src/store/db.js';
+import { openDatabase, runMigrations } from '../src/store/db.js';
 
 function tmpDir(): string { return fs.mkdtempSync(path.join(os.tmpdir(), 'harness-db-')); }
 
@@ -76,7 +76,7 @@ test('migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test('migration v11→v12 creates durable sandbox identity and alias tombstone tables', () => {
+test('migration through v13 creates sandbox identity, tombstones, and cold notices', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name);
@@ -87,6 +87,36 @@ test('migration v11→v12 creates durable sandbox identity and alias tombstone t
   assert.ok(triggers.includes('sandbox_executor_identity_no_update'));
   assert.ok(triggers.includes('persistent_sandboxes_identity_no_update'));
   assert.ok(triggers.includes('sandbox_aliases_no_delete'));
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+  const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
+  assert.ok(columns.includes('cold_notice_pending'));
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+  db.close();
+});
+
+test('migration v12→v13 adds cold notice state to an existing sandbox table', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE persistent_sandboxes (
+      id TEXT PRIMARY KEY,
+      mind_id INTEGER NOT NULL UNIQUE,
+      executor_id TEXT NOT NULL,
+      generation INTEGER NOT NULL DEFAULT 1,
+      lifecycle TEXT NOT NULL,
+      reminder_latched INTEGER NOT NULL DEFAULT 0,
+      retire_requested INTEGER NOT NULL DEFAULT 0,
+      active_run_id TEXT,
+      next_run_seq INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      retired_at INTEGER
+    );
+    PRAGMA user_version = 12;
+  `);
+  runMigrations(db);
+  const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
+  assert.ok(columns.includes('cold_notice_pending'));
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+  runMigrations(db);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('persistent_sandboxes') WHERE name = 'cold_notice_pending'").get() as { n: number }).n, 1);
   db.close();
 });

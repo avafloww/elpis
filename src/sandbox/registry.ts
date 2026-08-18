@@ -15,6 +15,7 @@ export interface SandboxRegistration {
   lifecycle: SandboxLifecycle;
   reminderLatched: boolean;
   retireRequested: boolean;
+  coldNoticePending: boolean;
   activeRunId: string | null;
   nextRunSeq: number;
   createdAt: number;
@@ -47,6 +48,7 @@ type SandboxRow = {
   lifecycle: SandboxLifecycle;
   reminder_latched: number;
   retire_requested: number;
+  cold_notice_pending: number;
   active_run_id: string | null;
   next_run_seq: number;
   created_at: number;
@@ -71,6 +73,7 @@ function registration(row: SandboxRow): SandboxRegistration {
     lifecycle: row.lifecycle,
     reminderLatched: row.reminder_latched === 1,
     retireRequested: row.retire_requested === 1,
+    coldNoticePending: row.cold_notice_pending === 1,
     activeRunId: row.active_run_id,
     nextRunSeq: row.next_run_seq,
     createdAt: row.created_at,
@@ -199,25 +202,21 @@ export class SandboxRegistry {
 
   beginRun(idOrAlias: string): SandboxRun {
     const id = this.resolveId(idOrAlias);
-    let closedMindId: number | null = null;
-    const run = this.immediate(() => {
-      const current = this.byId(id);
-      if (current.lifecycle !== 'ready' || current.retireRequested) {
-        throw new Error(`sandbox registry: ${current.alias} is ${current.lifecycle}${current.retireRequested ? ' and retiring' : ''}`);
+    return this.immediate(() => {
+      let current = this.byId(id);
+      if (current.lifecycle !== 'ready') {
+        throw new Error(`sandbox registry: ${current.alias} is ${current.lifecycle}`);
       }
       const mind = this.db.prepare('SELECT status, archived_at FROM mind_items WHERE id = ?').get(current.mindId) as { status: string; archived_at: number | null };
-      if (mind.status === 'done' || mind.status === 'cancelled' || mind.archived_at !== null) {
-        closedMindId = current.mindId;
-        this.retireInside(current);
-        return null;
+      if (!current.retireRequested && (mind.status === 'done' || mind.status === 'cancelled' || mind.archived_at !== null)) {
+        this.requestRetirementInside(current);
+        current = this.byId(id);
       }
       const runId = `${current.id}:g${current.generation}:r${current.nextRunSeq}`;
       const now = this.now();
       this.db.prepare(`UPDATE persistent_sandboxes SET lifecycle = 'busy', active_run_id = ?, next_run_seq = next_run_seq + 1, updated_at = ? WHERE id = ?`).run(runId, now, id);
       return { runId, sandbox: this.byId(id) };
     });
-    if (!run) throw new Error(`sandbox registry: Mind #${closedMindId} is closed`);
-    return run;
   }
 
   detachRun(idOrAlias: string, runId: string): SandboxRegistration {
@@ -232,11 +231,15 @@ export class SandboxRegistry {
         throw new Error(`sandbox registry: ${current.alias} does not own active run ${JSON.stringify(runId)}`);
       }
       const mind = this.db.prepare('SELECT status, archived_at FROM mind_items WHERE id = ?').get(current.mindId) as { status: string; archived_at: number | null };
-      const retire = current.retireRequested || mind.status === 'done' || mind.status === 'cancelled' || mind.archived_at !== null;
+      const closed = mind.status === 'done' || mind.status === 'cancelled' || mind.archived_at !== null;
       const now = this.now();
-      this.db.prepare(`UPDATE persistent_sandboxes SET lifecycle = ?, active_run_id = NULL, retire_requested = 0, retired_at = ?, updated_at = ? WHERE id = ?`)
-        .run(retire ? 'retired' : 'ready', retire ? now : null, now, id);
-      if (retire) this.db.prepare('UPDATE sandbox_aliases SET retired_at = ? WHERE sandbox_id = ?').run(now, id);
+      this.db.prepare(`
+        UPDATE persistent_sandboxes
+        SET lifecycle = 'ready', active_run_id = NULL,
+            retire_requested = CASE WHEN ? THEN 1 ELSE retire_requested END,
+            updated_at = ?
+        WHERE id = ?
+      `).run(closed ? 1 : 0, now, id);
       return this.byId(id);
     });
   }
@@ -256,6 +259,39 @@ export class SandboxRegistry {
   markInterruptedRunsDetached(): number {
     const result = this.db.prepare(`UPDATE persistent_sandboxes SET lifecycle = 'detached', updated_at = ? WHERE lifecycle = 'busy'`).run(this.now());
     return Number(result.changes);
+  }
+
+  failRunAndReset(idOrAlias: string, runId: string): SandboxRegistration {
+    const id = this.resolveId(idOrAlias);
+    return this.immediate(() => {
+      const current = this.byId(id);
+      if ((current.lifecycle !== 'busy' && current.lifecycle !== 'detached') || current.activeRunId !== runId) {
+        throw new Error(`sandbox registry: ${current.alias} does not own active run ${JSON.stringify(runId)}`);
+      }
+      this.db.prepare(`
+        UPDATE persistent_sandboxes
+        SET generation = generation + 1, lifecycle = 'ready', active_run_id = NULL,
+            next_run_seq = 1, cold_notice_pending = 0, updated_at = ?
+        WHERE id = ?
+      `).run(this.now(), id);
+      return this.byId(id);
+    });
+  }
+
+  coldResetAll(): number {
+    const result = this.db.prepare(`
+      UPDATE persistent_sandboxes
+      SET generation = generation + 1, lifecycle = 'ready', active_run_id = NULL,
+          next_run_seq = 1, cold_notice_pending = 1, updated_at = ?
+      WHERE lifecycle != 'retired'
+    `).run(this.now());
+    return Number(result.changes);
+  }
+
+  consumeColdNotice(idOrAlias: string): boolean {
+    const id = this.resolveId(idOrAlias);
+    const result = this.db.prepare('UPDATE persistent_sandboxes SET cold_notice_pending = 0 WHERE id = ? AND cold_notice_pending = 1').run(id);
+    return Number(result.changes) === 1;
   }
 
   reset(idOrAlias: string): SandboxRegistration {
@@ -284,10 +320,42 @@ export class SandboxRegistry {
     return this.byId(id);
   }
 
+  clearReminderByMind(mindId: number): SandboxRegistration | null {
+    const current = this.getByMind(mindId);
+    return current ? this.clearReminder(current.id) : null;
+  }
+
   retireByMind(mindId: number): SandboxRegistration | null {
     const current = this.getByMind(mindId);
     if (!current) return null;
-    return this.immediate(() => this.retireInside(this.byId(current.id)));
+    return this.immediate(() => this.requestRetirementInside(this.byId(current.id)));
+  }
+
+  cancelRetirement(mindId: number): SandboxRegistration | null {
+    const current = this.getByMind(mindId);
+    if (!current || current.lifecycle === 'retired' || !current.retireRequested) return current;
+    this.db.prepare('UPDATE persistent_sandboxes SET retire_requested = 0, updated_at = ? WHERE id = ?').run(this.now(), current.id);
+    return this.byId(current.id);
+  }
+
+  finalizeRetirement(idOrAlias: string): SandboxRegistration {
+    const id = this.resolveId(idOrAlias);
+    return this.immediate(() => {
+      const current = this.byId(id);
+      if (current.lifecycle === 'retired') return current;
+      if (current.lifecycle !== 'ready' || !current.retireRequested) {
+        throw new Error(`sandbox registry: ${current.alias} is not ready for retirement GC`);
+      }
+      const mind = this.db.prepare('SELECT status, archived_at FROM mind_items WHERE id = ?').get(current.mindId) as { status: string; archived_at: number | null };
+      if (mind.status !== 'done' && mind.status !== 'cancelled' && mind.archived_at === null) {
+        this.db.prepare('UPDATE persistent_sandboxes SET retire_requested = 0, updated_at = ? WHERE id = ?').run(this.now(), id);
+        return this.byId(id);
+      }
+      const now = this.now();
+      this.db.prepare(`UPDATE persistent_sandboxes SET lifecycle = 'retired', retire_requested = 0, retired_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
+      this.db.prepare('UPDATE sandbox_aliases SET retired_at = ? WHERE sandbox_id = ?').run(now, id);
+      return this.byId(id);
+    });
   }
 
   retireClosedMinds(): number {
@@ -300,15 +368,9 @@ export class SandboxRegistry {
     return rows.length;
   }
 
-  private retireInside(current: SandboxRegistration): SandboxRegistration {
-    if (current.lifecycle === 'retired') return current;
-    const now = this.now();
-    if (current.lifecycle === 'busy' || current.lifecycle === 'detached') {
-      this.db.prepare('UPDATE persistent_sandboxes SET retire_requested = 1, updated_at = ? WHERE id = ?').run(now, current.id);
-    } else {
-      this.db.prepare(`UPDATE persistent_sandboxes SET lifecycle = 'retired', retire_requested = 0, retired_at = ?, updated_at = ? WHERE id = ?`).run(now, now, current.id);
-      this.db.prepare('UPDATE sandbox_aliases SET retired_at = ? WHERE sandbox_id = ?').run(now, current.id);
-    }
+  private requestRetirementInside(current: SandboxRegistration): SandboxRegistration {
+    if (current.lifecycle === 'retired' || current.retireRequested) return current;
+    this.db.prepare('UPDATE persistent_sandboxes SET retire_requested = 1, updated_at = ? WHERE id = ?').run(this.now(), current.id);
     return this.byId(current.id);
   }
 }

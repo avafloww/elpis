@@ -119,6 +119,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       const nothingRan = '\nNothing in this program executed — no files written, no messages sent. Fix and re-run the whole batch.';
       return {
         ok: false,
+        failureKind: 'preparse',
         error: `SyntaxError (pre-parse): ${transformResult.error}${frame ? '\n' + frame : ''}${hints}${nothingRan}`,
         logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
       };
@@ -187,6 +188,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
     } catch (err) {
       return {
         ok: false,
+        failureKind: 'runtime',
         error: friendlyRunError(err),
         logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
       };
@@ -210,13 +212,13 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
  // log-final run overwrites `_` with a meaningless number and downstream code
  // that trusts `_` breaks with TypeErrors.
     const stored = value !== undefined;
-    if (stored) (ctx as unknown as { _: unknown })._ = value;
+    if (stored && deps.surface !== 'core') (ctx as unknown as { _: unknown })._ = value;
     return {
       ok: true,
       preview: stored
         ? preview(value, deps.config.sandbox.previewMaxBytes)
         : 'undefined (previous _ preserved)',
-      savedAs: stored ? '_' : undefined,
+      savedAs: stored && deps.surface !== 'core' ? '_' : undefined,
       logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
       sends: scope.sends.length > 0 ? scope.sends.slice() : undefined,
     };

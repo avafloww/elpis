@@ -90,7 +90,7 @@ test('runs carry generation-scoped IDs through busy, detached, finish, and reset
   db.close();
 });
 
-test('reminders latch once and active retirement completes after the run', () => {
+test('reminders latch once and retirement waits for explicit idle GC', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.register(mindId, ['softly-mossy-rabbit']);
@@ -103,7 +103,13 @@ test('reminders latch once and active retirement completes after the run', () =>
   const retiring = registry.retireByMind(mindId)!;
   assert.equal(retiring.lifecycle, 'busy');
   assert.equal(retiring.retireRequested, true);
-  const retired = registry.finishRun(sandbox.id, run.runId);
+  const idle = registry.finishRun(sandbox.id, run.runId);
+  assert.equal(idle.lifecycle, 'ready');
+  assert.equal(idle.retireRequested, true);
+  const finalRun = registry.beginRun(sandbox.id);
+  assert.match(finalRun.runId, /:g1:r2$/);
+  registry.finishRun(sandbox.id, finalRun.runId);
+  const retired = registry.finalizeRetirement(sandbox.id);
   assert.equal(retired.lifecycle, 'retired');
   assert.ok(retired.retiredAt);
   assert.throws(() => registry.beginRun(sandbox.id), /is retired/);
@@ -136,13 +142,45 @@ test('registerNamed hot-reads authored wordlists for each new binding', () => {
   db.close();
 });
 
-test('beginRun commits closed-Mind retirement before reporting the refusal', () => {
+test('beginRun auto-marks a closed Mind retiring but preserves use until GC', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.register(mindId, ['plainly-silver-newt']);
   db.prepare("UPDATE mind_items SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), mindId);
-  assert.throws(() => registry.beginRun(sandbox.id), /Mind #1 is closed/);
-  assert.equal(registry.get(sandbox.id).lifecycle, 'retired');
-  assert.ok(registry.get(sandbox.id).retiredAt);
+  const run = registry.beginRun(sandbox.id);
+  assert.equal(run.sandbox.lifecycle, 'busy');
+  assert.equal(run.sandbox.retireRequested, true);
+  const idle = registry.finishRun(sandbox.id, run.runId);
+  assert.equal(idle.lifecycle, 'ready');
+  assert.equal(registry.finalizeRetirement(sandbox.id).lifecycle, 'retired');
+  db.close();
+});
+
+test('reopen cancels pending retirement and cold reset advances every live generation once', () => {
+  const { db, registry, mind, now } = fixture();
+  const mindId = mind();
+  const sandbox = registry.register(mindId, ['plainly-copper-otter']);
+  db.prepare("UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), mindId);
+  registry.retireByMind(mindId);
+  db.prepare("UPDATE mind_items SET status = 'open', closed_at = NULL, updated_at = ? WHERE id = ?").run(now(), mindId);
+  assert.equal(registry.cancelRetirement(mindId)!.retireRequested, false);
+  assert.equal(registry.coldResetAll(), 1);
+  const cold = registry.get(sandbox.id);
+  assert.equal(cold.generation, 2);
+  assert.equal(cold.coldNoticePending, true);
+  assert.equal(registry.consumeColdNotice(sandbox.id), true);
+  assert.equal(registry.consumeColdNotice(sandbox.id), false);
+  db.close();
+});
+
+test('finishRun requests retirement when the Mind closes during execution without a callback', () => {
+  const { db, registry, mind, now } = fixture();
+  const mindId = mind();
+  const sandbox = registry.register(mindId, ['quietly-crimson-ibis']);
+  const run = registry.beginRun(sandbox.alias);
+  db.prepare("UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), mindId);
+  const finished = registry.finishRun(sandbox.alias, run.runId);
+  assert.equal(finished.lifecycle, 'ready');
+  assert.equal(finished.retireRequested, true);
   db.close();
 });
