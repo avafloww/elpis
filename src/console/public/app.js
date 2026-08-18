@@ -65,6 +65,24 @@
     view: ['context', 'mind'].includes(localStorage.getItem('ep-view')) ? localStorage.getItem('ep-view') : 'stream',
   };
 
+  const mobileViewport = matchMedia('(max-width: 700px)');
+  let mobileRailOpen = false;
+  function setMobileRail(open) {
+    mobileRailOpen = mobileViewport.matches && open;
+    app.setAttribute('data-mobile-rail', mobileRailOpen ? 'open' : 'closed');
+    $('rooms-toggle').setAttribute('aria-expanded', String(mobileRailOpen));
+    $('rail-scrim').hidden = !mobileRailOpen;
+    $('rail').inert = mobileViewport.matches && !mobileRailOpen;
+    if (!mobileRailOpen && mobileViewport.matches && $('rail').contains(document.activeElement)) $('rooms-toggle').focus();
+  }
+  $('rooms-toggle').onclick = () => setMobileRail(!mobileRailOpen);
+  $('rail-scrim').onclick = () => setMobileRail(false);
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && mobileRailOpen) setMobileRail(false); });
+  const onMobileViewportChange = () => setMobileRail(false);
+  if (mobileViewport.addEventListener) mobileViewport.addEventListener('change', onMobileViewportChange);
+  else mobileViewport.addListener(onMobileViewportChange);
+  setMobileRail(false);
+
  // ================= theme / cot =================
   function applyTheme() {
     app.setAttribute('data-theme', state.theme);
@@ -145,6 +163,7 @@
       b.classList.toggle('active', b.getAttribute('data-room-btn') === state.room);
     });
     applySpotlight();
+    if (mobileViewport.matches) setMobileRail(false);
   }
   function spotlightMatches(n, active) {
     if (active === 'all' || n.getAttribute('data-global') === 'true') return true;
@@ -1375,14 +1394,32 @@
  // the split is persisted in localStorage; the stored px height is re-clamped
  // against the CURRENT viewport on restore, so a window that shrank between
  // sessions can never resurrect a dock taller than the stream.
-  const resizer = $('resizer'), logdock = $('logdock');
+  const resizer = $('resizer'), logdock = $('logdock'), logToggle = $('log-toggle');
   const LOGDOCK_KEY = 'ep-logdock-h';
+  const MOBILE_LOG_KEY = 'ep-mobile-log';
   const clampDock = (h) => Math.max(96, Math.min(Math.max(120, window.innerHeight - 240), h));
+  let mobileLogOpen = false;
 
   try {
     const saved = parseInt(localStorage.getItem(LOGDOCK_KEY), 10);
     if (Number.isFinite(saved)) logdock.style.height = clampDock(saved) + 'px';
-  } catch (e) { /* storage blocked — fall back to the CSS default */ }
+    mobileLogOpen = localStorage.getItem(MOBILE_LOG_KEY) === 'open';
+  } catch (e) { /* storage blocked — fall back to the CSS defaults */ }
+
+  function applyMobileLog() {
+    const open = mobileViewport.matches && mobileLogOpen;
+    logdock.setAttribute('data-mobile-open', String(open));
+    logToggle.setAttribute('aria-expanded', String(open));
+    logToggle.textContent = open ? 'hide' : 'show';
+  }
+  logToggle.onclick = () => {
+    mobileLogOpen = !mobileLogOpen;
+    try { localStorage.setItem(MOBILE_LOG_KEY, mobileLogOpen ? 'open' : 'closed'); } catch (e) { /* non-fatal */ }
+    applyMobileLog();
+  };
+  if (mobileViewport.addEventListener) mobileViewport.addEventListener('change', applyMobileLog);
+  else mobileViewport.addListener(applyMobileLog);
+  applyMobileLog();
 
   resizer.addEventListener('mousedown', (e) => {
     e.preventDefault();

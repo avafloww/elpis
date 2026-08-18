@@ -70,6 +70,7 @@ details > summary::-webkit-details-marker { display: none; }
 .ep-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; color: var(--ink); font-family: 'IBM Plex Mono', monospace; font-size: 12px; transition: background .15s; }
 .ep-toggle:hover { background: var(--panel3); }
 .ep-toggle[hidden] { display: none; }
+.ep-rooms-toggle, .ep-rail-scrim, .ep-log-toggle { display: none; }
 .ep-cot-btn { font-size: 11px; padding: 5px 10px; }
 .ep-avatar { width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(140deg, var(--gold), var(--green)); display: grid; place-items: center; color: var(--onaccent); font-size: 12px; font-weight: 600; }
 
@@ -428,3 +429,72 @@ a.ep-attach-file:hover { color: var(--ink); border-color: var(--gold); }
 .ep-log-line[data-level="warn"] .ep-log-lvl { color: var(--amber); }
 .ep-log-line[data-level="error"] { color: var(--rose); }
 .ep-log-line[data-level="error"] .ep-log-lvl { color: var(--rose); }
+
+@media (max-width: 700px) {
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  .ep-app { width: 100%; height: 100dvh; min-height: 0; overflow: hidden; }
+  .ep-topbar { height: 52px; gap: 8px; padding: 5px 10px; }
+  .ep-brand-lockup, .ep-brand-logo { height: 32px; }
+  .ep-meter, .ep-gitbox, .ep-ws-url, .ep-ws-state, #theme-label { display: none; }
+  .ep-ws { padding: 7px; }
+  .ep-toggle { min-height: 36px; padding: 6px 9px; }
+  .ep-avatar { width: 28px; height: 28px; }
+
+  .ep-middle { position: relative; min-width: 0; overflow: hidden; }
+  .ep-rail {
+    position: absolute; inset: 0 auto 0 0; z-index: 30; width: min(86vw, 320px);
+    transform: translateX(-105%); visibility: hidden; border-right: 1px solid var(--line);
+    box-shadow: 14px 0 30px rgba(0,0,0,.18); transition: transform .18s ease, visibility .18s;
+  }
+  .ep-app[data-mobile-rail="open"] .ep-rail { transform: translateX(0); visibility: visible; }
+  .ep-rail-scrim:not([hidden]) { display: block; position: absolute; inset: 0; z-index: 25; border: 0; padding: 0; background: rgba(0,0,0,.34); }
+  .ep-rooms-toggle { display: inline-flex; flex: none; align-items: center; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; color: var(--ink); background: var(--panel2); font: 11px 'IBM Plex Mono', monospace; }
+
+  .ep-streamcol { width: 100%; max-width: 100%; min-height: 0; }
+  .ep-stream-head { min-height: 0; max-width: 100%; padding: 5px 8px; gap: 5px; flex-wrap: wrap; overflow: hidden; }
+  .ep-stream-head > .ep-spacer { display: none; }
+  .ep-view-tabs { flex: 1; min-width: 0; min-height: 40px; }
+  .ep-view-tab { flex: 1; min-width: 0; min-height: 40px; padding: 0 6px; }
+  .ep-view-tools { order: 2; width: 100%; max-width: 100%; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .ep-view-tools .ep-toggle { flex: none; }
+  .ep-lens, .ep-compacting, .ep-ctx-stat, .ep-mind-status { flex: none; white-space: nowrap; }
+  .ep-stream { max-width: 100%; padding: 12px 10px 18px; gap: 12px; }
+  #stream-body, #stream-live { gap: 12px; }
+  .ep-msg { gap: 7px; max-width: 100%; }
+  .ep-msg-avatar { width: 26px; height: 26px; }
+  .ep-bubble, .ep-monologue, .ep-attachments, .ep-summary { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .ep-bubble { padding: 9px 10px; font-size: 13px; }
+  .ep-attach-img { width: auto; height: auto; max-width: 100%; max-height: 42vh; }
+  .ep-divider { gap: 7px; }
+  .ep-divider-pill { min-width: 0; padding: 4px 8px; text-align: center; overflow-wrap: anywhere; }
+  .ep-notice.from-user { padding-inline: 8px; }
+  .ep-composer { padding: 7px 8px calc(8px + env(safe-area-inset-bottom)); }
+  .ep-composer-box { min-height: 44px; padding-left: 11px; }
+  .ep-composer textarea { min-height: 32px; font-size: 16px; }
+  .ep-ctx-list { padding: 10px 8px 18px; }
+  .ep-ctx-msg-head { gap: 6px; padding-inline: 8px; }
+  .ep-ctx-msg-body { padding: 8px; }
+
+  .ep-mind-stats { padding: 6px 8px; }
+  .ep-mind-list { max-height: 30dvh; padding: 8px; }
+  .ep-mind-detail { padding: 12px 10px 22px; }
+  .ep-mind-form-grid { grid-template-columns: 1fr; }
+  .ep-mind-search { width: 130px; }
+  .ep-mind-sort { width: 150px; }
+  .ep-field { font-size: 16px; }
+
+  .ep-resizer { display: none; }
+  .ep-logdock { height: 44px !important; max-height: min(42dvh, 360px); }
+  .ep-logdock[data-mobile-open="true"] { height: min(42dvh, 360px) !important; }
+  .ep-log-head { min-height: 44px; gap: 8px; padding: 6px 10px; }
+  .ep-log-cmd, .ep-log-filters { display: none; }
+  .ep-log-toggle { display: inline-flex; min-height: 32px; align-items: center; border: 1px solid var(--line); border-radius: 7px; padding: 0 9px; color: var(--logtxt); background: transparent; font: 10px 'IBM Plex Mono', monospace; }
+  .ep-logdock[data-mobile-open="false"] .ep-log-body { display: none; }
+  .ep-log-body { padding: 7px 10px 10px; font-size: 11px; line-height: 1.65; }
+}
+
+@media (max-width: 420px) {
+  .ep-ws { display: none; }
+  .ep-mind-facts { grid-template-columns: 1fr; }
+  .ep-mind-read-title { font-size: 18px; }
+}

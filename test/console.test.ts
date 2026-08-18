@@ -105,6 +105,28 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   assert.match(src, /previews-toggle'\)\.hidden = !state\.toolsOpen/);
 });
 
+test('client console has a bounded mobile layout with room and log drawers', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '../src/console/public/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(here, '../src/console/public/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(here, '../src/console/public/styles.css'), 'utf8');
+
+  assert.match(html, /id="rooms-toggle"[^>]+aria-controls="rail"[^>]+aria-expanded="false"/);
+  assert.match(html, /id="rail-scrim"[^>]+aria-label="Close rooms"[^>]+hidden/);
+  assert.match(html, /id="log-toggle"[^>]+aria-controls="log-body"[^>]+aria-expanded="false"/);
+  assert.match(src, /matchMedia\('\(max-width: 700px\)'\)/);
+  assert.match(src, /function setMobileRail[\s\S]*\.inert = mobileViewport\.matches/);
+  assert.match(src, /contains\(document\.activeElement\)[\s\S]*rooms-toggle'\)\.focus/);
+  assert.match(src, /Escape'[\s\S]*setMobileRail\(false\)/);
+  assert.match(src, /MOBILE_LOG_KEY = 'ep-mobile-log'[\s\S]*data-mobile-open/);
+  assert.match(css, /@media \(max-width: 700px\)[\s\S]*height: 100dvh/);
+  assert.match(css, /data-mobile-rail="open"[\s\S]*translateX\(0\)/);
+  assert.match(css, /\.ep-stream-head[^{]*\{[^}]*flex-wrap: wrap/);
+  assert.match(css, /\.ep-composer textarea[^{]*\{[^}]*font-size: 16px/);
+  assert.match(css, /\.ep-resizer \{ display: none; \}/);
+  assert.match(css, /data-mobile-open="false"[\s\S]*\.ep-log-body \{ display: none; \}/);
+});
+
 test('classifyMessage covers every render kind', () => {
   assert.equal(classifyMessage({ role: 'user', content: '<incoming-message channel="c" author="a" time="t" local-time="12:34">\nhi\n</incoming-message>' }), 'user');
   assert.equal(classifyMessage({ role: 'assistant', content: 'thinking' }), 'assistant');

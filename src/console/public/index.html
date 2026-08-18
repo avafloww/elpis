@@ -60,6 +60,7 @@
 
   <!-- ============ middle row ============ -->
   <div class="ep-middle">
+    <button class="ep-rail-scrim" id="rail-scrim" type="button" aria-label="Close rooms" hidden></button>
 
     <!-- rooms lens rail -->
     <div class="ep-rail" id="rail" data-active-room="all">
@@ -78,6 +79,7 @@
     <!-- unified stream -->
     <div class="ep-streamcol">
       <div class="ep-stream-head">
+        <button class="ep-rooms-toggle" id="rooms-toggle" type="button" aria-controls="rail" aria-expanded="false">Rooms</button>
         <nav class="ep-view-tabs" aria-label="Console view">
           <button class="ep-view-tab" id="stream-toggle">Thread</button>
           <button class="ep-view-tab" id="view-toggle">Context</button>
@@ -158,6 +160,7 @@
         <span class="ep-log-chip" data-level="warn">warn</span>
         <span class="ep-log-chip" data-level="error">error</span>
       </div>
+      <button class="ep-log-toggle" id="log-toggle" type="button" aria-controls="log-body" aria-expanded="false">show</button>
       <div class="ep-log-live"></div>
     </div>
     <div class="scroll ep-log-body" id="log-body" data-filter="all"></div>
