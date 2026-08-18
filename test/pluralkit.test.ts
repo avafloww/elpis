@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PLURALKIT_BOT_ID, PluralKitResolver, isPluralKitCommand, pluralKitIdentity } from '../src/discord/pluralkit.js';
+import { PLURALKIT_BOT_ID, PLURALKIT_REQUEST_TIMEOUT_MS, PluralKitResolver, isPluralKitCommand, pluralKitIdentity } from '../src/discord/pluralkit.js';
 
 test('official PluralKit bot id stays distinct from proxy webhook authors', () => {
   assert.equal(PLURALKIT_BOT_ID, '466378653216014359');
   assert.notEqual(PLURALKIT_BOT_ID, '111111111111111108');
+});
+
+test('PluralKit API requests allow proxy latency without hanging inbound forever', () => {
+  assert.equal(PLURALKIT_REQUEST_TIMEOUT_MS, 5000);
 });
 
 test('isPluralKitCommand recognizes PK commands without swallowing ordinary text', () => {

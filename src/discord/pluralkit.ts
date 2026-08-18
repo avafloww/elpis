@@ -1,4 +1,5 @@
 export const PLURALKIT_BOT_ID = '466378653216014359';
+export const PLURALKIT_REQUEST_TIMEOUT_MS = 5000;
 
 export interface PluralKitMember {
   name?: string | null;
@@ -53,7 +54,7 @@ export class PluralKitResolver {
 
     const res = await this.fetcher(`${this.baseUrl}/messages/${encodeURIComponent(messageId)}`, {
       headers: { 'User-Agent': 'elpis/0.1' },
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(PLURALKIT_REQUEST_TIMEOUT_MS),
     });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
