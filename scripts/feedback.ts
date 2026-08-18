@@ -21,6 +21,7 @@ import { chunkText } from '../src/discord/discord.js';
 import { parseTranscriptFile, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
 import { loadConfigFile } from '../src/config.js';
 import { openDatabase } from '../src/store/db.js';
+import { migrateDataLayout } from '../src/store/data-layout.js';
 import type { ChatMessage } from '../src/llm/llm.js';
 
 export interface LoadedFile { file: string; messages: ChatMessage[]; }
@@ -78,9 +79,9 @@ export function renderContext(messages: ChatMessage[], sendChannel: string, send
   return lines.join('\n');
 }
 
-/** Load transcript files under sessions/discord/main NEWEST-first. */
-function loadTranscriptsNewestFirst(dataDirectory: string): LoadedFile[] {
-  const dir = path.join(dataDirectory, 'sessions', 'discord', MAIN_TRANSCRIPT_ID);
+/** Load transcript files under elpis-data/sessions/discord/main NEWEST-first. */
+function loadTranscriptsNewestFirst(sessionsRoot: string): LoadedFile[] {
+  const dir = path.join(sessionsRoot, 'discord', MAIN_TRANSCRIPT_ID);
   let names: string[];
   try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
   const withMtime = names.map((n) => {
@@ -95,8 +96,9 @@ function loadTranscriptsNewestFirst(dataDirectory: string): LoadedFile[] {
 
 async function reconcile(): Promise<void> {
   const config = loadConfigFile();
-  const db = openDatabase(config.paths.dataDirectory);
-  const transcripts = loadTranscriptsNewestFirst(config.paths.dataDirectory);
+  const layout = migrateDataLayout(config.paths.dataDirectory).layout;
+  const db = openDatabase(layout.root);
+  const transcripts = loadTranscriptsNewestFirst(layout.sessions);
   const upsert = db.prepare(
     'INSERT INTO message_index (discord_message_id, channel_id, transcript_file, send_channel, send_text, source, indexed_at) ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(discord_message_id) DO UPDATE SET ' +
@@ -143,7 +145,8 @@ async function reconcile(): Promise<void> {
 async function review(limit: number): Promise<void> {
   await reconcile();
   const config = loadConfigFile();
-  const db = openDatabase(config.paths.dataDirectory);
+  const layout = migrateDataLayout(config.paths.dataDirectory).layout;
+  const db = openDatabase(layout.root);
   const rows = db.prepare(
     'SELECT f.*, mi.transcript_file AS tfile, mi.send_channel AS schannel, mi.send_text AS stext ' +
     'FROM feedback f LEFT JOIN message_index mi USING (discord_message_id) ORDER BY f.reacted_at DESC LIMIT ?',

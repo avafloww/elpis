@@ -11,7 +11,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 - **One agent, one thread.** Inputs from configured Discord rooms and the console enter one causally ordered history. Every message retains room provenance.
 - **One tool, many capabilities.** The model receives `run(code)`. JavaScript can call namespaced capabilities such as `elpis.channel`, `elpis.schedule`, `elpis.mind`, `elpis.browser`, and `elpis.computer`.
 - **Persistent working state.** Top-level JavaScript bindings survive tool calls within the process. Long-lived state belongs in the data directory.
-- **Durable identity and memory.** `SOUL.md`, `MEMORY.md`, `people/`, `ponder/`, transcripts, and `agent.db` survive restarts and model changes.
+- **Durable identity and memory.** `SOUL.md`, `MEMORY.md`, `people/`, `ponder/`, transcripts, and `elpis-data/elpis.db` survive restarts and model changes.
 - **Context without silent deletion.** Provider requests are projections of the durable record: completed-turn display reasoning and untrusted opaque state may be omitted, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
 - **Self-maintenance.** The agent can inspect source, edit files, run tests, commit changes, and deploy a verified build.
 - **Local extensions.** Trusted TypeScript modules in the private data directory can add frozen `elpis.ext.*` APIs and deterministic boot-time prompt blocks without hardcoding inhabitant-specific tools into core.
@@ -91,7 +91,7 @@ paths:
   data_directory: ../data
 ```
 
-`config.yaml` is ignored by Git and should remain mode `0600`. OAuth credentials and structured state are stored in `DATA_DIRECTORY/agent.db`; transcripts and private diagnostic bundles also live under the data directory.
+`config.yaml` is ignored by Git and should remain mode `0600`. OAuth credentials and structured state are stored in `DATA_DIRECTORY/elpis-data/elpis.db`; transcripts and private diagnostic bundles live under `DATA_DIRECTORY/elpis-data/`.
 
 ## Provider support
 

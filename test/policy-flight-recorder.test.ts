@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { isPolicyDenial, nonSecretHeaders, recordPolicyDenial } from '../src/llm/policy-flight-recorder.js';
 import { makeConfig } from './helpers.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function capture(dataDirectory: string, i = 0) {
   const config = makeConfig({ paths: { ...makeConfig().paths, dataDirectory } });
@@ -42,7 +43,7 @@ test('policy flight recorder writes replayable exact-byte bundle', () => {
 test('policy flight recorder retains every bundle from the last seven days and prunes older bundles', () => {
   const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-policy-retain-'));
   for (let i = 0; i < 12; i++) capture(dataDirectory, i);
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   const recent = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory());
   assert.equal(recent.length, 12, 'no count ceiling within the retention window');
   const oldest = path.join(root, recent[0].name, 'manifest.json');

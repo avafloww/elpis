@@ -1,5 +1,5 @@
 // channels.ts — a small persistent id→name(→guild, →parent) directory so channel
-// names survive a restart. Backed by agent.db (the `channels` table). On first boot with an
+// names survive a restart. Backed by elpis.db (the `channels` table). On first boot with an
 // empty table it imports a legacy DATA_DIRECTORY/channels.json once, after which
 // the DB is authoritative (the JSON file is left on disk, no longer written).
 //
@@ -21,7 +21,7 @@
 // heal-never-downgrade rule as `guild_id`.
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { resolveDataLayout } from './data-layout.js';
 import type { Database } from './db.js';
 
 /** One row of the channel directory. */
@@ -75,7 +75,7 @@ export function createChannelDirectory(
   const count = (db.prepare('SELECT COUNT(*) AS n FROM channels').get() as { n: number }).n;
   if (count === 0) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dataDir, 'channels.json'), 'utf8'));
+      const parsed = JSON.parse(fs.readFileSync(resolveDataLayout(dataDir).legacyChannels, 'utf8'));
       if (parsed && typeof parsed === 'object') {
         const now = new Date().toISOString();
         for (const [k, v] of Object.entries(parsed)) {

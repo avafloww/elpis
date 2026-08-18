@@ -12,7 +12,7 @@
 // at the one ingest point (resolveMentions) — a raw id tells the agent
 // nothing about who was pinged, least of all whether it was themselves.
 // - on MessageReactionAdd: 👍/👎 on one of the bot's OWN messages is captured
-// OUT-OF-BAND via deps.feedback (agent.db) as a good/bad signal — see the
+// OUT-OF-BAND via deps.feedback (elpis.db) as a good/bad signal — see the
 // reactionVerdict gate. Never touches the conversation transcript or history;
 // the agent does not see it. Fully guarded so a feedback failure can't disturb
 // the gateway. Content-matching lives only in scripts/feedback.ts, not here.
@@ -1122,7 +1122,7 @@ export function createDiscord(
   });
 
  // Feedback capture: 👍/👎 on one of the bot's OWN messages is recorded
- // out-of-band (agent.db feedback table) as a good/bad signal for later review.
+ // out-of-band (elpis.db feedback table) as a good/bad signal for later review.
  // Never touches the conversation transcript or the agent's history. Fully
  // guarded — a feedback failure must never disturb the gateway or the loop.
   client.on(Events.MessageReactionAdd, async (reaction, user) => {

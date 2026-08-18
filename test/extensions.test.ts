@@ -5,15 +5,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadExtensions, normalizeExtensionNamespace } from '../src/extensions.js';
 import { build as buildPrompt } from '../src/llm/prompt.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function tempData(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-ext-'));
-  fs.mkdirSync(path.join(dir, 'extensions'));
+  fs.mkdirSync(resolveDataLayout(dir).extensions, { recursive: true });
   return dir;
 }
 
 function touch(data: string, name: string): void {
-  fs.writeFileSync(path.join(data, 'extensions', name), 'fixture');
+  fs.writeFileSync(path.join(resolveDataLayout(data).extensions, name), 'fixture');
 }
 
 test('extension namespaces are filename-owned and dot-safe', () => {
@@ -119,7 +120,7 @@ test('namespace collisions and unsafe API shapes quarantine extensions without f
 
 test('real TypeScript extension files load through tsx at runtime', async () => {
   const data = tempData();
-  fs.writeFileSync(path.join(data, 'extensions', 'typed.ext.ts'), `
+  fs.writeFileSync(path.join(resolveDataLayout(data).extensions, 'typed.ext.ts'), `
     type NumberBox = { value: number };
     export const extension = {
       description: 'typed fixture',
@@ -147,9 +148,9 @@ test('real TypeScript extension files load through tsx at runtime', async () => 
 
 test('real TS parse and activation failures are recorded while later extensions still load', async () => {
   const data = tempData();
-  fs.writeFileSync(path.join(data, 'extensions', 'broken.ext.ts'), `export const extension = {`);
-  fs.writeFileSync(path.join(data, 'extensions', 'throws.ext.ts'), `export const extension = { prompt: 'never inject this', activate() { throw new Error('activation boom'); } };`);
-  fs.writeFileSync(path.join(data, 'extensions', 'working.ext.ts'), `export const extension = { prompt: 'working prompt', activate() { return { value: 42 }; } };`);
+  fs.writeFileSync(path.join(resolveDataLayout(data).extensions, 'broken.ext.ts'), `export const extension = {`);
+  fs.writeFileSync(path.join(resolveDataLayout(data).extensions, 'throws.ext.ts'), `export const extension = { prompt: 'never inject this', activate() { throw new Error('activation boom'); } };`);
+  fs.writeFileSync(path.join(resolveDataLayout(data).extensions, 'working.ext.ts'), `export const extension = { prompt: 'working prompt', activate() { return { value: 42 }; } };`);
   const logs: string[] = [];
   const registry = await loadExtensions({
     dataDirectory: data,
@@ -187,7 +188,7 @@ test('failure diagnostics cannot make optional extensions a boot dependency', as
 
 test('the exact documented example copies, loads, and runs', async () => {
   const data = tempData();
-  fs.copyFileSync(path.join(process.cwd(), 'docs', 'example.ext.ts'), path.join(data, 'extensions', 'example.ext.ts'));
+  fs.copyFileSync(path.join(process.cwd(), 'docs', 'example.ext.ts'), path.join(resolveDataLayout(data).extensions, 'example.ext.ts'));
   const runLogs: string[] = [];
   const registry = await loadExtensions({ dataDirectory: data, harnessRoot: process.cwd(), agentName: () => 'Aster', runLog: (...args) => runLogs.push(args.join(' ')) });
   assert.deepEqual(registry.failures, []);

@@ -4,6 +4,7 @@ import { buildGlobals } from '../src/sandbox/globals.js';
 import { resolveBuiltinModules } from '../src/builtin-modules.js';
 import { makeConfig } from './helpers.js';
 import type { SandboxDeps } from '../src/types.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function globals(config = makeConfig(), restricted = false) {
   const deps = {
@@ -85,12 +86,12 @@ test('restricted restart flushes and preserves resume state only when broker acc
   assert.equal(result.ok, true);
   assert.equal(flushed, 1);
   assert.equal(requested, 'load extension');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, '.resume-after-restart.json'), 'utf8')).reason, 'load extension');
+  assert.equal(JSON.parse(fs.readFileSync(resolveDataLayout(dir).resumeMarker, 'utf8')).reason, 'load extension');
 
   acceptedDeps.requestRestrictedRestart = async () => { throw new Error('broker unavailable'); };
   const rejected = buildGlobals(acceptedDeps).elpis as Record<string, unknown>;
   const failure = await (rejected.restart as () => Promise<{ ok: boolean; note: string }>)();
   assert.equal(failure.ok, false);
   assert.match(failure.note, /broker unavailable/);
-  assert.equal(fs.existsSync(path.join(dir, '.resume-after-restart.json')), false);
+  assert.equal(fs.existsSync(resolveDataLayout(dir).resumeMarker), false);
 });

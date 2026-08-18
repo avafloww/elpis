@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
+import { resolveDataLayout } from './store/data-layout.js';
 
 const EXTENSION_FILE = /^(.+)\.ext\.(?:ts|mts|js|mjs)$/i;
 const MAX_DESCRIPTION_CHARS = 4_096;
@@ -166,7 +167,7 @@ export async function loadExtensions(options: LoadExtensionsOptions): Promise<Ex
     prompt: composePrompt(promptParts),
   });
 
-  const directory = path.join(options.dataDirectory, 'extensions');
+  const directory = resolveDataLayout(options.dataDirectory).extensions;
   let entries: fs.Dirent[];
   try {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

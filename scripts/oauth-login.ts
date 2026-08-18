@@ -4,13 +4,14 @@
 //
 // Prints the authorize URL, waits for the operator to approve in a browser and
 // paste the resulting `code#state`, or drives Codex's device flow. Credentials
-// are written to agent.db and refreshed automatically by the harness.
+// are written to elpis-data/elpis.db and refreshed automatically by the harness.
 
 import * as readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { loadConfigFile } from '../src/config.js';
 import { ensureDataDirectory } from '../src/config.js';
 import { openDatabase } from '../src/store/db.js';
+import { migrateDataLayout } from '../src/store/data-layout.js';
 import { OAuthStore } from '../src/llm/oauth/store.js';
 import {
   startAnthropicLogin,
@@ -78,7 +79,7 @@ async function loginCodex(db: ReturnType<typeof openDatabase>): Promise<void> {
 async function main(): Promise<void> {
   const config = loadConfigFile();
   ensureDataDirectory(config.paths.dataDirectory);
-  const db = openDatabase(config.paths.dataDirectory);
+  const db = openDatabase(migrateDataLayout(config.paths.dataDirectory).layout.root);
   const requested = (process.argv[2] ?? (config.llm.providerType === 'codex-oauth' ? 'codex' : 'anthropic')).toLowerCase();
   if (requested === 'anthropic' || requested === 'anthropic-oauth') {
     await loginAnthropic(db);

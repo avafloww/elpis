@@ -1,4 +1,4 @@
-// db.ts — the agent's single SQLite database (agent.db), the home for
+// db.ts — the agent's single SQLite database (elpis.db), the home for
 // STRUCTURED data (channels, feedback signal). Markdown files (SOUL/MEMORY/…)
 // and transcripts stay on the filesystem; see docs/persistence.md for the line.
 //
@@ -269,12 +269,12 @@ export function runMigrations(db: DatabaseSync): void {
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
-/** Open (creating if needed) agent.db under dataDirectory, set WAL, migrate.
+/** Open (creating if needed) elpis.db under dataDirectory, set WAL, migrate.
  * busy_timeout lets a writer wait out a brief lock instead of throwing
  * SQLITE_BUSY — the offline scripts/feedback.ts reconcile may write
  * message_index while the live harness inserts a feedback row. */
 export function openDatabase(dataDirectory: string): DatabaseSync {
-  const db = new DatabaseSync(path.join(dataDirectory, 'agent.db'));
+  const db = new DatabaseSync(path.join(dataDirectory, 'elpis.db'));
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');

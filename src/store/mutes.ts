@@ -1,5 +1,5 @@
 // mutes.ts — the killswitch's persistent state: one row per muted/deafened
-// channel in agent.db's channel_mutes table (v5). The store is deliberately
+// channel in elpis.db's channel_mutes table (v5). The store is deliberately
 // dumb — transition RULES (who may set/clear what) live in Agent.moderateChannel,
 // the single implementation shared by slash commands, the console moderate op,
 // and the sandbox's self-mute. See docs/persistence.md and the.

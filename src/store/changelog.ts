@@ -21,12 +21,11 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
-const SEEN_FILE = '.changelog-seen.json';
+import { resolveDataLayout } from './data-layout.js';
 
 function readSeen(dataDirectory: string): Set<string> {
   try {
-    const raw = fs.readFileSync(path.join(dataDirectory, SEEN_FILE), 'utf8');
+    const raw = fs.readFileSync(resolveDataLayout(dataDirectory).changelogSeen, 'utf8');
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) return new Set(arr.filter((x): x is string => typeof x === 'string'));
   } catch { /* missing or corrupt → treat as empty */ }
@@ -51,7 +50,9 @@ export function markChangelogsSeen(dataDirectory: string, files: string[]): void
   try {
     const seen = readSeen(dataDirectory);
     for (const f of files) seen.add(f);
-    fs.writeFileSync(path.join(dataDirectory, SEEN_FILE), JSON.stringify([...seen].sort()));
+    const target = resolveDataLayout(dataDirectory).changelogSeen;
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(target, JSON.stringify([...seen].sort()));
   } catch { /* best-effort — worst case the notice repeats next boot */ }
 }
 

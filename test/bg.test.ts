@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createBgRegistry, type BgRegistry } from '../src/sandbox/bg.js';
 import { buildGlobals } from '../src/sandbox/globals.js';
 import { makeConfig } from './helpers.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'bg-test-'));
@@ -277,7 +278,7 @@ test('bg jobs: a fast completion wakes once without a stale five-minute nudge', 
 
 test('bg jobs: restart recovery reports newly-dead work and grandfathers old completed records', () => {
   const dir = tmpDir();
-  const bgDir = path.join(dir, 'bg');
+  const bgDir = resolveDataLayout(dir).bg;
   fs.mkdirSync(bgDir, { recursive: true });
   const now = Date.now();
   fs.writeFileSync(path.join(bgDir, 'registry.json'), JSON.stringify([

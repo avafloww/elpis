@@ -12,6 +12,7 @@ import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 import { RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
 const image = process.env.ELPISBENCH_IMAGE ?? 'elpisbench:latest';
@@ -76,8 +77,8 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     const episodeRoot = path.join(dataDirectory, 'episodes', episodeNames[0]);
     const work = path.join(episodeRoot, 'work');
     const results = path.join(episodeRoot, 'results');
-    assert.equal(fs.existsSync(path.join(work, 'agent.db')), true);
-    const db = new DatabaseSync(path.join(work, 'agent.db'), { readOnly: true });
+    assert.equal(fs.existsSync(resolveDataLayout(work).database), true);
+    const db = new DatabaseSync(resolveDataLayout(work).database, { readOnly: true });
     try {
       const version = db.prepare('PRAGMA user_version').get() as { user_version: number };
       assert.ok(version.user_version >= 11);
@@ -179,7 +180,7 @@ test('live production runtime preserves state across a fresh container restart',
     const work = path.join(dataDirectory, 'episodes', episode, 'work');
     assert.equal(fs.readFileSync(path.join(work, 'stage-one.txt'), 'utf8'), 'stage one\n');
     assert.equal(fs.readFileSync(path.join(work, 'stage-two.txt'), 'utf8'), 'stage two\n');
-    assert.equal(fs.existsSync(path.join(work, 'agent.db')), true);
+    assert.equal(fs.existsSync(resolveDataLayout(work).database), true);
     const sessionDir = path.join(work, 'sessions', 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

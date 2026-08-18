@@ -19,20 +19,18 @@
 // than delivered into a conversation that has moved on.
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { resolveDataLayout } from './data-layout.js';
 
 export interface ResumeMarker {
   reason: string | null;
   at: string; // ISO timestamp of the restart request
 }
 
-const MARKER_FILE = '.resume-after-restart.json';
-
 /** Written by the sandbox restart()/deploy() globals just before they hand off
  * to systemd or the restricted lifecycle broker. Best-effort: a marker-write
  * failure must never block the restart itself. */
 export function clearResumeMarker(dataDirectory: string): void {
-  try { fs.unlinkSync(path.join(dataDirectory, MARKER_FILE)); } catch { /* best-effort */ }
+  try { fs.unlinkSync(resolveDataLayout(dataDirectory).resumeMarker); } catch { /* best-effort */ }
 }
 
 export function writeResumeMarker(dataDirectory: string, reason?: string): void {
@@ -41,14 +39,16 @@ export function writeResumeMarker(dataDirectory: string, reason?: string): void 
     at: new Date().toISOString(),
   };
   try {
-    fs.writeFileSync(path.join(dataDirectory, MARKER_FILE), JSON.stringify(marker));
+    const layout = resolveDataLayout(dataDirectory);
+    fs.mkdirSync(layout.root, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(layout.resumeMarker, JSON.stringify(marker));
   } catch { /* best-effort */ }
 }
 
 /** Read AND delete the marker (consume-once). Returns null when there is no
  * marker, it is unreadable, or it is older than maxAgeMs. */
 export function consumeResumeMarker(dataDirectory: string, maxAgeMs = 15 * 60_000): ResumeMarker | null {
-  const file = path.join(dataDirectory, MARKER_FILE);
+  const file = resolveDataLayout(dataDirectory).resumeMarker;
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf8');

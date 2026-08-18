@@ -21,6 +21,7 @@ import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { slugify } from '../lib/slug.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 
 /** The shape returned by `elpis.ssh(host).exec(cmd)` — same as `elpis.sh` plus `host`. */
 export interface SshResult {
@@ -53,7 +54,7 @@ export interface SshHandle {
 }
 
 export interface SshRegistryOpts {
-  /** Override the socket directory (tests). Defaults to <dataDir>/.ssh-sockets/. */
+  /** Override the socket directory (tests). Defaults to <dataDir>/elpis-data/ssh-sockets/. */
   socketDir?: string;
   /** Override the ssh binary (tests). Defaults to 'ssh'. */
   sshBinary?: string;
@@ -138,7 +139,7 @@ export interface SshRegistry {
 }
 
 export function createSshRegistry(dataDirectory: string, opts?: SshRegistryOpts): SshRegistry {
-  const socketDir = opts?.socketDir ?? path.join(dataDirectory, '.ssh-sockets');
+  const socketDir = opts?.socketDir ?? resolveDataLayout(dataDirectory).sshSockets;
   fs.mkdirSync(socketDir, { recursive: true });
   const sshBinary = opts?.sshBinary ?? 'ssh';
   const persist = opts?.controlPersist ?? DEFAULT_PERSIST;

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { readUnseenChangelogs, formatChangelogNotice, markChangelogsSeen } from '../src/store/changelog.js';
 import { buildTestAgent, EMPTY_END } from './helpers.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const tmp = (prefix: string) => fs.mkdtempSync(path.join(os.tmpdir(), `harness-${prefix}-`));
 
@@ -67,7 +68,8 @@ test('changelog: non-md files are ignored', () => {
 test('changelog: a corrupt seen file is treated as empty, not fatal', () => {
   const root = harnessWith({ 'a.md': 'a' });
   const dataDir = tmp('changelog-data');
-  fs.writeFileSync(path.join(dataDir, '.changelog-seen.json'), 'not json{{');
+  fs.mkdirSync(resolveDataLayout(dataDir).root, { recursive: true });
+  fs.writeFileSync(resolveDataLayout(dataDir).changelogSeen, 'not json{{');
   assert.deepEqual(readUnseenChangelogs(root, dataDir), ['a.md']);
  // and marking seen over the corrupt file recovers it
   markChangelogsSeen(dataDir, ['a.md']);

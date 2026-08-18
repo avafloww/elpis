@@ -1,7 +1,7 @@
 // sessions.ts — transcript persistence for crash-safe recovery.
 //
 // (monocontext): ONE interleaved JSONL stream for the whole mind, keyed by a
-// reserved 'main' id under DATA_DIRECTORY/sessions/discord/main/TIMESTAMP-SEQ.jsonl.
+// reserved 'main' id under DATA_DIRECTORY/elpis-data/sessions/discord/main/TIMESTAMP-SEQ.jsonl.
 // Each persisted message carries an optional `channel` provenance stamp (the
 // Discord channel id, or 'internal'/'harness'); replay ignores it. Every push is
 // persisted — no exception (heartbeat traffic included).

@@ -7,7 +7,7 @@ Elpis is one long-lived Node.js process hosting one agent, one ordered conversat
 `src/index.ts` is the composition root. At startup it:
 
 1. loads and validates `config.yaml`;
-2. creates the data directory and opens `agent.db`;
+2. creates the data directory, migrates known legacy state into `elpis-data/`, and opens `elpis-data/elpis.db`;
 3. ensures `SOUL.md` and `MEMORY.md` exist;
 4. restores the newest transcript with opaque-replay provenance checks;
 5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional fleet, console, and Discord adapter;

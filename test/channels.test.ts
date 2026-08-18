@@ -8,9 +8,16 @@ import * as path from 'node:path';
 import { openDatabase } from '../src/store/db.js';
 import { createChannelDirectory } from '../src/store/channels.js';
 import { buildTestAgent } from './helpers.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'harness-channels-'));
+}
+
+function writeLegacyChannels(dir: string, content: string): void {
+  const file = resolveDataLayout(dir).legacyChannels;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
 }
 
 test('records real names and persists them across a reload', () => {
@@ -48,7 +55,7 @@ test('ignores synthetic/placeholder names so a heartbeat cannot clobber a real n
 
 test('one-time imports a legacy channels.json when the table is empty', () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, 'channels.json'), JSON.stringify({ '111': 'general', '222': 'unknown' }));
+  writeLegacyChannels(dir, JSON.stringify({ '111': 'general', '222': 'unknown' }));
   const d = createChannelDirectory(openDatabase(dir), dir);
   assert.equal(d.get('111'), 'general', 'real legacy name imported');
   assert.equal(d.get('222'), undefined, 'placeholder legacy name skipped');
@@ -56,7 +63,7 @@ test('one-time imports a legacy channels.json when the table is empty', () => {
 
 test('malformed channels.json degrades to empty instead of throwing', () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, 'channels.json'), '{ not valid json');
+  writeLegacyChannels(dir, '{ not valid json');
   const d = createChannelDirectory(openDatabase(dir), dir);
   assert.deepEqual(d.all(), []);
   d.set('111', 'ok');
@@ -126,7 +133,7 @@ test('channels: single configured guild backfills legacy NULL rows at creation',
 
 test('shared test agents expose production-style qualified channel names', async () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, 'channels.json'), JSON.stringify({ '100': 'general', '101': 'ops' }));
+  writeLegacyChannels(dir, JSON.stringify({ '100': 'general', '101': 'ops' }));
   const built = buildTestAgent({ dir });
   const listed = await built.sandbox.run("elpis.channel.list().map((entry) => entry.name).join(',')");
   const named = await built.sandbox.run("elpis.channel('stub/ops').name === 'ops'");

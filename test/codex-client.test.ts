@@ -18,6 +18,7 @@ import {
 import type { Config } from '../src/config.js';
 import { noopLogger } from '../src/lib/log.js';
 import { SOCIAL_SUMMARIZE_PROMPT } from '../src/llm/llm.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function codexConfig(model = 'gpt-test-codex'): Config {
  // These transport tests exercise only llm + compaction fields. Keep the
@@ -442,7 +443,7 @@ test('Codex fetch seals exact wire request and flagged response without consumin
     method: 'POST', headers: { 'content-type': 'application/json' }, body,
   });
   assert.equal(await response.text(), flagged, 'capture must consume only a response clone');
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   const bundles = fs.readdirSync(root);
   assert.equal(bundles.length, 1);
   const bundle = path.join(root, bundles[0]);
@@ -466,7 +467,7 @@ test('Codex fetch seals a policy denial delivered inside an HTTP 200 SSE stream'
     method: 'POST', headers: { 'content-type': 'application/json' }, body,
   });
   assert.equal(await response.text(), flagged, 'monitor must consume only the cloned stream');
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   for (let i = 0; i < 100 && !fs.existsSync(root); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(root), true);
   const bundles = fs.readdirSync(root);
@@ -490,7 +491,7 @@ test('Codex fetch does not seal an ordinary successful SSE stream', async () => 
   const response = await authenticated('https://chatgpt.com/backend-api/codex/responses', { method: 'POST', body: '{}' });
   assert.equal(await response.text(), clean);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(fs.existsSync(path.join(dataDirectory, 'private', 'policy-denials')), false);
+  assert.equal(fs.existsSync(resolveDataLayout(dataDirectory).policyDenials), false);
 });
 
 test('Codex fetch seals a denial event without waiting for the SSE connection to close', async () => {
@@ -507,7 +508,7 @@ test('Codex fetch seals a denial event without waiting for the SSE connection to
   const response = await authenticated('https://chatgpt.com/backend-api/codex/responses', { method: 'POST', body });
   const first = await response.body?.getReader().read();
   assert.equal(new TextDecoder().decode(first?.value), flagged);
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   for (let i = 0; i < 100 && !fs.existsSync(root); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(root), true, 'capture must land before stream EOF');
   const bundle = path.join(root, fs.readdirSync(root)[0]);
@@ -539,7 +540,7 @@ test('Codex fetch seals policy bytes before a final SSE blank-line delimiter', a
   const response = await authenticated('https://chatgpt.com/backend-api/codex/responses', { method: 'POST', body });
   const first = await response.body?.getReader().read();
   assert.equal(new TextDecoder().decode(first?.value), flagged);
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   for (let i = 0; i < 100 && !fs.existsSync(root); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(root), true, 'capture must not require a trailing SSE delimiter');
   const bundle = path.join(root, fs.readdirSync(root)[0]);
@@ -575,7 +576,7 @@ test('Codex fetch monitors a stream request when the response omits Content-Type
   const response = await authenticated('https://chatgpt.com/backend-api/codex/responses', { method: 'POST', body });
   const first = await response.body?.getReader().read();
   assert.equal(new TextDecoder().decode(first?.value), flagged);
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   for (let i = 0; i < 100 && !fs.existsSync(root); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(root), true);
   const bundle = path.join(root, fs.readdirSync(root)[0]);
@@ -603,7 +604,7 @@ test('Codex fetch ignores policy words in ordinary output and tool-argument even
     });
     assert.equal(await response.text(), streamText);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(fs.existsSync(path.join(dataDirectory, 'private', 'policy-denials')), false, `${event} must not seal`);
+    assert.equal(fs.existsSync(resolveDataLayout(dataDirectory).policyDenials), false, `${event} must not seal`);
   }
 });
 
@@ -618,7 +619,7 @@ test('Codex fetch recognizes response.failed policy envelopes', async () => {
     method: 'POST', body: '{"model":"gpt-5.6-sol","stream":true,"input":[]}',
   });
   assert.equal(await response.text(), failed);
-  const root = path.join(dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(dataDirectory).policyDenials;
   for (let i = 0; i < 100 && !fs.existsSync(root); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(root), true);
 });

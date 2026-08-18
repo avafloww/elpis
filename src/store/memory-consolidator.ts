@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LLM } from '../llm/llm.js';
 import type { Logger } from '../lib/log.js';
+import { resolveDataLayout } from './data-layout.js';
 
 export const MEMORY_CONSOLIDATION_PROMPT = `This is your memory, not anyone else's profile of you. Rewrite it for future-you as compact first-person internal monologue.
 
@@ -89,7 +90,7 @@ function privatePrompt(kind: 'memory' | 'person', file: string, target: number, 
 }
 
 function atomicReplace(file: string, original: string, replacement: string, dataDirectory: string): void {
-  const backups = path.join(dataDirectory, '.memory-backups');
+  const backups = resolveDataLayout(dataDirectory).memoryBackups;
   fs.mkdirSync(backups, { recursive: true, mode: 0o700 });
   fs.chmodSync(backups, 0o700);
   const rel = path.relative(dataDirectory, file).replace(/[^A-Za-z0-9._-]+/g, '_');

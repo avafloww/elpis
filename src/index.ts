@@ -39,6 +39,7 @@ import { createMcpEndpoint } from './mcp/server.js';
 import { createFleet } from './fleet/index.js';
 import { createUsageTracker } from './llm/usage-tracker.js';
 import { spawnText } from './lib/proc.js';
+import { migrateDataLayout } from './store/data-layout.js';
 
 export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
@@ -77,11 +78,16 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
   const profile = detectRuntimeProfile();
   const modules = resolveBuiltinModules(config, profile);
   ensureDataDirectory(config.paths.dataDirectory);
+  const migration = migrateDataLayout(config.paths.dataDirectory, {
+    log: (message) => config.logger.info(message),
+  });
+  const dataLayout = migration.layout;
+  if (migration.gitignoreRepaired) config.logger.warn('repaired elpis-data/.gitignore');
 
  // The agent's structured-data store (channels + feedback signal). Opened once
  // and shared; a failure here is a boot problem (channels depend on it), so it
  // is intentionally NOT swallowed. See docs/persistence.md.
-  const db = openDatabase(config.paths.dataDirectory);
+  const db = openDatabase(dataLayout.root);
 
  // Ensure SOUL.md and MEMORY.md exist with defaults if the agent hasn't
  // written them yet. Existing files are left untouched. The seeded SOUL.md
@@ -117,7 +123,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // serially. Restart recovery: load the single most-recent monocontext
  // transcript and prime the one history from it; returns null on first boot
  // (no sessions/main stream yet — the cutover from per-channel files is clean).
-  const sessionsRoot = path.join(config.paths.dataDirectory, 'sessions');
+  const sessionsRoot = dataLayout.sessions;
   log('fetching context window for', config.llm.model, '...');
   const [maxContextTokens, initialTranscript] = await Promise.all([
     (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),

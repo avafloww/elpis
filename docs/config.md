@@ -23,7 +23,7 @@ The example file is the exhaustive annotated reference. This document explains t
 | `api` | `auto`, `responses`, or `chat` for OpenAI-compatible providers |
 | `completion_reserve_tokens` | output budget reserved below the model context limit |
 
-`anthropic-oauth` and `codex-oauth` use credentials stored in `agent.db`; run `npm run oauth-login` after configuring the provider. See the provider-specific docs.
+`anthropic-oauth` and `codex-oauth` use credentials stored in `elpis-data/elpis.db`; run `npm run oauth-login` after configuring the provider. See the provider-specific docs.
 
 ## `operator`
 

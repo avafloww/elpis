@@ -12,7 +12,7 @@ Enable device-code authorization in ChatGPT settings, configure the provider, th
 npm run oauth-login -- codex
 ```
 
-The CLI completes device authorization with PKCE and stores credentials in `agent.db`.
+The CLI completes device authorization with PKCE and stores credentials in `elpis-data/elpis.db`.
 
 ## Configuration
 

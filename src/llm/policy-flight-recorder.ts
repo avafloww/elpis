@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../config.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const SECRET_HEADERS = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|chatgpt-account-id)$/i;
@@ -139,7 +140,7 @@ export function recordPolicyDenial(
   error: unknown,
 ): PolicyDenialRecord | null {
   if (!isPolicyDenial(error) && !isPolicyDenial(new TextDecoder().decode(response.body))) return null;
-  const root = path.join(config.paths.dataDirectory, 'private', 'policy-denials');
+  const root = resolveDataLayout(config.paths.dataDirectory).policyDenials;
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.chmodSync(root, 0o700);
   const now = new Date();

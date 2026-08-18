@@ -9,7 +9,7 @@ A bundle is sealed only when the stream contains both denial wording and an erro
 Bundles are written under:
 
 ```text
-DATA_DIRECTORY/private/policy-denials/<timestamp-uuid>/
+DATA_DIRECTORY/elpis-data/policy-denials/<timestamp-uuid>/
 ```
 
 Directories are mode `0700`; files are mode `0600`. A manifest records hashes, transport metadata, capture completeness, and trigger type. Secret headers are excluded.
@@ -24,7 +24,7 @@ Replay is explicit and potentially expensive:
 
 ```bash
 npm run replay-policy-denial -- \
-  "$DATA_DIRECTORY/private/policy-denials/<bundle>" \
+  "$DATA_DIRECTORY/elpis-data/policy-denials/<bundle>" \
   --yes
 ```
 

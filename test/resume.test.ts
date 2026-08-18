@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { clearResumeMarker, writeResumeMarker, consumeResumeMarker } from '../src/store/resume.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'harness-resume-'));
 
@@ -30,12 +31,13 @@ test('resume: marker is consume-once (second read returns null)', () => {
   writeResumeMarker(dir, 'x');
   assert.ok(consumeResumeMarker(dir));
   assert.equal(consumeResumeMarker(dir), null, 'a consumed marker must not replay');
-  assert.ok(!fs.existsSync(path.join(dir, '.resume-after-restart.json')));
+  assert.ok(!fs.existsSync(resolveDataLayout(dir).resumeMarker));
 });
 
 test('resume: a stale marker (older than maxAge) is discarded', () => {
   const dir = tmp();
-  const file = path.join(dir, '.resume-after-restart.json');
+  fs.mkdirSync(resolveDataLayout(dir).root, { recursive: true });
+  const file = resolveDataLayout(dir).resumeMarker;
   fs.writeFileSync(file, JSON.stringify({
     reason: null,
     at: new Date(Date.now() - 20 * 60_000).toISOString(),
@@ -46,7 +48,8 @@ test('resume: a stale marker (older than maxAge) is discarded', () => {
 
 test('resume: malformed marker returns null', () => {
   const dir = tmp();
-  fs.writeFileSync(path.join(dir, '.resume-after-restart.json'), 'not json{{');
+  fs.mkdirSync(resolveDataLayout(dir).root, { recursive: true });
+  fs.writeFileSync(resolveDataLayout(dir).resumeMarker, 'not json{{');
   assert.equal(consumeResumeMarker(dir), null);
 });
 

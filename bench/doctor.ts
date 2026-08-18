@@ -20,7 +20,7 @@ function command(name: string, args: string[]): DoctorCheck {
 function authCheck(config: BenchConfig, providerName: string): DoctorCheck {
   const provider = config.providers[providerName];
   if (provider.provider_type === 'openai-compatible') return { name: `auth:${providerName}`, ok: Boolean(provider.api_key), detail: provider.api_key ? 'API key configured' : 'missing providers.*.api_key' };
-  const file = path.join(config.data_directory ?? privateDataRoot(), 'auth', 'agent.db');
+  const file = path.join(config.data_directory ?? privateDataRoot(), 'auth', 'elpis.db');
   if (!fs.existsSync(file)) return { name: `auth:${providerName}`, ok: false, detail: `missing OAuth database ${file}; run auth login ${provider.provider_type}` };
   try {
     const db = new DatabaseSync(file, { readOnly: true });

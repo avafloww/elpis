@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { RetriableError, type ChatMessage, type StandaloneCompleteOptions, type StandaloneCompleteResult } from '../llm/llm.js';
 import type { ReasoningItemParam } from '../llm/responses.js';
 import { sameReplayIdentity, type ReplayIdentity } from '../llm/provenance.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 
 export const MOTOR_KEYS = ['Up', 'Down', 'Left', 'Right', 'space', 'f', 'Escape', 'Return', 'Tab', 'Shift_L'] as const;
 const MOTOR_KEY_SET = new Set<string>(MOTOR_KEYS);
@@ -175,7 +176,7 @@ function readTrace(file: string): Array<Record<string, unknown>> {
 }
 
 export function createMotorController(deps: MotorControllerDeps): Record<string, unknown> {
-  const tracesDir = path.join(deps.dataDirectory, 'motor', 'traces');
+  const tracesDir = path.join(resolveDataLayout(deps.dataDirectory).motor, 'traces');
   fs.mkdirSync(tracesDir, { recursive: true, mode: 0o700 });
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? Date.now;
@@ -395,7 +396,7 @@ export function createMotorController(deps: MotorControllerDeps): Record<string,
     },
     replay: async (traceFileValue: string, opts: { execute?: boolean } = {}) => {
       const file = path.resolve(traceFileValue);
-      if (!file.startsWith(`${path.resolve(tracesDir)}${path.sep}`)) throw new Error('elpis.motor.replay: trace must be under DATA_DIR/motor/traces');
+      if (!file.startsWith(`${path.resolve(tracesDir)}${path.sep}`)) throw new Error('elpis.motor.replay: trace must be under DATA_DIR/elpis-data/motor/traces');
       const events = readTrace(file).filter((event) => event.type === 'step');
       if (events.length > MAX_STEPS) throw new Error(`elpis.motor.replay: trace exceeds ${MAX_STEPS} steps`);
       const actions = events.map((event) => parseMotorAction(String(event.response ?? '')));

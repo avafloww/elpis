@@ -13,6 +13,7 @@ import { openDatabase, type Database } from '../src/store/db.js';
 import { noopLogger } from '../src/lib/log.js';
 import { SDK_EFFORT_LEVELS } from '../src/config.js';
 import { createFleet, type FleetHandle, type FleetOpts } from '../src/fleet/index.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const RUNNER = fileURLToPath(new URL('./fixtures/fake-fleet-runner.mjs', import.meta.url));
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -108,7 +109,7 @@ test('run: creates row+dir+config, handshakes hello, returns name/id', async (t)
   assert.match(res.id, /^f-[0-9a-z]{6}$/);
   assert.equal(res.model, 'opus');
 
-  const sessionDir = path.join(h.dataDir, 'fleet', res.id);
+  const sessionDir = path.join(resolveDataLayout(h.dataDir).fleet, res.id);
   assert.ok(fs.existsSync(path.join(sessionDir, 'runner-config.json')));
   const cfg = JSON.parse(fs.readFileSync(path.join(sessionDir, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.prompt, 'do a thing');
@@ -126,7 +127,7 @@ test('run: the configured endpoint + aliases land in runner-config.json, 0600', 
     models: { ...NO_ALIASES(), opus: { name: 'big-1', context: 262144 } },
   });
   const res = await h.fleet.run('go', { name: 'wired' });
-  const cfgPath = path.join(h.dataDir, 'fleet', res.id, 'runner-config.json');
+  const cfgPath = path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json');
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
  // Only alias NAMES travel on the wire; `context` is resolved per-session.
   assert.deepEqual(cfg.endpoint, {
@@ -147,7 +148,7 @@ test('an explicit alias context is used verbatim and SKIPS the models/info probe
     models: { ...NO_ALIASES(), opus: { name: 'big-1', context: 262144 } },
   });
   const res = await h.fleet.run('go', { name: 'pinned' });
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.contextTokens, 262144);
 });
 
@@ -157,14 +158,14 @@ test('a context pinned by alias KEY applies when the session names the raw model
     models: { ...NO_ALIASES(), opus: { name: 'big-1', context: 999 } },
   });
   const res = await h.fleet.run('go', { name: 'byname', model: 'big-1' });
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.contextTokens, 999, 'matched the alias by its configured target name');
 });
 
 test('no custom endpoint → no probe, no CLAUDE_CODE_MAX_CONTEXT_TOKENS', async (t) => {
   const h = harness(t); // endpoint entirely unset
   const res = await h.fleet.run('go', { name: 'stock' });
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.contextTokens, null);
 });
 
@@ -175,7 +176,7 @@ test('a failing models/info probe degrades to null — it never fails the spawn'
     models: { ...NO_ALIASES(), opus: { name: 'big-1', context: null } },
   });
   const res = await h.fleet.run('go', { name: 'degraded' });
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.contextTokens, null);
   assert.equal(sessionRow(h.db, res.id).status, 'running', 'the session still started');
 });
@@ -198,7 +199,7 @@ test('models/info is probed once per model and the answer is reused', async (t) 
   const a = await h.fleet.run('go', { name: 'probe-a' });
   const b = await h.fleet.run('go', { name: 'probe-b' });
   const read = (id: string) =>
-    JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', id, 'runner-config.json'), 'utf8'));
+    JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, id, 'runner-config.json'), 'utf8'));
   assert.equal(read(a.id).contextTokens, 131072);
   assert.equal(read(b.id).contextTokens, 131072, 'second spawn reuses the memoized answer');
  // base_url is the API ROOT (what ANTHROPIC_BASE_URL wants); the probe adds
@@ -220,7 +221,7 @@ test('run: null model/effort persist as "" and read back as null on revive', asy
   const row = sessionRow(h.db, res.id);
   assert.equal(row.model, '');
   assert.equal(row.effort, '');
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.model, null);
   assert.equal(cfg.effort, null);
 });
@@ -278,7 +279,7 @@ test('send: revives a dead session, rewriting config with resume+prompt', async 
 
   const revived = await h.fleet.send('reviveme', 'second message');
   assert.equal(revived.ok, true);
-  const cfg = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', res.id, 'runner-config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, res.id, 'runner-config.json'), 'utf8'));
   assert.equal(cfg.resume, sdkId);
   assert.equal(cfg.prompt, 'second message');
 });
@@ -320,7 +321,7 @@ test('dismiss gate: dirty worktree refuses without force, then force removes it'
 test('recover: dead runner with an undelivered turn-end → notice + died-notice, status failed', async (t) => {
   const h = harness(t);
   const id = 'f-dead01';
-  const sessionDir = path.join(h.dataDir, 'fleet', id);
+  const sessionDir = path.join(resolveDataLayout(h.dataDir).fleet, id);
   fs.mkdirSync(sessionDir, { recursive: true });
   const events = [
     { ev: 'state', seq: 1, state: 'running' },
@@ -342,7 +343,7 @@ test('recover: dead runner with an undelivered turn-end → notice + died-notice
 test('recover: dead runner with a clean exited tail → status idle, no died-notice', async (t) => {
   const h = harness(t);
   const id = 'f-clean1';
-  const sessionDir = path.join(h.dataDir, 'fleet', id);
+  const sessionDir = path.join(resolveDataLayout(h.dataDir).fleet, id);
   fs.mkdirSync(sessionDir, { recursive: true });
   const events = [
     { ev: 'turn-end', seq: 1, result: 'done', isError: false, usage: { input: 1, output: 1 }, costUsd: 0.1, turns: 1, sdkSessionId: 'sdk-1' },

@@ -30,7 +30,7 @@
 // conflate them — see extractCacheTokens in llm.ts.
 //
 // IN-MEMORY ONLY, deliberately: session-scoped like the context meter, reset on
-// context clear. Nothing here touches agent.db or the transcript.
+// context clear. Nothing here touches elpis.db or the transcript.
 
 import type { LLMUsage } from './llm.js';
 

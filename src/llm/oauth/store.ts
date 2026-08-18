@@ -1,7 +1,7 @@
 // store.ts — provider-agnostic OAuth credential store + lazy refresh.
 //
 // Credentials for a subscription-OAuth provider (`anthropic-oauth` or
-// `codex-oauth`) live in agent.db's `oauth_credentials`
+// `codex-oauth`) live in elpis.db's `oauth_credentials`
 // table, one row per provider key. Keeping them in the DB (rather than a disk
 // file) means one generic table serves every OAuth provider_type and the
 // secrets sit alongside the rest of the agent's structured state.
@@ -81,7 +81,7 @@ export class OAuthStore {
 
   /** Human-readable location, for log/CLI messages. */
   get location(): string {
-    return `agent.db oauth_credentials[provider=${this.#provider}]`;
+    return `elpis.db oauth_credentials[provider=${this.#provider}]`;
   }
 
   /** Read the stored credential. undefined = no row (not logged in). */

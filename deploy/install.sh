@@ -602,7 +602,7 @@ EOF
   rm -f "$_tmp"
   ok "seeded SOUL.md for $AGENT_NAME"
 else
-  ok "$DATA_DIR ready (the harness self-initializes SOUL.md, MEMORY.md, agent.db)"
+  ok "$DATA_DIR ready (the harness self-initializes SOUL.md, MEMORY.md, elpis-data/elpis.db)"
 fi
 
 step "Installing systemd units"

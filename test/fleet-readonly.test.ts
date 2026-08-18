@@ -16,6 +16,7 @@ import { openDatabase, type Database } from '../src/store/db.js';
 import { noopLogger } from '../src/lib/log.js';
 import { SDK_EFFORT_LEVELS } from '../src/config.js';
 import { createFleet, type FleetHandle, type FleetOpts } from '../src/fleet/index.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const RUNNER = fileURLToPath(new URL('./fixtures/fake-fleet-runner.mjs', import.meta.url));
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -81,11 +82,11 @@ function sessionRow(db: Database, id: string): Record<string, unknown> {
 }
 
 function configOf(h: Harness, id: string): Record<string, unknown> {
-  return JSON.parse(fs.readFileSync(path.join(h.dataDir, 'fleet', id, 'runner-config.json'), 'utf8'));
+  return JSON.parse(fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, id, 'runner-config.json'), 'utf8'));
 }
 
 function eventsOf(h: Harness, id: string): string {
-  return fs.readFileSync(path.join(h.dataDir, 'fleet', id, 'events.jsonl'), 'utf8');
+  return fs.readFileSync(path.join(resolveDataLayout(h.dataDir).fleet, id, 'events.jsonl'), 'utf8');
 }
 
 // ===========================================================================

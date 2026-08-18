@@ -28,6 +28,7 @@ import type { Logger } from '../lib/log.js';
 import { MODEL_ALIASES, type Config, type FleetModelAlias, type FleetModelOverride } from '../config.js';
 import { fetchModelContextWindow } from '../llm/llm.js';
 import { isPidAlive, killTree } from '../lib/proc.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 import { generateName, newSessionId, validateName } from './names.js';
 import { frameLine, parseFrames, type RunnerConfig, type RunnerEndpoint, type RunnerFrame, type RunnerOp } from './protocol.js';
 import {
@@ -307,7 +308,7 @@ export function createFleet(opts: FleetOpts): FleetHandle {
   }
 
   function sessionDirOf(id: string): string {
-    return path.join(dataDirectory, 'fleet', id);
+    return path.join(resolveDataLayout(dataDirectory).fleet, id);
   }
 
   function lastEventSummary(id: string): string {

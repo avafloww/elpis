@@ -11,7 +11,7 @@
 // - Clamp to [2, 6] so one pathological response can't poison the estimators.
 // - Reject small prompts (< MIN_PROMPT_TOKENS): they are mostly fixed template
 // overhead and misrepresent the steady-state density.
-// - Persisted per model in agent.db's token_density table; a missing/corrupt row
+// - Persisted per model in elpis.db's token_density table; a missing/corrupt row
 // degrades to the seed. Nothing here may throw into the agent loop.
 
 import type { Database } from '../store/db.js';

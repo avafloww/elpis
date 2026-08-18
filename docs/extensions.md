@@ -1,6 +1,6 @@
 # Extensions
 
-Elpis loads trusted local extensions from `DATA_DIRECTORY/extensions/` at boot. An extension can expose a frozen sandbox API under `elpis.ext.<namespace>` and add a deterministic block to the system prompt.
+Elpis loads trusted local extensions from `DATA_DIRECTORY/elpis-data/config/extensions/` at boot. An extension can expose a frozen sandbox API under `elpis.ext.<namespace>` and add a deterministic block to the system prompt.
 
 Extensions execute inside the harness process with the service user's full authority. They are not isolated by the JavaScript sandbox. Only install code trusted as much as the harness itself.
 
@@ -22,7 +22,7 @@ Files are activated sequentially in normalized namespace order, independent of f
 
 ## Module contract
 
-A complete commented example lives at [`docs/example.ext.ts`](example.ext.ts). Copy that exact file to `DATA_DIRECTORY/extensions/example.ext.ts`, edit it, and restart Elpis.
+A complete commented example lives at [`docs/example.ext.ts`](example.ext.ts). Copy that exact file to `DATA_DIRECTORY/elpis-data/config/extensions/example.ext.ts`, edit it, and restart Elpis.
 
 A module exports a named plain object called `extension`:
 
@@ -73,4 +73,4 @@ Activation can perform host side effects before throwing; Elpis can prevent expo
 
 Changes take effect only after a harness restart. There is no hot reload: one process has one extension registry and one prompt projection.
 
-The loader creates `DATA_DIRECTORY/extensions/` with mode `0700` when it is absent. Extension files live with the agent's private data and should be included in encrypted backups. Keep secrets out of prompt strings because extension prompt text is sent to the configured model provider.
+The loader creates `DATA_DIRECTORY/elpis-data/config/extensions/` with mode `0700` when it is absent. Extension files live with the agent's private data and should be included in encrypted backups. Keep secrets out of prompt strings because extension prompt text is sent to the configured model provider.

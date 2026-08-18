@@ -283,8 +283,8 @@ fleet:
 #   poll_interval_ms: 300000 # 5 minutes
 
 paths:
-  # REQUIRED. The agent's "brain": SOUL.md, MEMORY.md, sessions/, and anything
-  # it persists. Also the sandbox cwd, so relative writes land here.
+  # REQUIRED. The inhabitant corpus/workspace root. Harness-owned runtime state lives under
+  # elpis-data/. This remains the sandbox cwd, so relative writes land here.
   data_directory: ../data
 
 log_level: info                      # debug | info | warn | error | silent

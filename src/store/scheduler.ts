@@ -1,5 +1,5 @@
 // scheduler.ts — persistent, restart-safe task queue for waking the agent.
-// Tasks are stored in agent.db and polled by a background timer. When a task is
+// Tasks are stored in elpis.db and polled by a background timer. When a task is
 // due, the scheduler calls onTaskWake so the agent can enqueue a synthetic inbound
 // message with the task's payload as the prompt.
 

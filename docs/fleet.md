@@ -50,7 +50,7 @@ Fleet credentials and model selection are separate from the main `llm` provider.
 
 Runner events are appended to `events.jsonl` and streamed over a local socket. Reconnecting clients subscribe from the last sequence number, allowing gap-free replay. A torn final NDJSON line is skipped rather than making the whole event history unreadable.
 
-Registry and worktree metadata live in `agent.db`; session files live under the data directory.
+Registry and worktree metadata live in `elpis-data/elpis.db`; session files live under `elpis-data/fleet/`.
 
 ## Delegation boundary
 

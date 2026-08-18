@@ -1,5 +1,5 @@
 // feedback.ts — out-of-band capture of 👍/👎 reactions on the agent's Discord
-// messages. Writes one IMMUTABLE row per reaction-add into agent.db's `feedback`
+// messages. Writes one IMMUTABLE row per reaction-add into elpis.db's `feedback`
 // table. This NEVER touches the conversation transcript or the agent's history —
 // the agent does not see feedback; it is data for offline human+LLM review (see
 // docs/feedback.md and scripts/feedback.ts).

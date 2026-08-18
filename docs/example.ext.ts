@@ -3,7 +3,7 @@ import type { ExtensionContext, ExtensionDefinition } from '../src/extensions.js
 /**
  * Working Elpis extension example.
  *
- * Copy this file to DATA_DIRECTORY/extensions/example.ext.ts, edit it, then
+ * Copy this file to DATA_DIRECTORY/elpis-data/config/extensions/example.ext.ts, edit it, then
  * restart the harness. The filename becomes a lower-camelCase sandbox namespace, so this file
  * is exposed as elpis.ext.example.
  *

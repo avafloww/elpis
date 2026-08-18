@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createMotorController, extractMotorJson, parseMotorAction } from '../src/sandbox/motor.js';
 import { RetriableError, type ChatMessage, type StandaloneCompleteOptions } from '../src/llm/llm.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const usage = { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 };
 
@@ -109,7 +110,7 @@ test('motor carries encrypted reasoning from one screenshot decision into the ne
   assert.equal(events[0].reasoningItemsIn, 0);
   assert.equal(events[0].reasoningBytesOut, 'opaque-spatial-state'.length);
   assert.match(events[0].replaySourceId, /^[0-9a-f]{64}$/);
-  assert.notEqual(events[0].replaySourceId, fs.readFileSync(path.join(dir, 'motor', 'traces', '.source-id'), 'utf8').trim());
+  assert.notEqual(events[0].replaySourceId, fs.readFileSync(path.join(resolveDataLayout(dir).motor, 'traces', '.source-id'), 'utf8').trim());
   assert.equal(events[0].providerType, motorIdentity.providerType);
   assert.equal(events[0].apiSurface, motorIdentity.apiSurface);
   assert.equal(events[0].apiEndpoint, motorIdentity.apiEndpoint);
@@ -156,7 +157,7 @@ test('motor strips opaque reasoning when attribution is missing or a trace lacks
   }) as any;
   const source = await sourceMotor.run('source trace', { traceId: 'copied', maxSteps: 1, dryRun: true, settleMs: 0 });
   const importedDir = tempDir();
-  const importedTraceDir = path.join(importedDir, 'motor', 'traces');
+  const importedTraceDir = path.join(resolveDataLayout(importedDir).motor, 'traces');
   fs.mkdirSync(importedTraceDir, { recursive: true });
   fs.copyFileSync(source.traceFile, path.join(importedTraceDir, 'copied.jsonl'));
   let importedMessages: ChatMessage[] = [];
@@ -187,7 +188,7 @@ test('motor validation failure never acts and leaves an append-only error event'
   });
   await assert.rejects(motor.step('stay safe', { traceId: 'bad-key' }), /not allowed/);
   assert.equal(holds, 0);
-  const trace = path.join(dir, 'motor', 'traces', 'bad-key.jsonl');
+  const trace = path.join(resolveDataLayout(dir).motor, 'traces', 'bad-key.jsonl');
   const event = JSON.parse(fs.readFileSync(trace, 'utf8').trim());
   assert.equal(event.type, 'error');
   assert.equal(event.stage, 'validate');
@@ -216,7 +217,7 @@ test('motor aborts a hung standalone request and leaves a bounded timeout cut', 
     /timed out after 20ms/,
   );
   assert.equal(aborts, 1);
-  const event = JSON.parse(fs.readFileSync(path.join(dir, 'motor', 'traces', 'timeout-case.jsonl'), 'utf8').trim());
+  const event = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(dir).motor, 'traces', 'timeout-case.jsonl'), 'utf8').trim());
   assert.equal(event.type, 'error');
   assert.equal(event.stage, 'complete');
   assert.equal(event.completionAttempts, 1);
@@ -266,10 +267,10 @@ test('motor run resumes after a marked error without overwriting frame or step i
     },
   });
   await assert.rejects(motor.run('resume test', { traceId: 'resume-case', maxSteps: 3, settleMs: 0 }), /non-retriable cut/);
-  const file = path.join(dir, 'motor', 'traces', 'resume-case.jsonl');
+  const file = path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case.jsonl');
   let events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.map((event) => [event.type, event.step]), [['step', 0], ['error', 1]]);
-  assert.equal(fs.existsSync(path.join(dir, 'motor', 'traces', 'resume-case-0001.png')), true);
+  assert.equal(fs.existsSync(path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case-0001.png')), true);
   recovered = true;
   const resumed = await motor.run('resume test', { traceId: 'resume-case', resume: true, maxSteps: 3, settleMs: 0 });
   assert.equal(resumed.resumedFrom, 2);
@@ -277,7 +278,7 @@ test('motor run resumes after a marked error without overwriting frame or step i
   assert.equal(resumed.steps[0].step, 2);
   events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.map((event) => [event.type, event.step]), [['step', 0], ['error', 1], ['step', 2]]);
-  assert.equal(fs.existsSync(path.join(dir, 'motor', 'traces', 'resume-case-0002.png')), true);
+  assert.equal(fs.existsSync(path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case-0002.png')), true);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

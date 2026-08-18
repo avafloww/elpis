@@ -247,7 +247,7 @@ export interface Config {
     pollIntervalMs: number;
   };
   paths: {
-    /** The agent's "brain" — SOUL.md, MEMORY.md, sessions/. Also the sandbox cwd. */
+    /** The inhabitant corpus/workspace root and sandbox cwd. Harness state lives under elpis-data/. */
     dataDirectory: string;
     /** dataDirectory/SOUL.md. Hot-reloaded into the system prompt every turn. */
     soulPath: string;
@@ -289,12 +289,10 @@ function resolveHarnessRoot(): string {
   return path.resolve(path.dirname(here), '..');
 }
 
-/** Ensure the DATA_DIRECTORY and its sessions/discord/ subtree exist at
- * startup. The agent's runtime data (SOUL.md, MEMORY.md, transcripts) lives
- * here. Safe to call repeatedly. */
+/** Ensure the inhabitant data root exists. Harness-owned state is scaffolded
+ * and migrated separately before any runtime store opens. */
 export function ensureDataDirectory(dataDirectory: string): void {
   fs.mkdirSync(dataDirectory, { recursive: true });
-  fs.mkdirSync(path.join(dataDirectory, 'sessions', 'discord'), { recursive: true });
 }
 
 // ---------------------------------------------------------------------------

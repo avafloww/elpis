@@ -4,7 +4,7 @@ Elpis can record 👍 and 👎 reactions on its own Discord messages as out-of-b
 
 ## Live capture
 
-`src/discord/discord.ts` accepts configured reaction emoji only when the reacted-to message was authored by the bot. `src/store/feedback.ts` appends an immutable row to `agent.db`.
+`src/discord/discord.ts` accepts configured reaction emoji only when the reacted-to message was authored by the bot. `src/store/feedback.ts` appends an immutable row to `elpis-data/elpis.db`.
 
 Feedback does not edit prompts, identity, memory, or conversation history. It is evidence for later review, not an automatic reward loop.
 

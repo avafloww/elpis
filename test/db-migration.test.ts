@@ -11,7 +11,7 @@ function tmpDir(): string { return fs.mkdtempSync(path.join(os.tmpdir(), 'harnes
 test('migration v4→v5: seeded v4 db gains channels.guild_id and channel_mutes', () => {
   const dir = tmpDir();
  // Seed a database that looks like live v4: channels table without guild_id.
-  const seed = new DatabaseSync(path.join(dir, 'agent.db'));
+  const seed = new DatabaseSync(path.join(dir, 'elpis.db'));
   seed.exec(`CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at TEXT NOT NULL);`);
   seed.exec(`INSERT INTO channels VALUES ('100', 'general', '2026-01-01T00:00:00Z');`);
   seed.exec('PRAGMA user_version = 4');
@@ -33,7 +33,7 @@ test('migration v4→v5: seeded v4 db gains channels.guild_id and channel_mutes'
 test('migration v5→v6: seeded v5 db gains channels.parent_id, existing rows survive', () => {
   const dir = tmpDir();
  // Seed a database that looks like live v5: channels has guild_id but no parent_id.
-  const seed = new DatabaseSync(path.join(dir, 'agent.db'));
+  const seed = new DatabaseSync(path.join(dir, 'elpis.db'));
   seed.exec(`CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at TEXT NOT NULL, guild_id TEXT);`);
   seed.exec(`INSERT INTO channels (id, name, updated_at, guild_id) VALUES ('100', 'general', '2026-01-01T00:00:00Z', 'g1');`);
   seed.exec('PRAGMA user_version = 5');
@@ -54,7 +54,7 @@ test('migration v5→v6: seeded v5 db gains channels.parent_id, existing rows su
 
 test('migration v6→v7: seeded v6 db gains token_density, existing rows survive', () => {
   const dir = tmpDir();
-  const seed = new DatabaseSync(path.join(dir, 'agent.db'));
+  const seed = new DatabaseSync(path.join(dir, 'elpis.db'));
   seed.exec(`CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at TEXT NOT NULL, guild_id TEXT, parent_id TEXT);`);
   seed.exec(`INSERT INTO channels (id, name, updated_at) VALUES ('100', 'general', '2026-01-01T00:00:00Z');`);
   seed.exec('PRAGMA user_version = 6');

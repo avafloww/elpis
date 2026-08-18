@@ -33,6 +33,7 @@ import { createComputerTools, displayShellCommand } from './computer.js';
 import { createMotorController } from './motor.js';
 import { bskyPost, bskyFeed, bskyNotifications, bskyReply, bskyLike, bskyFollow, bskyTimeline } from './bsky.js';
 import type { SshRegistry, SshHandle } from './ssh.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
 
 // ─── Per-run scope (A5 / / ) ─────────────────────────────────────────
@@ -712,15 +713,16 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
  // Browser and whole-desktop control share the one real Xorg seat. Headless
  // Playwright ignores these variables; headed sessions render onto the exact
  // same :0 screen that elpis.computer and the Proxmox console observe.
-  const computerDir = path.join(deps.config.paths.dataDirectory, 'computer');
+  const harnessData = resolveDataLayout(deps.config.paths.dataDirectory);
+  const computerDir = harnessData.computer;
   const computerDisplay = ':0';
   const computerXauthority = path.join(computerDir, 'Xauthority');
 
  // browser automation: a thin, structured wrapper over the locally pinned
- // Playwright CLI. Session state + screenshots live under DATA_DIR/browser so
+ // Playwright CLI. Session state + screenshots live under DATA_DIR/elpis-data/browser so
  // repeated run calls and harness restarts can keep the same page open.
   if (modules.isActive('browser')) {
-    const browserDir = path.join(deps.config.paths.dataDirectory, 'browser');
+    const browserDir = harnessData.browser;
     const browserBin = path.join(deps.config.paths.harnessRoot, 'node_modules', '.bin', 'playwright-cli');
     const maximizedChromiumConfig = path.join(browserDir, 'maximized-chromium.config.json');
     const maximizedConfigBody = JSON.stringify({

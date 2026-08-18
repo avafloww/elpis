@@ -22,6 +22,7 @@ import { resolveCandidateIngress } from './ingress.js';
 import { contentDigest } from './store.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 import { openDatabase } from '../src/store/db.js';
+import { migrateDataLayout, resolveDataLayout } from '../src/store/data-layout.js';
 import { MindService } from '../src/store/mind.js';
 import { Scheduler } from '../src/store/scheduler.js';
 import { noopLogger } from '../src/lib/log.js';
@@ -58,9 +59,10 @@ class HostLLM implements LLM {
 
 function seedStructuredState(scenario: ScenarioSpec): void {
   if (scenario.fixture.mind.length === 0 && scenario.fixture.scheduler.length === 0) return;
-  if (fs.existsSync(path.join(WORK, 'agent.db'))) return;
+  const layout = migrateDataLayout(WORK).layout;
+  if (fs.existsSync(layout.database)) return;
   const baseTime = Date.parse(scenario.fixture.clockAt!);
-  const db = openDatabase(WORK);
+  const db = openDatabase(layout.root);
   const scheduler = new Scheduler({ db, logger: noopLogger, onTaskWake: () => {} });
   const mind = new MindService({ db, scheduler, logger: noopLogger });
   const ids = new Map<string, number>();
@@ -362,7 +364,7 @@ async function main(): Promise<void> {
     artifacts: {},
     provenance: {
       configDigest, dataSnapshotDigest,
-      dbSchemaVersion: databaseSchemaVersion(path.join(WORK, 'agent.db')),
+      dbSchemaVersion: databaseSchemaVersion(resolveDataLayout(WORK).database),
       promptDigest: promptDigests[0] ?? null, promptDigests,
       toolContractVersion: TOOL_CONTRACT_VERSION,
       ingressDigest: ingressDigests[0], ingressDigests,

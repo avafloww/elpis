@@ -76,7 +76,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 
 ### Local extensions
 
-Inhabitant-specific practices belong in trusted `DATA_DIRECTORY/extensions/` modules rather than the core sandbox. Loaded APIs appear under `elpis.ext`; see [extensions.md](extensions.md).
+Inhabitant-specific practices belong in trusted `DATA_DIRECTORY/elpis-data/config/extensions/` modules rather than the core sandbox. Loaded APIs appear under `elpis.ext`; see [extensions.md](extensions.md).
 
 The runtime prompt is the canonical exhaustive API reference presented to the inhabitant. New capabilities must update implementation, tests, and that prompt together.
 

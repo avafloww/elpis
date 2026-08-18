@@ -16,10 +16,10 @@ function tableNames(db: { prepare: (s: string) => { all: () => unknown[] } }): s
     .map((r) => r.name);
 }
 
-test('openDatabase creates agent.db with the expected tables', () => {
+test('openDatabase creates elpis.db with the expected tables', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  assert.ok(fs.existsSync(path.join(dir, 'agent.db')), 'agent.db file exists');
+  assert.ok(fs.existsSync(path.join(dir, 'elpis.db')), 'elpis.db file exists');
   const names = tableNames(db);
   assert.ok(names.includes('channels'), 'channels table');
   assert.ok(names.includes('feedback'), 'feedback table');
@@ -68,7 +68,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
 test('true v3→v4 upgrade path preserves data and creates fleet tables', () => {
   const dir = tmpDir();
  // Create a genuine v3 database with all v1-v3 DDL
-  const v3db = new DatabaseSync(path.join(dir, 'agent.db'));
+  const v3db = new DatabaseSync(path.join(dir, 'elpis.db'));
 
  // Create v0→v1 tables
   v3db.exec(`

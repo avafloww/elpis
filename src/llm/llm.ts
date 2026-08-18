@@ -869,9 +869,9 @@ export async function streamComplete(
 export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): LLM {
 
  // Anthropic subscription path: no OpenAI client, native Messages API over the
- // stored OAuth credential (in agent.db, refresh handled by the store).
+ // stored OAuth credential (in elpis.db, refresh handled by the store).
   if (config.llm.providerType === 'anthropic-oauth') {
-    if (!db) throw new Error('createLLM: provider_type=anthropic-oauth requires the agent.db handle (pass it as the 4th argument)');
+    if (!db) throw new Error('createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 4th argument)');
     const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
     if (!store.isLoggedIn()) {
       config.logger.warn(`llm: no Anthropic OAuth credential in ${store.location} — run \`npm run oauth-login\` before the first turn (calls will fail until then)`);
@@ -883,7 +883,7 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
  // Responses stream parser; codex-client.ts owns OAuth/header injection and
  // pins requests to the canonical ChatGPT backend.
   if (config.llm.providerType === 'codex-oauth') {
-    if (!db) throw new Error('createLLM: provider_type=codex-oauth requires the agent.db handle (pass it as the 4th argument)');
+    if (!db) throw new Error('createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 4th argument)');
     const store = new OAuthStore(db, OPENAI_CODEX_CREDENTIAL_KEY, refreshOpenAICodexToken);
     if (!store.isLoggedIn()) {
       config.logger.warn(`llm: no OpenAI Codex OAuth credential in ${store.location} — run \`npm run oauth-login -- codex\` before the first turn (calls will fail until then)`);
@@ -1071,7 +1071,7 @@ export async function fetchContextWindow(config: Config, db?: DatabaseSync): Pro
     return cw;
   }
   if (config.llm.providerType === 'codex-oauth') {
-    if (!db) throw new Error('fetchContextWindow: provider_type=codex-oauth requires the agent.db handle');
+    if (!db) throw new Error('fetchContextWindow: provider_type=codex-oauth requires the elpis.db handle');
     const store = new OAuthStore(db, OPENAI_CODEX_CREDENTIAL_KEY, refreshOpenAICodexToken);
     return fetchCodexContextWindow(config, store);
   }

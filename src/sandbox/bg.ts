@@ -3,7 +3,7 @@
 //
 // Jobs are `spawn(cmd, { shell: true, detached: true, stdio -> logFile })` so
 // the process group outlives the harness and its stdout+stderr land in a log
-// file under DATA_DIRECTORY/bg/<id>.log from the start (a spawn-time property
+// file under DATA_DIRECTORY/elpis-data/bg/<id>.log from the start (a spawn-time property
 // that cannot be retrofitted onto a piped child). The registry is a JSON file
 // in the same dir so `bg.list` after a reboot still finds running jobs and
 // reports their status via `process.kill(pid, 0)` probing.
@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { previewValue } from './preview.js';
 import { isPidAlive, killTree } from '../lib/proc.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 
 export interface BgJob {
   id: string;
@@ -102,7 +103,7 @@ export interface BgRegistryOpts {
 
 export function createBgRegistry(dataDirectory: string, opts?: BgRegistryOpts): BgRegistry {
   const jobNudgeMs: number = opts?.jobNudgeMs ?? 5 * 60_000;
-  const bgDir = path.join(dataDirectory, 'bg');
+  const bgDir = resolveDataLayout(dataDirectory).bg;
   const registryFile = path.join(bgDir, 'registry.json');
  // In-memory map (the source of truth for live state; the file is the
  // restart-recovery view). On creation we load the file so post-reboot

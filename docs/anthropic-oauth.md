@@ -1,6 +1,6 @@
 # Anthropic subscription OAuth
 
-`provider_type: anthropic-oauth` runs the main agent through Anthropic Messages using a Claude subscription OAuth credential stored in `agent.db`.
+`provider_type: anthropic-oauth` runs the main agent through Anthropic Messages using a Claude subscription OAuth credential stored in `elpis-data/elpis.db`.
 
 > **Trust and compatibility:** this adapter presents Claude Code's OAuth client identity, beta headers, user agent, and `x-app` value. It is not an official general-purpose subscription API and may conflict with provider terms or change without notice. Enable it deliberately.
 

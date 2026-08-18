@@ -10,7 +10,7 @@ import { ensurePrivateDir, privateDataRoot } from './store.js';
 
 export function hardenAuthStore(dir: string): void {
   fs.chmodSync(dir, 0o700);
-  for (const name of ['agent.db', 'agent.db-wal', 'agent.db-shm']) {
+  for (const name of ['elpis.db', 'elpis.db-wal', 'elpis.db-shm']) {
     const file = path.join(dir, name);
     if (fs.existsSync(file)) fs.chmodSync(file, 0o600);
   }

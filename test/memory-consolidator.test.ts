@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { MemoryConsolidator, MEMORY_CONSOLIDATION_PROMPT, effectiveMemoryLimits } from '../src/store/memory-consolidator.js';
 import { noopLogger } from '../src/lib/log.js';
 import type { LLM } from '../src/llm/llm.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function fixture() {
   const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-consolidator-'));
@@ -53,12 +54,12 @@ test('oversized memory is atomically consolidated and backed up', async () => {
   assert.equal(fs.readFileSync(p.memoryPath, 'utf8'), '# memory\nthing keep. fix known.\n');
   assert.match(seenSystem, /first-person internal monologue/);
   assert.match(seenSystem, /Small identity anchor/);
-  const backupDir = path.join(p.dataDirectory, '.memory-backups');
+  const backupDir = resolveDataLayout(p.dataDirectory).memoryBackups;
   const backups = fs.readdirSync(backupDir);
   assert.equal(fs.statSync(backupDir).mode & 0o777, 0o700);
   assert.equal(backups.length, 1);
   assert.equal(fs.statSync(path.join(backupDir, backups[0])).mode & 0o777, 0o600);
-  assert.equal(fs.readFileSync(path.join(p.dataDirectory, '.memory-backups', backups[0]), 'utf8'), original);
+  assert.equal(fs.readFileSync(path.join(resolveDataLayout(p.dataDirectory).memoryBackups, backups[0]), 'utf8'), original);
 });
 
 test('failure preserves original and safeMemoryView bounds boot injection', async () => {
@@ -73,7 +74,7 @@ test('failure preserves original and safeMemoryView bounds boot injection', asyn
   assert.match(view, /Full durable memory remains at/);
   assert.match(view, /middle omitted/);
   assert.ok(view.length < original.length);
-  assert.equal(fs.existsSync(path.join(p.dataDirectory, '.memory-backups')), false);
+  assert.equal(fs.existsSync(resolveDataLayout(p.dataDirectory).memoryBackups), false);
 });
 
 test('person frontmatter is preserved byte-for-byte while only its body is rewritten', async () => {
