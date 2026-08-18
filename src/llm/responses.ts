@@ -269,11 +269,10 @@ export type ResponsesRequestTransform = (
   body: Record<string, unknown>,
 ) => Record<string, unknown>;
 
-/** True when an error (raw or classify-wrapped) means "this endpoint has no
- * /responses route" — a 404/405 on the route, the signal for `llm.api: auto`
- * to fall back to Chat Completions for the rest of the process lifetime.
- * Anything else (auth, model errors, 5xx) is NOT an unsupported signal: those
- * would fail the same way on the chat path and must surface as themselves. */
+/** True when an error (raw or classify-wrapped) explicitly means this endpoint
+ * has no /responses route. Only 404/405/501 are capability evidence for
+ * `llm.api: auto`; capacity, auth, model, and other upstream failures must
+ * surface on Responses without probing or latching Chat Completions. */
 export function isResponsesUnsupported(e: unknown): boolean {
   const inner = e instanceof RetriableError || (e && typeof e === 'object' && 'cause' in e && (e as { name?: string }).name === 'NonRetriableError')
     ? (e as { cause: unknown }).cause
@@ -282,7 +281,7 @@ export function isResponsesUnsupported(e: unknown): boolean {
   const status = 'status' in inner && typeof (inner as { status: unknown }).status === 'number'
     ? (inner as { status: number }).status
     : undefined;
-  return status === 404 || status === 405;
+  return status === 404 || status === 405 || status === 501;
 }
 
 /** Convert a `response.failed` event's bare `{ code, message }` error object
@@ -298,10 +297,10 @@ export function failureToError(error: unknown): Error {
   const e = (typeof error === 'object' && error !== null ? error : {}) as Record<string, unknown>;
   const code = typeof e.code === 'string' ? e.code : 'unknown';
   const message = typeof e.message === 'string' ? e.message : 'responses stream reported failure';
-  const retriable = code === 'server_error' || code === 'rate_limit_exceeded';
+  const status = code === 'rate_limit_exceeded' ? 429 : code === 'server_error' ? 503 : 400;
   return Object.assign(new Error(`responses stream failed (${code}): ${message}`), {
     code,
-    status: retriable ? 503 : 400,
+    status,
   });
 }
 

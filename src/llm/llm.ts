@@ -913,27 +913,13 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
   });
 
  // API-surface selection (llm.api): 'responses' | 'chat' | 'auto'. Auto tries
- // the Responses API first — the modern surface, whose encrypted reasoning
- // items preserve the model's thinking across turns — and permanently falls
- // back to Chat Completions for the process lifetime when the endpoint
- // doesn't serve the route. Fallback is decided INSIDE the failing call (the
- // caller's message is not popped, no retry budget is spent): the error is
- // eaten, the same request re-issues on the chat path, and every later call
- // skips straight to chat. Two fallback triggers:
- // - a 404/405 (`isResponsesUnsupported`) flips unconditionally — the route
- // is plainly absent;
- // - any OTHER failure BEFORE the first Responses success (gateways answer
- // an unimplemented /responses with 400/500/501/…, not just 404) probes
- // the chat path with the same request and commits the flip only if chat
- // SUCCEEDS. A transient outage fails both, propagates the original
- // Responses error (keeping its Retriable/NonRetriable class for the
- // loop's backoff), and leaves the mode undecided for the next attempt.
- // Once Responses has succeeded, later errors propagate unchanged — endpoint
- // trouble at that point would hit either surface, and flipping would
- // silently discard reasoning preservation on a healthy route.
+ // Responses first and permanently falls back only when the endpoint
+ // explicitly reports that the route is absent or unimplemented. Capacity,
+ // auth, model, and transient upstream failures stay on Responses and retain
+ // their original retry classification; Chat success is not evidence that a
+ // different API surface is unsupported.
   let apiMode: 'responses' | 'chat' = config.llm.api === 'chat' ? 'chat' : 'responses';
   const canFallBack = config.llm.api === 'auto';
-  let responsesEverSucceeded = false;
   let surfaceAnnounced = false;
   function flipToChat(reason: string): void {
     apiMode = 'chat';
@@ -943,28 +929,14 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
     if (apiMode === 'responses') {
       try {
         const result = await viaResponses();
-        responsesEverSucceeded = true;
         if (!surfaceAnnounced) {
           surfaceAnnounced = true;
           config.logger.info('llm: using the OpenAI Responses API surface (encrypted reasoning preserved across turns)');
         }
         return result;
       } catch (e) {
-        if (!canFallBack) throw e;
-        if (isResponsesUnsupported(e)) {
-          flipToChat('endpoint has no /responses route (404/405)');
-        } else if (!responsesEverSucceeded) {
-          let result: T;
-          try {
-            result = await viaChat();
-          } catch {
-            throw e; // both surfaces failed — surface the original Responses error
-          }
-          flipToChat(`first /responses attempt failed (${e instanceof Error ? e.message : String(e)}) and Chat Completions succeeded`);
-          return result;
-        } else {
-          throw e;
-        }
+        if (!canFallBack || !isResponsesUnsupported(e)) throw e;
+        flipToChat('endpoint explicitly rejects /responses (404/405/501)');
       }
     }
     return viaChat();

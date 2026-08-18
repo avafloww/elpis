@@ -270,18 +270,20 @@ test('failureToError: terminal codes classify non-retriable with a readable mess
 
 test('failureToError: transient codes stay retriable', () => {
   assert.equal((failureToError({ code: 'server_error', message: 'oops' }) as any).status, 503);
-  assert.equal((failureToError({ code: 'rate_limit_exceeded', message: 'slow down' }) as any).status, 503);
+  assert.equal((failureToError({ code: 'rate_limit_exceeded', message: 'slow down' }) as any).status, 429);
   assert.equal((failureToError(undefined) as any).status, 400);
 });
 
 // ─── unsupported detection ───────────────────────────────────────────────────
 
-test('isResponsesUnsupported: 404/405 raw and classify-wrapped; other statuses no', () => {
+test('isResponsesUnsupported: explicit 404/405/501 raw and classify-wrapped; other statuses no', () => {
   const notFound = Object.assign(new Error('Not Found'), { status: 404 });
   assert.equal(isResponsesUnsupported(notFound), true);
   assert.equal(isResponsesUnsupported(Object.assign(new Error('nope'), { status: 405 })), true);
+  assert.equal(isResponsesUnsupported(Object.assign(new Error('not implemented'), { status: 501 })), true);
   assert.equal(isResponsesUnsupported(new NonRetriableError(notFound)), true);
   assert.equal(isResponsesUnsupported(Object.assign(new Error('bad'), { status: 400 })), false);
+  assert.equal(isResponsesUnsupported(Object.assign(new Error('limited'), { status: 429 })), false);
   assert.equal(isResponsesUnsupported(Object.assign(new Error('boom'), { status: 500 })), false);
   assert.equal(isResponsesUnsupported(new Error('no status')), false);
   assert.equal(isResponsesUnsupported(undefined), false);
@@ -323,17 +325,14 @@ test('createLLM auto: 404 on /responses falls back to chat in the same call, the
   assert.equal(chatCalls, 2);
 });
 
-test('createLLM auto: first-contact non-404 failure probes chat and commits the flip on success', async () => {
- // Gateways answer an unimplemented /responses with 400/500/501/…, not just
- // 404 — before the first Responses success, any failure probes the chat
- // path with the same request and commits the flip only if chat succeeds.
+test('createLLM auto: explicit 501 on /responses falls back to chat and commits the flip', async () => {
   const config = makeConfig();
   const llm = createLLM(config);
   let responsesCalls = 0;
   let chatCalls = 0;
   (llm.client.responses as any).create = async () => {
     responsesCalls++;
-    throw Object.assign(new Error('Responses API not supported for this model'), { status: 501 });
+    throw Object.assign(new Error('Responses API not implemented'), { status: 501 });
   };
   (llm.client.chat.completions as any).create = async () => {
     chatCalls++;
@@ -342,28 +341,28 @@ test('createLLM auto: first-contact non-404 failure probes chat and commits the 
   const r = await llm.complete([{ role: 'user', content: 'hi' }]);
   assert.equal(r.message.content, 'from chat');
   await llm.complete([{ role: 'user', content: 'again' }]);
-  assert.equal(responsesCalls, 1, 'flip committed — responses not retried');
+  assert.equal(responsesCalls, 1, 'explicit unsupported response commits the flip');
   assert.equal(chatCalls, 2);
 });
 
-test('createLLM auto: first-contact failure with chat ALSO failing propagates the responses error, mode undecided', async () => {
+test('createLLM auto: first-contact Responses rate limit never probes or latches Chat', async () => {
   const config = makeConfig();
   const llm = createLLM(config);
   let responsesCalls = 0;
-  const outage = Object.assign(new Error('gateway down'), { status: 503 });
-  (llm.client.responses as any).create = async () => { responsesCalls++; throw outage; };
+  let chatCalls = 0;
+  const limited = failureToError({
+    code: 'rate_limit_exceeded',
+    message: 'provider/model is temporarily rate-limited upstream',
+  });
+  (llm.client.responses as any).create = async () => { responsesCalls++; throw limited; };
   (llm.client.chat.completions as any).create = async () => {
-    throw Object.assign(new Error('gateway down'), { status: 503 });
+    chatCalls++;
+    return chatStream('must not run');
   };
-  await assert.rejects(
-    () => llm.complete([{ role: 'user', content: 'hi' }]),
-    (e: any) => e.cause === outage || e.message.includes('gateway down'),
-  );
- // A transient outage must NOT lock chat mode in: the next call tries
- // responses again.
-  (llm.client.chat.completions as any).create = async () => chatStream('x');
-  await llm.complete([{ role: 'user', content: 'retry' }]).catch(() => {});
-  assert.equal(responsesCalls, 2, 'responses re-attempted after an undecided failure');
+  await assert.rejects(() => llm.complete([{ role: 'user', content: 'hi' }]), /rate_limit_exceeded/);
+  await assert.rejects(() => llm.complete([{ role: 'user', content: 'retry' }]), /rate_limit_exceeded/);
+  assert.equal(responsesCalls, 2, 'each retry remains on Responses');
+  assert.equal(chatCalls, 0, 'capacity events are not capability probes');
 });
 
 test('createLLM auto: after a responses success, later errors propagate without flipping', async () => {
