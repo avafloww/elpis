@@ -12,6 +12,7 @@ DATA_DIRECTORY/
 ├── MEMORY.md
 ├── NOW.md
 ├── agent.db
+├── .memory-backups/
 ├── people/
 ├── ponder/
 ├── notes/
@@ -36,6 +37,16 @@ The exact set grows as capabilities are used.
 - `extensions/*.ext.ts` contains trusted local harness plugins; these execute with service-user authority and belong in encrypted backups.
 
 Existing files are never replaced by boot defaults.
+
+### Automatic memory consolidation
+
+`memory.consolidation_threshold_tokens` defaults to 32,000 estimated tokens; `memory.consolidation_target_tokens` defaults to 24,000. The effective limits are clamped to half the model's usable context window. Set the threshold to `0` to disable consolidation.
+
+At boot, before `MEMORY.md` can enter the main system prompt, Elpis checks it and each `people/*.md` file. Later writes are detected through memory-store hooks and filesystem watchers. Consolidation uses the configured model in an isolated/tool-free lane where available, preserves person-file frontmatter byte-for-byte, serializes concurrent edits, and writes atomically only after the result is non-empty, smaller, and below threshold.
+
+Before replacement, the original is copied mode-restricted into `.memory-backups/`; five versions per source file are retained. Keep this directory private and out of Git. If the provider fails or the file changes during consolidation, the original remains untouched. An oversized `MEMORY.md` then enters cognition only as a bounded head/tail emergency view naming the full on-disk path; omitted middle text is explicitly marked as unknown, never absence.
+
+The consolidation prompt treats the data directory as the inhabitant's private room, asks for compact first-person internal/grug notes rather than a third-person profile, and forbids adding a current date because normal memory writes are timestamped by the harness.
 
 ## SQLite
 

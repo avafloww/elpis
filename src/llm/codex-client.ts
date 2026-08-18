@@ -441,9 +441,10 @@ async function codexSummarize(
   text: string,
   sessionId: string,
   responsesLite: boolean,
+  systemPrompt = SOCIAL_SUMMARIZE_PROMPT,
 ): Promise<string> {
   const result = await codexStandaloneComplete(client, config, [
-    { role: 'system', content: SOCIAL_SUMMARIZE_PROMPT },
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: text },
   ], sessionId, responsesLite);
   return result.content;
@@ -502,8 +503,8 @@ export function createCodexOAuthLLM(
       });
       return result;
     },
-    summarize(text: string): Promise<string> {
-      return codexSummarize(client, config, text, sessionId, responsesLite);
+    summarize(text: string, systemPrompt?: string): Promise<string> {
+      return codexSummarize(client, config, text, sessionId, responsesLite, systemPrompt);
     },
   };
 }

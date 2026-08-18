@@ -103,6 +103,11 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     logger: noopLogger,
     logLevel: 'info',
     ...overrides,
+    memory: {
+      consolidationThresholdTokens: 32000,
+      consolidationTargetTokens: 24000,
+      ...overrides.memory,
+    },
  // Built AFTER the `...overrides` spread so it deep-merges rather than
  // being replaced wholesale: derivation from `dataDirectory` keeps working
  // even when a caller only overrides `paths.dataDirectory`, while an

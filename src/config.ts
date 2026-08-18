@@ -133,6 +133,12 @@ export interface Config {
  * older history. Validated 0 < keep < trigger. */
     keepTokens: number;
   };
+  memory: {
+    /** Consolidate MEMORY.md/people files above this estimated token count. 0 disables. */
+    consolidationThresholdTokens: number;
+    /** Ask the consolidator to shrink below this count; must be below threshold. */
+    consolidationTargetTokens: number;
+  };
   heartbeat: {
     /** Interval between autonomous heartbeat wakes. 0 disables. */
     intervalMs: number;
@@ -733,6 +739,21 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       };
     })(),
     compaction: { triggerTokens: compactTriggerTokens, keepTokens: compactKeepTokens },
+    memory: (() => {
+      const consolidationThresholdTokens = numOr(tree, 'memory.consolidation_threshold_tokens', 32_000, f);
+      const defaultTarget = consolidationThresholdTokens > 0 ? Math.min(24_000, Math.max(1, Math.floor(consolidationThresholdTokens * 0.75))) : 24_000;
+      const consolidationTargetTokens = numOr(tree, 'memory.consolidation_target_tokens', defaultTarget, f);
+      if (!Number.isInteger(consolidationThresholdTokens) || consolidationThresholdTokens < 0) {
+        throw new Error(`${f}: memory.consolidation_threshold_tokens must be a non-negative integer (0 disables)`);
+      }
+      if (!Number.isInteger(consolidationTargetTokens) || consolidationTargetTokens <= 0) {
+        throw new Error(`${f}: memory.consolidation_target_tokens must be a positive integer`);
+      }
+      if (consolidationThresholdTokens > 0 && consolidationTargetTokens >= consolidationThresholdTokens) {
+        throw new Error(`${f}: memory.consolidation_target_tokens must be below memory.consolidation_threshold_tokens`);
+      }
+      return { consolidationThresholdTokens, consolidationTargetTokens };
+    })(),
     heartbeat: {
       intervalMs: numOr(tree, 'heartbeat.interval_ms', 60 * 60 * 1000, f),
       maxIntervalMs: numOr(tree, 'heartbeat.max_interval_ms', 4 * 60 * 60 * 1000, f),

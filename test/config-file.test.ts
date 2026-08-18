@@ -101,6 +101,7 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.sandbox.asyncDeadlineMs, 120000);
   assert.equal(c.compaction.triggerTokens, 180000);
   assert.equal(c.compaction.keepTokens, 50000);
+  assert.deepEqual(c.memory, { consolidationThresholdTokens: 32000, consolidationTargetTokens: 24000 });
   assert.equal(c.llm.completionReserveTokens, 8192);
   assert.equal(c.heartbeat.intervalMs, 60 * 60 * 1000);
   assert.equal(c.heartbeat.reflectionMinMessages, 3);
@@ -108,6 +109,15 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.console.mcpEnabled, false);
   assert.equal(c.console.port, 8787);
   assert.equal(c.console.host, '127.0.0.1');
+});
+
+test('configFile: memory consolidation threshold is configurable and validated', () => {
+  const c = loadConfigFile(fixture(MINIMAL_OK + '\nmemory:\n  consolidation_threshold_tokens: 48000\n  consolidation_target_tokens: 30000\n'));
+  assert.deepEqual(c.memory, { consolidationThresholdTokens: 48000, consolidationTargetTokens: 30000 });
+  assert.throws(() => loadConfigFile(fixture(MINIMAL_OK + '\nmemory:\n  consolidation_threshold_tokens: 12000\n  consolidation_target_tokens: 12000\n')), /target_tokens must be below/);
+  assert.deepEqual(loadConfigFile(fixture(MINIMAL_OK + '\nmemory:\n  consolidation_threshold_tokens: 16000\n')).memory,
+    { consolidationThresholdTokens: 16000, consolidationTargetTokens: 12000 });
+  assert.throws(() => loadConfigFile(fixture(MINIMAL_OK + '\nmemory:\n  consolidation_threshold_tokens: -1\n')), /non-negative integer/);
 });
 
 test('configFile: MCP is an explicit console opt-in', () => {

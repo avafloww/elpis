@@ -34,6 +34,16 @@ test('appendDatedBullet stacks bullets without blank-line drift', () => {
   );
 });
 
+test('memory hooks can guard reads and observe append/overwrite writes', () => {
+  const file = tmpFile();
+  const changed: string[] = [];
+  const memory = createMemory(file, { read: () => 'bounded view', changed: p => changed.push(p) });
+  assert.equal(memory.read(), 'bounded view');
+  memory.append('one');
+  memory.overwrite('two');
+  assert.deepEqual(changed, [file, file]);
+});
+
 test('appendDatedBullet creates a missing file', () => {
   const file = tmpFile();
   appendDatedBullet(file, 'first', '2026-07-02');

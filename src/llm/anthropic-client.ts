@@ -397,14 +397,14 @@ async function anthropicComplete(
   }
 }
 
-async function anthropicSummarize(config: Config, store: OAuthStore, text: string): Promise<string> {
+async function anthropicSummarize(config: Config, store: OAuthStore, text: string, systemPrompt = SOCIAL_SUMMARIZE_PROMPT): Promise<string> {
   const body: Record<string, unknown> = {
     model: config.llm.model,
     max_tokens: SUMMARIZE_MAX_TOKENS,
     system: [
       { type: 'text', text: createBillingHeader(text) },
       { type: 'text', text: CLAUDE_CODE_IDENTITY },
-      { type: 'text', text: SOCIAL_SUMMARIZE_PROMPT },
+      { type: 'text', text: systemPrompt },
     ],
     messages: [{ role: 'user', content: [{ type: 'text', text }] }],
     stream: false,
@@ -475,8 +475,8 @@ export function createAnthropicOAuthLLM(
       });
       return result;
     },
-    async summarize(text: string): Promise<string> {
-      return anthropicSummarize(config, store, text);
+    async summarize(text: string, systemPrompt?: string): Promise<string> {
+      return anthropicSummarize(config, store, text, systemPrompt);
     },
   };
 }

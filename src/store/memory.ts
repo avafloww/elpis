@@ -14,6 +14,11 @@ export interface Memory {
   overwrite(text: string): { ok: true };
 }
 
+export interface MemoryHooks {
+  read?: () => string;
+  changed?: (path: string) => void;
+}
+
 /** Append a dated bullet (`- [YYYY-MM-DD] text`) to a file, creating it if
  * missing. Strips trailing newlines from existing content first so bullets
  * stack cleanly. Shared by memory.append, ponder, ponder.close, and
@@ -26,9 +31,10 @@ export function appendDatedBullet(file: string, text: string, stamp = new Date()
   fs.writeFileSync(file, updated);
 }
 
-export function createMemory(path: string): Memory {
+export function createMemory(path: string, hooks: MemoryHooks = {}): Memory {
   return {
     read(): string {
+      if (hooks.read) return hooks.read();
       try {
         return fs.readFileSync(path, 'utf8');
       } catch {
@@ -39,10 +45,12 @@ export function createMemory(path: string): Memory {
  // Route through the shared dated-bullet writer so MEMORY.md, ponder/, and
  // people/ all stamp the same `- [YYYY-MM-DD] text` format.
       appendDatedBullet(path, text.trim());
+      hooks.changed?.(path);
       return { ok: true };
     },
     overwrite(text: string): { ok: true } {
       fs.writeFileSync(path, text);
+      hooks.changed?.(path);
       return { ok: true };
     },
   };

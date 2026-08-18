@@ -5,7 +5,8 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfigFile, ensureDataDirectory, type Config } from './config.js';
 import { fetchContextWindow, createLLM, type LLM } from './llm/llm.js';
-import { createMemory, ensureFile } from './store/memory.js';
+import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
+import { MemoryConsolidator, effectiveMemoryLimits } from './store/memory-consolidator.js';
 import { createSandbox } from './sandbox/index.js';
 import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
@@ -142,7 +143,8 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // llm.base_url matches no provider — the feature simply doesn't exist then.
   const usageTracker = createUsageTracker(config, () => hub?.subUsageChanged());
 
-  const memory = createMemory(config.paths.memoryPath);
+  const memoryHooks: MemoryHooks = {};
+  const memory = createMemory(config.paths.memoryPath, memoryHooks);
  // Persistent channel id→name directory: survives restarts so recovered
  // contexts show their real name and channel('name') resolves before any new
  // message arrives.
@@ -295,6 +297,30 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
 
   llm = (adapters.createLLM ?? createLLM)(config, hub, db);
   const density = createDensityModel(db, config.llm.model, config.logger);
+  const memoryLimits = effectiveMemoryLimits(
+    config.memory.consolidationThresholdTokens,
+    config.memory.consolidationTargetTokens,
+    maxContextTokens,
+    config.llm.completionReserveTokens,
+  );
+  if (memoryLimits.threshold !== config.memory.consolidationThresholdTokens || memoryLimits.target !== config.memory.consolidationTargetTokens) {
+    config.logger.warn(`memory consolidation limits clamped to model window: threshold=${memoryLimits.threshold}, target=${memoryLimits.target} tokens`);
+  }
+  const memoryConsolidator = new MemoryConsolidator({
+    dataDirectory: config.paths.dataDirectory,
+    memoryPath: config.paths.memoryPath,
+    soulPath: config.paths.soulPath,
+    thresholdTokens: memoryLimits.threshold,
+    targetTokens: memoryLimits.target,
+    maxContextTokens,
+    estimateTokens: chars => density.estimate(chars),
+    llm,
+    logger: config.logger,
+  });
+  await memoryConsolidator.ensureBootSafe();
+  memoryHooks.read = () => memoryConsolidator.safeMemoryView();
+  memoryHooks.changed = file => memoryConsolidator.request(file);
+  memoryConsolidator.startWatching();
   const tracker = createContextTracker(maxContextTokens, config.llm.completionReserveTokens, density);
  // Clamp the effective trigger to the real window and scale the fold-serialize
  // cap to it.

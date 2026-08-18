@@ -148,6 +148,13 @@ compaction:
   # Verbatim tail kept unsummarized. Validated: 0 < keep < trigger.
   keep_tokens: 50000
 
+memory:
+  # MEMORY.md and individual people/*.md files above this estimated token count
+  # are consolidated before boot injection and after later edits. 0 disables.
+  consolidation_threshold_tokens: 32000
+  # Desired post-consolidation size; must be positive and below the threshold.
+  consolidation_target_tokens: 24000
+
 heartbeat:
   interval_ms: 3600000               # base autonomous wake interval (1h); 0 disables
   max_interval_ms: 14400000          # upper bound for idle-tick backoff (4h)

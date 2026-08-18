@@ -695,7 +695,7 @@ export interface LLM {
   completeStandalone?(messages: ChatMessage[], opts?: StandaloneCompleteOptions): Promise<StandaloneCompleteResult>;
   /** Standalone summarization call (used by the Compactor). Uses the social
  * compaction prompt (SOCIAL_SUMMARIZE_PROMPT). */
-  summarize(text: string): Promise<string>;
+  summarize(text: string, systemPrompt?: string): Promise<string>;
   /** Reset provider-scoped conversation/cache identity after a whole-mind
  * clear. Providers without such state omit this hook. */
   resetSession?(): void;
@@ -1033,10 +1033,10 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
         },
       );
     },
-    async summarize(text: string): Promise<string> {
+    async summarize(text: string, systemPrompt = SOCIAL_SUMMARIZE_PROMPT): Promise<string> {
       return routeCall(
-        () => responsesSummarize(client, config, SOCIAL_SUMMARIZE_PROMPT, text),
-        () => chatSummarize(SOCIAL_SUMMARIZE_PROMPT, text),
+        () => responsesSummarize(client, config, systemPrompt, text),
+        () => chatSummarize(systemPrompt, text),
       );
     },
   };
