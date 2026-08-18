@@ -68,8 +68,11 @@ export interface EnvelopeMessage {
  * display convenience for the agent; the authoritative `time` attribute is the ISO
  * timestamp stored in the transcript. */
 export const INBOUND_REPLY_REMINDER = 'REMINDER: use elpis.channel(...).send(...) to respond. Returned turn content will be discarded, not sent.';
+export const INBOUND_CONFIG_SEND_DENIED = "NOTE: you can't reply to this message due to channel configuration (allow_send=false). You can still observe and remember it.";
+export const INBOUND_AMBIENT_SEND_DENIED = "NOTE: you can't reply to this message during this ambient observation turn due to configuration (discord.ambient_allow_send=false). You can still observe and remember it.";
+export type InboundReplyNotice = 'send' | 'config-denied' | 'ambient-denied' | null;
 
-export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string, includeReplyReminder = false): string {
+export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string, replyNotice: InboundReplyNotice = null): string {
   const localTime = localMarker.replace(/^\[|\]$/g, '');
   const attrs = [
  // Absence (null/undefined), not falsiness, is what omits `guild=` — an empty
@@ -107,7 +110,9 @@ export function formatInboundEnvelope(m: EnvelopeMessage, localMarker: string, i
  // the utterance is everything between them and the closing tag.
   parts.push(neutralizeEnvelopeTags(m.content || '(no text content)'));
   parts.push('</incoming-message>');
-  if (includeReplyReminder) parts.push(INBOUND_REPLY_REMINDER);
+  if (replyNotice === 'send') parts.push(INBOUND_REPLY_REMINDER);
+  if (replyNotice === 'config-denied') parts.push(INBOUND_CONFIG_SEND_DENIED);
+  if (replyNotice === 'ambient-denied') parts.push(INBOUND_AMBIENT_SEND_DENIED);
   return parts.join('\n');
 }
 

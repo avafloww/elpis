@@ -1252,19 +1252,20 @@ export class Agent {
         const createdAtMs = Date.parse(m.createdAt);
         const timeMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
         const marker = isInternal ? localStamp(timeMs) : localHm(timeMs);
-        const content = formatInboundEnvelope(m, marker, m.kind === undefined || m.kind === 'discord');
- // D1: a direct wake into a self-muted channel can't be answered here — flag it
- // so the agent doesn't draft a reply that Agent.send will block. NB: `isAmbient`
- // isn't declared until below (after userMsg is built), so inline the wakeClass
- // check here rather than referencing it (use-before-declaration).
         const drainMute = this.deps.mutes?.get(m.channelId)?.type
           ?? (m.policyChannelId ? this.deps.mutes?.get(m.policyChannelId)?.type : undefined)
           ?? null;
-        const mutedText = muteAnnotation(content, drainMute, !isInternal && m.wakeClass !== 'ambient');
         const sendPolicy = isInternal ? null : resolveChannelPolicy(m.guildId, m.policyChannelId ?? m.channelId, this.guildIndex);
-        const contentText = sendPolicy && !sendPolicy.allowSend && m.wakeClass !== 'ambient'
-          ? `${mutedText}\n[harness: sending to this room is disabled by configuration (${sendPolicy.sendDeniedBy} allow_send=false). You can hear this message but channel.send will refuse delivery.]`
-          : mutedText;
+        const isDiscord = m.kind === undefined || m.kind === 'discord';
+        const replyNotice = !isDiscord || drainMute
+          ? null
+          : sendPolicy && !sendPolicy.allowSend
+            ? 'config-denied' as const
+            : m.wakeClass === 'ambient' && !this.config.discord.ambientAllowSend
+              ? 'ambient-denied' as const
+              : 'send' as const;
+        const content = formatInboundEnvelope(m, marker, replyNotice);
+        const contentText = muteAnnotation(content, drainMute, !isInternal && m.wakeClass !== 'ambient');
         const imageParts = m.attachments && m.attachments.length > 0 ? await buildImageContentParts(m.attachments) : [];
         const userMsg: ChatMessage = imageParts.length > 0
           ? { role: 'user', content: contentText, contentParts: [{ type: 'text', text: contentText }, ...imageParts] }

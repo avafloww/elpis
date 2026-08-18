@@ -203,12 +203,41 @@ test('ambient: receive-only tick hard-denies room and console sends while preser
   await assert.rejects(() => agent.send('1002', 'must not leave'), /ambient observation turn.*ambient_allow_send=false/);
   await assert.rejects(() => agent.send('console', 'maintenance hatch'), /ambient observation turn.*ambient_allow_send=false/);
   assert.equal(sent.length, 0);
-  const notice = agent.messagesForTest.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const ambient = users.find((m) => m.content.includes('chat in 1002'))?.content ?? '';
+  assert.doesNotMatch(ambient, /REMINDER: use elpis\.channel/);
+  assert.match(ambient, /ambient observation turn.*discord\.ambient_allow_send=false/);
+  const notice = users.at(-1)?.content ?? '';
   assert.match(notice, /receive-only observation turn/);
 
   release.resolve(EMPTY_END);
   await microtask();
   await microtask();
+  agent.stop();
+});
+
+test('send-denied Discord inbound replaces the reply reminder with a configuration note', async () => {
+  const llm = scriptedLLM([EMPTY_END]);
+  const lockedGuild: GuildConfig = {
+    ...FIXTURE_GUILDS[0],
+    channelAllowSend: { '1002': false },
+  };
+  const { agent } = buildTestAgent({
+    llm,
+    config: { discord: { ...makeConfig().discord, guilds: [lockedGuild] } },
+    tmpPrefix: 'harness-loop-send-denied-note-',
+  });
+  const { promise: done, resolve: signal } = Promise.withResolvers<void>();
+  llm.onCall = (n) => { if (n === 1) signal(); };
+
+  void agent.loop();
+  agent.enqueue({ ...ambientMsg('1002', 'locked-1'), wakeClass: 'wake' });
+  await done;
+  await microtask();
+
+  const content = agent.messagesForTest.find((m) => m.role === 'user')?.content ?? '';
+  assert.doesNotMatch(content, /REMINDER: use elpis\.channel/);
+  assert.match(content, /can't reply to this message due to channel configuration \(allow_send=false\)/);
   agent.stop();
 });
 

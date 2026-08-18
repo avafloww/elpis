@@ -36,10 +36,31 @@ test('real inbound reply reminder follows the envelope but is not part of the ut
   const built = formatInboundEnvelope(
     { channelName: 'dev', author: 'bramble', createdAt: 't', content: 'hello', replyTo: null, forwarded: null, mentions: [], attachments: [] },
     '12:34',
-    true,
+    'send',
   );
   assert.match(built, /<\/incoming-message>\nREMINDER: use elpis\.channel\(\.\.\.\)\.send\(\.\.\.\) to respond\. Returned turn content will be discarded, not sent\.$/);
   assert.equal(extractUtterance(built), 'hello');
+});
+
+test('send-denied inbound replaces the impossible channel.send reminder', () => {
+  const built = formatInboundEnvelope(
+    { channelName: 'locked', author: 'bramble', createdAt: 't', content: 'hello', replyTo: null, forwarded: null, mentions: [], attachments: [] },
+    '12:34',
+    'config-denied',
+  );
+  assert.doesNotMatch(built, /REMINDER: use elpis\.channel/);
+  assert.match(built, /can't reply to this message due to channel configuration \(allow_send=false\)/);
+  assert.equal(extractUtterance(built), 'hello');
+});
+
+test('ambient receive-only inbound names the turn-scoped configuration denial', () => {
+  const built = formatInboundEnvelope(
+    { channelName: 'social', author: 'bramble', createdAt: 't', content: 'hello', replyTo: null, forwarded: null, mentions: [], attachments: [] },
+    '12:34',
+    'ambient-denied',
+  );
+  assert.doesNotMatch(built, /REMINDER: use elpis\.channel/);
+  assert.match(built, /ambient observation turn.*discord\.ambient_allow_send=false/);
 });
 
 test('extractUtterance: multi-line utterance survives, envelope does not', () => {
