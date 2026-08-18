@@ -184,6 +184,7 @@ export interface CreateMindServiceDeps {
   scheduler: SchedulerLike;
   logger: Logger;
   onChanged?: () => void;
+  onItemStateChanged?: (id: number, status: MindStatus, archived: boolean) => void;
 }
 
 const ACTIVE_STATUSES: MindStatus[] = ['inbox', 'open', 'in_progress', 'waiting'];
@@ -751,6 +752,10 @@ export class MindService {
     else this.notifyChanged();
     return value;
   }
+  private itemStateChanged(item: MindItem): void {
+    try { this.deps.onItemStateChanged?.(item.id, item.status, item.archivedAt !== null); }
+    catch (error) { this.deps.logger.warn(`mind onItemStateChanged: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   private batch<T>(fn: () => T): T {
     this.changeDepth++;
     try { return fn(); }
@@ -779,14 +784,14 @@ export class MindService {
   renewClaim(id: number, principal: string, ttlMs?: number): MindDetail { return this.changed(this.store.renewClaim(id, principal, ttlMs)); }
   releaseClaim(id: number, principal: string, status: 'open' | 'waiting', note: string): MindDetail { return this.changed(this.store.releaseClaim(id, principal, status, note)); }
   logClaim(id: number, principal: string, owner: string, kind: MindLogKind, body: string, ttlMs?: number): MindDetail { return this.changed(this.store.logClaim(id, principal, owner, kind, body, ttlMs)); }
-  finishClaim(id: number, principal: string, owner: string, result: string, verification: string, omissions: string): MindDetail { return this.batch(() => { const item = this.store.finishClaim(id, principal, owner, result, verification, omissions); this.cancelPendingReminders(id, owner); return this.changed(this.store.get(item.id)!); }); }
+  finishClaim(id: number, principal: string, owner: string, result: string, verification: string, omissions: string): MindDetail { return this.batch(() => { const item = this.store.finishClaim(id, principal, owner, result, verification, omissions); this.cancelPendingReminders(id, owner); const current = this.store.get(item.id)!; this.itemStateChanged(current); return this.changed(current); }); }
   expireClaims(now?: number): number[] { const ids = this.store.expireClaims(now); if (ids.length) this.changed(undefined); return ids; }
   stats(): MindStats { return this.store.stats(); }
   graph(id: number, depth?: number, relations?: MindGraphRelation[]): MindGraph { return this.store.graph(id, depth, relations); }
-  update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail { return this.batch(() => { const item = this.store.update(id, patch, actor); if (item.status === 'done' || item.status === 'cancelled') this.cancelPendingReminders(id, actor); return this.changed(this.store.get(id)!); }); }
+  update(id: number, patch: UpdateMindItem, actor = 'agent'): MindDetail { return this.batch(() => { const item = this.store.update(id, patch, actor); if (item.status === 'done' || item.status === 'cancelled') this.cancelPendingReminders(id, actor); const current = this.store.get(id)!; if (patch.status !== undefined) this.itemStateChanged(current); return this.changed(current); }); }
   setStatus(id: number, status: MindStatus, actor = 'agent'): MindDetail { return this.update(id, { status }, actor); }
-  archive(id: number, actor = 'agent'): MindDetail { return this.changed(this.store.archive(id, actor)); }
-  restore(id: number, actor = 'agent'): MindDetail { return this.changed(this.store.restore(id, actor)); }
+  archive(id: number, actor = 'agent'): MindDetail { const item = this.store.archive(id, actor); this.itemStateChanged(item); return this.changed(item); }
+  restore(id: number, actor = 'agent'): MindDetail { const item = this.store.restore(id, actor); this.itemStateChanged(item); return this.changed(item); }
   addDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.addDependency(id, dep, actor)); }
   removeDependency(id: number, dep: number, actor = 'agent'): MindDetail { return this.changed(this.store.removeDependency(id, dep, actor)); }
   addComment(id: number, body: string, author = 'agent'): MindComment { return this.changed(this.store.addComment(id, body, author)); }

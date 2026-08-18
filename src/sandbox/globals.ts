@@ -1100,6 +1100,12 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
     return deps.mind;
   };
   const mindActor = () => deps.agentName?.().trim() || 'agent';
+  const boundMindId = (): number => {
+    if (!Number.isInteger(deps.mindDefaultId) || Number(deps.mindDefaultId) <= 0) {
+      throw new Error('elpis.mind.bound: this sandbox has no bound Mind item');
+    }
+    return Number(deps.mindDefaultId);
+  };
   e.mind = {
     add: (opts: { title: string; body?: string; kind?: 'task' | 'project' | 'idea' | 'question' | 'reminder'; status?: 'inbox' | 'open' | 'in_progress' | 'waiting' | 'done' | 'cancelled'; priority?: number; parentId?: number | string | null; dueAt?: unknown; tags?: string[]; dependsOn?: Array<number | string>; remindAt?: unknown; channelId?: string | null; actor?: string }) => {
       if (!opts || typeof opts !== 'object') throw new Error('elpis.mind.add(opts): opts is required');
@@ -1154,6 +1160,30 @@ if (files && files.length > 0) sendRecord.files = files.map((f) => f.name || Str
     remind: (ref: number | string, at: unknown, opts?: { actor?: string; channelId?: string | null }) => requireMind().addReminder(parseMindId(ref), coerceNextRunAt(at), opts?.actor ?? mindActor(), opts?.channelId ?? deps.inbound?.channelId ?? null),
     snoozeReminder: (reminderId: number, until: unknown, actor?: string) => requireMind().snoozeReminder(reminderId, coerceNextRunAt(until), actor ?? mindActor()),
     cancelReminder: (reminderId: number, actor?: string) => requireMind().cancelReminder(reminderId, actor ?? mindActor()),
+  };
+  (e.mind as Record<string, unknown>).bound = {
+    id: () => boundMindId(),
+    get: () => requireMind().get(boundMindId()),
+    update: (patch: Parameters<NonNullable<SandboxDeps['mind']>['update']>[1], actor?: string) => requireMind().update(boundMindId(), patch, actor ?? mindActor()),
+    status: (status: 'inbox' | 'open' | 'in_progress' | 'waiting' | 'done' | 'cancelled', actor?: string) => requireMind().setStatus(boundMindId(), status, actor ?? mindActor()),
+    done: (comment?: string, actor?: string) => {
+      const id = boundMindId(); const who = actor ?? mindActor();
+      if (comment) requireMind().addComment(id, comment, who);
+      return requireMind().setStatus(id, 'done', who);
+    },
+    cancel: (comment?: string, actor?: string) => {
+      const id = boundMindId(); const who = actor ?? mindActor();
+      if (comment) requireMind().addComment(id, comment, who);
+      return requireMind().setStatus(id, 'cancelled', who);
+    },
+    archive: (actor?: string) => requireMind().archive(boundMindId(), actor ?? mindActor()),
+    comment: (body: string, author?: string) => requireMind().addComment(boundMindId(), body, author ?? mindActor()),
+    reply: (commentId: number, body: string, author?: string) => requireMind().addReply(boundMindId(), commentId, body, author ?? mindActor()),
+    depends: (on: number | string, actor?: string) => requireMind().addDependency(boundMindId(), parseMindId(on), actor ?? mindActor()),
+    unlinks: (from: number | string, actor?: string) => requireMind().removeDependency(boundMindId(), parseMindId(from), actor ?? mindActor()),
+    tag: (tag: string, actor?: string) => requireMind().addTag(boundMindId(), tag, actor ?? mindActor()),
+    untag: (tag: string, actor?: string) => requireMind().removeTag(boundMindId(), tag, actor ?? mindActor()),
+    remind: (at: unknown, opts?: { actor?: string; channelId?: string | null }) => requireMind().addReminder(boundMindId(), coerceNextRunAt(at), opts?.actor ?? mindActor(), opts?.channelId ?? deps.inbound?.channelId ?? null),
   };
 
  // sleep(ms) — async delay without blocking the event loop. Useful for spacing

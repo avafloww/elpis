@@ -21,7 +21,7 @@ function setup(initialName = 'Aster') {
   const mind = new MindService({ db, scheduler, logger: config.logger });
   let agentName = initialName;
   const globals = buildGlobals({ config, logbuf: [], mind, agentName: () => agentName, inbound: { channelId: 'home-channel' } as any } as any) as any;
-  return { db, tasks, api: globals.elpis.mind, setAgentName: (name: string) => { agentName = name; } };
+  return { db, tasks, mind, config, api: globals.elpis.mind, setAgentName: (name: string) => { agentName = name; } };
 }
 
 test('elpis.mind exposes a complete normalized work-graph surface', () => {
@@ -90,5 +90,24 @@ test('elpis.mind.reply preserves structured reply provenance', () => {
   const stored = api.get(item.id).comments.find((comment: any) => comment.id === reply.id);
   assert.equal(stored.replyToId, question.id);
   assert.equal(stored.body, 'Keep the decoder boundary.');
+  db.close();
+});
+
+test('elpis.mind.bound defaults every mutation to the persistent sandbox Mind', () => {
+  const { db, mind, config, api } = setup('Aster');
+  assert.throws(() => api.bound.get(), /no bound Mind item/);
+  const bound = mind.create({ title: 'bound work' });
+  const other = mind.create({ title: 'other work' });
+  const globals = buildGlobals({ config, logbuf: [], mind, mindDefaultId: bound.id, agentName: () => 'Aster' } as any) as any;
+  const boundApi = globals.elpis.mind.bound;
+  assert.equal(boundApi.id(), bound.id);
+  assert.equal(boundApi.get().id, bound.id);
+  boundApi.comment('progress from inside');
+  boundApi.tag('persistent');
+  assert.equal(boundApi.get().comments[0].body, 'progress from inside');
+  assert.deepEqual(boundApi.get().tags, ['persistent']);
+  boundApi.done('verified');
+  assert.equal(mind.get(bound.id)!.status, 'done');
+  assert.equal(mind.get(other.id)!.status, 'open', 'explicitly unrelated Mind is untouched');
   db.close();
 });

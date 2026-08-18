@@ -54,6 +54,7 @@ Moves are same-filesystem atomic renames recorded in `elpis-data/layout-migratio
 - `NOW.md` records current focus.
 - `ponder/` holds unresolved thinking without turning it into a commitment.
 - `elpis-data/config/extensions/*.ext.ts` contains trusted local harness plugins; these execute with service-user authority and belong in encrypted backups.
+- `elpis-data/config/wordlists/{adverbs,adjectives,nouns}.txt` contains hot-reloaded persistent-sandbox naming pools. Missing files seed from bundled defaults; invalid authored files are preserved and bypassed with a warning.
 
 Existing inhabitant files are never replaced by boot defaults.
 
@@ -77,7 +78,8 @@ The consolidation prompt treats the data directory as the inhabitant's private r
 - OAuth credentials;
 - fleet sessions and worktrees;
 - token-density estimates;
-- Mind items, dependencies, tags, comments, events, and reminders.
+- Mind items, dependencies, tags, comments, events, and reminders;
+- immutable local sandbox executor identity, permanent Mind↔sandbox registrations, alias tombstones, and lifecycle/run counters.
 
 Schema migrations are idempotent and run at boot after the filesystem-layout migration. Foreign-key enforcement is enabled.
 

@@ -140,6 +140,8 @@ export interface SandboxDeps {
   completeStandalone?: (messages: ChatMessage[], opts?: StandaloneCompleteOptions) => Promise<StandaloneCompleteResult>;
   /** Durable dependency-aware work graph exposed as elpis.mind. */
   mind?: MindService;
+  /** Bound Mind item for a persistent sandbox. Omitted in unbound control rooms. */
+  mindDefaultId?: number;
   /** Persistent task scheduler. Used by schedule()/unschedule() globals. */
   scheduler?: {
     create(opts: { name: string; kind?: string; channelId?: string | null; payload: string; nextRunAt: number; intervalMs?: number | null; nagIntervalMs?: number | null; parentId?: number | null }): unknown;

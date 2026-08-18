@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { runMigrations } from '../src/store/db.js';
 import { MindService, MindStore, formatMindDetail, parseMindId, type MindReminder } from '../src/store/mind.js';
 import { makeConfig } from './helpers.js';
+import { createSandboxRegistry } from '../src/sandbox/registry.js';
 
 function database(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -30,7 +31,7 @@ test('mind migrations are idempotent and create the complete schema', () => {
   runMigrations(db);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mind_%' ORDER BY name").all() as { name: string }[]).map((x) => x.name);
   assert.deepEqual(tables, ['mind_claims', 'mind_comments', 'mind_dependencies', 'mind_events', 'mind_items', 'mind_reminders', 'mind_tags']);
-  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 11);
+  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 12);
   db.close();
 });
 
@@ -268,5 +269,33 @@ test('archive is soft, ids parse from human forms, and detail formatting is usef
   assert.equal(mind.list({ includeArchived: true }).length, 1);
   mind.restore(item.id);
   assert.equal(mind.list().length, 1);
+  db.close();
+});
+
+test('MindService state callback retires a bound sandbox after the Mind commit', () => {
+  const db = database();
+  const scheduler = schedulerStub();
+  let nextUuid = 0;
+  const registry = createSandboxRegistry({ db, uuid: () => `mind-hook-${++nextUuid}` });
+  const states: Array<{ id: number; status: string; archived: boolean }> = [];
+  const service = new MindService({
+    db,
+    scheduler,
+    logger,
+    onItemStateChanged: (id, status, archived) => {
+      states.push({ id, status, archived });
+      if (archived || status === 'done' || status === 'cancelled') registry.retireByMind(id);
+    },
+  });
+  const item = service.create({ title: 'persistent work' });
+  const sandbox = registry.register(item.id, ['gently-saucy-blahaj']);
+  const run = registry.beginRun(sandbox.id);
+
+  service.setStatus(item.id, 'done', 'test');
+  const pending = registry.get(sandbox.id);
+  assert.equal(pending.lifecycle, 'busy');
+  assert.equal(pending.retireRequested, true);
+  assert.deepEqual(states, [{ id: item.id, status: 'done', archived: false }]);
+  assert.equal(registry.finishRun(sandbox.id, run.runId).lifecycle, 'retired');
   db.close();
 });

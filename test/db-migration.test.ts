@@ -75,3 +75,18 @@ test('migration v6→v7: seeded v6 db gains token_density, existing rows survive
   assert.ok(v >= 7);
   db.close();
 });
+
+test('migration v11→v12 creates durable sandbox identity and alias tombstone tables', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name);
+  assert.ok(tables.includes('sandbox_executor_identity'));
+  assert.ok(tables.includes('persistent_sandboxes'));
+  assert.ok(tables.includes('sandbox_aliases'));
+  const triggers = (db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[]).map((row) => row.name);
+  assert.ok(triggers.includes('sandbox_executor_identity_no_update'));
+  assert.ok(triggers.includes('persistent_sandboxes_identity_no_update'));
+  assert.ok(triggers.includes('sandbox_aliases_no_delete'));
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+  db.close();
+});

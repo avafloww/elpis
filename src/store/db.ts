@@ -19,7 +19,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -265,6 +265,68 @@ export function runMigrations(db: DatabaseSync): void {
     db.exec('ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL');
   }
   db.exec('CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)');
+
+  // v12: persistent run-v3 sandboxes. Registrations and alias reservations are
+  // durable identity records, not disposable executor state.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sandbox_executor_identity (
+      singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+      executor_id TEXT NOT NULL UNIQUE,
+      created_at  INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS sandbox_executor_identity_no_update
+      BEFORE UPDATE ON sandbox_executor_identity BEGIN
+        SELECT RAISE(ABORT, 'sandbox executor identity is immutable');
+      END;
+    CREATE TRIGGER IF NOT EXISTS sandbox_executor_identity_no_delete
+      BEFORE DELETE ON sandbox_executor_identity BEGIN
+        SELECT RAISE(ABORT, 'sandbox executor identity is immutable');
+      END;
+
+    CREATE TABLE IF NOT EXISTS persistent_sandboxes (
+      id                TEXT PRIMARY KEY,
+      mind_id           INTEGER NOT NULL UNIQUE REFERENCES mind_items(id) ON DELETE RESTRICT,
+      executor_id       TEXT NOT NULL,
+      generation        INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+      lifecycle         TEXT NOT NULL CHECK (lifecycle IN ('ready','busy','detached','retired')),
+      reminder_latched  INTEGER NOT NULL DEFAULT 0 CHECK (reminder_latched IN (0,1)),
+      retire_requested  INTEGER NOT NULL DEFAULT 0 CHECK (retire_requested IN (0,1)),
+      active_run_id     TEXT,
+      next_run_seq      INTEGER NOT NULL DEFAULT 1 CHECK (next_run_seq >= 1),
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL,
+      retired_at        INTEGER,
+      CHECK (
+        (lifecycle IN ('ready','retired') AND active_run_id IS NULL) OR
+        (lifecycle IN ('busy','detached') AND active_run_id IS NOT NULL)
+      )
+    );
+    CREATE INDEX IF NOT EXISTS persistent_sandboxes_lifecycle_idx ON persistent_sandboxes(lifecycle, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS persistent_sandboxes_active_run_idx ON persistent_sandboxes(active_run_id) WHERE active_run_id IS NOT NULL;
+    CREATE TRIGGER IF NOT EXISTS persistent_sandboxes_identity_no_update
+      BEFORE UPDATE OF id, mind_id, executor_id ON persistent_sandboxes BEGIN
+        SELECT RAISE(ABORT, 'sandbox registration identity is immutable');
+      END;
+    CREATE TRIGGER IF NOT EXISTS persistent_sandboxes_no_delete
+      BEFORE DELETE ON persistent_sandboxes BEGIN
+        SELECT RAISE(ABORT, 'sandbox registrations are permanent');
+      END;
+
+    CREATE TABLE IF NOT EXISTS sandbox_aliases (
+      alias       TEXT PRIMARY KEY,
+      sandbox_id  TEXT NOT NULL UNIQUE REFERENCES persistent_sandboxes(id) ON DELETE RESTRICT,
+      reserved_at INTEGER NOT NULL,
+      retired_at  INTEGER
+    );
+    CREATE TRIGGER IF NOT EXISTS sandbox_aliases_identity_no_update
+      BEFORE UPDATE OF alias, sandbox_id ON sandbox_aliases BEGIN
+        SELECT RAISE(ABORT, 'sandbox alias reservations are immutable');
+      END;
+    CREATE TRIGGER IF NOT EXISTS sandbox_aliases_no_delete
+      BEFORE DELETE ON sandbox_aliases BEGIN
+        SELECT RAISE(ABORT, 'sandbox aliases are never reused');
+      END;
+  `);
 
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
