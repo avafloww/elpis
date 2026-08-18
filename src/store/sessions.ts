@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ChatMessage, ReasoningItemParam, AnthropicThinkingBlock } from '../llm/llm.js';
 import { isTrustedOpaqueReplay, parseGenerationProvenance, type ReplayIdentity } from '../llm/provenance.js';
+import { parseRunMessageMetadata } from '../sandbox/metadata.js';
 
 /** Reserved transcript id for the single monocontext stream. */
 export const MAIN_TRANSCRIPT_ID = 'main';
@@ -341,6 +342,10 @@ function parseChatMessage(raw: unknown, options?: TranscriptParseOptions): ChatM
  //: whitelist the provenance stamp and recorded sends, or they are dropped
  // silently on reload (review N6). parseChatMessage drops unlisted fields.
   if (typeof obj.channel === 'string') msg.channel = obj.channel;
+  if (role === 'tool') {
+    const run = parseRunMessageMetadata(obj.run);
+    if (run) msg.run = run;
+  }
   if (Array.isArray(obj.sends)) {
     const sends: { channel: string; text: string }[] = [];
     for (const s of obj.sends) {

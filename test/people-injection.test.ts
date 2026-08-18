@@ -7,7 +7,7 @@ import { build, buildPersonMemoryContent, loadPeopleFiles } from '../src/llm/pro
 import { toApiMessage, type ChatMessage } from '../src/llm/llm.js';
 import { toResponsesInput } from '../src/llm/responses.js';
 import { type InboundMessage } from '../src/agent.js';
-import { buildTestAgent, EMPTY_END, makeStubLLM } from './helpers.js';
+import { buildTestAgent, EMPTY_WAKE, makeStubLLM } from './helpers.js';
 
 function tmpDataDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'people-inject-'));
@@ -86,7 +86,7 @@ test('first real inbound appends one profile before the inbound and keeps the sy
   const llm = makeStubLLM({
     complete: async (messages) => {
       requests.push(messages.map((m) => ({ ...m })));
-      return EMPTY_END;
+      return EMPTY_WAKE;
     },
   });
   const { agent, cleanup } = buildTestAgent({ dir, llm });
@@ -119,7 +119,7 @@ test('ambient multi-speaker batches inject each profile before first inbound and
   writePerson(dir, 'abe', ['discord:1'], 'ABE_FACT');
   writePerson(dir, 'clover', ['discord:2'], 'CLOVER_FACT');
   let calls = 0;
-  const llm = makeStubLLM({ complete: async () => { calls++; return EMPTY_END; } });
+  const llm = makeStubLLM({ complete: async () => { calls++; return EMPTY_WAKE; } });
   const { agent, cleanup } = buildTestAgent({ dir, llm });
   void agent.loop();
   agent.enqueue(inbound('1', 'Abe', 'a1', 'ambient'));

@@ -20,6 +20,7 @@
 // history.ts, keyed by negative ids so it always sorts before the live mirror.
 
 import type { ChatMessage } from '../llm/llm.js';
+import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import { parseEnvelope } from '../lib/envelope.js';
 import type { LogLevel } from '../lib/log.js';
 import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
@@ -122,7 +123,7 @@ export interface LogLine {
  * append-only index (negative for on-disk archived backfill). */
 export interface StreamEntry {
   id: number;
-  kind: 'user' | 'assistant' | 'tool' | 'think-result' | 'summary' | 'notice' | 'system' | 'compaction' | 'cleared' | 'cachebust' | 'endnudge';
+  kind: 'user' | 'assistant' | 'tool' | 'think-result' | 'summary' | 'notice' | 'system' | 'compaction' | 'cleared' | 'cachebust' | 'yieldnudge';
   role: string;
   channel: string;
   content: string;
@@ -130,6 +131,8 @@ export interface StreamEntry {
   /** For assistant turns: executable run calls remain action cards. */
   toolCalls?: { id: string; code: string }[];
   tool_call_id?: string;
+  /** Harness-only run attribution for the private operator console. */
+  run?: RunMessageMetadata;
   sends?: { channel: string; text: string }[];
   /** Author + display fields parsed from a user envelope, when present. */
   author?: string;
@@ -140,7 +143,7 @@ export interface StreamEntry {
   replaced?: number;
   /** Cache-bust dividers carry the rewritten (lost-prefix) token count. */
   rewritten?: number;
-  /** End-nudge dividers carry the consecutive nudge count. */
+  /** Yield-nudge dividers carry the consecutive nudge count. */
   count?: number;
 }
 
@@ -277,9 +280,9 @@ export class ConsoleHub {
   /** The model returned a response with no run call and was nudged. Mirror-only,
  * same idiom as cacheBusted: never transcript-persisted, so it does not appear
  * in archived backfill. Does NOT refresh the meter. */
-  endNudge(count: number): void {
+  yieldNudge(count: number): void {
     const entry = this.pushEntry({
-      id: 0, kind: 'endnudge', role: 'system', channel: 'internal',
+      id: 0, kind: 'yieldnudge', role: 'system', channel: 'internal',
       content: '', ts: Date.now(), count,
     });
     this.broadcast({ t: 'message', msg: entry });
@@ -671,6 +674,7 @@ export function serializeMessage(msg: ChatMessage, id: number, ts: number | null
   }
   if (thoughtParts.length > 0) entry.reasoning_content = thoughtParts.join('\n\n');
   if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
+  if (msg.run) entry.run = msg.run;
   if (msg.sends && msg.sends.length > 0) entry.sends = msg.sends;
   if (msg.role === 'user') {
     const parsed = parseEnvelope(msg.content);

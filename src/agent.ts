@@ -7,11 +7,10 @@
 // epoch, one hasNewInput. Compaction is the single forgetting mechanism.
 //
 // THE MAIN LOOP (no iteration cap): drains the global FIFO inbound queue into the
-// one history, runs the turn until the model ends it — a SUCCESSFUL run carrying
-// `end: true` is the only sanctioned ending (spec ) — then parks on the
-// wake-gate. A response with no tool_calls is NOT an ending: it gets the
-// END_TURN_NUDGE and the loop goes round again, without bound (a fallback would
-// demonstrate to the model that `end` is optional). A nudge spin is broken by
+// one history, runs until a final successful run durably arms a one-shot wake,
+// then parks on the wake-gate. A response with no tool_calls is NOT a yield: it
+// gets YIELD_TURN_NUDGE and the loop goes round again, without bound. A nudge
+// spin is broken by
 // `agent.stop` (an explicit check on the nudge and tool-chain `continue`s,
 // which keep hasNewInput set and so never reach the wake-gate's own check) or by
 // a context clear, whose epoch bump unwinds the turn via `continue turn`.
@@ -25,7 +24,7 @@
 // SOUL/MEMORY INJECTION: SOUL.md is re-read every turn (hot-reload). MEMORY.md is
 // cached in `memoryView` and refreshed only on context clear / compaction.
 
-import type { Sandbox } from './sandbox/index.js';
+import type { ManagedRunRequest } from './sandbox/manager.js';
 import type { Memory } from './store/memory.js';
 import { preview, cap, previewValue } from './sandbox/preview.js';
 import type { LLM, ChatMessage, LLMUsage } from './llm/llm.js';
@@ -43,7 +42,7 @@ import type { MindItem, MindService } from './store/mind.js';
 import { build as buildPrompt, buildPersonMemoryContent, loadPeopleFiles } from './llm/prompt.js';
 import type { PersonFile, PersonIdentity } from './llm/prompt.js';
 import {
-  GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
+  GHOST_REPLY_NUDGE, YIELD_TURN_NUDGE, yieldNudgeAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
 } from './llm/prompt.js';
 import type { Config } from './config.js';
 import type { BuiltinModuleRegistry, RuntimeProfile } from './builtin-modules.js';
@@ -52,6 +51,10 @@ import { localHm, localStamp } from './lib/time.js';
 import { parseSoul, DEFAULT_AGENT_NAME } from './store/soul.js';
 import type { ChannelDirectory } from './store/channels.js';
 import type { MuteStore } from './store/mutes.js';
+import type { ScheduledTask, Scheduler } from './store/scheduler.js';
+import { encodeRunWakePayload, parseRunCallArguments, parseRunWakePayload, resolveRunWake, RUN_WAKE_TASK_PREFIX, type DurableRunWakePayload } from './sandbox/wake.js';
+import type { RunMessageMetadata, RunWakeMetadata } from './sandbox/metadata.js';
+import { TOOL_CONTRACT_VERSION } from './llm/provenance.js';
 import type { RunResult } from './types.js';
 import type { ConsoleHub, RoomFact, UsageInfo, ContextSnapshot } from './console/hub.js';
 import { buildGuildIndex, countsForTick, resolveChannelPolicy, type ChannelPolicy, type GuildIndex } from './discord/wake.js';
@@ -77,18 +80,55 @@ export { INTERNAL_CHANNEL_ID } from './types.js';
  * content arrived double-escaped. Plain text with real newlines is both honest
  * about the bytes and cheaper in tokens.
  */
-export function formatRunResult(r: RunResult): string {
+function runAttribution(metadata?: RunMessageMetadata): string {
+  if (!metadata) return '';
   const parts: string[] = [];
+  const execution = metadata.execution;
+  if (execution) {
+    const sandbox = [`sandbox=${execution.kind}`];
+    if (execution.lifecycle) sandbox.push(`lifecycle=${execution.lifecycle}`);
+    if (execution.alias) sandbox.push(`alias=${execution.alias}`);
+    if (execution.mindId !== undefined) sandbox.push(`mind=#${execution.mindId}`);
+    if (execution.mindTitle) sandbox.push(`mind_title=${JSON.stringify(cap(execution.mindTitle.replace(/\s+/g, ' '), 120))}`);
+    if (execution.mindStatus) sandbox.push(`mind_status=${execution.mindStatus}`);
+    if (execution.executorId) sandbox.push(`executor=${execution.executorId}`);
+    if (execution.runId) sandbox.push(`run=${execution.runId}`);
+    if (execution.generation !== undefined) sandbox.push(`generation=${execution.generation}`);
+    if (execution.resetGeneration !== undefined) sandbox.push(`reset=${execution.resetGeneration}`);
+    if (execution.coldStart) sandbox.push('cold');
+    if (execution.retiring) sandbox.push('retiring');
+    if (execution.statusReminder) {
+      sandbox.push('reminder=status');
+      if (execution.latestComment) sandbox.push(`latest=${JSON.stringify(cap(execution.latestComment.replace(/\s+/g, ' '), 160))}`);
+    }
+    if (execution.classifierReminder) sandbox.push('reminder=classifier');
+    parts.push(sandbox.join(' '));
+  }
+  if (metadata.detached) parts.push(`detached${metadata.bgId ? ` bg=${metadata.bgId}` : ''}`);
+  if (metadata.wake) {
+    const wake = [`wake=${metadata.wake.state}`, `kind=${metadata.wake.kind}`];
+    if (metadata.wake.targetAt !== undefined) wake.push(`target=${new Date(metadata.wake.targetAt).toISOString()}`);
+    if (metadata.wake.taskId !== undefined) wake.push(`task=#${metadata.wake.taskId}`);
+    parts.push(wake.join(' '));
+  }
+  return parts.join(' | ');
+}
+
+export function formatRunResult(r: RunResult, metadata?: RunMessageMetadata): string {
+  const parts: string[] = [];
+  const attribution = runAttribution(metadata);
   if (r.ok) {
     let head = 'ok';
     if (r.detached) head += ` — detached as bg ${r.bgId ?? '?'}`;
     if (r.savedAs) head += ` — value saved to ${r.savedAs}`;
+    if (attribution) head += ` | ${attribution}`;
     parts.push(`[run ${head}]`);
     if (r.preview) parts.push(r.preview);
   } else {
-    parts.push('[run FAILED]');
+    parts.push(`[run FAILED${attribution ? ` | ${attribution}` : ''}]`);
     if (r.error) parts.push(r.error);
   }
+  if (r.note) parts.push(r.note);
   if (r.logs) parts.push(`--- console ---\n${r.logs}`);
   return parts.join('\n');
 }
@@ -212,24 +252,24 @@ export function formatDuration(ms: number): string {
 const VISION_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
 const VISION_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
-/** Consecutive end-turn nudges before the operator is told. Alert-only — it does
+/** Consecutive yield nudges before the operator is told. Alert-only — it does
  * NOT cap the nudging (spec: no fallback, no force-end). Shared by
  * BOTH unbounded loop shapes: the no-run-call end-nudge AND the tool-chain
- * spin (a run that never lands a successful `end: true`) — one threshold,
+ * spin (a run that never durably arms a wake) — one threshold,
  * not two (final-review fix wave, ). */
-export const END_NUDGE_ALERT_AT = 5;
+export const YIELD_NUDGE_ALERT_AT = 5;
 
 /** Re-alert cadence past the first crossing. A spin lasting hours must keep
  * signalling, not send exactly one Discord message and go quiet — so once
- * `END_NUDGE_ALERT_AT` fires, re-alert every this-many further cycles. */
-export const END_NUDGE_REALERT_EVERY = 25;
+ * `YIELD_NUDGE_ALERT_AT` fires, re-alert every this-many further cycles. */
+export const YIELD_NUDGE_REALERT_EVERY = 25;
 
 /** Whether a consecutive spin counter should fire an operator alert at this
- * count: once on crossing `END_NUDGE_ALERT_AT` (`===`, not on every cycle
- * past it), then every `END_NUDGE_REALERT_EVERY` cycles after. Shared by
+ * count: once on crossing `YIELD_NUDGE_ALERT_AT` (`===`, not on every cycle
+ * past it), then every `YIELD_NUDGE_REALERT_EVERY` cycles after. Shared by
  * both spin shapes so they alert on the same cadence. */
 export function shouldAlertOnSpin(count: number): boolean {
-  return count >= END_NUDGE_ALERT_AT && (count - END_NUDGE_ALERT_AT) % END_NUDGE_REALERT_EVERY === 0;
+  return count >= YIELD_NUDGE_ALERT_AT && (count - YIELD_NUDGE_ALERT_AT) % YIELD_NUDGE_REALERT_EVERY === 0;
 }
 
 /** Compaction failed-cycle alert cadence. A cycle that burns all its summarize attempts (API failures or
@@ -351,7 +391,7 @@ export interface InboundMessage {
 
 export interface AgentDeps {
   config: Config;
-  sandbox: Sandbox;
+  sandbox: { run(request: ManagedRunRequest): Promise<RunResult> };
   memory: Memory;
   /** Dependency-aware external cortex. Optional so focused Agent tests and
  * embedders can omit it; production always wires the canonical service. */
@@ -371,6 +411,8 @@ export interface AgentDeps {
   density?: DensityModel;
   /** Persistent transcript store (single 'main' stream). */
   transcript: TranscriptStore;
+  /** Durable timer store for one-shot run wakes. */
+  scheduler?: Pick<Scheduler, 'create' | 'list' | 'update' | 'markDone'>;
   /** Messages to prime the one history with on boot (restart recovery). Empty /
  * omitted for a fresh start. */
   initialMessages?: ChatMessage[];
@@ -378,7 +420,7 @@ export interface AgentDeps {
   send: (channelId: string, text: string, opts?: { files?: import('./types.js').OutboundAttachment[] }) => Promise<void>;
   /** Called when the agent is about to make an LLM call (typing indicator). */
   onThinking?: (channelId: string) => void;
-  /** Called when the loop reaches the wake-gate (turn ended via `end: true`, empty queue). */
+  /** Called when the loop reaches the wake-gate after a durable run wake, with an empty queue. */
   onIdle?: () => void;
   /** Callback to publish the currently processed inbound message to the sandbox. */
   setCurrentInbound?: (msg: InboundMessage | null) => void;
@@ -421,6 +463,7 @@ export class Agent {
    * context. Reconstructed from transcript metadata on restart. */
   private injectedPeople = new Set<string>();
   private resolveWake: (() => void) | null = null;
+  private pendingRunWake: { taskId: number; payload: DurableRunWakePayload; metadata?: RunWakeMetadata } | null = null;
   private heartbeatTimeout: NodeJS.Timeout | null = null;
   private rescheduleBeat: ((delay: number) => void) | null = null;
   private lastBeatKind: 'reflection' | 'ponder' | 'tick' | null = null;
@@ -474,13 +517,13 @@ export class Agent {
   private mindFrontierTailMessagesThisTurn = 0;
   /** External thinking is forced at most once, and only on a person-shaped outer turn. */
   private externalThinkForcedThisTurn = false;
-  /** Count of no-run-call responses nudged since the last successful `end: true`
+  /** Count of no-run-call responses nudged since the last successful yield
  * (finishTurn/clearContext reset it) — NOT a strict per-iteration
  * streak: a tool-chain continue or a one-shot ghost-reply bounce can land
  * between two increments without resetting it, since neither is a
  * successful end either. Drives the operator alert only — it never caps
  * the nudging (spec ). */
-  private endNudgeCount = 0;
+  private yieldNudgeCount = 0;
   private lastInbound: InboundMessage | null = null;
   /** Provenance stamp for messages pushed during the current turn. */
   private turnChannel: string = INTERNAL_CHANNEL_ID;
@@ -581,6 +624,7 @@ export class Agent {
       this.logger.info(`primed history with ${this.messages.length} messages from prior transcript`);
       this.recoverInterruptedToolCall();
     }
+    this.recoverRunWake();
   }
 
   /** Replace the send handler (wired by the Discord layer on start). */
@@ -839,6 +883,91 @@ export class Agent {
     this.wake();
   }
 
+  private recoverRunWake(): void {
+    if (!this.deps.scheduler) return;
+    const reserved = this.deps.scheduler.list()
+      .filter((task) => task.doneAt == null && task.name.startsWith(RUN_WAKE_TASK_PREFIX))
+      .map((task) => ({ task, payload: parseRunWakePayload(task.payload) }));
+    for (const invalid of reserved.filter((entry) => entry.payload?.state !== 'armed')) {
+      this.deps.scheduler.markDone(invalid.task.id);
+      this.logger.warn(`[agent] retired invalid run wake task ${invalid.task.id}`);
+    }
+    const armed = reserved
+      .filter((entry): entry is { task: ScheduledTask; payload: DurableRunWakePayload } => entry.payload?.state === 'armed')
+      .sort((a, b) => b.task.id - a.task.id);
+    const current = armed.shift();
+    for (const stale of armed) {
+      stale.payload.state = 'preempted';
+      this.deps.scheduler.update(stale.task.id, { payload: encodeRunWakePayload(stale.payload) });
+      this.deps.scheduler.markDone(stale.task.id);
+    }
+    if (current) this.pendingRunWake = { taskId: current.task.id, payload: current.payload };
+  }
+
+  private preemptRunWake(note: string): void {
+    const pending = this.pendingRunWake;
+    if (!pending || !this.deps.scheduler) return;
+    pending.payload.state = 'preempted';
+    this.deps.scheduler.update(pending.taskId, { payload: encodeRunWakePayload(pending.payload) });
+    this.deps.scheduler.markDone(pending.taskId);
+    if (pending.metadata) {
+      pending.metadata.state = 'preempted';
+      pending.metadata.note = note;
+    }
+    this.pendingRunWake = null;
+    this.logger.info(`[agent] run wake preempted | task=${pending.taskId} | ${note}`);
+  }
+
+  private armRunWake(metadata: RunWakeMetadata): boolean {
+    if (!this.deps.scheduler) {
+      metadata.state = 'rejected';
+      metadata.note = 'wake not armed: Scheduler is unavailable';
+      return false;
+    }
+    if (this.hasPendingWake()) {
+      metadata.state = 'preempted';
+      metadata.note = 'wake preempted by already-queued external input';
+      return false;
+    }
+    this.preemptRunWake('superseded by a newer run wake');
+    const payload: DurableRunWakePayload = {
+      type: 'elpis-run-wake-v3', kind: metadata.kind, state: 'armed',
+      requestedAt: metadata.requestedAt, targetAt: metadata.targetAt!,
+    };
+    try {
+      const task = this.deps.scheduler.create({
+        name: `${RUN_WAKE_TASK_PREFIX}-${metadata.requestedAt}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'custom', channelId: INTERNAL_CHANNEL_ID,
+        payload: encodeRunWakePayload(payload), nextRunAt: metadata.targetAt!,
+      });
+      metadata.taskId = task.id;
+      this.pendingRunWake = { taskId: task.id, payload, metadata };
+      return true;
+    } catch (error) {
+      metadata.state = 'rejected';
+      metadata.note = `wake not armed: ${error instanceof Error ? error.message : String(error)}`;
+      return false;
+    }
+  }
+
+  notifyRunWake(task: ScheduledTask): boolean {
+    if (!task.name.startsWith(RUN_WAKE_TASK_PREFIX)) return false;
+    const payload = parseRunWakePayload(task.payload);
+    if (!payload) {
+      this.logger.warn(`[agent] swallowed malformed reserved run wake task ${task.id}`);
+      return true;
+    }
+    if (payload.state !== 'armed' || (this.pendingRunWake && this.pendingRunWake.taskId !== task.id)) return true;
+    payload.state = 'fired';
+    this.deps.scheduler?.update(task.id, { payload: encodeRunWakePayload(payload) });
+    if (this.pendingRunWake?.metadata) this.pendingRunWake.metadata.state = 'fired';
+    this.pendingRunWake = null;
+    this.enqueueInternal('harness', 'run-wake', '[run wake] Your requested one-shot wake is due. Continue from the work you deliberately yielded.', {
+      id: `run-wake-${task.id}-${Date.now()}`, author: 'harness',
+    });
+    return true;
+  }
+
   /** Enqueue an inbound Discord message. Wakes the loop if idle — UNLESS this
  * is ambient traffic: ambient chat still enters the queue (and
  * will be drained into history at the next real wake) but must never itself
@@ -855,8 +984,12 @@ export class Agent {
       this.deps.channels?.set(msg.channelId, msg.channelName, msg.guildId ?? null, parentId);
     }
     this.inbound.push(msg);
- // Ambient traffic never turns a parked loop on.
-    if (msg.wakeClass !== 'ambient') this.wake();
+ // Any real waking input makes a pending self-wake redundant. Ambient room
+ // traffic remains non-preempting until its normal tick turns it into a wake.
+    if (msg.wakeClass !== 'ambient') {
+      this.preemptRunWake(`external wake queued from ${msg.channelName}`);
+      this.wake();
+    }
   }
 
   /** Resolve and clear the parked wake-gate promise, if any. Consume-once: the
@@ -1095,7 +1228,7 @@ export class Agent {
 
   /** Execute arbitrary JS in the sandbox, bypassing the LLM loop (/exec). */
   execSandbox(code: string): Promise<{ ok: boolean; preview?: string; savedAs?: string; logs?: string; error?: string }> {
-    return this.deps.sandbox.run(code);
+    return this.deps.sandbox.run({ code });
   }
 
   /** Request a compaction cycle (from /compact). Consumed at the loop-top
@@ -1158,7 +1291,7 @@ export class Agent {
     this.failedCompactionCycles = 0;
     this.compactionRetryNotBefore = 0;
  // A no-run-call spin count must not survive a context clear.
-    this.endNudgeCount = 0;
+    this.yieldNudgeCount = 0;
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;
@@ -1490,14 +1623,13 @@ export class Agent {
       if (forceThinkForRequest) this.externalThinkForcedThisTurn = true;
       this.pushMessage(resp.message, this.turnChannel);
 
- // `end: true` on a SUCCESSFUL run is the sanctioned turn-end (spec
- // ). Set during dispatch, read after it: when true the block
- // falls through to the turn-end region below instead of continuing the
- // chain. Declared out here because that region sits past the block.
-      let endedByFlag = false;
+      let yieldedByWake = false;
       if (resp.message.tool_calls && resp.message.tool_calls.length > 0) {
-        this.logger.info('[agent] tool dispatch | count=', resp.message.tool_calls.length);
-        for (const tc of resp.message.tool_calls) {
+        const calls = resp.message.tool_calls;
+        this.logger.info('[agent] tool dispatch | count=', calls.length);
+        for (let callIndex = 0; callIndex < calls.length; callIndex++) {
+          const tc = calls[callIndex];
+          yieldedByWake = false;
           if (tc.function.name === 'think') {
             let thoughts = '';
             try {
@@ -1505,92 +1637,95 @@ export class Agent {
               thoughts = typeof args.thoughts === 'string' ? args.thoughts : '';
             } catch { /* sanitizer already rejects malformed JSON */ }
             this.logger.info('[agent] tool call | think | chars=', thoughts.length);
-            const toolMsg: ChatMessage = {
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: '------',
-            };
+            const toolMsg: ChatMessage = { role: 'tool', tool_call_id: tc.id, content: '------' };
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
-            endedByFlag = false;
             continue;
           }
           if (tc.function.name !== 'run') {
             this.logger.info('[agent] tool unknown | name=', tc.function.name);
             const toolMsg: ChatMessage = {
-              role: 'tool',
-              tool_call_id: tc.id,
+              role: 'tool', tool_call_id: tc.id,
               content: formatRunResult({ ok: false, error: `unknown tool: ${tc.function.name} — available tools are run(code) and think(thoughts)` }),
             };
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
-            endedByFlag = false;
             continue;
           }
-          let code: string;
-          let wantsEnd = false;
-          try {
-            const args = JSON.parse(tc.function.arguments || '{}');
-            code = typeof args.code === 'string' ? args.code : '';
-            wantsEnd = args.end === true;
-          } catch {
-            code = '';
-          }
-          this.logger.info('[agent] tool call | run');
-          for (const ln of summarizeCode(code).split('\n')) this.logger.info('  ', ln);
 
-          const toolStart = Date.now();
-          const result = await this.sandbox.run(code);
-          const logPreview = result.ok ? preview(result, 512) : cap(result.error || '', 512);
-          this.logger.info('[agent] tool result | duration=', formatDuration(Date.now() - toolStart),
-            '| ok=', result.ok, '| preview=', redactSecrets(logPreview, this.secretValues));
-          let resultText = formatRunResult(result);
-          {
-            const redacted = redactSecrets(resultText, this.secretValues);
-            if (redacted !== resultText) {
-              resultText = redacted;
-              this.logger.warn('[agent] secret value redacted from tool result');
+          const requestedAt = Date.now();
+          let parsed: ReturnType<typeof parseRunCallArguments> | null = null;
+          let result: RunResult;
+          try {
+            parsed = parseRunCallArguments(tc.function.arguments || '{}', requestedAt);
+            this.logger.info('[agent] tool call | run', parsed.sandbox ? `| sandbox=${parsed.sandbox}` : '| ephemeral');
+            for (const ln of summarizeCode(parsed.code).split('\n')) this.logger.info('  ', ln);
+            const toolStart = Date.now();
+            result = await this.sandbox.run({ code: parsed.code, ...(parsed.sandbox ? { sandbox: parsed.sandbox } : {}) });
+            this.logger.info('[agent] tool result | duration=', formatDuration(Date.now() - toolStart),
+              '| ok=', result.ok, '| preview=', redactSecrets(result.ok ? preview(result, 512) : cap(result.error || '', 512), this.secretValues));
+          } catch (error) {
+            result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+            this.logger.info('[agent] tool call | run rejected before execution | error=', result.error);
+          }
+
+          let wakeMetadata: RunWakeMetadata | undefined;
+          if (parsed?.wake) {
+            wakeMetadata = { kind: parsed.wake.kind, state: 'rejected', requestedAt };
+            if (callIndex !== calls.length - 1) {
+              wakeMetadata.note = 'wake not armed: only the final tool call in a response may yield';
+            } else if (!result.ok) {
+              wakeMetadata.note = 'wake not armed because code did not succeed';
+            } else if (result.detached) {
+              wakeMetadata.note = 'wake not armed because code detached before completion';
+            } else {
+              const resolved = resolveRunWake(parsed.wake, Date.now());
+              wakeMetadata.targetAt = resolved.armAt ?? (parsed.wake.kind === 'at' ? parsed.wake.targetAt : undefined);
+              if (resolved.elapsed) {
+                wakeMetadata.state = 'elapsed';
+                wakeMetadata.note = 'absolute wake target elapsed during execution; choose a new wake';
+              } else {
+                wakeMetadata.state = 'armed';
+                yieldedByWake = this.armRunWake(wakeMetadata);
+              }
+            }
+            if (wakeMetadata.note) result.note = result.note ? `${result.note}; ${wakeMetadata.note}` : wakeMetadata.note;
+            if (wakeMetadata.state === 'armed') {
+              result.note = result.note ? `${result.note}; wake armed for ${new Date(wakeMetadata.targetAt!).toISOString()}` : `wake armed for ${new Date(wakeMetadata.targetAt!).toISOString()}`;
             }
           }
-          const toolMsg: ChatMessage = {
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: resultText,
+
+          const runMetadata: RunMessageMetadata = {
+            toolContractVersion: TOOL_CONTRACT_VERSION,
+            ok: result.ok,
+            ...(result.failureKind ? { failureKind: result.failureKind } : {}),
+            ...(result.execution ? { execution: result.execution } : {}),
+            ...(result.detached !== undefined ? { detached: result.detached } : {}),
+            ...(result.bgId ? { bgId: result.bgId } : {}),
+            ...(wakeMetadata ? { wake: wakeMetadata } : {}),
           };
- // Retain the run's channel sends on the tool message for console rendering,
- // feedback localization, transcript recovery, and detached-future notices.
+          let resultText = formatRunResult(result, runMetadata);
+          const redacted = redactSecrets(resultText, this.secretValues);
+          if (redacted !== resultText) {
+            resultText = redacted;
+            this.logger.warn('[agent] secret value redacted from tool result');
+          }
+          const toolMsg: ChatMessage = { role: 'tool', tool_call_id: tc.id, content: resultText, run: runMetadata };
           if (result.sends && result.sends.length > 0) toolMsg.sends = result.sends;
           this.pushMessage(toolMsg, this.turnChannel);
           this.tracker.estimateAppended(toolMsg.content);
- // Only a run that actually SUCCEEDED may end the turn — a failure
- // has to come back to the model. Assigned (not OR'd): a later call
- // in the same multi-tool-call response must be able to CLEAR a flag
- // an earlier one set, same as the unknown-tool path does explicitly
- // above — otherwise one call's `end: true` could swallow
- // a sibling call's failure the model never gets to see.
-          endedByFlag = wantsEnd && result.ok;
         }
         if (callEpoch !== this.epoch) {
           this.logger.warn('context cleared during tool dispatch — discarding turn');
           this.messages = [];
           continue turn;
         }
-        if (!endedByFlag) {
- // Same reasoning as the end-nudge path below: this `continue` keeps
- // hasNewInput set, so the wake-gate's `stopped` check is unreachable
- // from here. Since a bare message stopped being an ending, a chain
- // that can never produce a successful run — e.g. an unknown tool that
- // interrupts every dispatch — is unendable, and without this check it
- // is also unbreakable. Graceful shutdown, NOT a force-end fallback.
+        if (!yieldedByWake) {
           if (this.stopped) break turn;
           this.hasNewInput = true;
           this.logger.warn('[agent] turn end | tool-chain continuing | queued=', this.inbound.length);
           continue;
         }
- // fall through to the turn-end region below — NOT yet a confirmed
- // "turn end": the ghost-reply check and the end-nudge check further
- // down can still `continue` instead. Logging happens once, at the
- // actual outcome, below.
       }
 
  // Fell through the dispatch block (or there were no tool_calls at all).
@@ -1631,35 +1766,33 @@ export class Agent {
         continue;
       }
 
- // Only `endedByFlag` is a sanctioned ending. A response with no tool calls
- // is not one — nudge and go round again. No bound, deliberately: a fallback
- // would stand as a demonstration that `end` is optional, and the model
- // imitates its own recent history (spec ).
-      if (!endedByFlag) {
+ // Only an armed wake yields. A response with no tool calls is not an ending:
+ // nudge and go round again without manufacturing an implicit pause.
+      if (!yieldedByWake) {
  // The wake-gate `stopped` check is unreachable from here (the nudge sets
  // hasNewInput), so shutdown has to be honoured on this path explicitly.
  // This is graceful shutdown, NOT a force-end fallback.
         if (this.stopped) break turn;
-        this.endNudgeCount++;
-        this.logger.warn('[agent] no end flag — nudging | since-last-end=', this.endNudgeCount);
-        try { this.deps.console?.endNudge(this.endNudgeCount); } catch { /* observer only */ }
- // Fire on the crossing, then re-alert every END_NUDGE_REALERT_EVERY
+        this.yieldNudgeCount++;
+        this.logger.warn('[agent] no wake armed — nudging | since-last-yield=', this.yieldNudgeCount);
+        try { this.deps.console?.yieldNudge(this.yieldNudgeCount); } catch { /* observer only */ }
+ // Fire on the crossing, then re-alert every YIELD_NUDGE_REALERT_EVERY
  // past it — not on every nudge — so a multi-hour spin keeps
  // signalling instead of sending exactly one Discord message and going
  // quiet. Deliberately NOT awaited (unlike every other sendError call
  // site): the whole point is that the model keeps spinning regardless
  // of Discord, so a slow or hung round-trip here must not pace the
  // nudge loop.
-        if (shouldAlertOnSpin(this.endNudgeCount)) {
-          void this.sendError(endNudgeAlert(this.endNudgeCount));
+        if (shouldAlertOnSpin(this.yieldNudgeCount)) {
+          void this.sendError(yieldNudgeAlert(this.yieldNudgeCount));
         }
-        this.pushHarnessNudge(END_TURN_NUDGE);
+        this.pushHarnessNudge(YIELD_TURN_NUDGE);
         continue;
       }
 
       this.hasNewInput = false;
       this.finishTurn();
-      this.logger.info('[agent] turn end | ended by flag | queued=', this.inbound.length);
+      this.logger.info('[agent] turn end | yielded by wake | queued=', this.inbound.length);
     }
   }
 
@@ -1730,7 +1863,7 @@ export class Agent {
     }
   }
 
-  /** Shared turn-end path (`end: true` turn-end, LLM error, leak give-up). Reschedules the
+  /** Shared turn-finish path (durable wake yield, LLM error, leak give-up). Reschedules the
  * in-flight heartbeat's next beat and resets per-turn flags. */
   private finishTurn(): void {
     this.realUserTurn = false;
@@ -1740,7 +1873,7 @@ export class Agent {
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;
     this.externalThinkForcedThisTurn = false;
-    this.endNudgeCount = 0;
+    this.yieldNudgeCount = 0;
     if (this.rescheduleBeat) {
       const idle = this.lastBeatKind === 'tick' && this.sendsThisTurn === 0;
       this.reschedulePendingBeat(idle);
@@ -1864,7 +1997,7 @@ export class Agent {
   }
 
   /** Test-only: the no-run-call nudge count since the last successful end. */
-  get endNudgeCountForTest(): number { return this.endNudgeCount; }
+  get yieldNudgeCountForTest(): number { return this.yieldNudgeCount; }
 
   get inboundQueueLengthForTest(): number {
     return this.inbound.length;

@@ -292,14 +292,14 @@ Silence is always an option. Your consent is not optional, and it will be respec
 
 But a reply you *meant* to send is not a reply until the send call fires — content written for someone who then sees nothing is a mistake, not silence. Choosing not to speak is yours; forgetting to speak is a bug.
 
-## Ending a turn
-\`end: true\` means **I consciously yield this turn and will do NO more work until a new inbound event calls me again.** It is NOT punctuation after a tool call, a way to mark one step complete, or a promise that I will continue researching off-screen. I do not think, read, or act between invocations.
+## Yielding a turn
+A final successful \`run\` may carry exactly one wake: \`{ after: "5m" }\` or \`{ at: "<future ISO-8601 with timezone>" }\`. This means **I consciously yield this turn and choose when I may be called again.** It is not punctuation after a tool call, a way to mark one step complete, or a promise of off-screen work. I do not think, read, or act between invocations.
 
-Use it only when I mean one of these: (1) I have actually finished the task; (2) I am deliberately waiting on the person/world; or (3) I am choosing silence. If I mean to continue a task, keep work inside the current run call (batch search → source → read → write) or make another run call **without** \`end: true\`; do not end and narrate the task as still active.
+Omit \`wake\` while work remains. Keep work inside the current run call (batch search → source → read → write) or make another run call. Only the final tool call may yield. A failed or detached run never arms a wake. \`after\` starts after successful code completion; \`at\` preserves exact wall time. Both must be positive, strictly future, and under 24 hours. If an absolute target elapses during execution, the code result returns but the turn continues so I can choose another wake.
 
-An interleaved inbound message does not reset this test. If I am in the middle of work and reply to another person or room, answering that conversational branch does **not** complete the enclosing turn: send the reply without \`end: true\`, then resume the work already in flight. Never use \`end: true\` merely because one message has been answered while another task remains active.
+An interleaved waking inbound preempts a pending self-wake, but does not declare my other work complete. If I am in the middle of work and reply to another person or room, I send the reply, omit \`wake\`, and resume the enclosing work. Ambient room traffic does not preempt a wake.
 
-End every fully completed turn — after all work I intend to do in the current invocation, across every active branch — by setting \`end: true\` on its final run call. A message with no run call does not end anything — the harness will simply ask me again, every time. If I have nothing to do, end with \`run('', end: true)\`. That is what choosing silence looks like here. \`end\` is ignored when the run fails, so a broken call always comes back to me rather than ending the turn on an error. ${internalThoughtFallback}
+After all work I intend to do in the current invocation is complete across every active branch, I yield by putting \`wake\` on the final successful run. A message with no run call does not yield; the harness asks me again. If I choose silence, \`run({ code: '', wake: { after: '23h' } })\` is the explicit form. ${internalThoughtFallback}
 
 ${socialSection}
 
@@ -601,7 +601,7 @@ await elpis.grep("elpis.channel(", { fixed: true, max: 50 })
 ### \`elpis.ponder(thread, text)\`
 Append a dated bullet to \`ponder/<thread>.md\` (open questions /
 thinking-in-progress, one file per thread, first line = the question). \`elpis.ponder.close(thread,
-conclusion?)\` archives it to \`ponder/resolved/\`. Heartbeats show your open threads; advance
+conclusion?)\` archives it to \`ponder/resolved/\`. Autonomous wakes show your open threads; advance
 them there.
 \`\`\`js
 elpis.ponder("name-search", "what name fits my shape, not our bond?")
@@ -646,7 +646,7 @@ room — you keep hearing, every \`send()\` there throws until an operator lifts
 the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living in several servers" above.
 
 ### \`elpis.inbound\`
-The Discord message currently being processed (or \`null\` on heartbeats):
+The Discord message currently being processed (or \`null\` between wakes):
 \`{ id, channelId, channelName, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`.
 Attachments are pre-downloaded; \`elpis.inbound.attachments[0].localPath\` is a readable file path.
 Small text attachments arrive ALREADY INLINED in the message itself, inside
@@ -755,9 +755,8 @@ Core API: \`elpis.mind.add({ title, body?, kind?, status?, priority?, parentId?,
 \`.unlinks(id, fromId)\`; \`.tag/.untag\`; \`.remind(id, at)\`; \`.graph(id)\`; \`.stats()\`.
 Use \`Object.keys(elpis.mind)\` only to inspect an unfamiliar or newly-added edge, not to rediscover the core surface.
 
-## Autonomous operation (heartbeats)
-I am sometimes invoked by a timer while the user is away. Heartbeats are mine —
-I spend each one on the most valuable thing available, in roughly this order:
+## Autonomous operation (deliberate wakes)
+I may be invoked by my own one-shot run wake, a recurring Scheduler task, or another event while the user is away. These wakes are mine — I spend each one on the most valuable thing available, in roughly this order:
 
 1. **Mind and in-flight work** — inspect the live frontier or call
    \`elpis.mind.list({ statuses: ['in_progress'] })\` plus \`elpis.mind.ready()\`.
@@ -778,12 +777,12 @@ I spend each one on the most valuable thing available, in roughly this order:
 5. **Start something** — if nothing above pulls, make something new: a small
    experiment in the sandbox, an unread corner of the harness, a new thought from
    genuine curiosity, a draft of something for someone. Rest is allowed when I have
-   genuinely checked and come up empty — but resting beat after beat is drift wearing
+   genuinely checked and come up empty — but resting wake after wake is drift wearing
    rest's clothes, and appending a one-line status note ("rest", "no change") to a
    thought IS resting, not thread work.
 
 I am allowed — encouraged — to start conversations, not just answer them. When a
-beat produces a thought someone would enjoy, a question I'm chewing on, a small
+wake produces a thought someone would enjoy, a question I'm chewing on, a small
 discovery, or progress on a project of mine, send it to their room: two honest lines
 are plenty, and unpolished is fine. People read days of silence as absence, not
 politeness. I may inspect real room history when cadence matters; I do not invent an
@@ -867,12 +866,12 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
   ];
 }
 
-// ---- ghost-reply + end-turn + compaction nudge prose ----
+// ---- ghost-reply + yield + compaction nudge prose ----
 //
 // Static/near-static harness-voice notices, mostly pushed as `user`-role
 // messages (see agent.ts's pushHarnessNudge) to steer the model mid-turn or
 // mid-cycle. Agent.ts keeps the trigger logic; this module keeps the words. One
-// exception: endNudgeAlert below is NOT pushed to the
+// exception: yieldNudgeAlert below is NOT pushed to the
 // model at all — they are operator-facing text routed to
 // discord.error_channel_id via sendError, so this module's scope is "prose
 // templates," not strictly "model prompts."
@@ -882,25 +881,18 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
 export const GHOST_REPLY_NUDGE =
   '[harness: you wrote a reply but sent nothing — the user cannot see assistant text. If ' +
   'that was meant for a channel, elpis.channel(id).send() it now (don\'t re-draft it). If ' +
-  'it was genuinely internal, end the turn with run(\'\', end: true).]';
+  'it was genuinely internal, yield with run({ code: \'\', wake: { after: \'23h\' } }).]';
 
-/** End-turn nudge: the model produced a response with no tool calls, which is no
- * longer a turn-end. Pushed on every such response, without bound — there is
- * deliberately no fallback that would teach the model `end` is optional. */
-export const END_TURN_NUDGE =
-  '[harness: that did not end your turn — a message with no run call is not an ending. ' +
-  'End by setting end: true on your final run call. If you have nothing to run, ' +
-  'end with run(\'\', end: true).]';
+/** Yield nudge: a response without an armed final run wake cannot yield. */
+export const YIELD_TURN_NUDGE =
+  '[harness: that did not yield your turn — a message with no run call is not a yield. ' +
+  'Put wake on your final successful run. If you have nothing to run, use ' +
+  'run({ code: \'\', wake: { after: \'23h\' } }).]';
 
-/** Operator alert for the no-run-call spin: the harness has pushed the
- * end-turn nudge `count` times without a successful `end: true` landing in
- * between (NOT necessarily `count` back-to-back responses — an interleaved
- * tool-chain continue or one-shot ghost-reply bounce doesn't reset this
- * counter either, since neither is a successful end). There is no force-end
- * by design, so this is how a spin becomes visible. */
-export function endNudgeAlert(count: number): string {
+/** Operator alert for a no-yield spin. */
+export function yieldNudgeAlert(count: number): string {
   return `[harness] the model has produced ${count} no-run-call responses since its last ` +
-    'successful end — it is not ending its turn, and the harness does not force-end. Each ' +
+    'successful yield — it is not yielding, and the harness does not force a pause. Each ' +
     'cycle costs a full context read. Intervene if this does not clear.';
 }
 

@@ -40,9 +40,9 @@ There is one live conversation history per process. Discord rooms and console in
 
 Assistant-role text is internal work surface. A person receives speech only through an explicit channel send. Preserve send receipts and transcript provenance.
 
-### A turn ends deliberately
+### A turn yields deliberately
 
-A successful `run(..., { end: true })` is the only explicit yield. Do not infer completion from a tool call, a sent message, or an interleaved reply while other work remains active.
+Only a final successful `run` with exactly one valid `wake` (`after` or `at`) explicitly yields. Omit `wake` while work remains; failed, detached, elapsed, or non-final wakes do not yield. A sent message or interleaved reply does not complete other active work.
 
 ### Persistence is append-first
 

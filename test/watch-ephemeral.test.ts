@@ -10,9 +10,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { buildTestAgent, EMPTY_END } from './helpers.js';
+import { buildTestAgent, EMPTY_WAKE } from './helpers.js';
 
-/** Returns the `run('', end: true)` turn-end idiom every call. It has to be a
+/** Returns the shared empty-run one-shot wake every call. It has to be a
  * real terminating run call: since a bare no-tool-call reply is
  * nudged instead of ending the turn, so the old `{ content: 'nice frames' }`
  * stub generated forever and the second generation clobbered `lastMessages`
@@ -25,7 +25,7 @@ function oneShotLLM(): LLM & { calls: number; lastMessages: unknown[] } {
     complete(messages: unknown[]): Promise<CompleteResult> {
       holder.calls++;
       holder.lastMessages = messages.map((m) => JSON.parse(JSON.stringify(m)));
-      return Promise.resolve(EMPTY_END as unknown as CompleteResult);
+      return Promise.resolve(EMPTY_WAKE as unknown as CompleteResult);
     },
     summarize(): Promise<string> { return Promise.resolve('SUMMARY'); },
   }) as LLM & { calls: number; lastMessages: unknown[] };

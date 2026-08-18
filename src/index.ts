@@ -8,6 +8,8 @@ import { fetchContextWindow, createLLM, createLlmRoleClients, type LLM, type Llm
 import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
 import { MemoryConsolidator, effectiveMemoryLimits } from './store/memory-consolidator.js';
 import { createSandbox } from './sandbox/index.js';
+import { createSandboxManager, type SandboxManager } from './sandbox/manager.js';
+import { createSandboxRegistry } from './sandbox/registry.js';
 import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
@@ -16,7 +18,7 @@ import { replayIdentityForConfig } from './llm/provenance.js';
 import { Agent, computeEffectiveTrigger, type InboundMessage } from './agent.js';
 import { createDiscord } from './discord/discord.js';
 import { createEmoteRegistry } from './discord/emotes.js';
-import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID } from './types.js';
+import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID, type SandboxDeps } from './types.js';
 import { createBgRegistry } from './sandbox/bg.js';
 import { createSshRegistry } from './sandbox/ssh.js';
 import { createRunLogger, runScope } from './sandbox/globals.js';
@@ -176,10 +178,12 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     ? createEmoteRegistry({ log: config.logger, keyframes: config.discord.emoteKeyframes })
     : undefined;
   let mind!: MindService;
+  let sandboxManager!: SandboxManager;
   const scheduler = new Scheduler({
     db,
     logger: config.logger,
     onTaskWake: (task) => {
+      if (agent.notifyRunWake(task)) return;
       mind?.onScheduledTaskWake(task);
       agent.enqueue({
         id: `schedule-${task.id}-${Date.now()}`,
@@ -197,7 +201,11 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
       });
     },
   });
-  mind = new MindService({ db, scheduler, logger: config.logger, onChanged: () => hub?.mindChanged() });
+  mind = new MindService({
+    db, scheduler, logger: config.logger,
+    onChanged: () => hub?.mindChanged(),
+    onItemStateChanged: (id, status, archived) => sandboxManager?.handleMindStateChange(id, status, archived),
+  });
  // Fleet registry: spawn/manage detached sub-agent runners. `notify` mirrors
  // the bgRegistry.onAbandoned closure below — `agent` isn't assigned until
  // after sandbox construction, but this closure only runs later (a runner
@@ -252,7 +260,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
       return () => {};
     },
   });
-  const sandbox = (adapters.createSandbox ?? createSandbox)({
+  const sandboxDeps: SandboxDeps = {
     config,
     replayIdentity: modules.isActive('motor') ? replayIdentityForConfig(configForLlmRole(config, 'motor')) : null,
     memory,
@@ -294,9 +302,9 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // transcript). The frame-building lives on the Agent (enqueueWatch).
     watch: (paths: string[], note: string) => agent.enqueueWatch(paths, note),
     completeStandalone: (messages, opts) => {
-      const motor = llms.motor;
-      if (!motor?.completeStandalone) throw new Error('configured motor role has no isolated standalone completion path');
-      return motor.completeStandalone(messages, opts);
+      const classifier = llms.classifier;
+      if (!classifier.completeStandalone) throw new Error('configured classifier role has no isolated standalone completion path');
+      return classifier.completeStandalone(messages, opts);
     },
  // Persistent task scheduler exposed to schedule/unschedule/tasks globals.
     scheduler,
@@ -305,6 +313,16 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // Killswitch self-mute: the sandbox can only ever mute itself —
  // moderateChannel's actor is hardcoded 'self' here, never 'operator'.
     moderate: (channelId: string, reason?: string) => agent.moderateChannel(channelId, 'mute', 'self', reason),
+  };
+  const sandboxRegistry = createSandboxRegistry({
+    db,
+    aliases: { dataDirectory: config.paths.dataDirectory, logger: config.logger },
+  });
+  sandboxManager = createSandboxManager({
+    deps: sandboxDeps,
+    registry: sandboxRegistry,
+    logger: config.logger,
+    create: adapters.createSandbox ?? createSandbox,
   });
 
   llms = createLlmRoleClients(config, {
@@ -367,7 +385,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
 
   const agent = new Agent({
     config,
-    sandbox,
+    sandbox: sandboxManager,
     memory,
     mind,
     extensionPrompt: extensions.prompt,
@@ -379,6 +397,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     compactor,
     density,
     transcript,
+    scheduler,
     initialMessages,
     channels,
     mutes,
@@ -486,9 +505,9 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     await consoleServer.start();
   }
 
- // Once Discord is wired up, start the autonomous heartbeat schedule so the
- // agent can wake and explore on its own even without human input.
-  agent.startHeartbeat();
+ // Autonomous one-shot wakes are armed explicitly by run.wake and recurring
+ // work remains Scheduler-owned. Legacy heartbeat config is accepted for
+ // rollback compatibility but no fixed heartbeat timer is started.
 
  // Recover any fleet runners left live/dead from a prior boot (probe pids →
  // reconnect-and-replay OR file-replay-then-mark-dead). Absent when the fleet
@@ -553,6 +572,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     log(`received ${sig} — flushing transcripts and shutting down`);
     try { consoleServer?.stop(); } catch { /* non-fatal */ }
     try { fleet?.dispose(); } catch { /* non-fatal */ }
+    try { sandboxManager.dispose(); } catch { /* non-fatal */ }
     try { sshRegistry.dispose(); } catch { /* non-fatal */ }
     try { usageTracker?.stop(); } catch { /* non-fatal */ }
     try {

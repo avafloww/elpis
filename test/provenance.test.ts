@@ -33,12 +33,25 @@ test('endpointAt preserves configured API base paths', () => {
   assert.equal(canonicalEndpoint(new URL('/x?q=1#x', `https://${'u'}:${'p'}@a.test`).href), 'https://a.test/x');
 });
 
-test('provenance is excluded from every provider request surface', () => {
-  const assistant: ChatMessage = { role: 'assistant', content: 'ok' }; stampGeneration(assistant, provenance());
-  const messages: ChatMessage[] = [{ role: 'system', content: 's' }, assistant];
-  assert.doesNotMatch(JSON.stringify(toApiMessage(assistant)), /provenance|private\.example/);
-  assert.doesNotMatch(JSON.stringify(toResponsesInput(prepareForApi(messages))), /provenance|private\.example/);
-  assert.doesNotMatch(JSON.stringify(translate(messages)), /provenance|private\.example/);
+test('provenance and run attribution are excluded from every provider request surface', () => {
+  const assistant: ChatMessage = {
+    role: 'assistant', content: '',
+    tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'run', arguments: '{"code":"1"}' } }],
+  };
+  stampGeneration(assistant, provenance());
+  const tool: ChatMessage = {
+    role: 'tool', tool_call_id: 'call-1', content: '[run ok]\n1',
+    run: {
+      toolContractVersion: TOOL_CONTRACT_VERSION, ok: true,
+      execution: { kind: 'persistent', alias: 'harness-private-alias', mindId: 7, executorId: 'private-executor', generation: 2, runId: 'private-run' },
+      wake: { kind: 'after', state: 'armed', requestedAt: 1, targetAt: 2, taskId: 3 },
+    },
+  };
+  const messages: ChatMessage[] = [{ role: 'system', content: 's' }, assistant, tool];
+  const forbidden = /provenance|private\.example|harness-private-alias|private-executor|private-run|toolContractVersion/;
+  assert.doesNotMatch(JSON.stringify(toApiMessage(tool)), forbidden);
+  assert.doesNotMatch(JSON.stringify(toResponsesInput(prepareForApi(messages))), forbidden);
+  assert.doesNotMatch(JSON.stringify(translate(messages)), forbidden);
 });
 
 test('provenance survives transcript restoration', () => {

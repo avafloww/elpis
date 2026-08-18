@@ -78,7 +78,7 @@ function buildAgent(): AgentHarness {
   const transcript = createTranscriptStore(tmpDir);
   agent = new Agent({
     config,
-    sandbox,
+    sandbox: { run: ({ code }) => sandbox.run(code) },
     memory,
     llm,
     tracker,

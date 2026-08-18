@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { readUnseenChangelogs, formatChangelogNotice, markChangelogsSeen } from '../src/store/changelog.js';
-import { buildTestAgent, EMPTY_END } from './helpers.js';
+import { buildTestAgent, EMPTY_WAKE } from './helpers.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 
@@ -99,7 +99,7 @@ test('changelog: onDelivered fires when the notice enters history, not at enqueu
     runTool: {} as unknown as LLM['runTool'],
     complete(): Promise<CompleteResult> {
       queueMicrotask(signalDone);
-      return Promise.resolve(EMPTY_END);
+      return Promise.resolve(EMPTY_WAKE);
     },
     summarize: () => Promise.resolve('SUMMARY'),
   } as LLM;

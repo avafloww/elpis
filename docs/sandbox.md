@@ -84,9 +84,9 @@ The runtime prompt is the canonical exhaustive API reference presented to the in
 
 A `run` result is internal. The inhabitant speaks to people only by calling `elpis.channel(target).send(...)`. This preserves routing and send receipts.
 
-## Turn ending
+## Turn yielding
 
-`run` accepts an `end` flag at dispatch. A successful run with `end: true` yields the outer turn. Failures never end it. Do not set the flag while another branch of work remains active.
+`run` accepts an optional exact sandbox alias and one wake: `{ after: "5m" }` or `{ at: "<future ISO-8601 with timezone>" }`. Only a final successful, non-detached run with a valid future wake under 24 hours yields. `after` starts after code completes; `at` keeps wall time and continues if it elapses during execution. Omit `wake` while another branch remains active.
 
 ## Background work
 

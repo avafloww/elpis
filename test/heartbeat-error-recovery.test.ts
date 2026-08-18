@@ -18,7 +18,7 @@ import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { NonRetriableError } from '../src/llm/llm.js';
 import { buildTestAgent, makeConfig } from './helpers.js';
 
-const EMPTY_END: CompleteResult = {
+const EMPTY_WAKE: CompleteResult = {
   message: { role: 'assistant', content: '' }, stripped: false,
   usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
 };
@@ -55,7 +55,7 @@ test('heartbeat: a non-retriable LLM error on a beat does not kill the scheduler
         threw = true;
         return Promise.reject(new NonRetriableError(new Error('400 Extra inputs are not permitted')));
       }
-      return Promise.resolve(EMPTY_END);
+      return Promise.resolve(EMPTY_WAKE);
     },
     summarize: () => Promise.resolve('SUMMARY'),
   } as LLM;
@@ -105,7 +105,7 @@ test('heartbeat: a beat that completes normally still reschedules (no regression
     client: {} as unknown as LLM['client'],
     model: 'test',
     runTool: {} as unknown as LLM['runTool'],
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY'),
   } as LLM;
 

@@ -35,7 +35,7 @@ test('translate: tool_calls → tool_use, tool result → user tool_result', () 
   const msgs: ChatMessage[] = [
     sys(),
     { role: 'user', content: 'do it' },
-    { role: 'assistant', content: 'ok', tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","end":true}' } }] },
+    { role: 'assistant', content: 'ok', tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"23h"}}' } }] },
     { role: 'tool', tool_call_id: 'tc1', content: '[run ok] 2' },
   ];
   const { wire } = translate(msgs);
@@ -44,7 +44,7 @@ test('translate: tool_calls → tool_use, tool result → user tool_result', () 
   assert.equal(wire[1].role, 'assistant');
   const toolUse = wire[1].content.find((b) => b.type === 'tool_use') as { type: 'tool_use'; name: string; input: unknown };
   assert.equal(toolUse.name, 'run');
-  assert.deepEqual(toolUse.input, { code: '1+1', end: true }); // parsed object, not a string
+  assert.deepEqual(toolUse.input, { code: '1+1', wake: { after: '23h' } }); // parsed object, not a string
   assert.equal(wire[2].role, 'user');
   const toolResult = wire[2].content[0] as { type: string; tool_use_id: string; content: string };
   assert.equal(toolResult.type, 'tool_result');

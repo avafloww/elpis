@@ -24,7 +24,7 @@ import {
   type EmoteOrStickerRef,
 } from '../src/discord/emotes.js';
 import { noopLogger } from '../src/lib/log.js';
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 import { createContextTracker } from '../src/llm/context-tracker.js';
 import type { Agent } from '../src/agent.js';
 import type { LLM } from '../src/llm/llm.js';
@@ -291,7 +291,7 @@ test('agent: transcript persist strips base64 contentParts (persistable), in-mem
   fs.writeFileSync(png, TINY_PNG);
   const stubLLM = {
     client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY '.padEnd(300, 'z')), // clears the quality-gate floor
   } as LLM;
   const { agent, tmpDir } = buildTestAgent({ llm: stubLLM, tmpPrefix: 'emotes-persist-' });
@@ -337,7 +337,7 @@ test('agent: compaction-apply re-arms the emote seen-set', async () => {
   let resets = 0;
   const stubLLM = {
     client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY '.padEnd(300, 'z')), // clears the quality-gate floor
   } as LLM;
   const { agent } = buildTestAgent({

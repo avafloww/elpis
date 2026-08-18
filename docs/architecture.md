@@ -109,7 +109,7 @@ Opaque state is replayed only across an exact trusted provenance match. It is wo
 
 ## Turn completion
 
-A turn yields only after a successful `run` call with `end: true`. Sending a message does not itself end a turn. Tool errors do not end it. An interleaved reply does not end other active work.
+A turn yields only when the final successful, non-detached `run` durably arms a valid one-shot wake. Sending a message does not yield. Tool errors, elapsed absolute targets, and pre-arm preemption continue the turn. An interleaved reply does not complete other active work.
 
 This explicit boundary lets the agent send progress, continue dependent tool work, and choose when it is actually done.
 

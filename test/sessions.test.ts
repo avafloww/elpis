@@ -193,6 +193,26 @@ test('sessions: channel stamp + sends round-trip (V1 whitelist, review N6)', () 
   assert.deepEqual(loaded!.messages[1].sends, [{ channel: '12345', text: 'delivered' }], 'sends restored');
 });
 
+test('sessions: run execution and wake metadata round-trip', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  const tool: ChatMessage = {
+    role: 'tool', tool_call_id: 'run-1', content: '[run ok]',
+    run: {
+      toolContractVersion: 'elpis-run-v3', ok: true,
+      execution: {
+        kind: 'persistent', lifecycle: 'ready', alias: 'quietly-crimson-ibis', mindId: 12,
+        executorId: 'executor-1', generation: 2, runId: 'executor-1:g2:r4', statusReminder: true,
+      },
+      wake: { kind: 'after', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 9 },
+    },
+  };
+  store.append('main', tool);
+  const loaded = loadMostRecentForChannel(root, 'main');
+  assert.ok(loaded);
+  assert.deepEqual(loaded!.messages[0].run, tool.run);
+});
+
 test('sessions: rotate with sentinel writes an empty newest file (clear honored)', () => {
   const root = tmpRoot();
   const store = createTranscriptStore(root);

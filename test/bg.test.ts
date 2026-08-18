@@ -367,7 +367,7 @@ test('bg.rearm safely chunks dates beyond Node timer maximum', async () => {
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { buildTestAgent } from './helpers.js';
 
-const EMPTY_END: CompleteResult = {
+const EMPTY_WAKE: CompleteResult = {
   message: { role: 'assistant', content: '' }, stripped: false,
   usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
 };
@@ -395,7 +395,7 @@ function scriptedLLM(responses: CompleteResult[]): LLM & { onCall: ((n: number) 
 
 test('A5: notifyFutureSettled enqueues [bg <id> settled] into the one history', () => {
   const { agent } = buildTestAgent({
-    llm: scriptedLLM([EMPTY_END]),
+    llm: scriptedLLM([EMPTY_WAKE]),
     config: { sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 100, previewMaxBytes: 2048, logMaxBytes: 2048 }, heartbeat: { intervalMs: 0, maxIntervalMs: 0, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tmpPrefix: 'harness-a5-',
   });
@@ -408,7 +408,7 @@ test('A5: notifyFutureSettled enqueues [bg <id> settled] into the one history', 
 
 test('A5: notifyFutureSettled renders post-detach sends into the notice', () => {
   const { agent } = buildTestAgent({
-    llm: scriptedLLM([EMPTY_END]),
+    llm: scriptedLLM([EMPTY_WAKE]),
     config: { sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 100, previewMaxBytes: 2048, logMaxBytes: 2048 }, heartbeat: { intervalMs: 0, maxIntervalMs: 0, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 } },
     tmpPrefix: 'harness-a5-sends-',
   });

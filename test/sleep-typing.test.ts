@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSandbox } from '../src/sandbox/index.js';
 import type { SandboxDeps } from '../src/types.js';
-import { buildTestAgent, makeStubLLM, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeStubLLM, EMPTY_WAKE } from './helpers.js';
 
 /** A sandbox wired with just enough config/memory/logbuf to run, plus the two
  * sleep hooks under test. Centralizes the `as unknown as SandboxDeps` cast
@@ -132,7 +132,7 @@ test('sleep typing: depth resets at turn start, so a stranded sleep cannot suppr
     complete: () => {
       depthAtCall = (agent as any).sleepDepth;
       signalCalled();
-      return Promise.resolve(EMPTY_END);
+      return Promise.resolve(EMPTY_WAKE);
     },
   });
   const { agent, cleanup } = buildTestAgent({ llm });

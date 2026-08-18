@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { LLM } from '../src/llm/llm.js';
-import { buildTestAgent, EMPTY_END } from './helpers.js';
+import { buildTestAgent, EMPTY_WAKE } from './helpers.js';
 
 test('notifyFleet: enqueues a [fleet ...] notice with fleet provenance', () => {
   const { agent } = buildTestAgent({ tmpPrefix: 'harness-fleet-notices-' });
@@ -18,7 +18,7 @@ test('notifyFleet: enqueues a [fleet ...] notice with fleet provenance', () => {
 
 test('notifyFleet: the notice drains into the one history with fleet provenance', async () => {
   const llm = {
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY'),
   } as unknown as LLM;
   const { agent } = buildTestAgent({

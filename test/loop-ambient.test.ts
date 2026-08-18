@@ -18,7 +18,7 @@ import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import type { GuildConfig } from '../src/config.js';
 import type { MuteStore, MuteRow, MuteType } from '../src/store/mutes.js';
 import { loadMostRecentMain } from '../src/store/sessions.js';
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 import { mindAddAmbientNotice } from '../src/discord/discord.js';
 
 // Two guilds: 'alpha' has a direct, a social, and a quiet channel; 'beta' has
@@ -98,7 +98,7 @@ function ambientMsg(channelId: string, id: string, extra: Partial<InboundMessage
 }
 
 test('ambient: an ambient enqueue does not wake the parked loop', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
 
   void agent.loop();
@@ -115,7 +115,7 @@ test('ambient: an ambient enqueue does not wake the parked loop', async () => {
 });
 
 test('ambient: a /mind add notice waits without waking, then rides the next room-context tick', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -143,7 +143,7 @@ test('ambient: a /mind add notice waits without waking, then rides the next room
 
 test('ambient: tick enqueues one room-context notice and one turn drains all ambient', async () => {
 
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent, tmpDir } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -210,14 +210,14 @@ test('ambient: receive-only tick hard-denies room and console sends while preser
   const notice = users.at(-1)?.content ?? '';
   assert.match(notice, /receive-only observation turn/);
 
-  release.resolve(EMPTY_END);
+  release.resolve(EMPTY_WAKE);
   await microtask();
   await microtask();
   agent.stop();
 });
 
 test('send-denied Discord inbound replaces the reply reminder with a configuration note', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const lockedGuild: GuildConfig = {
     ...FIXTURE_GUILDS[0],
     channelAllowSend: { '1002': false },
@@ -243,12 +243,12 @@ test('send-denied Discord inbound replaces the reply reminder with a configurati
 
 test('ambient: ghost-nudge does not fire on an ambient-only turn', async () => {
  // Two scripted responses because a bare no-tool-call reply is no longer a
- // turn-end : it earns the END_TURN_NUDGE, so a second completion
+ // turn-end : it earns the YIELD_TURN_NUDGE, so a second completion
  // always follows. What must NOT appear is the ghost bounce.
   const llm = scriptedLLM([{
     message: { role: 'assistant', content: 'a private thought, never sent anywhere' },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
-  }, EMPTY_END]);
+  }, EMPTY_WAKE]);
   const { agent, sent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 2) signal(); };
@@ -269,7 +269,7 @@ test('ambient: ghost-nudge does not fire on an ambient-only turn', async () => {
 });
 
 test('ambient: tick with only quiet-tier/muted ambient does not fire', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const mutes = stubMutes({ '2001': 'mute' });
   const { agent } = buildAgent(llm, { mutes });
 
@@ -294,7 +294,7 @@ test('ambient: one qualifying room lets a muted room\'s message ride along in th
  // labels every pending message — including a muted room's, which would not
  // have counted on its own. A muted channel is read-but-not-spoken-in; the
  // killswitch blocks the SEND, not the read.
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const mutes = stubMutes({ '2001': 'mute' });
   const { agent } = buildAgent(llm, { mutes });
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
@@ -320,7 +320,7 @@ test('ambient: one qualifying room lets a muted room\'s message ride along in th
 });
 
 test('ambient: mention (wakeClass wake) still wakes immediately', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -335,7 +335,7 @@ test('ambient: mention (wakeClass wake) still wakes immediately', async () => {
 });
 
 test('ambient: a thread\'s ambient chat resolves to its parent for the tick', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -359,7 +359,7 @@ test('ambient: a thread\'s ambient chat resolves to its parent for the tick', as
 });
 
 test('ambient: notice wording for three or more rooms is a comma list with a final "and"', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -388,7 +388,7 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
  // Regression for a concrete repro (traced in review, not hypothetical):
  // 1. A wake message starts a real-user turn.
  // 2. Ambient chat is enqueued while that turn's LLM call is in flight.
- // 3. The model ends the turn naturally (no tool calls) -> hasNewInput=false.
+ // 3. The model yields with its scripted wake -> hasNewInput=false.
  // 4. The loop reaches the top, drains the queued ambient into history AND
  // ambientUnseen, then parks on the (unbounded) wake promise.
  // 5. clearContext fires — wiping history.
@@ -396,7 +396,7 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
  // find the stale entry still pending and enqueue a room-context notice
  // describing history that no longer exists, waking a turn out of thin
  // air on an empty mind.
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => {
@@ -411,7 +411,7 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
   void agent.loop();
   agent.enqueue(ambientMsg('1001', 'w-1', { wakeClass: 'wake', content: 'a real user message' }));
   await done;
- // Let the natural turn-end run to completion: drains the queued ambient
+ // Let the wake-yielding run complete: it drains the queued ambient
  // into history + ambientUnseen, then parks without a second LLM call.
   await microtask();
   await microtask();
@@ -441,7 +441,7 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
 // social nudge, memory writes — all silently stopped) behind a log line that
 // read like nothing was wrong. The guard now counts only wake-class pending.
 test('heartbeat: ambient-only backlog does not skip the beat; a wake-class message still does', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   agent.primeForHeartbeatTest();
 

@@ -534,6 +534,34 @@
 
   function bytes(s) { return s ? new TextEncoder().encode(s).length : 0; }
 
+  function runAttribution(run) {
+    if (!run) return '';
+    const parts = [];
+    const execution = run.execution;
+    if (execution) {
+      parts.push(execution.alias || execution.kind);
+      if (execution.lifecycle) parts.push(execution.lifecycle);
+      if (execution.mindId != null) parts.push(`Mind #${execution.mindId}`);
+      if (execution.mindTitle) parts.push(execution.mindTitle);
+      if (execution.mindStatus) parts.push(execution.mindStatus);
+      if (execution.runId) parts.push(execution.runId);
+      else if (execution.generation != null) parts.push(`g${execution.generation}`);
+      if (execution.resetGeneration != null) parts.push(`reset g${execution.resetGeneration}`);
+      if (execution.coldStart) parts.push('cold');
+      if (execution.retiring) parts.push('retiring');
+      if (execution.statusReminder) parts.push('status reminder');
+      if (execution.classifierReminder) parts.push('classifier reminder');
+    }
+    if (run.detached) parts.push(`detached${run.bgId ? ` ${run.bgId}` : ''}`);
+    if (run.wake) {
+      let wake = `wake ${run.wake.state} · ${run.wake.kind}`;
+      if (run.wake.targetAt) wake += ` → ${new Date(run.wake.targetAt).toISOString()}`;
+      if (run.wake.taskId != null) wake += ` · task #${run.wake.taskId}`;
+      parts.push(wake);
+    }
+    return parts.join(' · ');
+  }
+
   function resultBlock(entry) {
     const content = entry.content || '';
     const ok = !/\[run FAILED\]/.test(content);
@@ -559,11 +587,15 @@
     ]));
     preview.appendChild(el('pre', { class: 'ep-result-pre value', text: valueText }));
     body.appendChild(preview);
+    const attribution = runAttribution(entry.run);
+    if (attribution) {
+      body.insertBefore(el('div', { class: 'ep-result-sub', text: attribution }), body.firstChild);
+    }
     const details = el('details', { class: 'ep-result ep-tool-fold' });
     details.open = state.toolsOpen;
     details.appendChild(el('summary', { class: 'ep-result-head' }, [
       el('span', { class: 'ep-result-status ' + (ok ? 'ok' : 'err'), text: ok ? '● ok' : '● err' }),
-      el('span', { class: 'ep-result-sub', text: 'RunResult · ' + (entry.tool_call_id || '').slice(0, 12) }),
+      el('span', { class: 'ep-result-sub', text: 'RunResult · ' + (entry.tool_call_id || '').slice(0, 12) + (attribution ? ' · ' + attribution : '') }),
       el('span', { class: 'ep-spacer' }),
       el('span', { class: 'ep-result-sub', text: `preview ${bytes(valueText)}B · logs ${bytes(consoleText)}B · ~${tokEst(content)} tok` }),
       el('span', { class: 'ep-fold-caret', text: '▾' }),
@@ -650,13 +682,13 @@
         el('div', { class: 'ep-divider-line' }),
       ]);
     }
-    if (entry.kind === 'endnudge') {
+    if (entry.kind === 'yieldnudge') {
       const t = entry.ts ? hm(entry.ts) : '';
-      return el('div', { class: 'ep-divider endnudge', 'data-room': ch, 'data-global': 'true' }, [
+      return el('div', { class: 'ep-divider yieldnudge', 'data-room': ch, 'data-global': 'true' }, [
         el('div', { class: 'ep-divider-line' }),
         el('div', { class: 'ep-divider-pill' }, [
-          el('span', { class: 'ep-endnudge-mark', text: '⚠' }),
-          ` end-turn nudge — ${entry.count || 0} since last end, no run call ${t}`,
+          el('span', { class: 'ep-yieldnudge-mark', text: '⚠' }),
+          ` yield nudge — ${entry.count || 0} since last yield, no run call ${t}`,
         ]),
         el('div', { class: 'ep-divider-line' }),
       ]);

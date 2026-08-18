@@ -255,3 +255,24 @@ test('delete removes a task', () => {
   scheduler.stop();
   db.close();
 });
+
+test('started scheduler re-arms its single timer when an earlier task is created', async () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  const fired: string[] = [];
+  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: (task) => fired.push(task.name) });
+  try {
+    scheduler.create({ name: 'later', payload: 'later', nextRunAt: Date.now() + 500 });
+    scheduler.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    scheduler.create({ name: 'earlier', payload: 'earlier', nextRunAt: Date.now() + 40 });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.deepEqual(fired, ['earlier']);
+    assert.ok(scheduler.getByName('earlier')?.doneAt);
+    assert.equal(scheduler.getByName('later')?.doneAt, null);
+  } finally {
+    scheduler.stop();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

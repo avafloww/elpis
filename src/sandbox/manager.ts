@@ -150,7 +150,7 @@ export class SandboxManager {
     }));
     const result = await sandbox.run(code);
     const remind = await classification;
-    result.execution = { kind: 'ephemeral', classifierReminder: remind };
+    result.execution = { kind: 'ephemeral', lifecycle: 'ephemeral', classifierReminder: remind };
     return result;
   }
 
@@ -178,6 +178,7 @@ export class SandboxManager {
       coldStart,
       retiring: run.sandbox.retireRequested,
       statusReminder,
+      lifecycle: 'busy',
     };
 
     let result: RunResult;
@@ -187,6 +188,7 @@ export class SandboxManager {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
+      execution.lifecycle = 'reset';
       return {
         ok: false,
         failureKind: 'runtime',
@@ -200,6 +202,7 @@ export class SandboxManager {
         const reset = this.registry.failRunAndReset(alias, run.runId);
         this.contexts.delete(alias);
         execution.resetGeneration = reset.generation;
+        execution.lifecycle = 'reset';
         result.ok = false;
         result.detached = false;
         result.failureKind = 'runtime';
@@ -207,6 +210,7 @@ export class SandboxManager {
         delete result.note;
       } else {
         this.registry.detachRun(alias, run.runId);
+        execution.lifecycle = 'detached';
         this.detached.set(result.bgId, { alias, runId: run.runId });
         const early = this.earlySettlements.get(result.bgId);
         if (early) {
@@ -218,8 +222,10 @@ export class SandboxManager {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
+      execution.lifecycle = 'reset';
     } else {
       this.registry.finishRun(alias, run.runId);
+      execution.lifecycle = 'ready';
     }
 
     result.execution = execution;

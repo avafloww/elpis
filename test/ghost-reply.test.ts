@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hasReplySubstance, type Agent } from '../src/agent.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 
 function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; onCall: ((n: number) => void) | null } {
   let i = 0;
@@ -83,8 +83,8 @@ test('ghost reply triggers exactly one bounce, then a send clears the flag', asy
     { message: { role: 'assistant', content: '', tool_calls: [{
         id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
- // After the tool result, the model ends with the run('', end: true) idiom.
-    EMPTY_END,
+ // After the tool result, the model yields with the shared empty-run wake.
+    EMPTY_WAKE,
   ]);
   const { agent, sent } = buildAgentWith(llm);
 
@@ -119,7 +119,7 @@ test('short content with zero sends DOES trigger a bounce (no length gate)', asy
     { message: { role: 'assistant', content: '', tool_calls: [{
         id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent, sent } = buildAgentWith(llm);
   const { promise: thirdCall, resolve: signalThird } = Promise.withResolvers<void>();
@@ -157,7 +157,7 @@ test('a tool-chain ghost bounces (user → tool_call → result → content-only
         id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"it is 2\\")"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
  // Natural end after the send.
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent, sent } = buildAgentWith(llm);
 
@@ -190,13 +190,13 @@ test('artifact-only content (stray tokens, punctuation) does not bounce', async 
  // Observed live: the model emitted literally "</invoke>" (a stray tool-call
  // artifact) as content with zero sends — not a reply the user lost, so
  // bouncing it is noise. Same for ".." / "." tics.
- // The artifact response no longer ends the turn , so it earns the
- // END_TURN_NUDGE and a second completion follows; EMPTY_END closes the turn.
+ // The artifact response no longer yields the turn , so it earns the
+ // YIELD_TURN_NUDGE and a second completion follows; EMPTY_WAKE closes the turn.
  // That nudge is the ONLY extra user message — the ghost bounce must not fire.
   const llm = scriptedLLM([
     { message: { role: 'assistant', content: '</invoke>' }, stripped: false,
       usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent } = buildAgentWith(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
@@ -209,7 +209,7 @@ test('artifact-only content (stray tokens, punctuation) does not bounce', async 
   await microtask();
 
   const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
-  assert.equal(users.length, 2, 'the real message + the end-turn nudge only');
+  assert.equal(users.length, 2, 'the real message + the yield nudge only');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'artifact-only content must not trigger a bounce');
   agent.stop();
@@ -217,12 +217,12 @@ test('artifact-only content (stray tokens, punctuation) does not bounce', async 
 
 test('heartbeat turns never trigger a bounce', async () => {
   const ghost = 'x'.repeat(300);
- // The content-only reply is no longer an ending, so the end-turn nudge lands
- // and EMPTY_END closes the turn. That nudge is the only extra user message.
+ // The content-only reply is no longer an ending, so the yield nudge lands
+ // and EMPTY_WAKE closes the turn. That nudge is the only extra user message.
   const llm = scriptedLLM([
     { message: { role: 'assistant', content: ghost }, stripped: false,
       usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent } = buildAgentWith(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
@@ -234,7 +234,7 @@ test('heartbeat turns never trigger a bounce', async () => {
   await microtask();
 
   const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
-  assert.equal(users.length, 2, 'the heartbeat message + the end-turn nudge only');
+  assert.equal(users.length, 2, 'the heartbeat message + the yield nudge only');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'no bounce on a heartbeat turn even with long content');
   agent.stop();
@@ -254,11 +254,11 @@ test('send in a tool-chain iteration + brief closing content → NO bounce (turn
         id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"here you go\\")"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } },
  // Turn 1b: a brief note-to-self as content — previously false-bounced. It
- // is no longer an ending either, so the end-turn nudge follows it and
- // EMPTY_END closes the turn.
+ // is no longer an ending either, so the yield nudge follows it and
+ // EMPTY_WAKE closes the turn.
     { message: { role: 'assistant', content: 'sent; watching for her reply.' }, stripped: false,
       usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent, sent } = buildAgentWith(llm);
   const { promise: thirdCall, resolve: signalThird } = Promise.withResolvers<void>();
@@ -272,7 +272,7 @@ test('send in a tool-chain iteration + brief closing content → NO bounce (turn
   await microtask();
 
   const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
-  assert.equal(users.length, 2, 'the real message + the end-turn nudge — a send earlier in the turn must suppress the bounce for closing content');
+  assert.equal(users.length, 2, 'the real message + the yield nudge — a send earlier in the turn must suppress the bounce for closing content');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')));
   assert.equal(sent.length, 1);
   assert.equal(sent[0].text, 'here you go');
@@ -280,7 +280,7 @@ test('send in a tool-chain iteration + brief closing content → NO bounce (turn
 });
 
 test('D1: a real wake into a self-muted channel is annotated so the model knows a reply will not send', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildTestAgent({
     llm,
     agentDeps: {
@@ -302,7 +302,7 @@ test('D1: a real wake into a self-muted channel is annotated so the model knows 
 });
 
 test('D1: an unmuted channel wake is NOT annotated', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgentWith(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => { if (n === 1) signal(); };
@@ -326,7 +326,7 @@ test('D1: a ghost reply in a muted channel does NOT bounce (a reply legitimately
   const llm = scriptedLLM([
     { message: { role: 'assistant', content: ghost }, stripped: false,
       usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent } = buildTestAgent({
     llm,
@@ -357,7 +357,7 @@ test('a ghost reply in a config-denied channel does NOT bounce', async () => {
   const llm = scriptedLLM([
     { message: { role: 'assistant', content: ghost }, stripped: false,
       usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const guilds = [{
     id: 'g1', slug: 'home', slashCommands: false, quietHours: null, timezone: null,
@@ -400,7 +400,7 @@ test('D1: a ghost reply on a THREAD whose PARENT is muted does NOT bounce (threa
   const llm = scriptedLLM([
     { message: { role: 'assistant', content: ghost }, stripped: false,
       usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent } = buildTestAgent({
     llm,
@@ -438,7 +438,7 @@ test('a send during the turn prevents the bounce', async () => {
     { message: { role: 'assistant', content: ghost, tool_calls: [{
         id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"sent\\")"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
-    EMPTY_END,
+    EMPTY_WAKE,
   ]);
   const { agent, sent } = buildAgentWith(llm);
   const { promise: secondCall, resolve: signalSecond } = Promise.withResolvers<void>();

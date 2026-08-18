@@ -7,6 +7,9 @@ import type { MindService } from './store/mind.js';
 import type { ReplayIdentity } from './llm/provenance.js';
 import type { ExtensionRegistry } from './extensions.js';
 import type { BuiltinModuleRegistry, RuntimeProfile } from './builtin-modules.js';
+import type { SandboxExecutionMetadata } from './sandbox/metadata.js';
+
+export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
 /** Reserved provenance label for heartbeat / harness-internal traffic. In the monocontext model,
  * (monocontext) this is no longer a separate context — it is a transcript
@@ -27,23 +30,6 @@ export interface OutboundAttachment {
   path: string;
   /** Optional display filename. Defaults to the basename of path. */
   name?: string;
-}
-
-export interface SandboxExecutionMetadata {
-  kind: 'ephemeral' | 'persistent';
-  alias?: string;
-  mindId?: number;
-  mindTitle?: string;
-  mindStatus?: string;
-  latestComment?: string | null;
-  executorId?: string;
-  generation?: number;
-  resetGeneration?: number;
-  runId?: string;
-  coldStart?: boolean;
-  retiring?: boolean;
-  statusReminder?: boolean;
-  classifierReminder?: boolean;
 }
 
 export interface RunResult {

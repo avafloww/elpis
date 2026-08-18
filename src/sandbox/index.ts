@@ -78,7 +78,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
     if (substance === '') {
       return {
         ok: true,
-        preview: 'empty program — nothing executed (previous _ preserved). This is the way to end a turn without doing anything: run(\'\', end: true).',
+        preview: 'empty program — nothing executed (previous _ preserved). Add wake to this run only when you deliberately mean to yield.',
         logs: '',
       };
     }

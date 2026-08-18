@@ -43,10 +43,10 @@ export interface SchedulerDeps {
 
 export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
-  private stopped = false;
+  private running = false;
 
  // Prepared once at construction (channels.ts:61-68 idiom) rather than
- // per-call — listDue alone would otherwise recompile every 60s poll.
+ // per-call — listDue would otherwise recompile on every timer wake.
   private readonly stmtInsert;
   private readonly stmtGetById;
   private readonly stmtGetByName;
@@ -80,31 +80,40 @@ export class Scheduler {
   }
 
   start(): void {
-    if (this.stopped) return;
-    this.stop();
-    this.schedulePoll(5_000);
+    this.running = true;
+    this.rearm();
   }
 
   stop(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
+    this.running = false;
+    this.clearTimer();
   }
 
-  private schedulePoll(delayMs: number): void {
-    if (this.stopped) return;
-    this.timer = setTimeout(() => { void this.poll(); }, delayMs);
+  private clearTimer(): void {
+    if (!this.timer) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  private rearm(): void {
+    if (!this.running) return;
+    this.clearTimer();
+    const now = Date.now();
+    let nextAt = now + 60_000;
+    for (const task of this.list()) {
+      if (task.doneAt != null) continue;
+      const effectiveAt = Math.max(task.nextRunAt, task.snoozeUntil ?? task.nextRunAt);
+      if (effectiveAt < nextAt) nextAt = effectiveAt;
+    }
+    const delayMs = Math.max(0, Math.min(60_000, nextAt - now));
+    this.timer = setTimeout(() => { this.timer = null; this.poll(); }, delayMs);
   }
 
   poll(): void {
-    if (this.stopped) return;
     const now = Date.now();
     const due = this.listDue(now);
-    for (const task of due) {
-      this.handleDue(task, now);
-    }
-    this.schedulePoll(60_000);
+    for (const task of due) this.handleDue(task, now);
+    this.rearm();
   }
 
   private handleDue(task: ScheduledTask, now: number): void {
@@ -165,6 +174,7 @@ export class Scheduler {
     );
     const result = fromRow(raw);
     this.deps.logger.info(`[scheduler] created task | id=${result.id} name=${result.name}`);
+    this.rearm();
     return result;
   }
 
@@ -193,12 +203,16 @@ export class Scheduler {
     const raw = this.deps.db.prepare(`
       UPDATE scheduled_tasks SET ${sets.join(', ')} WHERE id = ? RETURNING *
     `).get(...values);
-    return raw ? fromRow(raw) : null;
+    const result = raw ? fromRow(raw) : null;
+    this.rearm();
+    return result;
   }
 
   delete(id: number): boolean {
     const info = this.stmtDelete.run(id);
-    return (info.changes ?? 0) > 0;
+    const changed = (info.changes ?? 0) > 0;
+    if (changed) this.rearm();
+    return changed;
   }
 
   getById(id: number): ScheduledTask | null {
@@ -228,7 +242,9 @@ export class Scheduler {
 
   markDone(id: number, at = Date.now()): ScheduledTask | null {
     const raw = this.stmtMarkDone.get(at, id);
-    return raw ? fromRow(raw) : null;
+    const result = raw ? fromRow(raw) : null;
+    this.rearm();
+    return result;
   }
 
   markDoneByName(name: string, at = Date.now()): boolean {
@@ -251,7 +267,9 @@ export class Scheduler {
 
   snooze(id: number, until: number): ScheduledTask | null {
     const raw = this.stmtSnooze.get(until, id);
-    return raw ? fromRow(raw) : null;
+    const result = raw ? fromRow(raw) : null;
+    this.rearm();
+    return result;
   }
 
   snoozeByName(name: string, until: number): boolean {

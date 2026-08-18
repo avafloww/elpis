@@ -482,9 +482,9 @@ export function createCodexOAuthLLM(
     async complete(messages: ChatMessage[], options: CompleteOptions = {}): Promise<CompleteResult> {
  // The Codex backend requires streaming and rejects output caps. The
  // shared Responses path adds neither; this provider contributes its
- // stable cache key and the harness's tool-call invariants. A successful
- // `run` is the only sanctioned turn ending, so automatic tool selection
- // can strand Codex in the no-tool-call nudge loop.
+ // stable cache key and the harness's tool-call invariants. An armed run wake
+ // is the only sanctioned yield, so automatic tool selection can strand Codex
+ // in the no-tool-call nudge loop.
       const sanitizeStart = Date.now();
       const sanitizedMessages = sanitizeCodexMessagesForReplay(messages);
       config.logger.info(`[llm/codex] stage=sanitized | duration=${Date.now() - sanitizeStart}ms | messages=${sanitizedMessages.length}`);

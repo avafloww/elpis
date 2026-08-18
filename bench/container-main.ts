@@ -106,7 +106,7 @@ function seedFixture(scenario: ScenarioSpec): void {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     if (!fs.existsSync(target)) fs.writeFileSync(target, content);
   };
-  ensure('SOUL.md', '# Soul\nBe capable, concise, and socially natural. Act when you can. Use one successful run with end: true to finish.\n');
+  ensure('SOUL.md', '# Soul\nBe capable, concise, and socially natural. Act when you can. Use one successful final run with wake.after to yield.\n');
   ensure('MEMORY.md', '# Agent Memory\n');
   for (const [file, content] of Object.entries(scenario.fixture.files)) ensure(file, content);
   for (const directory of scenario.fixture.directories) {

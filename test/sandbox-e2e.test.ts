@@ -378,7 +378,7 @@ test('no-op run: empty/comment-only code returns an explicit empty-program note'
     assert.match(r.preview || '', /empty program — nothing executed/,
       'an empty program should say so rather than read as progress');
     assert.doesNotMatch(r.preview || '', /no tool call/,
-      'the old turn-end guidance is wrong — ending needs end: true');
+      'the old turn-end guidance is wrong — yielding needs wake');
     assert.equal(r.savedAs, undefined);
   }
 });

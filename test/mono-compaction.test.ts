@@ -13,17 +13,17 @@ import {
 } from '../src/agent.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { createContextTracker } from '../src/llm/context-tracker.js';
-// EMPTY_END is the shared `run('', end: true)` turn-end idiom (helpers.ts). The
+// EMPTY_WAKE is the shared empty-run one-shot wake idiom (helpers.ts). The
 // local bare-assistant constant that used to live here stopped ending turns on
 // — a response with no run call is no longer an ending — so the loop
 // never reached the wake-gate and `onIdle` never fired.
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 
-/** LLM whose complete() always ends the turn; summarize() is controllable. */
+/** LLM whose complete() always yields with a wake; summarize() is controllable. */
 function stubLLM(summarize: () => Promise<string>): LLM {
   return {
     client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize,
   } as LLM;
 }

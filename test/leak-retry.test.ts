@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 
 /** A scripted LLM: returns each queued response in order, one per complete()
  * call. Exposes `calls` so tests can assert how many generations ran.
@@ -77,10 +77,10 @@ function microtask(): Promise<void> {
 }
 
 test('loop: a fully-leaked response is retried, then the clean reply enters history', async () => {
- // The clean reply is the chosen-silence idiom `run('', end: true)` — the only
+ // The clean reply is the shared empty-run one-shot wake — the only
  // sanctioned turn-end since , and it writes no content so the
  // ghost-nudge doesn't fire either. This test is about leak retry.
-  const llm = scriptedLLM([leaked(), EMPTY_END]);
+  const llm = scriptedLLM([leaked(), EMPTY_WAKE]);
   const { agent, sent } = buildAgentWith(llm);
 
  // Signal on the 2nd complete return — that's the clean generation —

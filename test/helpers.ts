@@ -32,14 +32,12 @@ import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
 import { noopLogger } from '../src/lib/log.js';
 
-/** A minimal turn-end completion. Since 2026-07-24 the only sanctioned ending is
- * a successful run carrying `end: true`, so this is `run('', end: true)` — the
- * chosen-silence idiom — not a bare no-tool-call message. */
-export const EMPTY_END: CompleteResult = {
+/** A minimal explicit yield: successful empty code plus a long one-shot wake. */
+export const EMPTY_WAKE: CompleteResult = {
   message: {
     role: 'assistant',
     content: '',
-    tool_calls: [{ id: 'tc-end', type: 'function', function: { name: 'run', arguments: '{"code":"","end":true}' } }],
+    tool_calls: [{ id: 'tc-end', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"23h"}}' } }],
   },
   stripped: false,
   usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
@@ -130,7 +128,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-/** An LLM stub that ends the turn immediately (`complete` → EMPTY_END) and
+/** An LLM stub that yields immediately (`complete` → EMPTY_WAKE) and
  * summarizes to 'SUMMARY'. Override `complete`/`summarize` for scripted
  * behavior. */
 export function makeStubLLM(overrides: Partial<LLM> = {}): LLM {
@@ -138,7 +136,7 @@ export function makeStubLLM(overrides: Partial<LLM> = {}): LLM {
     client: {} as unknown as LLM['client'],
     model: 'test',
     runTool: {} as unknown as LLM['runTool'],
-    complete: () => Promise.resolve(EMPTY_END),
+    complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY'),
     ...overrides,
   } as LLM;
@@ -211,7 +209,10 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const agentRef: { current: Agent | null } = { current: null };
   const inboundRef: { current: InboundMessage | null } = { current: null };
   const db = openDatabase(tmpDir);
-  const scheduler = new Scheduler({ db, logger: config.logger, onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db, logger: config.logger,
+    onTaskWake: (task) => { agentRef.current?.notifyRunWake(task); },
+  });
   const mind = new MindService({ db, scheduler, logger: config.logger });
   const depsCtx: DepsContext = { tmpDir, config, memory, llm, agentRef, db, scheduler, mind };
   let channelsRef: ReturnType<typeof createChannelDirectory> | null = null;
@@ -240,7 +241,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   channelsRef = channels;
   const agent = new Agent({
     config,
-    sandbox,
+    sandbox: { run: ({ code }) => sandbox.run(code) },
     memory,
     mind,
     llm,
@@ -248,6 +249,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     compactor,
     density,
     transcript,
+    scheduler,
     channels,
     setCurrentInbound: (msg) => { inboundRef.current = msg; },
     send: async (channelId, text) => { sent.push({ channelId, text }); },

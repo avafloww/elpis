@@ -63,10 +63,8 @@ test('reasoning strip: thinking_blocks are preserved even past the strip boundar
 });
 
 // ---------- endsTurn ----------
-// endsTurn(messages, i) mirrors src/agent.ts's own `endedByFlag = wantsEnd &&
-// result.ok` rule exactly: only the LAST tool call in a response can end a
-// turn, and only when its matching `tool` result (found by tool_call_id)
-// shows the run actually succeeded ([run ok…], not [run FAILED]).
+// Current boundaries come from durable v3 wake metadata. The legacy cases below
+// preserve the old final-call `end && ok` rule for restored transcripts.
 
 test('endsTurn: a bare assistant message ends a turn (legacy shape)', () => {
   const messages: ChatMessage[] = [mk('assistant', 'done')];
@@ -116,8 +114,7 @@ test('endsTurn: unparseable arguments do not end a turn', () => {
 });
 
 test('endsTurn: only the LAST tool call in a multi-call response decides', () => {
- // The loop's endedByFlag is a plain per-call ASSIGNMENT, not an OR: a later
- // call in the same response always overrides an earlier one's end:true.
+ // Legacy history used the final call only: a later sibling overrides an earlier end:true.
   const messages: ChatMessage[] = [
     mk('assistant', '', { tool_calls: [
       { id: 'a', type: 'function', function: { name: 'run', arguments: '{"code":"","end":true}' } },
@@ -160,4 +157,57 @@ test('reasoning is NOT stripped ahead of a FAILED end:true call — the model ne
   ];
   const out = prepareForApi(messages);
   assert.equal(out[0].reasoning_content, 'WHY IT FAILED', 'no turn-end found in this array — reasoning survives the diet');
+});
+
+test('endsTurn: durable v3 wake states are boundaries; elapsed/rejected/pre-arm states are not', () => {
+  for (const state of ['armed', 'preempted', 'fired'] as const) {
+    const messages: ChatMessage[] = [
+      mk('assistant', '', { tool_calls: [{ id: 'v3', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"1h"}}' } }] }),
+      mk('tool', '[run ok]', {
+        tool_call_id: 'v3',
+        run: { toolContractVersion: 'elpis-run-v3', ok: true, wake: { kind: 'after', state, requestedAt: 1, targetAt: 2, taskId: 3 } },
+      }),
+    ];
+    assert.equal(endsTurn(messages, 0), true, `${state} preserves the completed yield boundary`);
+  }
+  for (const state of ['elapsed', 'rejected'] as const) {
+    const messages: ChatMessage[] = [
+      mk('assistant', '', { tool_calls: [{ id: 'v3', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"1h"}}' } }] }),
+      mk('tool', '[run ok]', {
+        tool_call_id: 'v3',
+        run: { toolContractVersion: 'elpis-run-v3', ok: true, wake: { kind: 'after', state, requestedAt: 1, targetAt: 2 } },
+      }),
+    ];
+    assert.equal(endsTurn(messages, 0), false, `${state} continues the open chain`);
+  }
+  const preArm: ChatMessage[] = [
+    mk('assistant', '', { tool_calls: [{ id: 'v3', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"1h"}}' } }] }),
+    mk('tool', '[run ok]', {
+      tool_call_id: 'v3',
+      run: { toolContractVersion: 'elpis-run-v3', ok: true, wake: { kind: 'after', state: 'preempted', requestedAt: 1, targetAt: 2 } },
+    }),
+  ];
+  assert.equal(endsTurn(preArm, 0), false, 'preemption before durable task creation is not a yield');
+});
+
+test('reasoning strip recognizes a successful v3 wake boundary', () => {
+  const messages: ChatMessage[] = [
+    mk('assistant', '', {
+      reasoning_content: 'OLD',
+      tool_calls: [{ id: 'v3', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"1h"}}' } }],
+    }),
+    mk('tool', '[run ok]', {
+      tool_call_id: 'v3',
+      run: { toolContractVersion: 'elpis-run-v3', ok: true, wake: { kind: 'after', state: 'armed', requestedAt: 1, targetAt: 2, taskId: 3 } },
+    }),
+    mk('user', 'next'),
+    mk('assistant', '', {
+      reasoning_content: 'NEW',
+      tool_calls: [{ id: 'open', type: 'function', function: { name: 'run', arguments: '{"code":"1+1"}' } }],
+    }),
+    mk('tool', '[run ok]\n2', { tool_call_id: 'open' }),
+  ];
+  const out = prepareForApi(messages);
+  assert.equal(out[0].reasoning_content, undefined);
+  assert.equal(out[3].reasoning_content, 'NEW');
 });

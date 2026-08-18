@@ -41,6 +41,7 @@ import {
 } from './oauth/openai-codex.js';
 import { createCodexOAuthLLM, fetchCodexContextWindow } from './codex-client.js';
 import { endpointAt, stampGeneration, type ApiSurface, type GenerationProvenance, type ProviderType } from './provenance.js';
+import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import { isPolicyDenial } from './policy-flight-recorder.js';
 
 export type { GenerationProvenance } from './provenance.js';
@@ -119,6 +120,9 @@ export interface ChatMessage {
   /** Out-of-band generation attribution. Persisted for forensic/data use, but
  * deliberately ignored by every provider request translator. */
   provenance?: GenerationProvenance;
+  /** Harness-only run execution/wake attribution for tool results. Persisted and
+   * restored for replay/console/diagnostics; provider translators ignore it. */
+  run?: RunMessageMetadata;
 }
 
 export interface LLMUsage {
@@ -316,47 +320,35 @@ function toolStatusLine(content: string): string {
   return lines.find((l) => l.startsWith('[run')) ?? lines[0] ?? '';
 }
 
-/** True when `messages[i]` is an assistant message that ENDED a turn. Two shapes
- * are recognised, mirroring `src/agent.ts`'s own `endedByFlag` rule exactly (not
- * a looser approximation of it):
- * - a message with no tool calls at all (the natural turn-end,
- * still present in older history and in restored transcripts), or
- * - a message whose LAST tool call (the loop's `endedByFlag = wantsEnd &&
- * result.ok` is a plain assignment per call, so only the final call in a
- * multi-tool-call response decides) carries `end: true` in its arguments
- * AND that call's matching `tool` result (found by `tool_call_id` among the
- * messages that follow, up to the next assistant message) shows the run
- * actually SUCCEEDED (`formatRunResult`'s `[run ok…]` status line, via
- * `toolStatusLine`). A failed run's `end: true` does NOT end the turn — the
- * failure has to come back to the model, so its reasoning must survive the
- * strip — and a result that isn't in the array yet (an interrupted chain)
- * can't have succeeded, so it doesn't end the turn either.
- * The reasoning-strip boundary keys off this rather than off "has no
- * tool_calls", which silently degenerates to -1 once every turn ends with a
- * run call. */
+/** True when `messages[i]` is an assistant message that yielded a turn.
+ * Current transcripts record the final run's wake lifecycle on its matching
+ * tool result. A wake that reached a durable Scheduler task remains a boundary
+ * after it fires or is preempted by external input. Rejected, elapsed, and
+ * pre-arm preemptions are continuations. Natural no-tool endings and successful
+ * legacy `end: true` calls remain recognised only for restored old history. */
 export function endsTurn(messages: ChatMessage[], i: number): boolean {
-  const m = messages[i];
-  if (m.role !== 'assistant') return false;
-  if (!m.tool_calls || m.tool_calls.length === 0) return true;
-  const last = m.tool_calls[m.tool_calls.length - 1];
-  let wantsEnd: boolean;
-  try {
- // `.end` access on a non-object parse (e.g. arguments === 'null') throws a
- // TypeError here too — caught the same as a JSON syntax error, since neither
- // shape can carry a meaningful `end: true` request.
-    wantsEnd = JSON.parse(last.function.arguments || '{}').end === true;
-  } catch {
-    wantsEnd = false;
-  }
-  if (!wantsEnd) return false;
+  const message = messages[i];
+  if (message.role !== 'assistant') return false;
+  if (!message.tool_calls || message.tool_calls.length === 0) return true;
+  const last = message.tool_calls[message.tool_calls.length - 1];
   let toolResult: ChatMessage | undefined;
   for (let j = i + 1; j < messages.length; j++) {
-    const mm = messages[j];
-    if (mm.role === 'assistant') break; // next turn started; this chain is exhausted
-    if (mm.role === 'tool' && mm.tool_call_id === last.id) { toolResult = mm; break; }
+    const candidate = messages[j];
+    if (candidate.role === 'assistant') break;
+    if (candidate.role === 'tool' && candidate.tool_call_id === last.id) { toolResult = candidate; break; }
   }
   if (!toolResult) return false;
-  return toolStatusLine(toolResult.content ?? '').startsWith('[run ok');
+  const wake = toolResult.run?.wake;
+  if (toolResult.run?.ok && wake?.taskId !== undefined &&
+      (wake.state === 'armed' || wake.state === 'preempted' || wake.state === 'fired')) return true;
+
+  let legacyEnd = false;
+  try {
+    const parsed = JSON.parse(last.function.arguments || '{}') as unknown;
+    legacyEnd = !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+      (parsed as Record<string, unknown>).end === true;
+  } catch { /* malformed legacy call */ }
+  return legacyEnd && toolStatusLine(toolResult.content ?? '').startsWith('[run ok');
 }
 
 /** Strip completed-turn reasoning from the provider projection. Returns a new
@@ -385,9 +377,20 @@ export interface RunTool {
       type: 'object';
       properties: {
         code: { type: 'string'; description: string };
-        end: { type: 'boolean'; description: string };
+        sandbox: { type: 'string'; description: string };
+        wake: {
+          type: 'object';
+          description: string;
+          properties: {
+            after: { anyOf: [{ type: 'string' }, { type: 'number' }]; description: string };
+            at: { type: 'string'; description: string };
+          };
+          oneOf: [{ required: ['after'] }, { required: ['at'] }];
+          additionalProperties: false;
+        };
       };
       required: ['code'];
+      additionalProperties: false;
     };
   };
 }
@@ -397,23 +400,33 @@ export const RUN_TOOL: RunTool = {
   function: {
     name: 'run',
     description:
-      'Run JavaScript in your persistent sandbox. Returns a capped preview of the ' +
-      'completion value (full value saved as `_`), plus console output. Use this for ' +
-      'everything: computation, shelling out via elpis.sh()/elpis.sudo(), and updating memory via elpis.remember().',
+      'Run JavaScript in a fresh core sandbox by default, or in an exact named persistent sandbox. ' +
+      'Returns a capped preview plus console output. Omit wake to continue this model turn; a valid ' +
+      'wake on a successful run yields and schedules one self-wake.',
     parameters: {
       type: 'object',
       properties: {
         code: { type: 'string', description: 'JavaScript to execute.' },
-        end: {
-          type: 'boolean',
-          description:
-            'Set true on your final run call to end the turn. This is the ONLY way to end a ' +
-            'turn — if the run succeeds the harness stops here instead of asking you for ' +
-            'another message. Ignored when the run fails, so an error always comes back to ' +
-            'you. To end without doing anything, use empty code: run(\'\', end: true).',
+        sandbox: {
+          type: 'string',
+          description: 'Exact alias of a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.',
+        },
+        wake: {
+          type: 'object',
+          description: 'Yield after success and wake once later. Exactly one of after or at; delay must be positive and less than 24h.',
+          properties: {
+            after: {
+              anyOf: [{ type: 'string' }, { type: 'number' }],
+              description: 'Delay after successful code completion, e.g. "5m" or milliseconds.',
+            },
+            at: { type: 'string', description: 'Exact future ISO-8601 timestamp with timezone.' },
+          },
+          oneOf: [{ required: ['after'] }, { required: ['at'] }],
+          additionalProperties: false,
         },
       },
       required: ['code'],
+      additionalProperties: false,
     },
   },
 };
@@ -612,7 +625,7 @@ export interface SanitizedResponse {
  * (no usable content and no surviving tool calls), the loop retries the
  * generation rather than pushing it into history — a fully-stripped response
  * has no `tool_calls`, so under the `end` contract (agent.ts) it would only
- * earn an END_TURN_NUDGE round trip; regenerating instead saves that wasted
+ * earn an YIELD_TURN_NUDGE round trip; regenerating instead saves that wasted
  * turn. */
   stripped: boolean;
 }

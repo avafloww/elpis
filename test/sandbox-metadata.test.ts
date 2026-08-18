@@ -1,0 +1,39 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { parseRunMessageMetadata } from '../src/sandbox/metadata.js';
+
+test('run metadata parser restores bounded execution and wake attribution', () => {
+  const parsed = parseRunMessageMetadata({
+    toolContractVersion: 'elpis-run-v3', ok: true, detached: true, bgId: 'f1',
+    execution: {
+      kind: 'persistent', lifecycle: 'detached', alias: 'quietly-crimson-ibis', mindId: 42,
+      mindTitle: 'ship the thing', mindStatus: 'in_progress', latestComment: 'still working',
+      executorId: 'executor-1', generation: 3, resetGeneration: 4, runId: 'executor-1:g3:r8',
+      coldStart: true, retiring: false, statusReminder: true, classifierReminder: false,
+      ignored: 'drop me',
+    },
+    wake: { kind: 'after', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed' },
+    ignored: 'drop me',
+  });
+  assert.deepEqual(parsed, {
+    toolContractVersion: 'elpis-run-v3', ok: true, detached: true, bgId: 'f1',
+    execution: {
+      kind: 'persistent', lifecycle: 'detached', alias: 'quietly-crimson-ibis', mindId: 42,
+      mindTitle: 'ship the thing', mindStatus: 'in_progress', latestComment: 'still working',
+      executorId: 'executor-1', generation: 3, resetGeneration: 4, runId: 'executor-1:g3:r8',
+      coldStart: true, retiring: false, statusReminder: true, classifierReminder: false,
+    },
+    wake: { kind: 'after', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed' },
+  });
+});
+
+test('run metadata parser rejects envelopes and drops malformed nested fields', () => {
+  assert.equal(parseRunMessageMetadata(null), undefined);
+  assert.equal(parseRunMessageMetadata({ ok: true }), undefined);
+  assert.equal(parseRunMessageMetadata({ toolContractVersion: 'v3', ok: 'yes' }), undefined);
+  assert.deepEqual(parseRunMessageMetadata({
+    toolContractVersion: 'v3', ok: false,
+    execution: { kind: 'persistent', alias: 'x'.repeat(300), generation: 1.5 },
+    wake: { kind: 'after', state: 'armed', requestedAt: 1.5 },
+  }), { toolContractVersion: 'v3', ok: false, execution: { kind: 'persistent' } });
+});

@@ -260,12 +260,31 @@ test('serializeMessage: run calls stay action cards while think calls become CoT
   assert.equal(asst.reasoning_content, 'let me check\n\nconsider the edge');
   assert.deepEqual(asst.toolCalls, [{ id: 'call_1', code: '1+1' }]);
 
+  const run = {
+    toolContractVersion: 'elpis-run-v3', ok: true,
+    execution: { kind: 'persistent' as const, alias: 'quietly-crimson-ibis', mindId: 7, generation: 2, runId: 'exec-g2-r3' },
+    wake: { kind: 'after' as const, state: 'armed' as const, requestedAt: 1, targetAt: 2, taskId: 3 },
+  };
   const tool = serializeMessage({
-    role: 'tool', channel: 'c1', content: '[run ok]', tool_call_id: 'call_1',
+    role: 'tool', channel: 'c1', content: '[run ok]', tool_call_id: 'call_1', run,
     sends: [{ channel: 'agora', text: 'hi' }],
   }, 6, null);
   assert.equal(tool.kind, 'tool');
+  assert.deepEqual(tool.run, run);
   assert.deepEqual(tool.sends, [{ channel: 'agora', text: 'hi' }]);
+});
+
+test('client runAttribution renders bounded sandbox and wake lifecycle', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '../src/console/public/app.js'), 'utf8');
+  const body = src.slice(src.indexOf('function runAttribution'), src.indexOf('function resultBlock'));
+  const runAttribution = new Function(body + '\n return runAttribution;')() as (run: unknown) => string;
+  const text = runAttribution({
+    execution: { kind: 'persistent', lifecycle: 'ready', alias: 'quietly-crimson-ibis', mindId: 7, mindTitle: 'Wake contract', mindStatus: 'open', runId: 'exec-g2-r3', generation: 2, coldStart: true, retiring: true },
+    detached: true, bgId: 'bg-4',
+    wake: { kind: 'after', state: 'armed', targetAt: 2, taskId: 3 },
+  });
+  assert.equal(text, 'quietly-crimson-ibis · ready · Mind #7 · Wake contract · open · exec-g2-r3 · cold · retiring · detached bg-4 · wake armed · after → 1970-01-01T00:00:00.002Z · task #3');
 });
 
 test('ConsoleHub marks only paired think separators as hidden Thread results', async () => {
@@ -699,18 +718,18 @@ test('hub: cacheBusted appends a cachebust entry and broadcasts one message fram
   assert.ok(entry.ts && entry.ts > 0, 'stamped with a wall-clock time');
 });
 
-test('hub: endNudge appends an endnudge entry and broadcasts one message frame', async () => {
+test('hub: yieldNudge appends an yieldnudge entry and broadcasts one message frame', async () => {
   const hub = new ConsoleHub([]);
   const client = recordingClient();
   await hub.addClient(client);
   const before = client.byType('message').length;
 
-  hub.endNudge(3);
+  hub.yieldNudge(3);
 
   const frames = client.byType('message');
   assert.equal(frames.length, before + 1, 'exactly one message frame');
   const entry = frames[frames.length - 1].msg as StreamEntry;
-  assert.equal(entry.kind, 'endnudge');
+  assert.equal(entry.kind, 'yieldnudge');
   assert.equal(entry.count, 3);
   assert.equal(entry.role, 'system');
   assert.equal(entry.channel, 'internal');

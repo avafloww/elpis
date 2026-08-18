@@ -19,7 +19,7 @@ import { createDiscord } from '../src/discord/discord.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import type { GuildConfig } from '../src/config.js';
 import type { MuteStore, MuteRow, MuteType } from '../src/store/mutes.js';
-import { buildTestAgent, makeConfig, EMPTY_END } from './helpers.js';
+import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 
 // Both channels are 'social' tier: a plain human message with no mention/reply
 // classifies as 'ambient' there (wake.test.ts), which is the precondition for
@@ -109,7 +109,7 @@ async function flush(n = 8): Promise<void> {
 }
 
 test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social channel but a muted one never wakes', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const mutes = stubMutes({ '1003': 'mute' }); // '1003' muted; '1002' is not
   const { agent, tmpDir, config } = buildTestAgent({
     llm,
@@ -150,7 +150,7 @@ test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social cha
 });
 
 test('discord ingest: mention markup in the body is resolved to names before it reaches the agent', async () => {
-  const llm = scriptedLLM([EMPTY_END]);
+  const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent, tmpDir, config } = buildTestAgent({
     llm,
     config: { discord: { ...makeConfig().discord, guilds: [FIXTURE_GUILD], ambientTickMs: 0 } },
