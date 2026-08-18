@@ -228,8 +228,9 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
   void agent.loop();
   await settle();
   assert.equal(llm.calls, 2);
-  assert.match(String(llm.requests[0].at(-3)?.content), /^<mind-frontier>/, 'frontier sits before the whole current inbound batch');
-  assert.match(String(llm.requests[0].at(-2)?.content), /hi/, 'first inbound stays after the frontier');
+  assert.match(String(llm.requests[0].at(-4)?.content), /^<mind-frontier>/, 'frontier sits before the whole current inbound batch');
+  assert.match(String(llm.requests[0].at(-3)?.content), /^\[person-memory/, 'first-seen profile stays inside the current inbound batch');
+  assert.match(String(llm.requests[0].at(-2)?.content), /hi/, 'first inbound stays after its profile');
   assert.match(String(llm.requests[0].at(-1)?.content), /second message in the same inbound batch/, 'current conversation has maximum recency');
   assert.ok(llm.requests[1].every((m) => !String(m.content).startsWith('<mind-frontier>')), 'post-tool continuation omits the request-only card');
 

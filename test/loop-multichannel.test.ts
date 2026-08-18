@@ -114,7 +114,7 @@ test('mono: interleaved inbound from two channels drains into one history in FIF
   await microtask();
 
  // Both user messages are in the one history, in FIFO order.
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind === 'inbound');
   assert.ok(users[0].content.includes('hi from 1001'), 'A drained first');
   assert.ok(users[1].content.includes('hi from 1002'), 'B drained second into the same history');
  // Provenance stamps carry the originating channel.

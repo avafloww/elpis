@@ -8,7 +8,7 @@ const sys = (): ChatMessage => ({
   role: 'system',
   content: build({
     soul: 'SOUL_X', memory: 'MEM_X', now: 'NOW_X', harnessRoot: '/HR', dataDirectory: '/DD',
-    participants: [], peopleFiles: [], guildCount: 1,
+    guildCount: 1,
   }),
 });
 

@@ -8,8 +8,6 @@ const inputs = {
   now: 'NOW_MARKER_XYZ',
   harnessRoot: '/HR',
   dataDirectory: '/DD',
-  participants: [{ authorId: '1', author: 'Clover' }],
-  peopleFiles: [{ slug: 'clover', ids: ['1'], raw: 'CLOVER_FACTS_XYZ' }],
   guildCount: 1,
 };
 
@@ -25,10 +23,11 @@ test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   assert.ok(!segs[1].text.includes('SOUL_BODY_MARKER_XYZ'));
   assert.ok(segs[2].text.startsWith('## Your soul'));
 
- // Boundary views (memory/state/focus/people) live in the boundary tier.
+ // Boundary views (memory/state/focus) live in the boundary tier; person
+ // profiles are ordinary history messages and never enter the system string.
   assert.ok(segs[1].text.startsWith('## Current memory'));
   assert.ok(segs[1].text.includes('MEMORY_MARKER_XYZ'));
-  assert.ok(segs[1].text.includes('CLOVER_FACTS_XYZ'));
+  assert.ok(!full.includes('CLOVER_FACTS_XYZ'));
 
  // Stable tier carries the static bulk (tool docs) and no volatile content.
   assert.ok(segs[0].text.includes('## Output contract'));
@@ -40,7 +39,7 @@ test('segmentSystemPrompt: no content is lost (every non-marker line survives)',
   const full = build(inputs);
   const segs = segmentSystemPrompt(full);
  // Concatenating tiers reproduces every marker line (order differs — SOUL moved).
-  for (const marker of ['SOUL_BODY_MARKER_XYZ', 'MEMORY_MARKER_XYZ', 'NOW_MARKER_XYZ', 'CLOVER_FACTS_XYZ', '## Output contract', '## Your Environment']) {
+  for (const marker of ['SOUL_BODY_MARKER_XYZ', 'MEMORY_MARKER_XYZ', 'NOW_MARKER_XYZ', '## Output contract', '## Your Environment']) {
     assert.ok(segs.some((s) => s.text.includes(marker)), `missing: ${marker}`);
   }
 });

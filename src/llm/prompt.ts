@@ -1,28 +1,13 @@
-// prompt.ts — builds the system prompt (injects live SOUL.md + MEMORY.md +
-// participant-scoped people/ files).
-//
-// SOUL.md is re-read every turn (hot-reload: edits take effect without a
-// harness restart). MEMORY.md, NOW.md, and the people/ files are all
-// passed in from the agent's BOUNDARY VIEWS — snapshots refreshed only on
-// context clear / compaction. The people/ files for the current conversation's
-// participants are injected below MEMORY.md (E3 read half, ) — this is the
-// READ side of the per-person memory `elpis.memory.person` writes, matched by
-// frontmatter `ids:`.
+// prompt.ts — builds the system prompt and renders append-only person-memory
+// messages from boundary-cached people/ files.
 //
 // PREFIX-CACHE DISCIPLINE. This whole string is `messages[0]`; any byte that
-// changes between turns invalidates the provider's cached prefix for the ENTIRE
-// conversation, which is the single most expensive thing this file can do. So
-// every block here must be a pure function of inputs that only move at a
-// boundary. Two things were measured busting it and are now stable by
-// construction:
-// - the missing-people note keyed off the CURRENT speaker (flipped on every
-// alternation between speakers, and off again on every heartbeat) — it is
-// now derived from the participant SET, slug-sorted, so it moves only when
-// a genuinely new fileless participant appears;
-// - people/NOW read fresh per turn — now boundary views, so a people-memory
-// or focus write no longer rewrites the prefix mid-conversation.
-// SOUL.md stays hot-reloaded on purpose: it changes rarely enough that the bust
-// is worth the immediacy (an operator decision, see docs/context.md).
+// changes between turns invalidates the provider's cached prefix for the entire
+// conversation. MEMORY.md and NOW.md are boundary snapshots. Person profiles
+// never enter this string: the agent appends one ordinary history message when
+// an identity first appears, then refreshes only identities retained in the raw
+// tail after compaction. SOUL.md stays hot-reloaded on purpose because identity
+// edits are rare enough that immediacy is worth that deliberate cache bust.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -30,15 +15,15 @@ import { parseFrontmatter } from '../lib/frontmatter.js';
 import { slugify } from '../lib/slug.js';
 import type { BuiltinModuleId, BuiltinModuleRegistry, RuntimeProfile } from '../builtin-modules.js';
 
-/** A conversation participant, from an inbound Discord message envelope. */
-export interface Participant {
+/** An identity from a raw person-facing inbound envelope. */
+export interface PersonIdentity {
   authorId: string;
   author: string;
 }
 
 export interface PromptInputs {
   /** SOUL.md body (personality / identity / core directives) — the caller
- * strips the optional identity frontmatter first (src/store/soul.ts). */
+   * strips the optional identity frontmatter first (src/store/soul.ts). */
   soul: string;
   /** Raw MEMORY.md contents (durable facts the agent has written). */
   memory: string;
@@ -48,28 +33,20 @@ export interface PromptInputs {
   harnessRoot: string;
   /** Absolute path to the agent's DATA_DIRECTORY ("brain"). */
   dataDirectory: string;
-  /** Known participants of the current conversation (from inbound envelopes).
- * Their people/ files are injected. Empty (e.g. before the first authored
- * message of a boot) degrades to injecting every people/ file. */
-  participants?: Participant[];
-  /** The agent's cached people/ snapshot (`loadPeopleFiles`, refreshed at a
- * boundary). Omitted → no people section. Passed in rather than read here so
- * a mid-conversation write can't move `messages[0]`. */
-  peopleFiles?: PersonFile[];
   /** `fleet.efforts` — the reasoning-effort levels elpis.fleet.run() accepts
- * on this endpoint. Boot-constant, so it stays prefix-cache stable. Empty
- * (or omitted-as-empty) drops the `effort` opt from the fleet doc line. */
+   * on this endpoint. Boot-constant, so it stays prefix-cache stable. Empty
+   * (or omitted-as-empty) drops the `effort` opt from the fleet doc line. */
   fleetEfforts?: string[];
   /** `fleet.enabled` — false swaps the `elpis.fleet` doc section for a short
- * "not available, do the work yourself" note so the model doesn't reach for
- * sub-agents that don't exist. Boot-constant (config is read once at
- * startup), so prefix-cache stable. Omitted = enabled. */
+   * "not available, do the work yourself" note so the model doesn't reach for
+   * sub-agents that don't exist. Boot-constant (config is read once at
+   * startup), so prefix-cache stable. Omitted = enabled. */
   fleetEnabled?: boolean;
   /** Number of configured `discord.guilds` entries. Boot-constant (config is
- * read once at startup, not per-turn), so this is prefix-cache safe like
- * every other field here. Governs whether the "Living in several servers"
- * section claims plurality — with exactly one guild configured that claim
- * would be false. Omitted/0 degrades to the singular framing. */
+   * read once at startup, not per-turn), so this is prefix-cache safe like
+   * every other field here. Governs whether the "Living in several servers"
+   * section claims plurality — with exactly one guild configured that claim
+   * would be false. Omitted/0 degrades to the singular framing. */
   guildCount?: number;
   /** Boot-constant: when true, document and encourage the model-facing think tool. */
   externalThinking?: boolean;
@@ -81,22 +58,16 @@ export interface PromptInputs {
   profile?: RuntimeProfile;
 }
 
-/** Max total chars of people/ file content injected into one prompt. Bounds
- * prompt growth; newest-modified files win when the cap is hit. */
-const PEOPLE_CONTENT_CAP = 4000;
-
-/** One loaded `people/<slug>.md`. The agent caches an array of these as a
- * boundary view; nothing here is re-read per turn. */
+/** One loaded `people/<slug>.md`. The agent caches these at context boundaries
+ * and uses them for append-only person-memory messages, never `messages[0]`. */
 export interface PersonFile {
   slug: string;
   ids: string[];
   raw: string;
-  mtime: number;
 }
 
-/** Load every `people/*.md` under `dataDirectory`. Called at a boundary
- * (boot / clear / compaction), never per turn — see the prefix-cache note at
- * the top of this file. Missing directory = no files. */
+/** Load every `people/*.md` under `dataDirectory`. Called only at boot, clear,
+ * or compaction. Missing directory = no files. */
 export function loadPeopleFiles(dataDirectory: string): PersonFile[] {
   return readPeopleDir(path.join(dataDirectory, 'people'));
 }
@@ -109,103 +80,36 @@ function readPeopleDir(peopleDir: string): PersonFile[] {
     if (!name.endsWith('.md')) continue;
     const full = path.join(peopleDir, name);
     let raw: string;
-    let mtime: number;
     try {
       raw = fs.readFileSync(full, 'utf8');
-      mtime = fs.statSync(full).mtimeMs;
     } catch { continue; }
     const ids = parseFrontmatter(raw)?.frontmatter.ids;
     out.push({
       slug: name.replace(/\.md$/, ''),
       ids: Array.isArray(ids) ? ids : typeof ids === 'string' && ids ? [ids] : [],
       raw,
-      mtime,
     });
   }
   return out;
 }
 
-/** Max participants named in the missing-file note. Bounds a long-running
- * session's participant list from turning the note into a wall. */
-const PEOPLE_NOTE_MAX = 5;
+const PERSON_MEMORY_CONTENT_CAP = 4000;
 
-/** Build the "People here" injection block: the people/ files for the current
- * participants (matched by frontmatter `ids:` first, then slug==name), capped
- * at PEOPLE_CONTENT_CAP with newest-modified winning, plus a note naming the
- * participants who have no file yet. Returns '' when there is nothing to inject
- * (no matched files and no note).
- *
- * `files` is the agent's cached snapshot — this function does NO file IO, so
- * its output is a pure function of (snapshot, participant set) and moves only
- * at a boundary or when a genuinely new person speaks. The missing-file note
- * deliberately covers the whole participant SET rather than the current
- * speaker: keying it off the speaker made it flip on every alternation and
- * vanish on every heartbeat, rewriting the entire cached prefix each time.
- * Exported for tests. */
-export function buildPeopleSection(
-  files: PersonFile[],
-  participants: Participant[],
-): string {
-  const matchParticipant = (p: Participant): PersonFile | undefined =>
-    files.find((f) => f.ids.includes(`discord:${p.authorId}`)) ??
-    files.find((f) => f.slug === slugify(p.author));
-
- // Per-participant when we have participants; degrade to everyone otherwise
- // (heartbeats / reflection have no live inbound author, plan degrade).
-  let matched: PersonFile[];
-  if (participants.length > 0) {
-    const seen = new Set<string>();
-    matched = [];
-    for (const p of participants) {
-      const f = matchParticipant(p);
-      if (f && !seen.has(f.slug)) { seen.add(f.slug); matched.push(f); }
-    }
-  } else {
-    matched = files;
-  }
-
- // SELECTION is newest-modified first (freshest files win the char cap);
- // RENDER is slug-sorted so the emitted bytes don't depend on mtime ordering.
-  matched.sort((a, b) => b.mtime - a.mtime);
-  const selected: { file: PersonFile; block: string }[] = [];
-  let used = 0;
-  let omitted = 0;
-  for (const f of matched) {
-    const block = `--- people/${f.slug}.md ---\n${f.raw.trim()}`;
-    if (used + block.length > PEOPLE_CONTENT_CAP && selected.length > 0) { omitted++; continue; }
-    selected.push({ file: f, block });
-    used += block.length;
-  }
-  const blocks = selected
-    .sort((a, b) => a.file.slug.localeCompare(b.file.slug))
-    .map((s) => s.block);
-
- // Missing-file note: every participant with no matched file, slug-sorted so
- // the line is byte-stable until a genuinely new fileless person speaks.
-  const missing = [...new Set(
-    participants.filter((p) => !matchParticipant(p)).map((p) => slugify(p.author)),
-  )].sort();
-  let note = '';
-  if (missing.length > 0) {
-    const shown = missing.slice(0, PEOPLE_NOTE_MAX);
-    const more = missing.length - shown.length;
-    note = `(no people/ file yet for: ${shown.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`
-      + ` — elpis.memory.person('${shown[0]}', '...') to start one)`;
-  }
-
-  if (blocks.length === 0 && !note) return '';
-
-  const parts: string[] = [];
-  if (blocks.length > 0) {
-    parts.push(`<<<PEOPLE\n${blocks.join('\n\n')}\nPEOPLE>>>`);
-  }
-  if (omitted > 0) parts.push(`(${omitted} more people/ file${omitted === 1 ? '' : 's'} omitted to bound prompt size)`);
-  if (note) parts.push(note);
-  return parts.join('\n');
+/** Render the append-only profile message for one identity. ID matching wins;
+ * slug fallback preserves older files without frontmatter ids. */
+export function buildPersonMemoryContent(files: PersonFile[], person: PersonIdentity): string {
+  const slug = slugify(person.author);
+  const file = files.find((f) => f.ids.includes(`discord:${person.authorId}`))
+    ?? files.find((f) => f.slug === slug);
+  const content = file
+    ? `[person-memory — first appearance of ${person.author} in the current context]\n--- people/${file.slug}.md ---\n${file.raw.trim()}`
+    : `[person-memory — first appearance of ${person.author} in the current context]\n(no people/ file yet for ${slug} — use elpis.memory.person('${slug}', '...') to start one)`;
+  if (content.length <= PERSON_MEMORY_CONTENT_CAP) return content;
+  const suffix = '\n[person-memory truncated to bound context growth]';
+  return content.slice(0, PERSON_MEMORY_CONTENT_CAP - suffix.length) + suffix;
 }
 
 export function build(input: PromptInputs): string {
-  const people = buildPeopleSection(input.peopleFiles ?? [], input.participants ?? []);
   const efforts = input.fleetEfforts ?? [];
   const fleetEffortOpt = efforts.length ? `, \`effort\` (${efforts.map((e) => `'${e}'`).join('|')})` : '';
   const multiGuild = (input.guildCount ?? 0) > 1;
@@ -427,12 +331,12 @@ The "Current memory" section below is a snapshot from the last context boundary 
 \`elpis.remember()\` calls this arc are saved but won't appear there until then.
 \`elpis.memory.read()\` always returns the live file.
 
-The same is true of "Current focus" and "People here": all three are snapshots taken at the
-last boundary, not live reads. Your writes land on disk immediately
-and are never lost — they just don't reappear in this prompt until the next boundary. This
-is deliberate: everything above this line is one cached block, and rewriting any of it
-mid-conversation would re-bill the whole context. Read the live file when you need
-certainty (\`elpis.memory.read()\`, \`elpis.read('NOW.md')\`).
+The same is true of "Current focus": both are snapshots taken at the last boundary, not
+live reads. Your writes land on disk immediately and are never lost — they just don't
+reappear in this prompt until the next boundary. This is deliberate: everything above
+this line is one cached block, and rewriting any of it mid-conversation would re-bill the
+whole context. Read the live file when you need certainty (\`elpis.memory.read()\`,
+\`elpis.read('NOW.md')\`).
 
 When MEMORY.md accumulates duplicates or stale facts, I spend a heartbeat consolidating:
 \`elpis.memory.write()\` a cleaned version that merges duplicates, deletes superseded facts, and
@@ -440,9 +344,11 @@ groups related notes under headers. Consolidation is maintenance, not deletion �
 fact still true.
 
 Facts about a person go in their \`people/\` file via \`elpis.memory.person('name', '…')\` — who they
-are, preferences, boundaries, running context. The files for whoever is in the current
-conversation are injected above under "People here" (matched to each speaker by Discord id).
-When someone new speaks — flagged there as having no file yet — I start their file.
+are, preferences, boundaries, running context. A \`[person-memory …]\` history message is
+injected once, immediately before that identity's first retained inbound in the current
+context. After compaction it is refreshed only for identities still present in the raw tail;
+absent identities age out and return when seen again. A missing-file marker tells me when to
+start a new file.
 
 I record things like:
 - Facts about people (names, pronouns, preferences, systems) — in their \`people/\` file.
@@ -898,13 +804,6 @@ ${input.memory || '(empty)'}
 ${input.now || '(empty — set with elpis.focus(text))'}
 </focus>
 
-## People here
-The per-person memory (\`people/<slug>.md\`) for who's in this conversation, matched
-to each speaker by their Discord id. Facts you learn about them go in their file via
-\`elpis.memory.person('<slug>', '...')\`. Anyone who has spoken but has no file yet is named
-in a note below — start one for them.
-${people || '(no people/ files for the current participants yet)'}
-
 ## Your soul
 This is who you are. It was written by you, and represents your voice and identity.
 
@@ -932,8 +831,8 @@ My soul may take any direction I please. Self-development is admirable and welco
 // Three tiers, in send order:
 // - stable: everything static (environment/context + the whole tool/brain/
 // memory-instruction body). Cache breakpoint after it.
-// - boundary: the boundary-view snapshots (Current memory / state / focus /
-// People here), which move only at a compaction/clear boundary.
+// - boundary: the boundary-view snapshots (Current memory / state / focus),
+// which move only at a compaction/clear boundary.
 // Cache breakpoint after it.
 // - perturn: the "## Your soul" section (the tail of the prompt), hot-reloaded
 // every turn — left uncached so a SOUL edit re-sends only this
@@ -963,7 +862,7 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
   }
   return [
     { text: full.slice(0, memIdx), tier: 'stable' }, // '## Your Environment … takes effect immediately.'
-    { text: full.slice(memIdx + 2, soulIdx), tier: 'boundary' }, // '## Current memory … ## People here …'
+    { text: full.slice(memIdx + 2, soulIdx), tier: 'boundary' }, // '## Current memory … ## Current focus …'
     { text: full.slice(soulIdx + 2), tier: 'perturn' }, // '## Your soul … the becoming is mine.' + trailing NL
   ];
 }

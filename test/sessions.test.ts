@@ -248,3 +248,27 @@ test('sessions: transcript tree and files are private, including pre-existing pa
     assert.equal(fs.statSync(path.join(channel, name)).mode & 0o777, 0o600);
   }
 });
+
+test('sessions: person-context metadata round-trips with validation', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  store.append('people', {
+    role: 'user',
+    content: 'profile',
+    personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
+  });
+  const loaded = loadMostRecentForChannel(root, 'people');
+  assert.deepEqual(loaded?.messages[0].personContext, {
+    kind: 'memory', authorId: '111', author: 'Bramble',
+  });
+
+  const malformed = path.join(root, 'malformed-person.jsonl');
+  fs.writeFileSync(malformed, [
+    JSON.stringify({ role: 'user', content: 'bad kind', personContext: { kind: 'other', authorId: '1', author: 'A' } }),
+    JSON.stringify({ role: 'assistant', content: 'wrong role', personContext: { kind: 'memory', authorId: '1', author: 'A' } }),
+  ].join('\n'));
+  const parsed = parseTranscriptFile(malformed);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].personContext, undefined);
+  assert.equal(parsed[1].personContext, undefined);
+});

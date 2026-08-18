@@ -152,7 +152,7 @@ test('auto-retry: retries exhausted — error surfaced once, user message kept i
   assert.match(sent[0].text, /transient error persisted/);
  // RetriableError contract: the failing user message STAYS in history so a
  // later "retry" sees the same context.
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind === 'inbound');
   assert.equal(users.length, 1, 'the user message is kept in history');
   agent.stop();
 });

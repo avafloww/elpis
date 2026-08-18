@@ -40,8 +40,8 @@ import type { DensityModel } from './llm/density.js';
 import type { TranscriptStore } from './store/sessions.js';
 import { MAIN_TRANSCRIPT_ID } from './store/sessions.js';
 import type { MindItem, MindService } from './store/mind.js';
-import { build as buildPrompt, loadPeopleFiles } from './llm/prompt.js';
-import type { PersonFile } from './llm/prompt.js';
+import { build as buildPrompt, buildPersonMemoryContent, loadPeopleFiles } from './llm/prompt.js';
+import type { PersonFile, PersonIdentity } from './llm/prompt.js';
 import {
   GHOST_REPLY_NUDGE, END_TURN_NUDGE, endNudgeAlert, compactionFailureAlert, COMPACTION_FLUSH_NUDGE, compactionEscalationNudge,
 } from './llm/prompt.js';
@@ -417,19 +417,19 @@ export class Agent {
   private epoch = 0;
   /** Global FIFO inbound queue. */
   private inbound: InboundMessage[] = [];
+  /** Identities whose profile marker is already present in the current raw
+   * context. Reconstructed from transcript metadata on restart. */
+  private injectedPeople = new Set<string>();
   private resolveWake: (() => void) | null = null;
   private heartbeatTimeout: NodeJS.Timeout | null = null;
   private rescheduleBeat: ((delay: number) => void) | null = null;
   private lastBeatKind: 'reflection' | 'ponder' | 'tick' | null = null;
   private stopped = false;
  // --- Boundary views ---------------------------------------------------
- // Snapshots of the agent-writable files injected into the system prompt.
- // Refreshed ONLY at a context boundary (boot / clear / compaction) via
- // refreshBoundaryViews. They are NOT hot-reloaded per turn, because
- // `messages[0]` is the provider's cached prefix: a mid-conversation write
- // (elpis.memory.person / elpis.state / elpis.focus) that moved one of these
- // rewrote the entire cached context. SOUL.md is the deliberate exception —
- // still read fresh each turn (readFileOr in the turn loop).
+ // MEMORY/NOW feed the system prompt. peopleView feeds append-only profile
+ // messages instead, so a new speaker never rewrites `messages[0]`. All three
+ // snapshots refresh only at boot, clear, or compaction; SOUL remains the
+ // deliberate hot-reloaded exception.
   private memoryView = '';
   private peopleView: PersonFile[] = [];
   private nowView = '';
@@ -570,6 +570,9 @@ export class Agent {
  // Restart recovery: prime the one history from the most-recent transcript.
     if (deps.initialMessages && deps.initialMessages.length > 0) {
       this.messages = deps.initialMessages.slice();
+      for (const msg of this.messages) {
+        if (msg.personContext?.kind === 'memory') this.injectedPeople.add(msg.personContext.authorId);
+      }
       deps.tracker.recompute(this.messages);
  // A prior conversation existed, so heartbeats should fire after a restart
  // (deliberately, incl. after the agent's own deploy) instead of parking
@@ -1140,6 +1143,7 @@ export class Agent {
     this.deps.transcript.rotate(MAIN_TRANSCRIPT_ID, true);
     this.epoch++;
     this.messages = [];
+    this.injectedPeople.clear();
     this.tracker.reset();
     this.deps.llm.resetSession?.();
     this.cacheStats.reset();
@@ -1258,6 +1262,11 @@ export class Agent {
         const userMsg: ChatMessage = imageParts.length > 0
           ? { role: 'user', content: contentText, contentParts: [{ type: 'text', text: contentText }, ...imageParts] }
           : { role: 'user', content: contentText };
+        if (isDiscord && m.authorId) {
+          const person = { authorId: m.authorId, author: m.author };
+          this.ensurePersonMemory(person);
+          userMsg.personContext = { kind: 'inbound', ...person };
+        }
  // Watch-mode frames (elpis.watch): parts serve exactly one generation,
  // then strip from history + never hit the transcript.
         if (m.kind === 'watch') { userMsg.ephemeral = true; this.hasEphemeral = true; }
@@ -1738,6 +1747,22 @@ export class Agent {
     }
   }
 
+  private personMemoryMessage(person: PersonIdentity): ChatMessage {
+    return {
+      role: 'user',
+      content: buildPersonMemoryContent(this.peopleView, person),
+      personContext: { kind: 'memory', ...person },
+    };
+  }
+
+  private ensurePersonMemory(person: PersonIdentity): void {
+    if (this.injectedPeople.has(person.authorId)) return;
+    const msg = this.personMemoryMessage(person);
+    this.injectedPeople.add(person.authorId);
+    this.pushMessage(msg, INTERNAL_CHANNEL_ID);
+    this.tracker.estimateAppended(msg.content);
+  }
+
   /** Push a synthetic `[harness: …]` nudge into the one history (internal
  * provenance), account for it, and flip the wake gate so the loop re-runs the
  * turn. Shared by the ghost-reply bounce and the compaction flush/apply/
@@ -1792,25 +1817,40 @@ export class Agent {
     }
   }
 
-  /** Called after a compaction swap: rotate the transcript and refresh the
- * boundary views (compaction is a refresh boundary). */
+  /** Called after a compaction swap: refresh profiles for identities still in
+   * the retained raw tail, then durably rewrite the compacted transcript. */
   private onCompaction(): void {
+    this.refreshBoundaryViews();
+    this.refreshPersonMemoryAfterCompaction();
     this.deps.transcript.rotate(MAIN_TRANSCRIPT_ID);
     for (const msg of this.messages) this.deps.transcript.append(MAIN_TRANSCRIPT_ID, persistable(msg));
  // Emote/sticker images attached before the keep-boundary just folded away;
- // resetting the whole seen-set is the simple over-approximation (a first
- // use surviving in the verbatim tail re-attaches on next use — a cheap
- // duplicate, vs. tracking per-emote message positions against the walked
- // boundary, which is not worth the machinery).
+ // resetting the whole seen-set is the simple over-approximation.
     this.deps.emotes?.resetSeen();
-    this.refreshBoundaryViews();
   }
 
-  /** Re-read every agent-writable file injected into the system prompt. Called
- * ONLY at a context boundary (boot / clear / compaction) — never per turn.
- * The prefix cache is why: see the boundary-views note on the fields above
- * and the prefix-cache header in prompt.ts. Each read degrades to an empty
- * value on error, exactly as the per-turn reads it replaced did. */
+  private refreshPersonMemoryAfterCompaction(): void {
+    const refreshed: ChatMessage[] = [];
+    this.injectedPeople.clear();
+    for (const msg of this.messages) {
+      if (msg.personContext?.kind === 'memory') continue;
+      if (msg.personContext?.kind === 'inbound' && !this.injectedPeople.has(msg.personContext.authorId)) {
+        const profile = this.personMemoryMessage({
+          authorId: msg.personContext.authorId,
+          author: msg.personContext.author,
+        });
+        profile.channel = INTERNAL_CHANNEL_ID;
+        refreshed.push(profile);
+        this.injectedPeople.add(msg.personContext.authorId);
+      }
+      refreshed.push(msg);
+    }
+    this.messages = refreshed;
+    this.tracker.recompute(this.messages);
+  }
+
+  /** Re-read boundary-cached memory, focus, and people files. Each read
+   * degrades to an empty value on error. */
   private refreshBoundaryViews(): void {
     this.memoryView = this.deps.memory.read();
     const dataDir = this.config.paths.dataDirectory;
@@ -1928,18 +1968,12 @@ export class Agent {
  // The frontmatter envelope (agent name — src/store/soul.ts) is harness
  // metadata, not identity prose: only the body reaches the prompt.
     const soul = parseSoul(readFileOr(this.config.paths.soulPath)).body;
- // Newest-seen first (the people-injection cap picks the freshest files).
-    const participants = Array.from(this.participants, ([authorId, v]) => ({ authorId, author: v.author, lastSeenAt: v.lastSeenAt }))
-      .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
-      .map(({ authorId, author }) => ({ authorId, author }));
     const prompt = buildPrompt({
       soul,
       memory: this.memoryView,
       now: this.nowView,
       harnessRoot: this.config.paths.harnessRoot,
       dataDirectory: this.config.paths.dataDirectory,
-      participants,
-      peopleFiles: this.peopleView,
       fleetEfforts: this.config.fleet?.efforts,
       fleetEnabled: this.config.fleet?.enabled,
       guildCount: this.config.discord.guilds.length,
@@ -1960,8 +1994,8 @@ export class Agent {
  * under the same request-assembly diet `complete` applies (`prepareForApi` → `toApiMessage`), plus the
  * model, tool schema, and (when configured) `reasoning_effort`. Read-only:
  * every transform builds fresh objects, the in-memory history is never
- * touched. Harness-only stamps (`channel`, `sends`) are absent from the wire
- * shape by construction (`toApiMessage`).
+ * touched. Harness-only stamps (`channel`, `personContext`, `sends`) are
+ * absent from the wire shape by construction (`toApiMessage`).
  *
  * Faithful, with declared exceptions (see docs/console.md): huge inline
  * image payloads are ELIDED (below) so a click on the console can never

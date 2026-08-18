@@ -134,7 +134,7 @@ test('ambient: a /mind add notice waits without waking, then rides the next room
   agent.fireAmbientTick();
   await done;
   await microtask();
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(llm.calls, 1);
   assert.equal(users.filter((m) => m.content.includes('[mind item added via /mind]')).length, 1);
   assert.ok(users[0].content.includes('#42') && users[0].content.includes('A thought arrived'));
@@ -160,7 +160,7 @@ test('ambient: tick enqueues one room-context notice and one turn drains all amb
   await microtask();
 
   assert.equal(llm.calls, 1, 'exactly one turn ran for the whole burst');
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 4, '3 ambient envelopes + 1 room-context notice');
   assert.ok(users[0].content.includes('chat in 1002'));
   assert.ok(users[1].content.includes('chat in 2001'));
@@ -176,7 +176,7 @@ test('ambient: tick enqueues one room-context notice and one turn drains all amb
   assert.equal(users[3].channel, 'internal', 'in-history stamp: the tick-generated notice is internal/harness provenance');
   const loaded = loadMostRecentMain(path.join(tmpDir, 'sessions'));
   assert.ok(loaded, 'the turn persisted to the one transcript stream');
-  const persistedUsers = loaded!.messages.filter((m) => m.role === 'user');
+  const persistedUsers = loaded!.messages.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(persistedUsers.length, 4, 'transcript holds the 3 ambient envelopes + the room-context notice');
   assert.equal(persistedUsers[0].channel, '1002', 'transcript stamp: ambient message a-1 keeps its real room id');
   assert.equal(persistedUsers[1].channel, '2001', 'transcript stamp: ambient message a-2 keeps its real room id');
@@ -235,7 +235,7 @@ test('send-denied Discord inbound replaces the reply reminder with a configurati
   await done;
   await microtask();
 
-  const content = agent.messagesForTest.find((m) => m.role === 'user')?.content ?? '';
+  const content = agent.messagesForTest.find((m) => m.role === 'user' && m.personContext?.kind === 'inbound')?.content ?? '';
   assert.doesNotMatch(content, /REMINDER: use elpis\.channel/);
   assert.match(content, /can't reply to this message due to channel configuration \(allow_send=false\)/);
   agent.stop();
@@ -310,7 +310,7 @@ test('ambient: one qualifying room lets a muted room\'s message ride along in th
   await microtask();
 
   assert.equal(llm.calls, 1, 'the qualifying social-tier message let the tick fire');
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 3, '2 ambient envelopes + 1 room-context notice');
   const notice = users[2].content;
   assert.ok(notice.includes('room context — 2 messages'), 'both pending messages are counted, not just the qualifying one');

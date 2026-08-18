@@ -98,7 +98,7 @@ test('ghost reply triggers exactly one bounce, then a send clears the flag', asy
 
  // The ghost turn triggered one bounce (a synthetic user message) — visible
  // in history as a second user message after the real one.
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'the bounce nudge should be in history');
  // The model sent during the repair turn.
@@ -130,7 +130,7 @@ test('short content with zero sends DOES trigger a bounce (no length gate)', asy
   await thirdCall;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'short content with zero sends should trigger the bounce');
   assert.equal(sent.length, 1, 'one send during the repair turn');
@@ -169,7 +169,7 @@ test('a tool-chain ghost bounces (user → tool_call → result → content-only
   await fourthCall;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'the tool-chain ghost should still trigger the bounce');
   assert.equal(sent.length, 1, 'one send during the repair turn');
@@ -208,7 +208,7 @@ test('artifact-only content (stray tokens, punctuation) does not bounce', async 
   await microtask();
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 2, 'the real message + the end-turn nudge only');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'artifact-only content must not trigger a bounce');
@@ -233,7 +233,7 @@ test('heartbeat turns never trigger a bounce', async () => {
   await done;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 2, 'the heartbeat message + the end-turn nudge only');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'no bounce on a heartbeat turn even with long content');
@@ -271,7 +271,7 @@ test('send in a tool-chain iteration + brief closing content → NO bounce (turn
  // one more microtask round so the post-response ghost check has run
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 2, 'the real message + the end-turn nudge — a send earlier in the turn must suppress the bounce for closing content');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')));
   assert.equal(sent.length, 1);
@@ -295,7 +295,7 @@ test('D1: a real wake into a self-muted channel is annotated so the model knows 
   await done;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(users.some((m) => m.content.includes('is muted — a reply here will not send')),
     'a real wake in a muted channel should be annotated');
   agent.stop();
@@ -312,7 +312,7 @@ test('D1: an unmuted channel wake is NOT annotated', async () => {
   await done;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(!users.some((m) => m.content.includes('is muted — a reply here will not send')),
     'an unmuted channel wake must not be annotated');
   agent.stop();
@@ -343,7 +343,7 @@ test('D1: a ghost reply in a muted channel does NOT bounce (a reply legitimately
   await microtask();
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'a muted turn channel must not bounce a ghost reply');
   agent.stop();
@@ -377,7 +377,7 @@ test('a ghost reply in a config-denied channel does NOT bounce', async () => {
   await microtask();
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(users.some((m) => m.content.includes("can't reply to this message due to channel configuration (allow_send=false)")),
     'a direct config-denied wake carries the policy-aware note');
   assert.ok(!users.some((m) => m.content.includes('REMINDER: use elpis.channel')),
@@ -424,7 +424,7 @@ test('D1: a ghost reply on a THREAD whose PARENT is muted does NOT bounce (threa
   await microtask();
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'a thread whose parent is muted must not bounce a ghost reply either');
   agent.stop();
@@ -449,7 +449,7 @@ test('a send during the turn prevents the bounce', async () => {
   await secondCall;
   await microtask();
 
-  const users = agent.messagesForTest.filter((m) => m.role === 'user');
+  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
   assert.equal(users.length, 1, 'a send during the turn prevents the bounce');
   assert.equal(sent.length, 1);
   agent.stop();

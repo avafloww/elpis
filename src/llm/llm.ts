@@ -104,6 +104,11 @@ export interface ChatMessage {
  * the transcript for offline forensics + a future dashboard; NEVER sent to the
  * API (toApiMessage builds a fresh object). Replay ignores it. */
   channel?: string;
+  /** Harness-only person-context marker. `inbound` identifies a raw person
+   * message; `memory` marks the synthetic profile injected for that identity.
+   * Persisted for restart/compaction reconciliation and never sent as metadata
+   * to a provider (the message content itself is the intended model input). */
+  personContext?: { kind: 'inbound' | 'memory'; authorId: string; author: string };
   /** For a `tool` message: the channel().send() calls made during that run,
  * recorded harness-side (literal channel + text). Rendered verbatim when the
  * result is aged down at request-assembly time so the agent's outbound speech

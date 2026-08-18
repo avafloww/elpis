@@ -327,6 +327,17 @@ function parseChatMessage(raw: unknown, options?: TranscriptParseOptions): ChatM
   }
   const tcid = obj.tool_call_id;
   if (typeof tcid === 'string') msg.tool_call_id = tcid;
+ // Harness-only person markers are bounded and user-role only. They drive
+ // first-seen dedupe + compaction reconciliation after restart; malformed or
+ // oversized transcript values are dropped rather than trusted.
+  if (role === 'user' && typeof obj.personContext === 'object' && obj.personContext !== null) {
+    const p = obj.personContext as Record<string, unknown>;
+    if ((p.kind === 'inbound' || p.kind === 'memory')
+      && typeof p.authorId === 'string' && p.authorId.length > 0 && p.authorId.length <= 256
+      && typeof p.author === 'string' && p.author.length > 0 && p.author.length <= 256) {
+      msg.personContext = { kind: p.kind, authorId: p.authorId, author: p.author };
+    }
+  }
  //: whitelist the provenance stamp and recorded sends, or they are dropped
  // silently on reload (review N6). parseChatMessage drops unlisted fields.
   if (typeof obj.channel === 'string') msg.channel = obj.channel;
