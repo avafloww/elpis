@@ -22,6 +22,12 @@ test('installer shell parses and documents authored brain seeds', () => {
   assert.match(help.stdout, /never overwrite existing files/);
 });
 
+test('installer trusts only its exact operator-owned bootstrap checkout', () => {
+  const source = fs.readFileSync(installer, 'utf8');
+  assert.match(source, /git -c safe\.directory="\$LOCAL_SOURCE" -c safe\.directory="\$LOCAL_SOURCE\/\.git"/);
+  assert.doesNotMatch(source, /git config --global[^\n]*safe\.directory/);
+});
+
 test('installer rejects a missing seed before sudo or package work', () => {
   const result = run(['--non-interactive', '--soul-file', '/definitely/missing/elpis-soul.md']);
   assert.equal(result.status, 1);

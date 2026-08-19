@@ -532,12 +532,14 @@ if [[ -n "$LOCALE" ]]; then
 fi
 
 step "Fetching the harness"
-# clone as root (immune to git's dubious-ownership check on a source checkout
-# owned by another user), then hand the tree to the service user
+# Clone as root, then hand the tree to the service user. A bootstrap checkout
+# may belong to the invoking non-root operator, so trust only that exact source
+# for this command rather than weakening root's global safe.directory policy.
 if [[ -d "$HARNESS_DIR/.git" ]]; then
   ok "existing checkout at $HARNESS_DIR — reusing"
 elif [[ -n "$LOCAL_SOURCE" ]]; then
-  git clone --branch "$BRANCH" "$LOCAL_SOURCE" "$HARNESS_DIR"
+  git -c safe.directory="$LOCAL_SOURCE" -c safe.directory="$LOCAL_SOURCE/.git" \
+    clone --branch "$BRANCH" "$LOCAL_SOURCE" "$HARNESS_DIR"
  # keep origin pointed at the real remote, not the local bootstrap copy
   _origin="${REPO_URL:-$(git -C "$LOCAL_SOURCE" remote get-url origin 2>/dev/null || true)}"
   if [[ -n "$_origin" ]]; then
