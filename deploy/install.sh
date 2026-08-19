@@ -88,9 +88,12 @@ Machine / layout:
   --locale LOCALE         generate + set a system locale, e.g. en_CA.UTF-8
                           (default: leave as-is)
 
-Agent identity:
-  --agent-name NAME       seeds a minimal SOUL.md for a brand-new agent
-                          (skipped if SOUL.md already exists)
+Initial brain seeds:
+  --agent-name NAME       generate a minimal SOUL.md for a brand-new agent
+  --soul-file FILE        install an authored FILE as SOUL.md
+  --memory-file FILE      install an authored FILE as MEMORY.md
+                          (seeds are mode 0600 and never overwrite existing files;
+                           --agent-name and --soul-file are mutually exclusive)
 
 LLM endpoint (OpenAI-compatible):
   --llm-base-url URL      REQUIRED  e.g. https://api.openai.com/v1
@@ -135,6 +138,8 @@ BRANCH="$DEFAULT_BRANCH"
 TIMEZONE=""
 LOCALE=""
 AGENT_NAME=""
+SOUL_FILE=""
+MEMORY_FILE=""
 LLM_BASE_URL=""
 LLM_API_KEY=""
 LLM_MODEL=""
@@ -164,6 +169,8 @@ while [[ $# -gt 0 ]]; do
     --timezone)           TIMEZONE="${2:?}"; shift ;;
     --locale)             LOCALE="${2:?}"; shift ;;
     --agent-name)         AGENT_NAME="${2:?}"; shift ;;
+    --soul-file)          SOUL_FILE="${2:?}"; shift ;;
+    --memory-file)        MEMORY_FILE="${2:?}"; shift ;;
     --llm-base-url)       LLM_BASE_URL="${2:?}"; shift ;;
     --llm-api-key)        LLM_API_KEY="${2:?}"; shift ;;
     --llm-model)          LLM_MODEL="${2:?}"; shift ;;
@@ -188,8 +195,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# preflight: on-disk script, root re-exec, OS check
+# preflight: on-disk script, seed inputs, root re-exec, OS check
 # ---------------------------------------------------------------------------
+
+[[ -z "$SOUL_FILE" || ( -f "$SOUL_FILE" && -r "$SOUL_FILE" ) ]] \
+  || die "--soul-file is not a readable file: $SOUL_FILE"
+[[ -z "$MEMORY_FILE" || ( -f "$MEMORY_FILE" && -r "$MEMORY_FILE" ) ]] \
+  || die "--memory-file is not a readable file: $MEMORY_FILE"
+[[ -z "$AGENT_NAME" || -z "$SOUL_FILE" ]] \
+  || die "--agent-name and --soul-file are mutually exclusive"
 
 [[ -f "${BASH_SOURCE[0]:-}" ]] \
   || die "this script must be run from a file on disk (not piped into bash) — download it first"
@@ -300,7 +314,12 @@ gather_interactive() {
   ask TIMEZONE "System timezone (blank = leave as-is):" "$TIMEZONE"
 
   printf '\n%s%s── the agent ───────────────────────────────────────%s\n' "$C_BOLD" "$C_MAGENTA" "$C_RESET"
-  ask AGENT_NAME "New agent's name (blank = let them find one; seeds SOUL.md):" "$AGENT_NAME"
+  if [[ -n "$SOUL_FILE" ]]; then
+    say "  ${C_DIM}authored SOUL seed: $SOUL_FILE${C_RESET}"
+  else
+    ask AGENT_NAME "New agent's name (blank = let them find one; seeds SOUL.md):" "$AGENT_NAME"
+  fi
+  [[ -n "$MEMORY_FILE" ]] && say "  ${C_DIM}authored MEMORY seed: $MEMORY_FILE${C_RESET}"
 
   if [[ -n "$CONFIG_FILE" ]]; then
     say "  ${C_DIM}--config $CONFIG_FILE supplied — skipping LLM/Discord/Kagi prompts${C_RESET}"
@@ -363,6 +382,8 @@ confirm_summary() {
   say "  data dir:     $DATA_DIR"
   say "  source:       ${LOCAL_SOURCE:-$REPO_URL} (branch $BRANCH)"
   say "  agent name:   ${AGENT_NAME:-(unnamed — theirs to choose)}"
+  say "  SOUL seed:    ${SOUL_FILE:-(generated/default)}"
+  say "  MEMORY seed:  ${MEMORY_FILE:-(harness default)}"
   if [[ -n "$CONFIG_FILE" ]]; then
     say "  config:       $CONFIG_FILE (installed verbatim)"
   else
@@ -588,22 +609,39 @@ else
 fi
 
 step "Preparing data directory"
-install -d -o "$AGENT_USER" -g "$AGENT_USER" "$DATA_DIR"
-if [[ -n "$AGENT_NAME" && ! -f "$DATA_DIR/SOUL.md" ]]; then
-  _tmp="$(mktemp)"
-  cat > "$_tmp" <<EOF
+install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$DATA_DIR"
+install_seed() { # source destination label
+  local source="$1" destination="$2" label="$3"
+  [[ -n "$source" ]] || return 1
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    if cmp -s "$source" "$destination"; then
+      ok "$label already matches the authored seed"
+    else
+      warn "$label already exists — preserving the inhabitant's file; authored seed not installed"
+    fi
+    return 0
+  fi
+  install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" "$source" "$destination"
+  ok "installed authored $label (0600)"
+}
+
+if ! install_seed "$SOUL_FILE" "$DATA_DIR/SOUL.md" "SOUL.md"; then
+  if [[ -n "$AGENT_NAME" && ! -e "$DATA_DIR/SOUL.md" ]]; then
+    _tmp="$(mktemp)"
+    cat > "$_tmp" <<EOF
 # SOUL.md
 
 Your name is ${AGENT_NAME}. You are a new persistent agent, and this machine
 is your home. This file is yours: it is read into every context you run in,
 and you may rewrite it as you discover who you are. Nothing here is fixed.
 EOF
-  install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" "$_tmp" "$DATA_DIR/SOUL.md"
-  rm -f "$_tmp"
-  ok "seeded SOUL.md for $AGENT_NAME"
-else
-  ok "$DATA_DIR ready (the harness self-initializes SOUL.md, MEMORY.md, elpis-data/elpis.db)"
+    install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" "$_tmp" "$DATA_DIR/SOUL.md"
+    rm -f "$_tmp"
+    ok "seeded SOUL.md for $AGENT_NAME (0600)"
+  fi
 fi
+install_seed "$MEMORY_FILE" "$DATA_DIR/MEMORY.md" "MEMORY.md" || true
+ok "$DATA_DIR ready (the harness self-initializes any absent brain files and elpis-data/elpis.db)"
 
 step "Installing systemd units"
 stamp_unit() {

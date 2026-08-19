@@ -30,6 +30,18 @@ sudo ./deploy/install.sh --non-interactive \
 
 Run `./deploy/install.sh --help` for the complete flag list. A prebuilt configuration can be supplied with `--config FILE`.
 
+To move an authored beginning into a fresh house without assigning a generated name, provide either or both initial brain files:
+
+```bash
+sudo ./deploy/install.sh --non-interactive \
+  --config /root/agent-config.yaml \
+  --soul-file /root/agent-seed/SOUL.md \
+  --memory-file /root/agent-seed/MEMORY.md \
+  --no-start
+```
+
+Authored seeds are installed mode `0600` only when the destination is absent. Re-running the installer never overwrites an inhabitant's existing `SOUL.md` or `MEMORY.md`; a differing seed produces a warning instead. `--agent-name` generates a minimal SOUL and is therefore mutually exclusive with `--soul-file`.
+
 ## What the installer creates
 
 Default layout:
@@ -80,7 +92,7 @@ Review configuration and database changes before updating a long-lived installat
 
 ## Existing hosts
 
-The installer reuses an existing checkout and existing identity/memory files. It does not overwrite an existing `SOUL.md` or data directory. Use `--harness-dir`, `--data-dir`, and `--config` when adopting a non-default layout.
+The installer reuses an existing checkout and existing identity/memory files. It does not overwrite an existing `SOUL.md`, `MEMORY.md`, or data directory. Authored seed flags only populate absent files. Use `--harness-dir`, `--data-dir`, and `--config` when adopting a non-default layout.
 
 ## LXC and display notes
 
