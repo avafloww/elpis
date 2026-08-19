@@ -245,7 +245,7 @@ a.ep-attach-file:hover { color: var(--ink); border-color: var(--gold); }
 .ep-tool-fold[open] > summary .ep-fold-caret { transform: rotate(180deg); }
 .ep-run-head { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--code); border-bottom: 1px solid rgba(0,0,0,0.25); }
 .ep-run-tag { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--gold); }
-.ep-run-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; color: var(--soft); }
+.ep-run-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; color: var(--codetext); opacity: .78; }
 .ep-run-sub { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--faint); }
 .ep-run-code { margin: 0; padding: 12px 14px; background: var(--code); font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; line-height: 1.6; color: var(--codetext); overflow-x: auto; white-space: pre; }
 .ep-run-code code { color: inherit; font: inherit; }

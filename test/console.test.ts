@@ -110,6 +110,7 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   assert.match(src, /class: 'ep-result ep-tool-fold'[\s\S]*details\.open = state\.toolsOpen/);
   assert.match(src, /class: 'ep-run-detail'[\s\S]*tc\.detail \|\| 'execute javascript · vm sandbox'/);
   assert.match(src, /class: 'ep-result-detail'[\s\S]*entry\.run\?\.detail \|\| 'RunResult'/);
+  assert.doesNotMatch(src, /class: 'ep-result-sub', text: `· \${attribution}`/);
   assert.match(css, /\.ep-view-tab[^}]*IBM Plex Sans/);
   assert.match(css, /\.ep-run-detail[^}]*IBM Plex Sans/);
   assert.match(css, /\.ep-result-detail[^}]*IBM Plex Sans/);

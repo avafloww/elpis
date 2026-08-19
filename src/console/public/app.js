@@ -586,7 +586,6 @@
     details.appendChild(el('summary', { class: 'ep-result-head' }, [
       el('span', { class: 'ep-result-status ' + (ok ? 'ok' : 'err'), text: ok ? '● ok' : '● err' }),
       el('span', { class: 'ep-result-detail', text: entry.run?.detail || 'RunResult' }),
-      attribution ? el('span', { class: 'ep-result-sub', text: `· ${attribution}` }) : null,
       el('span', { class: 'ep-spacer' }),
       el('span', { class: 'ep-result-sub', text: `output ${bytes(valueText)}B · logs ${bytes(consoleText)}B · ~${tokEst(content)} tok` }),
       el('span', { class: 'ep-fold-caret', text: '▾' }),
