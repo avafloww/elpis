@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import * as net from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { createConsoleServer, isAllowedOrigin, resolveAttachmentPath } from '../src/console/server.js';
 import { ConsoleHub } from '../src/console/hub.js';
@@ -57,6 +58,12 @@ test('resolveAttachmentPath: rejects traversal out of the attachment root', () =
   assert.equal(resolveAttachmentPath('/attachments/123/../../etc/passwd'), null);
  // Empty remainder resolves to the root itself, not a file under it.
   assert.equal(resolveAttachmentPath('/attachments/'), null);
+});
+
+test('static console server declares PWA asset MIME types', () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/console/server.ts'), 'utf8');
+  assert.equal(source.includes("  '.png': 'image/png',"), true);
+  assert.equal(source.includes("  '.webmanifest': 'application/manifest+json; charset=utf-8',"), true);
 });
 
 test('resolveAttachmentPath: non-attachment paths are not its business', () => {
