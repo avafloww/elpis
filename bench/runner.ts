@@ -78,7 +78,7 @@ function oracleLLM(scenario: ScenarioSpec): LLM {
     async complete() {
       calls++;
       const code = oracleCode(scenario, calls);
-      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, wake: { after: '1h' } }) } }] };
+      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Apply the oracle outcome', wake: { after: '1h' } }) } }] };
       stampGeneration(message, { providerType: 'openai-compatible', model: 'elpisbench-oracle', apiSurface: 'responses', apiEndpoint: 'https://oracle.elpisbench.invalid/v1/responses' });
       return { message, stripped: false, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
     },

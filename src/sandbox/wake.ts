@@ -1,6 +1,8 @@
 import { parseDuration } from '../config.js';
 
 export const MAX_RUN_WAKE_MS = 60 * 60 * 1000;
+export const MAX_RUN_DETAIL_CHARS = 120;
+export const MAX_RUN_DETAIL_WORDS = 10;
 
 export type RunWakeRequest = { after: unknown } | { at: unknown } | { auto: unknown };
 export type ParsedRunWake =
@@ -15,6 +17,7 @@ export interface ResolvedRunWake {
 
 export interface ParsedRunCall {
   code: string;
+  detail: string;
   sandbox?: string;
   wake?: ParsedRunWake;
 }
@@ -72,11 +75,17 @@ export function parseRunCallArguments(raw: string, dispatchAt = Date.now()): Par
   catch { throw new Error('run arguments must be valid JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('run arguments must be an object');
   const record = parsed as Record<string, unknown>;
-  const allowed = new Set(['code', 'sandbox', 'wake']);
+  const allowed = new Set(['code', 'detail', 'sandbox', 'wake']);
   const extra = Object.keys(record).filter((key) => !allowed.has(key));
   if (extra.length > 0) throw new Error(`run arguments contain unsupported key${extra.length === 1 ? '' : 's'}: ${extra.join(', ')}`);
   if (typeof record.code !== 'string') throw new Error('run.code must be a string');
-  const result: ParsedRunCall = { code: record.code };
+  if (typeof record.detail !== 'string') throw new Error('run.detail must be a string');
+  const detail = record.detail.trim();
+  if (!detail) throw new Error('run.detail must not be empty');
+  if (/\r|\n/.test(detail)) throw new Error('run.detail must be a single line');
+  if (detail.length > MAX_RUN_DETAIL_CHARS) throw new Error(`run.detail must be at most ${MAX_RUN_DETAIL_CHARS} characters`);
+  if (detail.split(/\s+/).length > MAX_RUN_DETAIL_WORDS) throw new Error(`run.detail must be at most ${MAX_RUN_DETAIL_WORDS} words`);
+  const result: ParsedRunCall = { code: record.code, detail };
   if (record.sandbox !== undefined) {
     if (typeof record.sandbox !== 'string' || !record.sandbox.trim()) throw new Error('run.sandbox must be a non-empty exact alias');
     result.sandbox = record.sandbox;

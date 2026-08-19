@@ -285,7 +285,7 @@ test('formatRunResult: detached result names the bg id', async () => {
 
 test('formatRunResult includes bounded sandbox and wake attribution in the status header', () => {
   const out = formatRunResult({ ok: true, preview: '42' }, {
-    toolContractVersion: 'elpis-run-v3', ok: true,
+    toolContractVersion: 'elpis-run-v4', ok: true, detail: 'Verify the persisted result',
     execution: {
       kind: 'persistent', lifecycle: 'ready', alias: 'quietly-crimson-ibis', mindId: 7, mindTitle: 'Ship  wake\ncontract', mindStatus: 'open', latestComment: 'verify  exact\nCI',
       executorId: 'exec-uuid', runId: 'exec-uuid-g2-r3', generation: 2, resetGeneration: 1,
@@ -293,6 +293,6 @@ test('formatRunResult includes bounded sandbox and wake attribution in the statu
     },
     wake: { kind: 'after', state: 'armed', requestedAt: 1, targetAt: 2, taskId: 3 },
   });
-  assert.match(out, /^\[run ok \| sandbox=persistent lifecycle=ready alias=quietly-crimson-ibis mind=#7 mind_title="Ship wake contract" mind_status=open executor=exec-uuid run=exec-uuid-g2-r3 generation=2 reset=1 cold retiring reminder=status latest="verify exact CI" reminder=classifier \| wake=armed kind=after target=1970-01-01T00:00:00\.002Z task=#3\]/);
+  assert.match(out, /^\[run ok \| detail="Verify the persisted result" \| sandbox=persistent lifecycle=ready alias=quietly-crimson-ibis mind=#7 mind_title="Ship wake contract" mind_status=open executor=exec-uuid run=exec-uuid-g2-r3 generation=2 reset=1 cold retiring reminder=status latest="verify exact CI" reminder=classifier \| wake=armed kind=after target=1970-01-01T00:00:00\.002Z task=#3\]/);
   assert.match(out, /\n42$/);
 });

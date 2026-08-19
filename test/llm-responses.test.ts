@@ -296,7 +296,7 @@ test('responsesRunTool: flattened FunctionTool with the same schema, strict off'
   assert.equal(t.type, 'function');
   assert.equal(t.name, 'run');
   assert.equal(t.strict, false);
-  assert.deepEqual(Object.keys((t.parameters as any).properties), ['code', 'sandbox', 'wake']);
+  assert.deepEqual(Object.keys((t.parameters as any).properties), ['code', 'detail', 'sandbox', 'wake']);
 });
 
 // ─── auto fallback in createLLM ──────────────────────────────────────────────

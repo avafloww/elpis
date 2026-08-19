@@ -42,13 +42,13 @@ test('provenance and run attribution are excluded from every provider request su
   const tool: ChatMessage = {
     role: 'tool', tool_call_id: 'call-1', content: '[run ok]\n1',
     run: {
-      toolContractVersion: TOOL_CONTRACT_VERSION, ok: true,
+      toolContractVersion: TOOL_CONTRACT_VERSION, ok: true, detail: 'private metadata detail',
       execution: { kind: 'persistent', alias: 'harness-private-alias', mindId: 7, executorId: 'private-executor', generation: 2, runId: 'private-run' },
       wake: { kind: 'after', state: 'armed', requestedAt: 1, targetAt: 2, taskId: 3 },
     },
   };
   const messages: ChatMessage[] = [{ role: 'system', content: 's' }, assistant, tool];
-  const forbidden = /provenance|private\.example|harness-private-alias|private-executor|private-run|toolContractVersion/;
+  const forbidden = /provenance|private\.example|harness-private-alias|private-executor|private-run|private metadata detail|toolContractVersion/;
   assert.doesNotMatch(JSON.stringify(toApiMessage(tool)), forbidden);
   assert.doesNotMatch(JSON.stringify(toResponsesInput(prepareForApi(messages))), forbidden);
   assert.doesNotMatch(JSON.stringify(translate(messages)), forbidden);

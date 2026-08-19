@@ -84,6 +84,7 @@ export { INTERNAL_CHANNEL_ID } from './types.js';
 function runAttribution(metadata?: RunMessageMetadata): string {
   if (!metadata) return '';
   const parts: string[] = [];
+  if (metadata.detail) parts.push(`detail=${JSON.stringify(metadata.detail)}`);
   const execution = metadata.execution;
   if (execution) {
     const sandbox = [`sandbox=${execution.kind}`];
@@ -1723,6 +1724,7 @@ export class Agent {
           const runMetadata: RunMessageMetadata = {
             toolContractVersion: TOOL_CONTRACT_VERSION,
             ok: result.ok,
+            ...(parsed?.detail ? { detail: parsed.detail } : {}),
             ...(result.failureKind ? { failureKind: result.failureKind } : {}),
             ...(result.execution ? { execution: result.execution } : {}),
             ...(result.detached !== undefined ? { detached: result.detached } : {}),

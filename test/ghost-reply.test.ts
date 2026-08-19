@@ -81,7 +81,7 @@ test('ghost reply triggers exactly one bounce, then a send clears the flag', asy
       usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
  // Repair turn: the model runs code that sends, then ends with empty content.
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")","detail":"Send the completion reply"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
  // After the tool result, the model yields with the shared empty-run wake.
     EMPTY_WAKE,
@@ -117,7 +117,7 @@ test('short content with zero sends DOES trigger a bounce (no length gate)', asy
       usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } },
  // Repair turn: send via a run tool call, then end with empty content.
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"all set\\")","detail":"Send the completion reply"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
     EMPTY_WAKE,
   ]);
@@ -147,14 +147,14 @@ test('a tool-chain ghost bounces (user → tool_call → result → content-only
   const llm = scriptedLLM([
  // Turn 1a: a tool call that does NOT send (just runs some code).
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc0', type: 'function', function: { name: 'run', arguments: '{"code":"1 + 1"}' } }] },
+        id: 'tc0', type: 'function', function: { name: 'run', arguments: '{"code":"1 + 1","detail":"Compute the requested sum"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } },
  // Turn 1b (after the tool result): the ghost — a content-only reply, no sends.
     { message: { role: 'assistant', content: 'The answer is 2. Let me know if you need anything else!' },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 12, total_tokens: 24 } },
  // Repair turn (after the bounce): send via a run tool call.
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"it is 2\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"it is 2\\")","detail":"Send the computed answer"}' } }] },
       stripped: false, usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } },
  // Natural end after the send.
     EMPTY_WAKE,
@@ -251,7 +251,7 @@ test('send in a tool-chain iteration + brief closing content → NO bounce (turn
   const llm = scriptedLLM([
  // Turn 1a: the model sends via a run tool call.
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"here you go\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"here you go\\")","detail":"Send the requested result"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } },
  // Turn 1b: a brief note-to-self as content — previously false-bounced. It
  // is no longer an ending either, so the yield nudge follows it and
@@ -436,7 +436,7 @@ test('a send during the turn prevents the bounce', async () => {
  // Turn 1: model sends via a tool call AND writes long content. The send
  // counts, so no bounce.
     { message: { role: 'assistant', content: ghost, tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"sent\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"sent\\")","detail":"Send the turn reply"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 50, total_tokens: 60 } },
     EMPTY_WAKE,
   ]);

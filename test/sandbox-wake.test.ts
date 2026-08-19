@@ -39,15 +39,20 @@ test('relative wake anchors after successful completion while absolute wake keep
 });
 
 test('run-call parsing rejects legacy end and validates wake before execution', () => {
-  assert.deepEqual(parseRunCallArguments('{"code":"1"}', DISPATCH), { code: '1' });
-  assert.deepEqual(parseRunCallArguments('{"code":"","wake":{"auto":true}}', DISPATCH), { code: '', wake: { kind: 'auto' } });
-  assert.deepEqual(parseRunCallArguments('{"code":"2","sandbox":"quietly-crimson-ibis","wake":{"after":"2m"}}', DISPATCH), {
-    code: '2', sandbox: 'quietly-crimson-ibis', wake: { kind: 'after', delayMs: 120_000 },
+  assert.deepEqual(parseRunCallArguments('{"code":"1","detail":"Read one value"}', DISPATCH), { code: '1', detail: 'Read one value' });
+  assert.deepEqual(parseRunCallArguments('{"code":"","detail":"Yield while waiting","wake":{"auto":true}}', DISPATCH), { code: '', detail: 'Yield while waiting', wake: { kind: 'auto' } });
+  assert.deepEqual(parseRunCallArguments('{"code":"2","detail":"Continue the bound task","sandbox":"quietly-crimson-ibis","wake":{"after":"2m"}}', DISPATCH), {
+    code: '2', detail: 'Continue the bound task', sandbox: 'quietly-crimson-ibis', wake: { kind: 'after', delayMs: 120_000 },
   });
-  assert.throws(() => parseRunCallArguments('{"code":"would run","end":true}', DISPATCH), /unsupported key: end/);
-  assert.throws(() => parseRunCallArguments('{"code":"would run","wake":{"after":0}}', DISPATCH), /greater than zero/);
-  assert.throws(() => parseRunCallArguments('{"code":1}', DISPATCH), /run\.code must be a string/);
-  assert.throws(() => parseRunCallArguments('{"code":"1","sandbox":""}', DISPATCH), /non-empty exact alias/);
+  assert.throws(() => parseRunCallArguments('{"code":"would run","detail":"Reject legacy end","end":true}', DISPATCH), /unsupported key: end/);
+  assert.throws(() => parseRunCallArguments('{"code":"would run","detail":"Reject zero wake","wake":{"after":0}}', DISPATCH), /greater than zero/);
+  assert.throws(() => parseRunCallArguments('{"code":1,"detail":"Reject bad code"}', DISPATCH), /run\.code must be a string/);
+  assert.throws(() => parseRunCallArguments('{"code":"1","detail":"Reject empty sandbox","sandbox":""}', DISPATCH), /non-empty exact alias/);
+  assert.throws(() => parseRunCallArguments('{"code":"1"}', DISPATCH), /run\.detail must be a string/);
+  assert.throws(() => parseRunCallArguments('{"code":"1","detail":""}', DISPATCH), /must not be empty/);
+  assert.throws(() => parseRunCallArguments(JSON.stringify({ code: '1', detail: 'two\nlines' }), DISPATCH), /single line/);
+  assert.throws(() => parseRunCallArguments(JSON.stringify({ code: '1', detail: 'one two three four five six seven eight nine ten eleven' }), DISPATCH), /at most 10 words/);
+  assert.throws(() => parseRunCallArguments(JSON.stringify({ code: '1', detail: 'x'.repeat(121) }), DISPATCH), /at most 120 characters/);
 });
 
 test('durable run-wake payload round-trips only the bounded v3 shape', () => {

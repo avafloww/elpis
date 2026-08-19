@@ -12,6 +12,7 @@
 
   const $ = (id) => document.getElementById(id);
   const app = $('app');
+  const runCode = window.ElpisRunCode;
 
  // ---- tiny DOM helper ----
   function el(tag, attrs, children) {
@@ -51,7 +52,6 @@
     theme: localStorage.getItem('ep-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
     cotOpen: localStorage.getItem('ep-cot') !== 'hidden',
     toolsOpen: localStorage.getItem('ep-tools') === 'shown',
-    previewsOpen: localStorage.getItem('ep-previews') === 'shown',
     room: 'all',
     logFilter: 'all',
     roomsById: new Map(),
@@ -106,22 +106,13 @@
   };
   function applyTools() {
     $('tools-label').textContent = state.toolsOpen ? 'shown' : 'hidden';
-    $('previews-toggle').hidden = !state.toolsOpen;
-    $('previews-label').textContent = state.previewsOpen ? 'shown' : 'hidden';
     document.querySelectorAll('.ep-tool-fold').forEach((d) => { d.open = state.toolsOpen; });
-    document.querySelectorAll('.ep-preview-fold').forEach((d) => { d.open = state.toolsOpen && state.previewsOpen; });
   }
   $('tools-toggle').onclick = () => {
     state.toolsOpen = !state.toolsOpen;
     localStorage.setItem('ep-tools', state.toolsOpen ? 'shown' : 'hidden');
     applyTools();
   };
-  $('previews-toggle').onclick = () => {
-    state.previewsOpen = !state.previewsOpen;
-    localStorage.setItem('ep-previews', state.previewsOpen ? 'shown' : 'hidden');
-    applyTools();
-  };
-
  // ================= time helpers =================
   function pad(n) { return String(n).padStart(2, '0'); }
   function hm(ms) {
@@ -523,12 +514,14 @@
     details.open = state.toolsOpen;
     details.appendChild(el('summary', { class: 'ep-run-head' }, [
       el('span', { class: 'ep-run-tag', text: 'run()' }),
-      el('span', { class: 'ep-run-sub', text: 'execute javascript · vm sandbox' }),
+      el('span', { class: 'ep-run-detail', text: tc.detail || 'execute javascript · vm sandbox' }),
       el('span', { class: 'ep-spacer' }),
       el('span', { class: 'ep-run-sub', text: (tc.id || '').slice(0, 12) }),
       el('span', { class: 'ep-fold-caret', text: '▾' }),
     ]));
-    details.appendChild(el('pre', { class: 'ep-run-code', text: tc.code || '' }));
+    const code = el('code', { class: 'language-javascript', text: tc.code || '' });
+    details.appendChild(el('pre', { class: 'ep-run-code' }, code));
+    void runCode?.render(code, tc);
     return details;
   }
 
@@ -578,16 +571,12 @@
       body.appendChild(el('div', { class: 'ep-result-label', text: 'console' }));
       body.appendChild(el('pre', { class: 'ep-result-pre', text: consoleText }));
     }
-    const preview = el('details', { class: 'ep-preview-fold' });
-    preview.open = state.toolsOpen && state.previewsOpen;
-    preview.appendChild(el('summary', { class: 'ep-preview-summary' }, [
-      el('span', { text: ok ? 'preview → saved as _' : 'error preview' }),
+    body.appendChild(el('div', { class: 'ep-result-label ep-result-value-head' }, [
+      el('span', { text: ok ? 'value → saved as _' : 'error' }),
       el('span', { class: 'ep-spacer' }),
       el('span', { class: 'ep-result-sub', text: `${bytes(valueText)}B` }),
-      el('span', { class: 'ep-fold-caret', text: '▾' }),
     ]));
-    preview.appendChild(el('pre', { class: 'ep-result-pre value', text: valueText }));
-    body.appendChild(preview);
+    body.appendChild(el('pre', { class: 'ep-result-pre ep-result-scroll value', text: valueText }));
     const attribution = runAttribution(entry.run);
     if (attribution) {
       body.insertBefore(el('div', { class: 'ep-result-sub', text: attribution }), body.firstChild);
@@ -596,9 +585,10 @@
     details.open = state.toolsOpen;
     details.appendChild(el('summary', { class: 'ep-result-head' }, [
       el('span', { class: 'ep-result-status ' + (ok ? 'ok' : 'err'), text: ok ? '● ok' : '● err' }),
-      el('span', { class: 'ep-result-sub', text: 'RunResult · ' + (entry.tool_call_id || '').slice(0, 12) + (attribution ? ' · ' + attribution : '') }),
+      el('span', { class: 'ep-result-detail', text: entry.run?.detail || 'RunResult' }),
+      attribution ? el('span', { class: 'ep-result-sub', text: `· ${attribution}` }) : null,
       el('span', { class: 'ep-spacer' }),
-      el('span', { class: 'ep-result-sub', text: `preview ${bytes(valueText)}B · logs ${bytes(consoleText)}B · ~${tokEst(content)} tok` }),
+      el('span', { class: 'ep-result-sub', text: `output ${bytes(valueText)}B · logs ${bytes(consoleText)}B · ~${tokEst(content)} tok` }),
       el('span', { class: 'ep-fold-caret', text: '▾' }),
     ]));
     details.appendChild(body);

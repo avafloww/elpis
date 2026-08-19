@@ -29,6 +29,7 @@ export interface RunWakeMetadata {
 export interface RunMessageMetadata {
   toolContractVersion: string;
   ok: boolean;
+  detail?: string;
   failureKind?: 'preparse' | 'runtime';
   execution?: SandboxExecutionMetadata;
   detached?: boolean;
@@ -50,6 +51,8 @@ export function parseRunMessageMetadata(raw: unknown): RunMessageMetadata | unde
   const toolContractVersion = boundedString(value.toolContractVersion, 128);
   if (!toolContractVersion || typeof value.ok !== 'boolean') return undefined;
   const parsed: RunMessageMetadata = { toolContractVersion, ok: value.ok };
+  const detail = boundedString(value.detail, 120);
+  if (detail && !/[\r\n]/.test(detail) && detail.trim().split(/\s+/).length <= 10) parsed.detail = detail.trim();
   if (value.failureKind === 'preparse' || value.failureKind === 'runtime') parsed.failureKind = value.failureKind;
   if (typeof value.detached === 'boolean') parsed.detached = value.detached;
   const bgId = boundedString(value.bgId, 128);

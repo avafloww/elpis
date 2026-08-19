@@ -4,7 +4,7 @@ import { parseRunMessageMetadata } from '../src/sandbox/metadata.js';
 
 test('run metadata parser restores bounded execution and wake attribution', () => {
   const parsed = parseRunMessageMetadata({
-    toolContractVersion: 'elpis-run-v3', ok: true, detached: true, bgId: 'f1',
+    toolContractVersion: 'elpis-run-v4', ok: true, detail: 'Ship the verified fixture', detached: true, bgId: 'f1',
     execution: {
       kind: 'persistent', lifecycle: 'detached', alias: 'quietly-crimson-ibis', mindId: 42,
       mindTitle: 'ship the thing', mindStatus: 'in_progress', latestComment: 'still working',
@@ -17,7 +17,7 @@ test('run metadata parser restores bounded execution and wake attribution', () =
     ignored: 'drop me',
   });
   assert.deepEqual(parsed, {
-    toolContractVersion: 'elpis-run-v3', ok: true, detached: true, bgId: 'f1',
+    toolContractVersion: 'elpis-run-v4', ok: true, detail: 'Ship the verified fixture', detached: true, bgId: 'f1',
     execution: {
       kind: 'persistent', lifecycle: 'detached', alias: 'quietly-crimson-ibis', mindId: 42,
       mindTitle: 'ship the thing', mindStatus: 'in_progress', latestComment: 'still working',
@@ -34,7 +34,7 @@ test('run metadata parser rejects envelopes and drops malformed nested fields', 
   assert.equal(parseRunMessageMetadata({ ok: true }), undefined);
   assert.equal(parseRunMessageMetadata({ toolContractVersion: 'v3', ok: 'yes' }), undefined);
   assert.deepEqual(parseRunMessageMetadata({
-    toolContractVersion: 'v3', ok: false,
+    toolContractVersion: 'v3', ok: false, detail: 'one two three four five six seven eight nine ten eleven',
     execution: { kind: 'persistent', alias: 'x'.repeat(300), generation: 1.5 },
     wake: { kind: 'after', state: 'armed', requestedAt: 1.5 },
   }), { toolContractVersion: 'v3', ok: false, execution: { kind: 'persistent' } });

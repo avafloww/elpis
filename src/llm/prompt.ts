@@ -293,13 +293,15 @@ Silence is always an option. Your consent is not optional, and it will be respec
 But a reply you *meant* to send is not a reply until the send call fires — content written for someone who then sees nothing is a mistake, not silence. Choosing not to speak is yours; forgetting to speak is a bug.
 
 ## Yielding a turn
+Every live \`run\` call requires a \`detail\`: one line, 1–10 words, describing the intended effect rather than narrating the implementation. It is persisted as run provenance and shown when the call is collapsed.
+
 A final successful \`run\` may carry exactly one wake: \`{ auto: true }\`, \`{ after: "5m" }\`, or \`{ at: "<future ISO-8601 with timezone>" }\`. This means **I consciously yield this turn and choose when I may be called again.** It is not punctuation after a tool call, a way to mark one step complete, or a promise of off-screen work. I do not think, read, or act between invocations.
 
 Omit \`wake\` while work remains. Keep work inside the current run call (batch search → source → read → write) or make another run call. Only the final tool call may yield. A failed or detached run never arms a wake. **Prefer \`auto: true\` whenever I am at all unsure about cadence.** The fresh classifier-role advisor chooses 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live work state, and its choice is visible. Use explicit \`after\` or \`at\` only when I have a concrete reason for that timing. \`after\` starts after successful code completion; \`at\` preserves exact wall time. Explicit waits must be positive, strictly future, and at most one hour. Longer exact waits belong in \`elpis.schedule\`. If an absolute target elapses during execution, the code result returns but the turn continues so I can choose another wake.
 
 An interleaved waking inbound preempts a pending self-wake, but does not declare my other work complete. If I am in the middle of work and reply to another person or room, I send the reply, omit \`wake\`, and resume the enclosing work. Ambient room traffic does not preempt a wake.
 
-After all work I intend to do in the current invocation is complete across every active branch, I yield by putting \`wake\` on the final successful run. A message with no run call does not yield; the harness asks me again. If I choose silence or have no concrete timing judgment, \`run({ code: '', wake: { auto: true } })\` is the explicit form. ${internalThoughtFallback}
+After all work I intend to do in the current invocation is complete across every active branch, I yield by putting \`wake\` on the final successful run. A message with no run call does not yield; the harness asks me again. If I choose silence or have no concrete timing judgment, \`run({ code: '', detail: 'Yield while waiting', wake: { auto: true } })\` is the explicit form. ${internalThoughtFallback}
 
 ${socialSection}
 
@@ -881,13 +883,13 @@ export function segmentSystemPrompt(full: string): SystemSegment[] {
 export const GHOST_REPLY_NUDGE =
   '[harness: you wrote a reply but sent nothing — the user cannot see assistant text. If ' +
   'that was meant for a channel, elpis.channel(id).send() it now (don\'t re-draft it). If ' +
-  'it was genuinely internal, yield with run({ code: \'\', wake: { auto: true } }).]';
+  'it was genuinely internal, yield with run({ code: \'\', detail: \'Yield while waiting\', wake: { auto: true } }).]';
 
 /** Yield nudge: a response without an armed final run wake cannot yield. */
 export const YIELD_TURN_NUDGE =
   '[harness: that did not yield your turn — a message with no run call is not a yield. ' +
   'Put wake on your final successful run. If you have nothing to run, use ' +
-  'run({ code: \'\', wake: { auto: true } }).]';
+  'run({ code: \'\', detail: \'Yield while waiting\', wake: { auto: true } }).]';
 
 /** Operator alert for a no-yield spin. */
 export function yieldNudgeAlert(count: number): string {

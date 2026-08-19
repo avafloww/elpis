@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "rm -rf dist && tsc && npm run copy-assets",
-    "copy-assets": "rm -rf dist/console/public && mkdir -p dist/console/public && cp -r src/console/public/. dist/console/public/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js",
+    "copy-assets": "rm -rf dist/console/public && mkdir -p dist/console/public && cp -r src/console/public/. dist/console/public/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js && cp node_modules/prettier/standalone.js dist/console/public/prettier-standalone.js && cp node_modules/prettier/plugins/babel.js dist/console/public/prettier-babel.js && cp node_modules/prettier/plugins/estree.js dist/console/public/prettier-estree.js && cp node_modules/prettier/plugins/typescript.js dist/console/public/prettier-typescript.js && cp node_modules/prismjs/prism.js dist/console/public/prism.js && cp node_modules/prismjs/components/prism-typescript.min.js dist/console/public/prism-typescript.js && cp dist/lib/heredoc-display.js dist/console/public/heredoc-display.js && cp dist/lib/jslex.js dist/console/public/jslex.js",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "repl": "tsx src/repl.ts",
@@ -36,6 +36,8 @@
     "magic-string": "^0.30.17",
     "marked": "^18.0.5",
     "openai": "^5.15.0",
+    "prettier": "3.9.6",
+    "prismjs": "1.30.0",
     "sharp": "^0.35.3",
     "tsx": "^4.23.12",
     "ws": "^8.21.0",

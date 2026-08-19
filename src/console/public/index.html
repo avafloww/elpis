@@ -11,6 +11,13 @@
 <link id="elpis-favicon" data-elpis-favicon rel="icon" type="image/svg+xml" href="./elpis-icon-light.svg">
 <script src="./elpis-branding.js" defer></script>
 <script src="./marked.umd.js"></script>
+<script src="./prettier-standalone.js"></script>
+<script src="./prettier-babel.js"></script>
+<script src="./prettier-estree.js"></script>
+<script src="./prettier-typescript.js"></script>
+<script src="./prism.js"></script>
+<script src="./prism-typescript.js"></script>
+<script src="./run-code.js"></script>
 </head>
 <body>
 <div class="ep-app" id="app" data-theme="light" data-cot="open">
@@ -92,7 +99,6 @@
           <span class="ep-lens" id="lens-label">all rooms</span>
           <button class="ep-toggle ep-cot-btn" id="cot-toggle" title="Show or hide all chains of thought"><span class="ep-flower-gold">❋</span> CoT <span id="cot-label">shown</span></button>
           <button class="ep-toggle ep-cot-btn" id="tools-toggle" title="Show or hide all tool calls and results">Tools <span id="tools-label">hidden</span></button>
-          <button class="ep-toggle ep-cot-btn" id="previews-toggle" title="Show or hide all tool-result previews" hidden>Preview <span id="previews-label">hidden</span></button>
         </div>
         <div class="ep-view-tools" id="context-tools" hidden>
           <button class="ep-toggle ep-latest-btn" id="ctx-latest" type="button" title="Jump to the latest Context message" hidden>↓ latest</button>

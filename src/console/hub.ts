@@ -22,6 +22,7 @@
 import type { ChatMessage } from '../llm/llm.js';
 import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import { parseEnvelope } from '../lib/envelope.js';
+import { protectDisplayHeredocs, type DisplayHeredoc } from '../lib/heredoc-display.js';
 import type { LogLevel } from '../lib/log.js';
 import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
 import type { CacheInfo } from '../llm/cache-stats.js';
@@ -129,7 +130,7 @@ export interface StreamEntry {
   content: string;
   reasoning_content?: string;
   /** For assistant turns: executable run calls remain action cards. */
-  toolCalls?: { id: string; code: string }[];
+  toolCalls?: { id: string; code: string; detail?: string; display?: { code: string; heredocs: DisplayHeredoc[] } }[];
   tool_call_id?: string;
   /** Harness-only run attribution for the private operator console. */
   run?: RunMessageMetadata;
@@ -659,7 +660,7 @@ export function serializeMessage(msg: ChatMessage, id: number, ts: number | null
   const thoughtParts: string[] = [];
   if (msg.reasoning_content) thoughtParts.push(msg.reasoning_content);
   if (msg.tool_calls && msg.tool_calls.length > 0) {
-    const runCalls: { id: string; code: string }[] = [];
+    const runCalls: NonNullable<StreamEntry['toolCalls']> = [];
     for (const tc of msg.tool_calls) {
       if (tc.function.name === 'think') {
         try {
@@ -667,7 +668,13 @@ export function serializeMessage(msg: ChatMessage, id: number, ts: number | null
           if (typeof parsed.thoughts === 'string' && parsed.thoughts) thoughtParts.push(parsed.thoughts);
         } catch { /* malformed args remain absent; sanitizer normally rejects them */ }
       } else if (tc.function.name === 'run') {
-        runCalls.push({ id: tc.id, code: extractCode(tc.function.arguments) });
+        const detail = extractDetail(tc.function.arguments);
+        const code = extractCode(tc.function.arguments);
+        const protectedCode = protectDisplayHeredocs(code);
+        const display = !protectedCode.error && protectedCode.heredocs.length > 0
+          ? { code: protectedCode.code, heredocs: protectedCode.heredocs }
+          : undefined;
+        runCalls.push({ id: tc.id, code, ...(detail ? { detail } : {}), ...(display ? { display } : {}) });
       }
     }
     if (runCalls.length > 0) entry.toolCalls = runCalls;
@@ -706,6 +713,16 @@ export function extractCode(argumentsJson: string): string {
  // fall through
   }
   return argumentsJson || '';
+}
+
+export function extractDetail(argumentsJson: string): string {
+  try {
+    const parsed = JSON.parse(argumentsJson || '{}');
+    if (parsed && typeof parsed.detail === 'string') return parsed.detail;
+  } catch {
+ // malformed legacy calls have no usable detail
+  }
+  return '';
 }
 
 // The envelope parser lives in lib/envelope.ts (one home for the format, build

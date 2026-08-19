@@ -377,6 +377,7 @@ export interface RunTool {
       type: 'object';
       properties: {
         code: { type: 'string'; description: string };
+        detail: { type: 'string'; description: string; maxLength: 120 };
         sandbox: { type: 'string'; description: string };
         wake: {
           type: 'object';
@@ -390,7 +391,7 @@ export interface RunTool {
           additionalProperties: false;
         };
       };
-      required: ['code'];
+      required: ['code', 'detail'];
       additionalProperties: false;
     };
   };
@@ -408,6 +409,7 @@ export const RUN_TOOL: RunTool = {
       type: 'object',
       properties: {
         code: { type: 'string', description: 'JavaScript to execute.' },
+        detail: { type: 'string', maxLength: 120, description: 'Required single-line description of the intended effect: 1 to 10 words.' },
         sandbox: {
           type: 'string',
           description: 'Exact alias of a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.',
@@ -427,7 +429,7 @@ export const RUN_TOOL: RunTool = {
           additionalProperties: false,
         },
       },
-      required: ['code'],
+      required: ['code', 'detail'],
       additionalProperties: false,
     },
   },

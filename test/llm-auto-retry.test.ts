@@ -108,7 +108,7 @@ test('auto-retry: default outage policy provides ten retries with exponential ca
 test('auto-retry: two transient failures then success — nothing surfaced to the channel', async () => {
   const llm = flakyLLM(2, [
     { message: { role: 'assistant', content: '', tool_calls: [{
-        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"back!\\")"}' } }] },
+        id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"elpis.channel(\\"100\\").send(\\"back!\\")","detail":"Send the recovery reply"}' } }] },
       stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } },
     emptyEnd, // natural end after the send's tool result
   ]);

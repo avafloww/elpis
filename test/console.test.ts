@@ -16,7 +16,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ConsoleHub, serializeMessage, classifyMessage, extractCode, parseEnvelope,
+  ConsoleHub, serializeMessage, classifyMessage, extractCode, extractDetail, parseEnvelope,
   type HubSources, type HubClient, type StreamEntry,
 } from '../src/console/hub.js';
 import { createArchivedReader } from '../src/console/history.js';
@@ -84,6 +84,8 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   const here = path.dirname(fileURLToPath(import.meta.url));
   const src = fs.readFileSync(path.join(here, '../src/console/public/app.js'), 'utf8');
   const html = fs.readFileSync(path.join(here, '../src/console/public/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(here, '../src/console/public/styles.css'), 'utf8');
+  const runCodeSrc = fs.readFileSync(path.join(here, '../src/console/public/run-code.js'), 'utf8');
   assert.match(html, /id="composer-text"[\s\S]*Message agent · console/);
   assert.match(html, /ep-composer-box[\s\S]*aria-label="Send message"/);
   assert.doesNotMatch(html, /ep-composer-foot/);
@@ -98,11 +100,21 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   assert.match(src, /const relatedRooms = [\s\S]*entry\.sends[\s\S]*data-related-rooms': relatedRooms/);
   assert.match(src, /ep-divider cachebust'[\s\S]*'data-global': 'true'/);
   assert.match(src, /cotOpen: localStorage\.getItem\('ep-cot'\) !== 'hidden'/);
-  assert.match(src, /localStorage\.setItem\('ep-cot',[\s\S]*localStorage\.setItem\('ep-tools',[\s\S]*localStorage\.setItem\('ep-previews'/);
+  assert.match(src, /localStorage\.setItem\('ep-cot',[\s\S]*localStorage\.setItem\('ep-tools'/);
+  assert.doesNotMatch(src, /ep-previews|previewsOpen|ep-preview-fold|previews-toggle/);
+  assert.doesNotMatch(html, /previews-toggle|previews-label/);
   assert.match(src, /class: 'ep-run ep-tool-fold'[\s\S]*details\.open = state\.toolsOpen/);
+  assert.match(src, /void runCode\?\.render\(code, tc\)/);
+  assert.match(html, /prettier-standalone\.js[\s\S]*prism-typescript\.js[\s\S]*run-code\.js/);
+  assert.match(runCodeSrc, /import\('.\/heredoc-display\.js'\)/);
   assert.match(src, /class: 'ep-result ep-tool-fold'[\s\S]*details\.open = state\.toolsOpen/);
-  assert.match(src, /class: 'ep-preview-fold'[\s\S]*state\.toolsOpen && state\.previewsOpen/);
-  assert.match(src, /previews-toggle'\)\.hidden = !state\.toolsOpen/);
+  assert.match(src, /class: 'ep-run-detail'[\s\S]*tc\.detail \|\| 'execute javascript · vm sandbox'/);
+  assert.match(src, /class: 'ep-result-detail'[\s\S]*entry\.run\?\.detail \|\| 'RunResult'/);
+  assert.match(css, /\.ep-view-tab[^}]*IBM Plex Sans/);
+  assert.match(css, /\.ep-run-detail[^}]*IBM Plex Sans/);
+  assert.match(css, /\.ep-result-detail[^}]*IBM Plex Sans/);
+  assert.match(src, /class: 'ep-result-pre ep-result-scroll value'/);
+  assert.match(css, /\.ep-result-scroll \{[^}]*max-height: min\(32rem, 55vh\);[^}]*overflow: auto;[^}]*scrollbar-gutter: stable/);
 });
 
 test('client console has a bounded mobile layout with room and log drawers', () => {
@@ -136,10 +148,13 @@ test('classifyMessage covers every render kind', () => {
   assert.equal(classifyMessage({ role: 'user', content: '[harness: context compacted — 4 earlier messages...' }), 'notice');
 });
 
-test('extractCode pulls code from tool-call arguments, tolerating malformed JSON', () => {
-  assert.equal(extractCode(JSON.stringify({ code: 'await elpis.sh("ls")' })), 'await elpis.sh("ls")');
+test('run-card extraction pulls code and detail while tolerating legacy or malformed JSON', () => {
+  const args = JSON.stringify({ code: 'await elpis.sh("ls")', detail: 'List the working directory' });
+  assert.equal(extractCode(args), 'await elpis.sh("ls")');
+  assert.equal(extractDetail(args), 'List the working directory');
+  assert.equal(extractDetail(JSON.stringify({ code: '1' })), '');
   assert.equal(extractCode('{not json'), '{not json');
-  assert.equal(extractCode(''), '');
+  assert.equal(extractDetail('{not json'), '');
 });
 
 test('parseEnvelope extracts author + timestamp from the inbound XML envelope', () => {
@@ -252,16 +267,25 @@ test('serializeMessage: run calls stay action cards while think calls become CoT
     reasoning_content: 'let me check',
     tool_calls: [
       { id: 'think_1', type: 'function', function: { name: 'think', arguments: JSON.stringify({ thoughts: 'consider the edge' }) } },
-      { id: 'call_1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code: '1+1' }) } },
+      { id: 'call_1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code: '1+1', detail: 'Add the fixture values' }) } },
     ],
   }, 5, 123);
   assert.equal(asst.kind, 'assistant');
   assert.equal(asst.id, 5);
   assert.equal(asst.reasoning_content, 'let me check\n\nconsider the edge');
-  assert.deepEqual(asst.toolCalls, [{ id: 'call_1', code: '1+1' }]);
+  assert.deepEqual(asst.toolCalls, [{ id: 'call_1', code: '1+1', detail: 'Add the fixture values' }]);
+
+  const heredocCode = ["const x=<<<BODY", 'raw `text`', 'BODY.trimEnd()'].join('\n');
+  const heredoc = serializeMessage({
+    role: 'assistant', channel: 'c1', content: '',
+    tool_calls: [{ id: 'call_2', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code: heredocCode, detail: 'Read the raw body' }) } }],
+  }, 7, 124);
+  assert.equal(heredoc.toolCalls?.[0].code, heredocCode);
+  assert.match(heredoc.toolCalls?.[0].display?.code ?? '', /__ELPIS_HEREDOC_0__/);
+  assert.equal(heredoc.toolCalls?.[0].display?.heredocs[0].source, '<<<BODY\nraw `text`\nBODY');
 
   const run = {
-    toolContractVersion: 'elpis-run-v3', ok: true,
+    toolContractVersion: 'elpis-run-v4', ok: true, detail: 'Add the fixture values',
     execution: { kind: 'persistent' as const, alias: 'quietly-crimson-ibis', mindId: 7, generation: 2, runId: 'exec-g2-r3' },
     wake: { kind: 'after' as const, state: 'armed' as const, requestedAt: 1, targetAt: 2, taskId: 3 },
   };

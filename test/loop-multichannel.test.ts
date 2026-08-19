@@ -95,7 +95,7 @@ function mutableMutes(): MuteStore {
 // A turn that sends to an EXPLICIT channel via a run tool call, then ends.
 const SEND_THEN_END = (target: string, text: string): CompleteResult[] => [
   { message: { role: 'assistant', content: '', tool_calls: [{
-      id: 'tc', type: 'function', function: { name: 'run', arguments: `{"code":"elpis.channel('${target}').send(\\"${text}\\")"}` } }] },
+      id: 'tc', type: 'function', function: { name: 'run', arguments: `{"code":"elpis.channel('${target}').send(\\"${text}\\")","detail":"Send the scripted message"}` } }] },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } },
   { message: { role: 'assistant', content: '' }, stripped: false,
     usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } },

@@ -12,13 +12,14 @@ import { YIELD_NUDGE_ALERT_AT, YIELD_NUDGE_REALERT_EVERY } from '../src/agent.js
 import type { ConsoleHub } from '../src/console/hub.js';
 import type { Logger } from '../src/lib/log.js';
 
-test('RUN_TOOL exposes optional sandbox/wake with code as the only required param', () => {
+test('RUN_TOOL requires code/detail and keeps sandbox/wake optional', () => {
   const params = RUN_TOOL.function.parameters;
   assert.equal(Object.hasOwn(params.properties, 'end'), false);
   assert.equal(params.properties.sandbox.type, 'string');
   assert.equal(params.properties.wake.type, 'object');
-  assert.deepEqual(params.required, ['code']);
+  assert.deepEqual(params.required, ['code', 'detail']);
   assert.equal(params.properties.code.type, 'string');
+  assert.equal(params.properties.detail.maxLength, 120);
 });
 
 test('external-thinking JUICE preserves the chosen effort after native reasoning is disabled', () => {
@@ -79,7 +80,7 @@ function runCall(code: string, wake: boolean): CompleteResult {
   return {
     message: {
       role: 'assistant', content: '',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code, ...(wake ? { wake: { after: '1h' } } : {}) }) } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Exercise run wake handling', ...(wake ? { wake: { after: '1h' } } : {}) }) } }],
     },
     stripped: false,
     usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
@@ -106,7 +107,7 @@ function multiRunCall(calls: { code: string; wake: boolean }[]): CompleteResult 
       role: 'assistant', content: '',
       tool_calls: calls.map((c, i) => ({
         id: `tc${i + 1}`, type: 'function' as const,
-        function: { name: 'run', arguments: JSON.stringify({ code: c.code, ...(c.wake ? { wake: { after: '1h' } } : {}) }) },
+        function: { name: 'run', arguments: JSON.stringify({ code: c.code, detail: 'Exercise final wake selection', ...(c.wake ? { wake: { after: '1h' } } : {}) }) },
       })),
     },
     stripped: false,
@@ -413,7 +414,7 @@ test('ghost-reply nudge still fires on a wake-yielded turn with zero sends', asy
     message: {
       role: 'assistant',
       content: 'Yes, I can help with that — here is what I would do first.',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"1h"}}' } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","detail":"Compute the ghost fixture","wake":{"after":"1h"}}' } }],
     },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
   };
@@ -658,7 +659,7 @@ test('a ghost-bounced turn does not log a turn-end that never happened', async (
     message: {
       role: 'assistant',
       content: 'Yes, I can help with that — here is what I would do first.',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"1h"}}' } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","detail":"Compute the ghost fixture","wake":{"after":"1h"}}' } }],
     },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
   };

@@ -6,16 +6,17 @@ import * as path from 'node:path';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 
-test('run v3 schema exposes code, exact sandbox alias, and one-shot wake without end', () => {
+test('run v4 schema requires concise detail with code, exact sandbox alias, and one-shot wake without end', () => {
   const parameters = RUN_TOOL.function.parameters;
-  assert.deepEqual(Object.keys(parameters.properties), ['code', 'sandbox', 'wake']);
+  assert.deepEqual(Object.keys(parameters.properties), ['code', 'detail', 'sandbox', 'wake']);
   assert.equal(Object.hasOwn(parameters.properties, 'end'), false);
-  assert.deepEqual(parameters.required, ['code']);
+  assert.deepEqual(parameters.required, ['code', 'detail']);
+  assert.equal(parameters.properties.detail.maxLength, 120);
   assert.equal(parameters.additionalProperties, false);
   assert.deepEqual(parameters.properties.wake.oneOf, [{ required: ['after'] }, { required: ['at'] }, { required: ['auto'] }]);
   assert.deepEqual(parameters.properties.wake.properties.auto.enum, [true]);
   assert.equal(parameters.properties.wake.additionalProperties, false);
-  assert.equal(TOOL_CONTRACT_VERSION, 'elpis-run-v3');
+  assert.equal(TOOL_CONTRACT_VERSION, 'elpis-run-v4');
 });
 
 import type { CompleteOptions, CompleteResult, LLM, ChatMessage } from '../src/llm/llm.js';
@@ -25,8 +26,9 @@ import { buildTestAgent } from './helpers.js';
 import { parseRunWakePayload, RUN_WAKE_TASK_PREFIX } from '../src/sandbox/wake.js';
 
 function runResponse(args: Record<string, unknown>, id = 'run-1'): CompleteResult {
+  const v4Args = { detail: 'Exercise the run contract', ...args };
   return {
-    message: { role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name: 'run', arguments: JSON.stringify(args) } }] },
+    message: { role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name: 'run', arguments: JSON.stringify(v4Args) } }] },
     stripped: false,
     usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
   };
@@ -67,14 +69,15 @@ function success(code: string): RunResult {
   };
 }
 
-test('run v3 rejects invalid wake before execution and forwards exact sandbox aliases', async () => {
+test('run v4 rejects invalid wake before execution and forwards exact sandbox aliases', async () => {
   const llm = scripted([
-    runResponse({ code: 'never', wake: { after: '0s' } }, 'bad'),
+    runResponse({ code: 'missing', detail: undefined }, 'missing-detail'),
+    runResponse({ code: 'never', wake: { after: '0s' } }, 'bad-wake'),
     runResponse({ code: 'second', sandbox: 'quietly-crimson-ibis', wake: { after: '1h' } }, 'good'),
   ]);
   const requests: unknown[] = [];
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-validate-',
+    llm, tmpPrefix: 'run-v4-validate-',
     agentDeps: { sandbox: { run: async (request) => { requests.push(request); return success(request.code); } } },
   });
   void h.agent.loop();
@@ -83,11 +86,15 @@ test('run v3 rejects invalid wake before execution and forwards exact sandbox al
   h.agent.stop();
   assert.deepEqual(requests, [{ code: 'second', sandbox: 'quietly-crimson-ibis' }]);
   const tools = h.agent.messagesForTest.filter((message) => message.role === 'tool');
-  assert.match(String(tools[0]?.content), /greater than zero/);
-  assert.equal(tools[1]?.run?.execution?.alias, 'quietly-crimson-ibis');
-  assert.equal(tools[1]?.run?.wake?.state, 'armed');
-  assert.ok(tools[1]?.run?.wake?.taskId);
-  const task = h.scheduler.list().find((candidate) => candidate.id === tools[1]?.run?.wake?.taskId);
+  assert.match(String(tools[0]?.content), /run\.detail must be a string/);
+  assert.equal(tools[0]?.run?.detail, undefined);
+  assert.match(String(tools[1]?.content), /greater than zero/);
+  assert.equal(tools[2]?.run?.detail, 'Exercise the run contract');
+  assert.equal(tools[2]?.run?.execution?.alias, 'quietly-crimson-ibis');
+  assert.equal(tools[2]?.run?.wake?.state, 'armed');
+  assert.match(String(tools[2]?.content), /detail="Exercise the run contract"/);
+  assert.ok(tools[2]?.run?.wake?.taskId);
+  const task = h.scheduler.list().find((candidate) => candidate.id === tools[2]?.run?.wake?.taskId);
   assert.ok(task && task.doneAt == null);
   assert.equal(parseRunWakePayload(task.payload)?.state, 'armed');
   h.cleanup();
@@ -100,7 +107,7 @@ test('failed and detached runs reject wake and continue until completed code arm
     runResponse({ code: 'done', wake: { after: '1h' } }, 'done'),
   ]);
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-reject-',
+    llm, tmpPrefix: 'run-v4-reject-',
     agentDeps: { sandbox: { run: async ({ code }) => {
       if (code === 'fail') return { ok: false, error: 'boom', failureKind: 'runtime' };
       if (code === 'detach') return { ok: true, detached: true, bgId: 'bg-1', preview: 'detached' };
@@ -127,7 +134,7 @@ test('absolute target elapsed during execution returns success without yielding'
     runResponse({ code: 'done', wake: { after: '1h' } }, 'done'),
   ]);
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-elapsed-',
+    llm, tmpPrefix: 'run-v4-elapsed-',
     agentDeps: { sandbox: { run: async ({ code }) => {
       if (code === 'slow') await new Promise((resolve) => setTimeout(resolve, 260));
       return success(code);
@@ -148,7 +155,7 @@ test('absolute target elapsed during execution returns success without yielding'
 test('external wakes preempt an armed run wake while ambient traffic does not', async () => {
   const llm = scripted([runResponse({ code: 'done', wake: { after: '1h' } })]);
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-preempt-',
+    llm, tmpPrefix: 'run-v4-preempt-',
     agentDeps: { sandbox: { run: async ({ code }) => success(code) } },
   });
   void h.agent.loop();
@@ -172,7 +179,7 @@ test('a due durable run wake fires through Scheduler and starts a new outer turn
     runResponse({ code: 'second', wake: { after: '1h' } }, 'second'),
   ]);
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-fire-',
+    llm, tmpPrefix: 'run-v4-fire-',
     agentDeps: { sandbox: { run: async ({ code }) => success(code) } },
   });
   try {
@@ -193,7 +200,7 @@ test('a due durable run wake fires through Scheduler and starts a new outer turn
 });
 
 test('restart recovery adopts the armed wake and external input preempts it durably', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-v3-recover-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-v4-recover-'));
   const firstLlm = scripted([runResponse({ code: 'first', wake: { after: '1h' } })]);
   const first = buildTestAgent({
     dir, llm: firstLlm,
@@ -229,7 +236,7 @@ test('auto wake consults the bounded advisor and persists its visible provenance
   const llm = scripted([runResponse({ code: 'done', wake: { auto: true } }, 'auto')]);
   let turn: unknown;
   const h = buildTestAgent({
-    llm, tmpPrefix: 'run-v3-auto-',
+    llm, tmpPrefix: 'run-v4-auto-',
     agentDeps: { sandbox: {
       run: async ({ code }) => success(code),
       adviseWake: async (value) => {

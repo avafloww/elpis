@@ -27,7 +27,7 @@ export interface GenerationProvenance {
   toolContractVersion: string;
 }
 
-export const TOOL_CONTRACT_VERSION = 'elpis-run-v3';
+export const TOOL_CONTRACT_VERSION = 'elpis-run-v4';
 
 /** Remove every URL component which could carry authentication or unstable
  * request data. Throws for relative/invalid URLs: provenance must be exact. */
