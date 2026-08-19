@@ -114,8 +114,9 @@ test('client console composer sends Enter, preserves Shift+Enter, and handles ch
   assert.match(css, /\.ep-view-tab[^}]*IBM Plex Sans/);
   assert.match(css, /\.ep-run-detail[^}]*IBM Plex Sans/);
   assert.match(css, /\.ep-result-detail[^}]*IBM Plex Sans/);
+  assert.match(src, /class: 'ep-result-pre ep-result-scroll console'/);
   assert.match(src, /class: 'ep-result-pre ep-result-scroll value'/);
-  assert.match(css, /\.ep-result-scroll \{[^}]*max-height: min\(32rem, 55vh\);[^}]*overflow: auto;[^}]*scrollbar-gutter: stable/);
+  assert.match(css, /\.ep-result-scroll \{[^}]*max-height: min\(24rem, 42vh\);[^}]*overflow: auto;[^}]*scrollbar-gutter: stable/);
 });
 
 test('client console has a bounded mobile layout with room and log drawers', () => {

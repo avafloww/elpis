@@ -270,7 +270,7 @@ a.ep-attach-file:hover { color: var(--ink); border-color: var(--gold); }
 .ep-result-pre { margin: 0 0 10px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; line-height: 1.55; color: var(--soft); white-space: pre-wrap; word-wrap: break-word; }
 .ep-result-pre.value { color: var(--ink); margin-bottom: 0; }
 .ep-result-value-head { display: flex; align-items: center; gap: 7px; }
-.ep-result-scroll { max-height: min(32rem, 55vh); overflow: auto; scrollbar-gutter: stable; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.ep-result-scroll { max-height: min(24rem, 42vh); overflow: auto; scrollbar-gutter: stable; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
 
 /* summary / notice / compaction divider */
 .ep-summary { border: 1px solid var(--gold); border-radius: 9px; background: var(--panel3); overflow: hidden; max-width: 860px; }

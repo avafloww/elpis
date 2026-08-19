@@ -11,8 +11,8 @@
     for (const heredoc of heredocs || []) {
       const doubleQuoted = JSON.stringify(heredoc.token);
       const singleQuoted = `'${heredoc.token}'`;
-      if (code.includes(doubleQuoted)) code = code.replace(doubleQuoted, heredoc.source);
-      else if (code.includes(singleQuoted)) code = code.replace(singleQuoted, heredoc.source);
+      if (code.includes(doubleQuoted)) code = code.replace(doubleQuoted, () => heredoc.source);
+      else if (code.includes(singleQuoted)) code = code.replace(singleQuoted, () => heredoc.source);
       else throw new Error(`formatted code lost heredoc placeholder ${heredoc.token}`);
     }
     return code;
@@ -47,10 +47,11 @@
     const heredocs = Array.isArray(display?.heredocs) ? display.heredocs : [];
     for (const parser of ['babel', 'typescript']) {
       try {
-        const formatted = (await window.prettier.format(input, {
+        let formatted = (await window.prettier.format(input, {
           parser, plugins: pluginsFor(parser), printWidth: 100, tabWidth: 2,
           singleQuote: true, semi: true, trailingComma: 'all',
         })).trimEnd();
+        if (!raw.trimEnd().endsWith(';') && formatted.endsWith(';')) formatted = formatted.slice(0, -1);
         return {
           source: restoreHeredocs(formatted, heredocs),
           highlightSource: formatted,
@@ -90,8 +91,8 @@
       const replacement = `<span class="token string heredoc">${escapeHtml(heredoc.source)}</span>`;
       const singleQuoted = `<span class="token string">'${heredoc.token}'</span>`;
       const doubleQuoted = `<span class="token string">"${heredoc.token}"</span>`;
-      if (html.includes(singleQuoted)) html = html.replace(singleQuoted, replacement);
-      else if (html.includes(doubleQuoted)) html = html.replace(doubleQuoted, replacement);
+      if (html.includes(singleQuoted)) html = html.replace(singleQuoted, () => replacement);
+      else if (html.includes(doubleQuoted)) html = html.replace(doubleQuoted, () => replacement);
       else {
         highlight(element, restoreHeredocs(source, heredocs), normalized);
         return;

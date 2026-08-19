@@ -569,7 +569,7 @@
     const body = el('div', { class: 'ep-result-body' });
     if (consoleText) {
       body.appendChild(el('div', { class: 'ep-result-label', text: 'console' }));
-      body.appendChild(el('pre', { class: 'ep-result-pre', text: consoleText }));
+      body.appendChild(el('pre', { class: 'ep-result-pre ep-result-scroll console', text: consoleText }));
     }
     body.appendChild(el('div', { class: 'ep-result-label ep-result-value-head' }, [
       el('span', { text: ok ? 'value → saved as _' : 'error' }),
