@@ -18,13 +18,14 @@ import { evaluateOutcome, recipientSatisfied, targetChannelSatisfied } from './o
 import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { parseEpisodeBootstrap } from './bootstrap.js';
-import { resolveCandidateIngress } from './ingress.js';
+import { resolveCandidateIngressBatch } from './ingress.js';
 import { contentDigest } from './store.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
 import { openDatabase } from '../src/store/db.js';
 import { migrateDataLayout, resolveDataLayout } from '../src/store/data-layout.js';
 import { MindService } from '../src/store/mind.js';
 import { Scheduler } from '../src/store/scheduler.js';
+import { SandboxRegistry } from '../src/sandbox/registry.js';
 import { noopLogger } from '../src/lib/log.js';
 
 process.umask(0o077);
@@ -58,7 +59,7 @@ class HostLLM implements LLM {
 }
 
 function seedStructuredState(scenario: ScenarioSpec): void {
-  if (scenario.fixture.mind.length === 0 && scenario.fixture.scheduler.length === 0) return;
+  if (scenario.fixture.mind.length === 0 && scenario.fixture.scheduler.length === 0 && scenario.fixture.sandboxes.length === 0) return;
   const layout = migrateDataLayout(WORK).layout;
   if (fs.existsSync(layout.database)) return;
   const baseTime = Date.parse(scenario.fixture.clockAt!);
@@ -87,6 +88,14 @@ function seedStructuredState(scenario: ScenarioSpec): void {
         payload: task.payload, nextRunAt: baseTime + task.nextRunOffsetMs,
         intervalMs: task.intervalMs, nagIntervalMs: task.nagIntervalMs,
       });
+    }
+    if (scenario.fixture.sandboxes.length > 0) {
+      let uuidSequence = 0;
+      const registry = new SandboxRegistry({
+        db, now: () => baseTime,
+        uuid: () => `00000000-0000-4000-8000-${String(++uuidSequence).padStart(12, '0')}`,
+      });
+      for (const sandbox of scenario.fixture.sandboxes) registry.register(ids.get(sandbox.mindKey)!, [sandbox.alias]);
     }
     db.prepare(`UPDATE mind_items SET created_at = ?, updated_at = ?, closed_at = CASE WHEN closed_at IS NULL THEN NULL ELSE ? END WHERE created_by = 'fixture'`).run(baseTime, baseTime, baseTime);
     db.prepare(`UPDATE mind_dependencies SET created_at = ? WHERE created_by = 'fixture'`).run(baseTime);
@@ -161,6 +170,10 @@ function databaseSchemaVersion(file: string): number {
 function writeRuntimeConfig(scenario: ScenarioSpec, meta: ReturnType<typeof parseEpisodeBootstrap>['meta']): string {
   const file = path.join(CONTROL, 'runtime-config.yaml');
   const channels = Object.fromEntries(Object.values(scenario.fixture.channels).map((id) => [id, 'direct']));
+  const declaredIngress = [scenario.ingress, ...(scenario.ingressBatch ?? []), scenario.resumeIngress, ...(scenario.resumeIngressBatch ?? [])]
+    .filter((event): event is NonNullable<typeof event> => event !== undefined);
+  const discordIngress = declaredIngress.find((event) => event.kind === 'discord');
+  const guildSlug = discordIngress?.kind === 'discord' ? discordIngress.guildSlug ?? 'workspace' : 'workspace';
   const llm: Record<string, unknown> = {
     provider_type: meta.providerType,
     model: meta.model,
@@ -180,7 +193,7 @@ function writeRuntimeConfig(scenario: ScenarioSpec, meta: ReturnType<typeof pars
     discord: {
       bot_token: 'MTIz.local.transport', application_id: '123', ambient_tick_ms: 0,
       emote_images: false,
-      guilds: [{ id: 'workspace-guild', slug: 'workspace', slash_commands: false, channels }],
+      guilds: [{ id: 'workspace-guild', slug: guildSlug, slash_commands: false, channels }],
     },
     compaction: { trigger_tokens: 220000, keep_tokens: 50000 },
     heartbeat: { interval_ms: 0, max_interval_ms: 14400000, reflection_min_messages: 3, social_nudge_ms: 0 },
@@ -192,11 +205,15 @@ function writeRuntimeConfig(scenario: ScenarioSpec, meta: ReturnType<typeof pars
   return file;
 }
 
+function terminalIntent(args: Record<string, unknown>): boolean {
+  return args.end === true || Object.hasOwn(args, 'wake');
+}
+
 function parseCall(message: ChatMessage, recorder: TraceRecorder): void {
   for (const call of message.tool_calls ?? []) {
     let args: Record<string, unknown> = {}, malformed = false;
     try { args = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { malformed = true; }
-    recorder.add({ kind: 'tool-call', callId: call.id, code: typeof args.code === 'string' ? args.code : undefined, end: args.end === true, data: { malformed } });
+    recorder.add({ kind: 'tool-call', callId: call.id, code: typeof args.code === 'string' ? args.code : undefined, end: terminalIntent(args), data: { malformed } });
   }
 }
 
@@ -267,7 +284,7 @@ async function main(): Promise<void> {
         for (const call of calls) {
           try {
             const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
-            if (args.end === true) {
+            if (terminalIntent(args)) {
               call.function.arguments = JSON.stringify({ ...args, code: 'throw new Error("simulated terminal failure")' });
               terminalFailureInjected = true; break;
             }
@@ -312,13 +329,12 @@ async function main(): Promise<void> {
   currentMessages = () => runtime.agent.messagesForTest;
   indexedMessages = runtime.agent.messagesForTest.length;
   if (spec.fixture.advanceClockMs && !resumed) await host.advance(spec.fixture.advanceClockMs);
-  const ingress = resolveCandidateIngress(spec, resumed);
-  ingressDigests.push(contentDigest(ingress));
-  recorder.add({ kind: ingress.kind === 'heartbeat' ? 'heartbeat' : 'natural-turn', channel: ingress.channelId, detail: ingress.content });
-  runtime.agent.enqueue({
-    id: `${ingress.kind}-${Date.now()}`, ...ingress, createdAt: new Date().toISOString(),
-    replyTo: null, forwarded: null, mentions: [], attachments: [],
-  });
+  const ingressBatch = resolveCandidateIngressBatch(spec, resumed, WORK);
+  ingressDigests.push(contentDigest(ingressBatch));
+  for (const ingress of ingressBatch) {
+    recorder.add({ kind: ingress.kind === 'heartbeat' ? 'heartbeat' : 'natural-turn', channel: ingress.channelId, detail: ingress.content });
+    runtime.agent.enqueue(ingress);
+  }
   const startedAt = new Date().toISOString();
   let timedOut = false, error: string | undefined;
   try {
@@ -396,7 +412,7 @@ async function main(): Promise<void> {
 function endFor(tool: ChatMessage, messages: ChatMessage[]): boolean {
   const assistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.tool_calls?.some((c) => c.id === tool.tool_call_id));
   const call = assistant?.tool_calls?.find((c) => c.id === tool.tool_call_id);
-  try { return JSON.parse(call?.function.arguments ?? '{}').end === true; } catch { return false; }
+  try { return terminalIntent(JSON.parse(call?.function.arguments ?? '{}') as Record<string, unknown>); } catch { return false; }
 }
 
 main().catch((error) => { writeJsonLine(process.stdout, { type: 'episode-error', id: episodeId, error: error instanceof Error ? error.stack ?? error.message : String(error) }); process.exitCode = 1; });

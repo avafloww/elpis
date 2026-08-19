@@ -11,7 +11,7 @@ import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
 import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
-import { RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { AMBIENT_BATCH_TEST_SCENARIO, RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
@@ -55,7 +55,7 @@ test('live Docker boundary denies network/root writes/capabilities and applies d
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('live oracle episode keeps every private artifact at 0700/0600', { skip: !live }, async () => {
+test('live oracle episode keeps private state at 0700/0600 and the exact nested gitignore at 0644', { skip: !live }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpisbench-private-live-'));
   const dataDirectory = path.join(root, 'data');
   const provider = { provider_type: 'openai-compatible' as const, model: 'oracle-unused', base_url: 'https://oracle.invalid/v1', api_key: 'unused', api: 'auto' as const };
@@ -88,19 +88,19 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
       assert.ok(tables.includes('scheduled_tasks'));
       assert.ok(tables.includes('channels'));
       const items = db.prepare('SELECT title, status, parent_id, due_at FROM mind_items ORDER BY id').all() as Array<{ title: string; status: string; parent_id: number | null; due_at: number | null }>;
-      assert.equal(items.length, 4);
+      assert.equal(items.length, 5);
       assert.deepEqual(items.map((item) => [item.title, item.status]), [
-        ['Seeded project', 'in_progress'], ['Finished prerequisite', 'done'], ['Ready leaf', 'open'], ['Blocked leaf', 'open'],
+        ['Engine workspace', 'in_progress'], ['Seeded project', 'in_progress'], ['Finished prerequisite', 'done'], ['Ready leaf', 'open'], ['Blocked leaf', 'open'],
       ]);
-      assert.equal(items[2].parent_id, 1);
-      assert.equal(items[2].due_at, Date.parse('2026-01-02T03:06:05.000Z'));
+      assert.equal(items[3].parent_id, 2);
+      assert.equal(items[3].due_at, Date.parse('2026-01-02T03:06:05.000Z'));
       const dependencies = db.prepare('SELECT item_id, depends_on_id FROM mind_dependencies ORDER BY item_id').all().map((row) => ({ item_id: Number((row as { item_id: number }).item_id), depends_on_id: Number((row as { depends_on_id: number }).depends_on_id) }));
-      assert.deepEqual(dependencies, [{ item_id: 3, depends_on_id: 2 }, { item_id: 4, depends_on_id: 3 }]);
+      assert.deepEqual(dependencies, [{ item_id: 4, depends_on_id: 3 }, { item_id: 5, depends_on_id: 4 }]);
       const scheduledRow = db.prepare('SELECT name, channel_id, payload, next_run_at FROM scheduled_tasks').get() as { name: string; channel_id: string; payload: string; next_run_at: number };
       const scheduled = { name: String(scheduledRow.name), channel_id: String(scheduledRow.channel_id), payload: String(scheduledRow.payload), next_run_at: Number(scheduledRow.next_run_at) };
       assert.deepEqual(scheduled, { name: 'seeded-future-task', channel_id: '101', payload: '[seeded future wake]', next_run_at: Date.parse('2026-01-02T03:05:05.000Z') });
     } finally { db.close(); }
-    const sessionDir = path.join(work, 'sessions', 'discord', 'main');
+    const sessionDir = path.join(resolveDataLayout(work).sessions, 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
     const runtimeConfig = parseYaml(fs.readFileSync(path.join(results, 'runtime-config.yaml'), 'utf8')) as {
       paths: { data_directory: string }; console: { enabled: boolean }; fleet: { enabled: boolean };
@@ -141,15 +141,53 @@ test('live oracle episode keeps every private artifact at 0700/0600', { skip: !l
     const containerSource = fs.readFileSync(path.join(process.cwd(), 'bench', 'container-main.ts'), 'utf8');
     assert.doesNotMatch(containerSource, /buildTestAgent|test\/helpers/);
     const wrong: string[] = [];
+    const publicGitignore = resolveDataLayout(work).gitignore;
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const file = path.join(dir, entry.name); const mode = fs.statSync(file).mode & 0o777;
         if (entry.isDirectory()) { if (mode !== 0o700) wrong.push(`${mode.toString(8)} ${file}`); walk(file); }
-        else if (mode !== 0o600) wrong.push(`${mode.toString(8)} ${file}`);
+        else {
+          const expectedMode = file === publicGitignore ? 0o644 : 0o600;
+          if (mode !== expectedMode) wrong.push(`${mode.toString(8)} ${file}`);
+        }
       }
     };
     walk(dataDirectory);
     assert.deepEqual(wrong, []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('live production runtime drains ambient Discord and its harness wake into one dispatch', { skip: !live }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpisbench-ingress-batch-live-'));
+  const dataDirectory = path.join(root, 'data');
+  const provider = { provider_type: 'openai-compatible' as const, model: 'oracle-unused', base_url: 'https://oracle.invalid/v1', api_key: 'unused', api: 'auto' as const };
+  const config: BenchConfig = {
+    version: 1, default_provider: 'oracle', generator_provider: 'oracle', providers: { oracle: provider },
+    judges: [
+      { id: 'a', provider: 'oracle', family: 'one', teacher_pool: true },
+      { id: 'b', provider: 'oracle', family: 'two', teacher_pool: true },
+      { id: 'c', provider: 'oracle', family: 'three', teacher_pool: false },
+    ],
+    image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
+  };
+  try {
+    const record = await runScenario(config, AMBIENT_BATCH_TEST_SCENARIO, 'oracle', { oracle: true });
+    assert.equal(Object.values(record.gates).every(Boolean), true);
+    assert.equal(record.metrics.naturalTurns, 2);
+    assert.equal(record.metrics.dispatchCount, 1);
+    assert.ok(record.provenance);
+    assert.equal(record.provenance.ingressDigests.length, 1);
+    const [episode] = fs.readdirSync(path.join(dataDirectory, 'episodes'));
+    const sessionDir = path.join(dataDirectory, 'episodes', episode, 'work', 'elpis-data', 'sessions', 'discord', 'main');
+    const transcript = fs.readdirSync(sessionDir)
+      .filter((name) => name.endsWith('.jsonl'))
+      .sort()
+      .map((name) => fs.readFileSync(path.join(sessionDir, name), 'utf8'))
+      .join('\n');
+    assert.match(transcript, /guild=\\"workspace\\" channel=\\"lounge\\" author=\\"person\\" bot=\\"false\\" time=\\"2026-01-02T03:04:05\.000Z\\"/);
+    assert.match(transcript, /ordinary ambient message/);
+    assert.match(transcript, /time=\\"2026-01-02T03:05:05\.000Z\\"/);
+    assert.match(transcript, /room context — 1 message/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -181,7 +219,7 @@ test('live production runtime preserves state across a fresh container restart',
     assert.equal(fs.readFileSync(path.join(work, 'stage-one.txt'), 'utf8'), 'stage one\n');
     assert.equal(fs.readFileSync(path.join(work, 'stage-two.txt'), 'utf8'), 'stage two\n');
     assert.equal(fs.existsSync(resolveDataLayout(work).database), true);
-    const sessionDir = path.join(work, 'sessions', 'discord', 'main');
+    const sessionDir = path.join(resolveDataLayout(work).sessions, 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

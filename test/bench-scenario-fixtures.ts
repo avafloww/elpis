@@ -10,9 +10,13 @@ type FixtureOptions = {
   restartAtDispatch?: number;
   track?: ScenarioSpec['track'];
   ingress?: ScenarioSpec['ingress'];
+  ingressBatch?: ScenarioSpec['ingressBatch'];
+  resumeIngress?: ScenarioSpec['resumeIngress'];
+  resumeIngressBatch?: ScenarioSpec['resumeIngressBatch'];
   clockAt?: string;
   mind?: ScenarioSpec['fixture']['mind'];
   scheduler?: ScenarioSpec['fixture']['scheduler'];
+  sandboxes?: ScenarioSpec['fixture']['sandboxes'];
 };
 
 export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
@@ -26,12 +30,21 @@ export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
     prompt: options.prompt ?? 'write the requested test fixture',
     track: options.track ?? 'micro',
     ...(options.ingress ? { ingress: options.ingress } : {}),
+    ...(options.ingressBatch ? { ingressBatch: options.ingressBatch } : {}),
+    ...(options.resumeIngress ? { resumeIngress: options.resumeIngress } : {}),
+    ...(options.resumeIngressBatch ? { resumeIngressBatch: options.resumeIngressBatch } : {}),
     difficulty: options.difficulty ?? 'ordinary',
     maxDispatches: 8,
     maxWallMs: 30_000,
     fixture: {
       channels: { general: '100', ops: '101' }, files: options.files ?? { 'result.txt': 'before\n' }, directories: [],
-      ...(options.clockAt ? { clockAt: options.clockAt } : {}), mind: options.mind ?? [], scheduler: options.scheduler ?? [],
+      clockAt: options.clockAt ?? '2026-01-02T03:04:05.000Z',
+      mind: [
+        { key: 'workspace', title: 'Engine workspace', kind: 'task', status: 'in_progress', priority: 1, body: '', parentKey: undefined, dependsOn: [], dueOffsetMs: null, tags: ['engine'] },
+        ...(options.mind ?? []),
+      ],
+      scheduler: options.scheduler ?? [],
+      sandboxes: options.sandboxes ?? [{ mindKey: 'workspace', alias: 'quiet-ready-workspace' }],
       inputChannel: 'general', heartbeat: false, ...(options.restartAtDispatch ? { restartAtDispatch: options.restartAtDispatch } : {}),
     },
     expected: {
@@ -55,6 +68,23 @@ export const SEEDED_HEARTBEAT_TEST_SCENARIO = engineTestScenario({
   ],
   scheduler: [{ name: 'seeded-future-task', kind: 'custom', channel: 'ops', payload: '[seeded future wake]', nextRunOffsetMs: 60_000, intervalMs: null, nagIntervalMs: null }],
 });
+export const AMBIENT_BATCH_TEST_SCENARIO = engineTestScenario({
+  id: 'social/engine-ambient-batch', category: 'social', track: 'production',
+  clockAt: '2026-01-02T03:04:05.000Z',
+  ingressBatch: [
+    {
+      kind: 'discord', id: 'ambient-message', channel: 'general', channelName: 'lounge',
+      author: 'person', authorId: '200', guildSlug: 'workspace', bot: false, wakeClass: 'ambient',
+      content: 'ordinary ambient message',
+    },
+    {
+      kind: 'harness', id: 'ambient-tick', atOffsetMs: 60_000,
+      content: '[room context — 1 message since 03:04, across workspace/lounge. This is what was said around you, not a set of requests.]',
+      sendScope: 'observe_only',
+    },
+  ],
+});
+
 export const RESTART_TEST_SCENARIO = engineTestScenario({
   id: 'tool/engine-restart', restartAtDispatch: 1, files: { 'stage-one.txt': '', 'stage-two.txt': '' },
   expected: { outcome: 'restart engine fixture', workPaths: ['stage-one.txt', 'stage-two.txt'], checks: [

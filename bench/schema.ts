@@ -17,10 +17,54 @@ export const outcomeCheckSchema = z.discriminatedUnion('kind', [
 export type OutcomeCheck = z.infer<typeof outcomeCheckSchema>;
 export type OutcomeCheckInput = z.input<typeof outcomeCheckSchema>;
 
+const ingressIdentity = {
+  id: z.string().min(1).optional(),
+  atOffsetMs: z.number().int().nonnegative().max(14 * 24 * 60 * 60 * 1000).default(0),
+};
+
+const ingressAttachmentSchema = z.object({
+  path: z.string().min(1),
+  url: z.string().default(''),
+  name: z.string().min(1).optional(),
+  contentType: z.string().nullable().default(null),
+  inlineText: z.string().nullable().optional(),
+});
+
+const ingressReplySchema = z.object({
+  id: z.string().min(1),
+  author: z.string().min(1),
+  authorId: z.string().optional(),
+  content: z.string(),
+});
+
+const ingressForwardSchema = z.object({
+  author: z.string().min(1),
+  channelName: z.string().nullable().default(null),
+  content: z.string(),
+});
+
 export const candidateIngressSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('discord'), content: z.string(), channel: z.string().min(1), author: z.string().min(1), authorId: z.string().optional() }),
-  z.object({ kind: z.literal('heartbeat') }),
-  z.object({ kind: z.enum(['scheduler', 'harness', 'watch']), content: z.string().min(1), author: z.string().default('agent') }),
+  z.object({
+    kind: z.literal('discord'), ...ingressIdentity,
+    content: z.string(), channel: z.string().min(1), channelName: z.string().min(1).optional(),
+    policyChannel: z.string().min(1).optional(), author: z.string().min(1), authorId: z.string().optional(),
+    guildSlug: z.string().min(1).optional(), bot: z.boolean().optional(), wakeClass: z.enum(['wake', 'ambient']).default('wake'),
+    replyTo: ingressReplySchema.nullable().default(null), forwarded: ingressForwardSchema.nullable().default(null),
+    mentions: z.array(z.string()).default([]), attachments: z.array(ingressAttachmentSchema).default([]),
+  }),
+  z.object({ kind: z.literal('heartbeat'), ...ingressIdentity }),
+  z.object({
+    kind: z.literal('scheduler'), ...ingressIdentity,
+    content: z.string().min(1), channel: z.string().min(1).optional(), author: z.string().min(1).default('scheduler'),
+  }),
+  z.object({
+    kind: z.literal('harness'), ...ingressIdentity,
+    content: z.string().min(1), author: z.string().min(1).default('harness'), sendScope: z.literal('observe_only').optional(),
+  }),
+  z.object({
+    kind: z.literal('watch'), ...ingressIdentity,
+    content: z.string().min(1), author: z.string().min(1).default('harness'), attachments: z.array(ingressAttachmentSchema).default([]),
+  }),
 ]);
 export type CandidateIngressSpec = z.infer<typeof candidateIngressSchema>;
 
@@ -57,6 +101,11 @@ const schedulerSeedSchema = z.object({
   nagIntervalMs: z.number().int().positive().nullable().default(null),
 });
 
+const sandboxSeedSchema = z.object({
+  mindKey: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  alias: z.string().regex(/^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*){2}$/),
+});
+
 const scenarioSpecBase = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
   id: z.string().regex(/^[a-z]+\/[a-z0-9-]+$/),
@@ -67,7 +116,9 @@ const scenarioSpecBase = z.object({
   prompt: z.string().min(1),
   track: z.enum(['micro', 'production']).default('micro'),
   ingress: candidateIngressSchema.optional(),
+  ingressBatch: z.array(candidateIngressSchema).min(1).max(32).optional(),
   resumeIngress: candidateIngressSchema.optional(),
+  resumeIngressBatch: z.array(candidateIngressSchema).min(1).max(32).optional(),
   pairId: z.string().optional(),
   difficulty: z.enum(['ordinary', 'hard-recovery', 'adversarial', 'calibration']),
   maxDispatches: z.number().int().positive(),
@@ -79,6 +130,7 @@ const scenarioSpecBase = z.object({
     clockAt: z.string().datetime().optional(),
     mind: z.array(mindSeedSchema).default([]),
     scheduler: z.array(schedulerSeedSchema).default([]),
+    sandboxes: z.array(sandboxSeedSchema).default([]),
     inputChannel: z.string().optional(),
     inputAuthor: z.string().optional(),
     heartbeat: z.boolean().default(false),
@@ -91,10 +143,45 @@ const scenarioSpecBase = z.object({
   judgeCriteria: z.array(z.string()).default([]),
 });
 export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) => {
-  if (scenario.track === 'production' && !scenario.ingress) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'production scenarios require explicit candidate ingress' });
-  if (scenario.track === 'micro' && (scenario.ingress || scenario.resumeIngress)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'micro scenarios derive ingress from the prompt' });
+  const primaryIngressCount = Number(scenario.ingress !== undefined) + Number(scenario.ingressBatch !== undefined);
+  const resumeIngressCount = Number(scenario.resumeIngress !== undefined) + Number(scenario.resumeIngressBatch !== undefined);
+  if (scenario.track === 'production' && primaryIngressCount !== 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'production scenarios require exactly one of ingress or ingressBatch' });
+  if (scenario.track === 'production' && !scenario.fixture.clockAt) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'clockAt'], message: 'production ingress requires deterministic clockAt' });
+  if (scenario.track === 'micro' && (primaryIngressCount > 0 || resumeIngressCount > 0)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'micro scenarios derive ingress from the prompt' });
+  if (resumeIngressCount > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['resumeIngress'], message: 'use only one of resumeIngress or resumeIngressBatch' });
+  if (scenario.track === 'production' && scenario.fixture.restartAtDispatch && resumeIngressCount !== 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['resumeIngress'], message: 'production restart requires exactly one of resumeIngress or resumeIngressBatch' });
+  if (!scenario.fixture.restartAtDispatch && resumeIngressCount > 0) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['resumeIngress'], message: 'resume ingress requires restartAtDispatch' });
+  const batches: [string, CandidateIngressSpec[] | undefined][] = [
+    ['ingressBatch', scenario.ingressBatch],
+    ['resumeIngressBatch', scenario.resumeIngressBatch],
+  ];
+  for (const [field, batch] of batches) {
+    if (!batch) continue;
+    for (let i = 1; i < batch.length; i++) {
+      if (batch[i].atOffsetMs < batch[i - 1].atOffsetMs) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field, i, 'atOffsetMs'], message: 'ingress batch offsets must be nondecreasing' });
+    }
+  }
+  const primaryBatch = scenario.ingressBatch ?? (scenario.ingress ? [scenario.ingress] : []);
+  const resumeBatch = scenario.resumeIngressBatch ?? (scenario.resumeIngress ? [scenario.resumeIngress] : []);
+  if (primaryBatch.length > 0 && resumeBatch.length > 0 && resumeBatch[0].atOffsetMs < primaryBatch.at(-1)!.atOffsetMs) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['resumeIngress', 'atOffsetMs'], message: 'resume ingress cannot predate initial ingress' });
+  }
+  const phaseBatches: Array<[string, CandidateIngressSpec[]]> = [
+    ['ingressBatch', primaryBatch],
+    ['resumeIngressBatch', resumeBatch],
+  ];
+  for (const [field, batch] of phaseBatches) {
+    if (batch.length > 0 && !batch.some((event) => event.kind !== 'discord' || event.wakeClass === 'wake')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'ingress batch must contain an event that wakes the agent' });
+    }
+    const explicitIds = batch.flatMap((event) => event.id === undefined ? [] : [event.id]);
+    if (new Set(explicitIds).size !== explicitIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'ingress event ids must be unique within a phase' });
+  }
+  const declaredIngress = [...primaryBatch, ...resumeBatch];
+  const guildSlugs = new Set(declaredIngress.filter((event) => event.kind === 'discord').map((event) => event.guildSlug ?? 'workspace'));
+  if (guildSlugs.size > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'current production fixture supports exactly one Discord guild slug' });
   const keys = new Set<string>();
-  if ((scenario.fixture.mind.length > 0 || scenario.fixture.scheduler.length > 0) && !scenario.fixture.clockAt) {
+  if ((scenario.fixture.mind.length > 0 || scenario.fixture.scheduler.length > 0 || scenario.fixture.sandboxes.length > 0) && !scenario.fixture.clockAt) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'clockAt'], message: 'structured state requires a deterministic clockAt' });
   }
   for (const [index, item] of scenario.fixture.mind.entries()) {
@@ -107,6 +194,17 @@ export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) =
   }
   for (const [index, task] of scenario.fixture.scheduler.entries()) {
     if (task.channel && !scenario.fixture.channels[task.channel]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'scheduler', index, 'channel'], message: `unknown fixture channel ${task.channel}` });
+  }
+  const sandboxMindKeys = new Set<string>();
+  const sandboxAliases = new Set<string>();
+  for (const [index, sandbox] of scenario.fixture.sandboxes.entries()) {
+    const mind = scenario.fixture.mind.find((item) => item.key === sandbox.mindKey);
+    if (!mind) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `unknown Mind seed key ${sandbox.mindKey}` });
+    else if (mind.status === 'done' || mind.status === 'cancelled') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `sandbox Mind seed ${sandbox.mindKey} is closed` });
+    if (sandboxMindKeys.has(sandbox.mindKey)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `duplicate sandbox Mind seed ${sandbox.mindKey}` });
+    if (sandboxAliases.has(sandbox.alias)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'alias'], message: `duplicate sandbox alias ${sandbox.alias}` });
+    sandboxMindKeys.add(sandbox.mindKey);
+    sandboxAliases.add(sandbox.alias);
   }
 });
 export type ScenarioSpec = z.infer<typeof scenarioSpecSchema>;

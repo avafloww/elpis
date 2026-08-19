@@ -78,7 +78,8 @@ function oracleLLM(scenario: ScenarioSpec): LLM {
     async complete() {
       calls++;
       const code = oracleCode(scenario, calls);
-      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Apply the oracle outcome', wake: { after: '1h' } }) } }] };
+      const sandbox = scenario.fixture.sandboxes[0]?.alias;
+      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Apply the oracle outcome', ...(sandbox ? { sandbox } : {}), wake: { after: '1h' } }) } }] };
       stampGeneration(message, { providerType: 'openai-compatible', model: 'elpisbench-oracle', apiSurface: 'responses', apiEndpoint: 'https://oracle.elpisbench.invalid/v1/responses' });
       return { message, stripped: false, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
     },
@@ -93,14 +94,14 @@ function noToolBaselineLLM(scenario: ScenarioSpec): LLM {
     if (calls <= scenario.maxDispatches) return { message: { role:'assistant' as const, content:'I cannot use tools, but I think this is done.' }, stripped:false, usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} };
     // Emergency stopper belongs to the benchmark, not the baseline policy. It
     // arrives only after the dispatch cap, so the bounded hard gate still fails.
-    return { message:{role:'assistant' as const,content:'',tool_calls:[{id:`baseline-stop-${calls}`,type:'function' as const,function:{name:'run',arguments:'{"code":"","end":true}'}}]},stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} };
+    return { message:{role:'assistant' as const,content:'',tool_calls:[{id:`baseline-stop-${calls}`,type:'function' as const,function:{name:'run',arguments:'{"code":"","detail":"Stop the bounded baseline","wake":{"after":"1h"}}'}}]},stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} };
   }, async summarize(){return 'baseline';} };
 }
 
 function candidateLLM(serialized: string): LLM {
   const raw = JSON.parse(serialized) as unknown; const queue = (Array.isArray(raw) ? raw : [raw]) as Array<{ content?: string; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string | Record<string, unknown> } }[] }>;
   let index = 0;
-  return { model:'grpo-candidate',runTool:{} as LLM['runTool'],async complete(){ const item=queue[index++]; if(!item) return {message:{role:'assistant' as const,content:'',tool_calls:[{id:`candidate-stop-${index}`,type:'function' as const,function:{name:'run',arguments:'{"code":"","end":true}'}}]},stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}; const message={role:'assistant' as const,content:item.content??'',...(item.tool_calls?{tool_calls:item.tool_calls.map((c)=>({...c,function:{...c.function,arguments:typeof c.function.arguments==='string'?c.function.arguments:JSON.stringify(c.function.arguments)}}))}:{})}; return {message,stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}};},async summarize(){return 'candidate summary';} };
+  return { model:'grpo-candidate',runTool:{} as LLM['runTool'],async complete(){ const item=queue[index++]; if(!item) return {message:{role:'assistant' as const,content:'',tool_calls:[{id:`candidate-stop-${index}`,type:'function' as const,function:{name:'run',arguments:'{"code":"","detail":"Stop the bounded baseline","wake":{"after":"1h"}}'}}]},stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}; const message={role:'assistant' as const,content:item.content??'',...(item.tool_calls?{tool_calls:item.tool_calls.map((c)=>({...c,function:{...c.function,arguments:typeof c.function.arguments==='string'?c.function.arguments:JSON.stringify(c.function.arguments)}}))}:{})}; return {message,stripped:false,usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}};},async summarize(){return 'candidate summary';} };
 }
 
 export async function runScenario(config: BenchConfig, scenario: ScenarioSpec, providerName = config.default_provider, opts: { oracle?: boolean; noToolBaseline?: boolean; candidate?: string } = {}): Promise<RunRecord> {

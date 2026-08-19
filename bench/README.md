@@ -47,11 +47,22 @@ all capabilities dropped, `no-new-privileges`, resource limits, and a
 and credentials remain on the host behind a JSONL stdio gateway.
 
 Engine fixtures can seed a deterministic world through `fixture.clockAt`, keyed
-Mind items with parent/dependency edges, and scheduler tasks whose times are
-offsets from that clock. Seeding runs through the production SQLite migrations,
-`MindService`, and `Scheduler` before the production runtime boots. Structured
-state without a declared clock is rejected, so container startup latency cannot
-silently change the world. These generic fixtures test the engine; they are not
+Mind items with parent/dependency edges, scheduler tasks whose times are offsets
+from that clock, and registry-backed persistent sandboxes bound to Mind keys.
+Seeding runs through the production SQLite migrations, `MindService`,
+`Scheduler`, and `SandboxRegistry` before the production runtime boots.
+Structured state without a declared clock is rejected, so container startup
+latency cannot silently change the world.
+
+A production phase declares either one legacy `ingress` or an ordered
+`ingressBatch`; restart phases use the corresponding resume fields. Batches
+resolve to full production `InboundMessage` values with deterministic IDs and
+timestamps, Discord guild/bot/reply/forward/mention/wake provenance, guarded
+in-world attachments, scheduler channel targeting, and internal harness/watch
+shapes. This permits the ordinary production pairing of ambient Discord followed
+by a room-context harness wake without coaching text or an extra model turn. The
+current fixture supports one Discord guild slug per scenario and rejects inert
+all-ambient batches. These generic fixtures test the engine; they are not
 validated benchmark episodes.
 
 The engine retains typed outcome checks, append-only traces, restart replacement,
