@@ -538,8 +538,18 @@ step "Fetching the harness"
 if [[ -d "$HARNESS_DIR/.git" ]]; then
   ok "existing checkout at $HARNESS_DIR — reusing"
 elif [[ -n "$LOCAL_SOURCE" ]]; then
-  git -c safe.directory="$LOCAL_SOURCE" -c safe.directory="$LOCAL_SOURCE/.git" \
-    clone --branch "$BRANCH" "$LOCAL_SOURCE" "$HARNESS_DIR"
+  _bootstrap_dir="$(mktemp -d)"
+  _bootstrap_bundle="$_bootstrap_dir/bootstrap.bundle"
+  if ! git -c safe.directory="$LOCAL_SOURCE" -c safe.directory="$LOCAL_SOURCE/.git" \
+      -C "$LOCAL_SOURCE" bundle create "$_bootstrap_bundle" "refs/heads/$BRANCH"; then
+    rm -rf "$_bootstrap_dir"
+    die "failed to bundle local bootstrap checkout $LOCAL_SOURCE"
+  fi
+  if ! git clone --branch "$BRANCH" "$_bootstrap_bundle" "$HARNESS_DIR"; then
+    rm -rf "$_bootstrap_dir"
+    die "failed to clone local bootstrap bundle"
+  fi
+  rm -rf "$_bootstrap_dir"
  # keep origin pointed at the real remote, not the local bootstrap copy
   _origin="${REPO_URL:-$(git -C "$LOCAL_SOURCE" remote get-url origin 2>/dev/null || true)}"
   if [[ -n "$_origin" ]]; then

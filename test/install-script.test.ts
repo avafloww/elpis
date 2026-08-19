@@ -22,9 +22,12 @@ test('installer shell parses and documents authored brain seeds', () => {
   assert.match(help.stdout, /never overwrite existing files/);
 });
 
-test('installer trusts only its exact operator-owned bootstrap checkout', () => {
+test('installer isolates an operator-owned bootstrap checkout through a temporary bundle', () => {
   const source = fs.readFileSync(installer, 'utf8');
   assert.match(source, /git -c safe\.directory="\$LOCAL_SOURCE" -c safe\.directory="\$LOCAL_SOURCE\/\.git"/);
+  assert.match(source, /bundle create "\$_bootstrap_bundle" "refs\/heads\/\$BRANCH"/);
+  assert.match(source, /git clone --branch "\$BRANCH" "\$_bootstrap_bundle" "\$HARNESS_DIR"/);
+  assert.doesNotMatch(source, /git clone --branch "\$BRANCH" "\$LOCAL_SOURCE"/);
   assert.doesNotMatch(source, /git config --global[^\n]*safe\.directory/);
 });
 
