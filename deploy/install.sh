@@ -551,7 +551,8 @@ elif [[ -n "$LOCAL_SOURCE" ]]; then
   fi
   rm -rf "$_bootstrap_dir"
  # keep origin pointed at the real remote, not the local bootstrap copy
-  _origin="${REPO_URL:-$(git -C "$LOCAL_SOURCE" remote get-url origin 2>/dev/null || true)}"
+  _origin="${REPO_URL:-$(git -c safe.directory="$LOCAL_SOURCE" -c safe.directory="$LOCAL_SOURCE/.git" \
+    -C "$LOCAL_SOURCE" remote get-url origin 2>/dev/null || true)}"
   if [[ -n "$_origin" ]]; then
     git -C "$HARNESS_DIR" remote set-url origin "$_origin"
   fi

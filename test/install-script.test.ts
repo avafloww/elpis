@@ -27,6 +27,8 @@ test('installer isolates an operator-owned bootstrap checkout through a temporar
   assert.match(source, /git -c safe\.directory="\$LOCAL_SOURCE" -c safe\.directory="\$LOCAL_SOURCE\/\.git"/);
   assert.match(source, /bundle create "\$_bootstrap_bundle" "refs\/heads\/\$BRANCH"/);
   assert.match(source, /git clone --branch "\$BRANCH" "\$_bootstrap_bundle" "\$HARNESS_DIR"/);
+  assert.match(source, /-C "\$LOCAL_SOURCE" remote get-url origin/);
+  assert.doesNotMatch(source, /git -C "\$LOCAL_SOURCE" remote get-url origin/);
   assert.doesNotMatch(source, /git clone --branch "\$BRANCH" "\$LOCAL_SOURCE"/);
   assert.doesNotMatch(source, /git config --global[^\n]*safe\.directory/);
 });
