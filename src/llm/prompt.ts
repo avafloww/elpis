@@ -185,7 +185,11 @@ const r = await elpis.sh("ls -la /tmp"); if (r.code !== 0) console.log(r.stderr)
 elpis.sh("git status", { cwd: HARNESS_ROOT })           // final-expr auto-resolves
 await elpis.sh("npm test", { cwd: HARNESS_ROOT, timeout: 120000 })`;
   const sudoSection = restricted ? '' : `### \`elpis.sudo(cmd, opts?)\`
-Same async contract as \`elpis.sh\` but prefixed with sudo. This VM is yours; sudo is passwordless.`;
+Same async contract as \`elpis.sh\` but prefixed with sudo. This VM is yours; sudo is passwordless.
+
+The prefix applies once: shell operators in \`elpis.sudo("a && b")\` may leave \`b\` unprivileged.
+For a multi-command root script, wrap the whole script explicitly:
+\`await elpis.sudo("sh -c " + elpis.sh.q(script))\`.`;
   const lifecycleSection = restricted ? `### \`elpis.restart(reason?)\`
 Flush transcripts and ask the namespaced Kubernetes lifecycle broker to refresh this harness from its configured image. The broker endpoint is fixed at boot; you cannot choose a deployment, image, command, or Kubernetes credential. A failed request leaves the current container running. An accepted request makes this your last turn before reboot; a \`[restart complete]\` message wakes you afterward.` : `### \`elpis.restart(reason?)\`
 Flush transcripts then spawn a detached systemctl restart of the harness.
