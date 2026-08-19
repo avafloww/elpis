@@ -7,10 +7,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   buildCommandDefinitions,
   isAuthorizedOperator,
   isOwnMessage,
+  isIgnoredAuthor,
   reactionVerdict,
   wakeInputFor,
   operatorGateReason,
@@ -219,6 +221,34 @@ test('/new and /compact: also refused for a non-operator (previously ungated)', 
     assert.equal(isAuthorizedOperator(config, 'random-guild-member'), false, `${name}`);
     assert.equal(operatorGateReason(config, name), 'You are not authorized to use this command.', `${name}`);
   }
+});
+
+// ---------- ignored author gate (silent pre-ingress filter) ----------
+
+test('isIgnoredAuthor: exact configured ids are dropped and other bots remain visible', () => {
+  const ignored = new Set(['222']);
+  assert.equal(isIgnoredAuthor(ignored, '222'), true);
+  assert.equal(isIgnoredAuthor(ignored, '111'), false);
+});
+
+test('ignored authors are gated before every agent-visible message or reaction side effect', () => {
+  const source = fs.readFileSync(new URL('../src/discord/discord.ts', import.meta.url), 'utf8');
+  const messageStart = source.indexOf('client.on(Events.MessageCreate');
+  const reactionStart = source.indexOf('client.on(Events.MessageReactionAdd', messageStart);
+  const messageBody = source.slice(messageStart, reactionStart);
+  const ignored = messageBody.indexOf('isIgnoredAuthor(ignoredUserIds, message.author.id)');
+  assert.ok(ignored >= 0);
+  for (const marker of ['isOwnMessage(', 'pluralKit.resolve(', 'log.debug(`inbound message', 'ch.messages.fetch(', 'buildInboundAttachments(']) {
+    const position = messageBody.indexOf(marker);
+    assert.ok(position > ignored, `${marker} must remain after the ignored-author gate`);
+  }
+  assert.match(messageBody, /if \(!ref \|\| isIgnoredAuthor\(ignoredUserIds, ref\.author\.id\)\) return null/);
+
+  const reactionBody = source.slice(reactionStart);
+  const reactionIgnored = reactionBody.indexOf('isIgnoredAuthor(ignoredUserIds, user.id)');
+  assert.ok(reactionIgnored >= 0);
+  assert.ok(reactionBody.indexOf('reaction.fetch()') > reactionIgnored);
+  assert.ok(reactionBody.indexOf('recordReaction(') > reactionIgnored);
 });
 
 // ---------- isOwnMessage (loop guard: self only, other bots allowed) ----------

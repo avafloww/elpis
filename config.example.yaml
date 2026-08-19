@@ -87,6 +87,9 @@ discord:
   # Dedicated channel for harness-level error notices. null = log-only; errors
   # never fall back to a public room.
   error_channel_id: null
+  # Exact raw Discord user ids whose messages/reactions are silently discarded
+  # before attachment, PluralKit, transcript, context, or agent-visible logging.
+  ignored_user_ids: []
   # Per-message budget for inlining small text attachments into the inbound
   # message. 0 disables inlining.
   attachment_inline_max_bytes: 32768

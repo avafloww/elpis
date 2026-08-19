@@ -150,6 +150,13 @@ test('configFile: required keys present → loads core fields', () => {
   assert.equal(c.discord.guilds[0].id, 'guild-1');
 });
 
+test('configFile: ignored Discord user ids are digit-only and deduplicated', () => {
+  const configured = MINIMAL_OK.replace('  bot_token:', '  ignored_user_ids: ["111", "222", "111"]\n  bot_token:');
+  assert.deepEqual(loadConfigFile(fixture(configured)).discord.ignoredUserIds, ['111', '222']);
+  assert.throws(() => loadConfigFile(fixture(MINIMAL_OK.replace('  bot_token:', '  ignored_user_ids: nope\n  bot_token:'))), /must be a list of strings/);
+  assert.throws(() => loadConfigFile(fixture(MINIMAL_OK.replace('  bot_token:', '  ignored_user_ids: ["not-an-id"]\n  bot_token:'))), /raw Discord user id \(digits\)/);
+});
+
 test('configFile: ambient send permission is independently configurable', () => {
   const c = loadConfigFile(fixture(MINIMAL_OK.replace('  bot_token:', '  ambient_allow_send: false\n  bot_token:')));
   assert.equal(c.discord.ambientAllowSend, false);
@@ -161,6 +168,7 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.llm.contextSize, null);
   assert.equal(c.kagi.apiKey, null);
   assert.equal(c.discord.errorChannelId, null);
+  assert.deepEqual(c.discord.ignoredUserIds, []);
   assert.deepEqual(c.operator, { name: 'operator', pronouns: null, discordId: null });
   assert.equal(c.discord.ambientTickMs, 600000);
   assert.equal(c.discord.ambientAllowSend, true);

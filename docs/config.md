@@ -35,6 +35,8 @@ The inhabitant's name does **not** come from this section. It comes from `SOUL.m
 
 `discord.bot_token` is required. `discord.guilds` is exhaustive for guilds: an unlisted guild is never ingested. Each listed guild has a receive default and optional channel overrides.
 
+`discord.ignored_user_ids` is an optional list of exact digit-only Discord user IDs. Messages and reactions from those authors are silently discarded at the gateway before PluralKit lookup, attachment download, content logging, transcript/context ingestion, ambient batching, or feedback capture. A reply to an ignored author's message omits the referenced message rather than importing its content. The default is `[]`; ordinary nonignored bots remain visible.
+
 Each guild has:
 
 - a stable lowercase `slug` used in qualified room names;

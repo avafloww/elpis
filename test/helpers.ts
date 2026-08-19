@@ -75,6 +75,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       botToken: 'stub',
       applicationId: 'stub',
       errorChannelId: null,
+      ignoredUserIds: [],
       attachmentInlineMaxBytes: 32768,
       ambientTickMs: 0,
       ambientAllowSend: true,

@@ -85,6 +85,8 @@ export interface Config {
     /** Dedicated channel for harness-level error notices. When null these are
  * LOG-ONLY — they never fall back to a public room. */
     errorChannelId: string | null;
+    /** Exact raw Discord author ids dropped before any agent-visible ingress. */
+    ignoredUserIds: string[];
     /** Per-message byte budget for inlining small text attachments verbatim
  * into the inbound message. 0 disables inlining. */
     attachmentInlineMaxBytes: number;
@@ -866,10 +868,15 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       if (at(tree, 'discord.operator_id') !== undefined) {
         throw new Error(`${f}: \`discord.operator_id\` has been moved to \`operator.discord_id\``);
       }
+      const ignoredUserIds = strListOr(tree, 'discord.ignored_user_ids', [], f);
+      for (const [i, id] of ignoredUserIds.entries()) {
+        if (!/^\d+$/.test(id)) throw new Error(`${f}: key \`discord.ignored_user_ids[${i}]\` must be a raw Discord user id (digits)`);
+      }
       return {
         botToken,
         applicationId: optStr(tree, 'discord.application_id', f) ?? appIdFromToken(botToken),
         errorChannelId: optStr(tree, 'discord.error_channel_id', f),
+        ignoredUserIds: [...new Set(ignoredUserIds)],
         attachmentInlineMaxBytes: numOr(tree, 'discord.attachment_inline_max_bytes', 32768, f),
         ambientTickMs: numOr(tree, 'discord.ambient_tick_ms', 600_000, f),
         ambientAllowSend: boolOr(tree, 'discord.ambient_allow_send', true, f),

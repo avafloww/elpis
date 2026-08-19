@@ -400,6 +400,10 @@ export function buildCommandDefinitions() {
  * (client not ready), in which case the caller should NOT skip (it's safer
  * to process a possible self-message once than to drop a real one). Pure +
  * synchronous for tests. */
+export function isIgnoredAuthor(ignoredUserIds: ReadonlySet<string>, authorId: string): boolean {
+  return ignoredUserIds.has(authorId);
+}
+
 export function isOwnMessage(botUserId: string | undefined, authorId: string): boolean {
   return botUserId !== undefined && botUserId === authorId;
 }
@@ -848,6 +852,7 @@ export function createDiscord(
  // Built once — never per message. Unlisted guilds still fail closed; channel
  // channels listed in a guild's `channels` map reach the classifier at all.
   const guildIndex = buildGuildIndex(config.discord.guilds);
+  const ignoredUserIds = new Set(config.discord.ignoredUserIds);
   const pluralKit = new PluralKitResolver();
  // Unlisted-channel and deafened-channel drops are logged once per
  // `<policyChannelId>:<reason>` per boot — the log line is how the operator
@@ -933,6 +938,7 @@ export function createDiscord(
   };
 
   client.on(Events.MessageCreate, async (message: Message) => {
+    if (isIgnoredAuthor(ignoredUserIds, message.author.id)) return;
  // ignore the bot's OWN messages — prevents self-reply loops. Other bot
  // accounts are allowed through so the agent can react to them.
     if (isOwnMessage(client.user?.id, message.author.id)) return;
@@ -996,7 +1002,7 @@ export function createDiscord(
         const ref = ch.isTextBased() && 'messages' in ch
           ? await ch.messages.fetch(replyToId)
           : null;
-        if (!ref) return null;
+        if (!ref || isIgnoredAuthor(ignoredUserIds, ref.author.id)) return null;
         const refFallback = ref.author.displayName || ref.author.username;
         let refIdentity = { author: refFallback, authorId: ref.author.id };
         if (policy.guild.pluralKit) {
@@ -1127,6 +1133,7 @@ export function createDiscord(
  // guarded — a feedback failure must never disturb the gateway or the loop.
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     try {
+      if (isIgnoredAuthor(ignoredUserIds, user.id)) return;
       if (user.id === client.user?.id) return; // ignore our own reactions early
  // Old/uncached messages arrive partial — hydrate before inspecting.
       if (reaction.partial) { await reaction.fetch(); }
