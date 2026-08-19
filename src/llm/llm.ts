@@ -384,8 +384,9 @@ export interface RunTool {
           properties: {
             after: { anyOf: [{ type: 'string' }, { type: 'number' }]; description: string };
             at: { type: 'string'; description: string };
+            auto: { type: 'boolean'; enum: [true]; description: string };
           };
-          oneOf: [{ required: ['after'] }, { required: ['at'] }];
+          oneOf: [{ required: ['after'] }, { required: ['at'] }, { required: ['auto'] }];
           additionalProperties: false;
         };
       };
@@ -413,15 +414,16 @@ export const RUN_TOOL: RunTool = {
         },
         wake: {
           type: 'object',
-          description: 'Yield after success and wake once later. Exactly one of after or at; delay must be positive and less than 24h.',
+          description: 'Yield after success and wake once later. Prefer auto whenever timing is uncertain; use after/at only for a concrete intended time. Explicit waits must be positive and at most 1h; longer exact waits belong in Scheduler.',
           properties: {
             after: {
               anyOf: [{ type: 'string' }, { type: 'number' }],
-              description: 'Delay after successful code completion, e.g. "5m" or milliseconds.',
+              description: 'Concrete delay after successful code completion, e.g. "5m" or milliseconds; at most 1h.',
             },
-            at: { type: 'string', description: 'Exact future ISO-8601 timestamp with timezone.' },
+            at: { type: 'string', description: 'Concrete future ISO-8601 timestamp with timezone, no more than 1h away.' },
+            auto: { type: 'boolean', enum: [true], description: 'Ask the fresh classifier-role wake advisor to choose 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live state.' },
           },
-          oneOf: [{ required: ['after'] }, { required: ['at'] }],
+          oneOf: [{ required: ['after'] }, { required: ['at'] }, { required: ['auto'] }],
           additionalProperties: false,
         },
       },

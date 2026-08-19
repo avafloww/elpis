@@ -26,6 +26,7 @@ function fixture(opts: { deadlineMs?: number; classify?: SandboxDeps['completeSt
   const scheduler = {
     create(value: any) { const row = { id: taskId++, ...value }; tasks.set(row.id, row); return row; },
     delete(id: number) { return tasks.delete(id); },
+    list() { return Array.from(tasks.values()); },
     update(id: number, patch: any) { const row = tasks.get(id); if (!row) return null; Object.assign(row, patch); return row; },
   };
   const config = makeConfig({
@@ -244,5 +245,20 @@ test('persistent detach without bg registry fails visibly and resets generation'
   assert.equal(f.registry.get(registration.alias).generation, 2);
   manager.dispose();
   await new Promise((resolve) => setTimeout(resolve, 70));
+  f.close();
+});
+
+test('wake advice runs through the manager classifier seam with bounded turn state', async () => {
+  let userPayload = '';
+  const f = fixture({ classify: async (messages) => {
+    userPayload = String(messages[1]?.content ?? '');
+    return completion('{"minutes":45,"reason":"quiet-exploration"}');
+  } });
+  const advice = await f.manager.adviseWake({
+    turnKind: 'autonomous', sendsThisTurn: 0, ranCode: false, continuedMindId: null,
+  });
+  assert.deepEqual(advice, { delayMs: 45 * 60_000, reason: 'quiet-exploration', source: 'classifier' });
+  assert.match(userPayload, /"turnKind":"autonomous"/);
+  assert.match(userPayload, /"inProgress":\[\]/);
   f.close();
 });

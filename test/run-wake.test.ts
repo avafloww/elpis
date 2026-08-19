@@ -28,9 +28,10 @@ test('external-thinking JUICE preserves the chosen effort after native reasoning
   assert.equal(externalThinkingJuice('unknown'), 8);
 });
 
-test('the wake description names the positive sub-24h yield contract', () => {
-  assert.match(RUN_TOOL.function.parameters.properties.wake.description, /positive/i);
-  assert.match(RUN_TOOL.function.parameters.properties.wake.description, /24h/i);
+test('the wake description prefers auto and caps explicit waits at one hour', () => {
+  assert.match(RUN_TOOL.function.parameters.properties.wake.description, /prefer auto/i);
+  assert.match(RUN_TOOL.function.parameters.properties.wake.description, /at most 1h/i);
+  assert.match(RUN_TOOL.function.parameters.properties.wake.description, /Scheduler/i);
 });
 
 /** A scripted LLM that yields a macrotask per call. The yield is mandatory: on a
@@ -78,7 +79,7 @@ function runCall(code: string, wake: boolean): CompleteResult {
   return {
     message: {
       role: 'assistant', content: '',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code, ...(wake ? { wake: { after: '23h' } } : {}) }) } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: JSON.stringify({ code, ...(wake ? { wake: { after: '1h' } } : {}) }) } }],
     },
     stripped: false,
     usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
@@ -105,7 +106,7 @@ function multiRunCall(calls: { code: string; wake: boolean }[]): CompleteResult 
       role: 'assistant', content: '',
       tool_calls: calls.map((c, i) => ({
         id: `tc${i + 1}`, type: 'function' as const,
-        function: { name: 'run', arguments: JSON.stringify({ code: c.code, ...(c.wake ? { wake: { after: '23h' } } : {}) }) },
+        function: { name: 'run', arguments: JSON.stringify({ code: c.code, ...(c.wake ? { wake: { after: '1h' } } : {}) }) },
       })),
     },
     stripped: false,
@@ -330,7 +331,7 @@ test('a response with NO tool calls does not end the turn — it nudges and cont
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
   assert.ok(users.some((m) => m.content.includes(YIELD_NUDGE_MARK)),
     'the yield nudge should be in history');
-  assert.ok(users.some((m) => m.content.includes("wake: { after: '23h' }")),
+  assert.ok(users.some((m) => m.content.includes('wake: { auto: true }')),
     'and it should name the explicit silence-yield idiom');
   assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
     'artifact-only content must not bounce — the END nudge is what fired');
@@ -412,7 +413,7 @@ test('ghost-reply nudge still fires on a wake-yielded turn with zero sends', asy
     message: {
       role: 'assistant',
       content: 'Yes, I can help with that — here is what I would do first.',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"23h"}}' } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"1h"}}' } }],
     },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
   };
@@ -482,7 +483,7 @@ test('a fully-leaked response ends the turn without nudging', async () => {
   await settle(300);
   agent.stop();
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
-  assert.ok(!users.some((m) => m.content.includes("wake: { after: '23h' }")),
+  assert.ok(!users.some((m) => m.content.includes('wake: { auto: true }')),
     'the leak path must exit, not nudge');
   cleanup();
 });
@@ -657,7 +658,7 @@ test('a ghost-bounced turn does not log a turn-end that never happened', async (
     message: {
       role: 'assistant',
       content: 'Yes, I can help with that — here is what I would do first.',
-      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"23h"}}' } }],
+      tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'run', arguments: '{"code":"1+1","wake":{"after":"1h"}}' } }],
     },
     stripped: false, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
   };

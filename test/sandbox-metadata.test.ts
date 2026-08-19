@@ -12,7 +12,8 @@ test('run metadata parser restores bounded execution and wake attribution', () =
       coldStart: true, retiring: false, statusReminder: true, classifierReminder: false,
       ignored: 'drop me',
     },
-    wake: { kind: 'after', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed' },
+    wake: { kind: 'auto', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed',
+      advice: { source: 'classifier', delayMs: 120_000, reason: 'active-work' } },
     ignored: 'drop me',
   });
   assert.deepEqual(parsed, {
@@ -23,7 +24,8 @@ test('run metadata parser restores bounded execution and wake attribution', () =
       executorId: 'executor-1', generation: 3, resetGeneration: 4, runId: 'executor-1:g3:r8',
       coldStart: true, retiring: false, statusReminder: true, classifierReminder: false,
     },
-    wake: { kind: 'after', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed' },
+    wake: { kind: 'auto', state: 'armed', requestedAt: 1000, targetAt: 2000, taskId: 7, note: 'armed',
+      advice: { source: 'classifier', delayMs: 120_000, reason: 'active-work' } },
   });
 });
 

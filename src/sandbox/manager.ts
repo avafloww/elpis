@@ -3,6 +3,7 @@ import type { Logger } from '../lib/log.js';
 import type { RunResult, SandboxDeps, SandboxExecutionMetadata } from '../types.js';
 import { createSandbox, type Sandbox } from './index.js';
 import type { SandboxRegistration, SandboxRegistry } from './registry.js';
+import { adviseWake as chooseWakeAdvice, snapshotWakeAdvisorState, WAKE_ADVISOR_TIMEOUT_MS, type WakeAdvice, type WakeAdviceTurnContext } from './wake-advisor.js';
 
 const CLASSIFIER_SOURCE_LIMIT = 8_000;
 const CLASSIFIER_TIMEOUT_MS = 3_000;
@@ -20,6 +21,7 @@ export interface SandboxManagerOptions {
   now?: () => number;
   coldStart?: boolean;
   classifierTimeoutMs?: number;
+  wakeAdvisorTimeoutMs?: number;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -54,6 +56,7 @@ export class SandboxManager {
   private readonly create: typeof createSandbox;
   private readonly now: () => number;
   private readonly classifierTimeoutMs: number;
+  private readonly wakeAdvisorTimeoutMs: number;
   private readonly contexts = new Map<string, LiveContext>();
   private readonly detached = new Map<string, DetachedOwner>();
   private readonly earlySettlements = new Map<string, FutureSettlement>();
@@ -66,6 +69,7 @@ export class SandboxManager {
     this.create = options.create ?? createSandbox;
     this.now = options.now ?? Date.now;
     this.classifierTimeoutMs = options.classifierTimeoutMs ?? CLASSIFIER_TIMEOUT_MS;
+    this.wakeAdvisorTimeoutMs = options.wakeAdvisorTimeoutMs ?? WAKE_ADVISOR_TIMEOUT_MS;
     this.stopFutureTerminal = this.deps.bg?.onFutureTerminal((id) => {
       if (this.detached.has(id)) this.settleDetached(id, true);
     }) ?? (() => {});
@@ -89,6 +93,11 @@ export class SandboxManager {
 
   getByMind(mindId: number): SandboxRegistration | null {
     return this.registry.getByMind(mindId);
+  }
+
+  async adviseWake(turn: WakeAdviceTurnContext): Promise<WakeAdvice> {
+    const state = snapshotWakeAdvisorState(this.deps, turn, this.now());
+    return chooseWakeAdvice(this.deps, state, this.logger, this.wakeAdvisorTimeoutMs);
   }
 
   handleMindStateChange(mindId: number, status: string, archived: boolean): void {

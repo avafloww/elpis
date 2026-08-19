@@ -1,11 +1,12 @@
 import { parseDuration } from '../config.js';
 
-export const MAX_RUN_WAKE_MS = 24 * 60 * 60 * 1000;
+export const MAX_RUN_WAKE_MS = 60 * 60 * 1000;
 
-export type RunWakeRequest = { after: unknown } | { at: unknown };
+export type RunWakeRequest = { after: unknown } | { at: unknown } | { auto: unknown };
 export type ParsedRunWake =
   | { kind: 'after'; delayMs: number }
-  | { kind: 'at'; targetAt: number };
+  | { kind: 'at'; targetAt: number }
+  | { kind: 'auto' };
 
 export interface ResolvedRunWake {
   armAt: number | null;
@@ -20,27 +21,32 @@ export interface ParsedRunCall {
 
 export interface DurableRunWakePayload {
   type: 'elpis-run-wake-v3';
-  kind: 'after' | 'at';
+  kind: 'after' | 'at' | 'auto';
   state: 'armed' | 'preempted' | 'fired';
   requestedAt: number;
   targetAt: number;
+  advice?: { source: 'classifier' | 'fallback'; delayMs: number; reason: string };
 }
 
 export const RUN_WAKE_TASK_PREFIX = '__elpis_run_wake_v3__';
 
 export function parseRunWake(value: unknown, dispatchAt = Date.now()): ParsedRunWake {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('run wake must be exactly { after: <duration> } or { at: <ISO timestamp> }');
+    throw new Error('run wake must be exactly { after: <duration> }, { at: <ISO timestamp> }, or { auto: true }');
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  if (keys.length !== 1 || (keys[0] !== 'after' && keys[0] !== 'at')) {
-    throw new Error('run wake must contain exactly one key: after or at');
+  if (keys.length !== 1 || (keys[0] !== 'after' && keys[0] !== 'at' && keys[0] !== 'auto')) {
+    throw new Error('run wake must contain exactly one key: after, at, or auto');
+  }
+  if (keys[0] === 'auto') {
+    if (record.auto !== true) throw new Error('run wake.auto must be exactly true');
+    return { kind: 'auto' };
   }
   if (keys[0] === 'after') {
     const delayMs = parseDuration(record.after, 'wake.after', 'run');
     if (!Number.isFinite(delayMs) || delayMs <= 0) throw new Error('run wake.after must be greater than zero');
-    if (delayMs >= MAX_RUN_WAKE_MS) throw new Error('run wake.after must be less than 24h');
+    if (delayMs > MAX_RUN_WAKE_MS) throw new Error('run wake.after must be at most 1h');
     return { kind: 'after', delayMs };
   }
   if (typeof record.at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(record.at)) {
@@ -50,11 +56,11 @@ export function parseRunWake(value: unknown, dispatchAt = Date.now()): ParsedRun
   if (!Number.isFinite(targetAt)) throw new Error('run wake.at must be a valid ISO-8601 timestamp');
   const delayMs = targetAt - dispatchAt;
   if (delayMs <= 0) throw new Error('run wake.at must be strictly in the future');
-  if (delayMs >= MAX_RUN_WAKE_MS) throw new Error('run wake.at must be less than 24h from dispatch');
+  if (delayMs > MAX_RUN_WAKE_MS) throw new Error('run wake.at must be at most 1h from dispatch');
   return { kind: 'at', targetAt };
 }
 
-export function resolveRunWake(wake: ParsedRunWake, completedAt = Date.now()): ResolvedRunWake {
+export function resolveRunWake(wake: Exclude<ParsedRunWake, { kind: 'auto' }>, completedAt = Date.now()): ResolvedRunWake {
   if (wake.kind === 'after') return { armAt: completedAt + wake.delayMs, elapsed: false };
   if (wake.targetAt <= completedAt) return { armAt: null, elapsed: true };
   return { armAt: wake.targetAt, elapsed: false };
@@ -89,11 +95,20 @@ export function parseRunWakePayload(raw: string): DurableRunWakePayload | null {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const value = parsed as Record<string, unknown>;
   if (value.type !== 'elpis-run-wake-v3') return null;
-  if (value.kind !== 'after' && value.kind !== 'at') return null;
+  if (value.kind !== 'after' && value.kind !== 'at' && value.kind !== 'auto') return null;
   if (value.state !== 'armed' && value.state !== 'preempted' && value.state !== 'fired') return null;
   if (!Number.isSafeInteger(value.requestedAt) || !Number.isSafeInteger(value.targetAt)) return null;
-  return {
+  const result: DurableRunWakePayload = {
     type: 'elpis-run-wake-v3', kind: value.kind, state: value.state,
     requestedAt: value.requestedAt as number, targetAt: value.targetAt as number,
   };
+  if (value.advice && typeof value.advice === 'object' && !Array.isArray(value.advice)) {
+    const advice = value.advice as Record<string, unknown>;
+    if ((advice.source === 'classifier' || advice.source === 'fallback')
+      && Number.isSafeInteger(advice.delayMs) && (advice.delayMs as number) > 0 && (advice.delayMs as number) <= MAX_RUN_WAKE_MS
+      && typeof advice.reason === 'string' && advice.reason.length > 0 && advice.reason.length <= 64) {
+      result.advice = { source: advice.source, delayMs: advice.delayMs as number, reason: advice.reason };
+    }
+  }
+  return result;
 }

@@ -17,12 +17,13 @@ export interface SandboxExecutionMetadata {
 }
 
 export interface RunWakeMetadata {
-  kind: 'after' | 'at';
+  kind: 'after' | 'at' | 'auto';
   state: 'armed' | 'elapsed' | 'rejected' | 'preempted' | 'fired';
   requestedAt: number;
   targetAt?: number;
   taskId?: number;
   note?: string;
+  advice?: { source: 'classifier' | 'fallback'; delayMs: number; reason: string };
 }
 
 export interface RunMessageMetadata {
@@ -78,7 +79,7 @@ export function parseRunMessageMetadata(raw: unknown): RunMessageMetadata | unde
 
   if (value.wake && typeof value.wake === 'object' && !Array.isArray(value.wake)) {
     const source = value.wake as Record<string, unknown>;
-    const kind = source.kind === 'after' || source.kind === 'at' ? source.kind : undefined;
+    const kind = source.kind === 'after' || source.kind === 'at' || source.kind === 'auto' ? source.kind : undefined;
     const states: RunWakeMetadata['state'][] = ['armed', 'elapsed', 'rejected', 'preempted', 'fired'];
     const state = states.includes(source.state as RunWakeMetadata['state']) ? source.state as RunWakeMetadata['state'] : undefined;
     const requestedAt = finiteInteger(source.requestedAt);
@@ -87,6 +88,15 @@ export function parseRunMessageMetadata(raw: unknown): RunMessageMetadata | unde
       const targetAt = finiteInteger(source.targetAt); if (targetAt !== undefined) wake.targetAt = targetAt;
       const taskId = finiteInteger(source.taskId); if (taskId !== undefined) wake.taskId = taskId;
       const note = boundedString(source.note, 512); if (note) wake.note = note;
+      if (source.advice && typeof source.advice === 'object' && !Array.isArray(source.advice)) {
+        const rawAdvice = source.advice as Record<string, unknown>;
+        const reason = boundedString(rawAdvice.reason, 64);
+        const delayMs = finiteInteger(rawAdvice.delayMs);
+        if ((rawAdvice.source === 'classifier' || rawAdvice.source === 'fallback')
+          && reason && delayMs !== undefined && delayMs > 0 && delayMs <= 60 * 60_000) {
+          wake.advice = { source: rawAdvice.source, delayMs, reason };
+        }
+      }
       parsed.wake = wake;
     }
   }

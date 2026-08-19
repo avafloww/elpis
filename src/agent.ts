@@ -25,6 +25,7 @@
 // cached in `memoryView` and refreshed only on context clear / compaction.
 
 import type { ManagedRunRequest } from './sandbox/manager.js';
+import { fallbackWakeAdvice, type WakeAdvice, type WakeAdviceTurnContext } from './sandbox/wake-advisor.js';
 import type { Memory } from './store/memory.js';
 import { preview, cap, previewValue } from './sandbox/preview.js';
 import type { LLM, ChatMessage, LLMUsage } from './llm/llm.js';
@@ -109,6 +110,7 @@ function runAttribution(metadata?: RunMessageMetadata): string {
     const wake = [`wake=${metadata.wake.state}`, `kind=${metadata.wake.kind}`];
     if (metadata.wake.targetAt !== undefined) wake.push(`target=${new Date(metadata.wake.targetAt).toISOString()}`);
     if (metadata.wake.taskId !== undefined) wake.push(`task=#${metadata.wake.taskId}`);
+    if (metadata.wake.advice) wake.push(`advice=${metadata.wake.advice.source}:${Math.round(metadata.wake.advice.delayMs / 60_000)}m:${metadata.wake.advice.reason}`);
     parts.push(wake.join(' '));
   }
   return parts.join(' | ');
@@ -391,7 +393,10 @@ export interface InboundMessage {
 
 export interface AgentDeps {
   config: Config;
-  sandbox: { run(request: ManagedRunRequest): Promise<RunResult> };
+  sandbox: {
+    run(request: ManagedRunRequest): Promise<RunResult>;
+    adviseWake?(turn: WakeAdviceTurnContext): Promise<WakeAdvice>;
+  };
   memory: Memory;
   /** Dependency-aware external cortex. Optional so focused Agent tests and
  * embedders can omit it; production always wires the canonical service. */
@@ -933,6 +938,7 @@ export class Agent {
     const payload: DurableRunWakePayload = {
       type: 'elpis-run-wake-v3', kind: metadata.kind, state: 'armed',
       requestedAt: metadata.requestedAt, targetAt: metadata.targetAt!,
+      ...(metadata.advice ? { advice: metadata.advice } : {}),
     };
     try {
       const task = this.deps.scheduler.create({
@@ -1678,6 +1684,25 @@ export class Agent {
               wakeMetadata.note = 'wake not armed because code did not succeed';
             } else if (result.detached) {
               wakeMetadata.note = 'wake not armed because code detached before completion';
+            } else if (parsed.wake.kind === 'auto') {
+              const turn: WakeAdviceTurnContext = {
+                turnKind: this.personInputTurn ? (this.realUserTurn ? 'person' : 'ambient') : 'autonomous',
+                sendsThisTurn: this.sendsThisTurn,
+                ranCode: /\S/.test(parsed.code),
+                continuedMindId: result.execution?.mindId ?? null,
+              };
+              let advice: WakeAdvice;
+              try {
+                advice = this.deps.sandbox.adviseWake
+                  ? await this.deps.sandbox.adviseWake(turn)
+                  : fallbackWakeAdvice({ ...turn, inProgress: [], ready: [], waiting: [], runningBg: 0, nextScheduledInMs: null });
+              } catch {
+                advice = fallbackWakeAdvice({ ...turn, inProgress: [], ready: [], waiting: [], runningBg: 0, nextScheduledInMs: null });
+              }
+              wakeMetadata.advice = advice;
+              wakeMetadata.targetAt = Date.now() + advice.delayMs;
+              wakeMetadata.state = 'armed';
+              yieldedByWake = this.armRunWake(wakeMetadata);
             } else {
               const resolved = resolveRunWake(parsed.wake, Date.now());
               wakeMetadata.targetAt = resolved.armAt ?? (parsed.wake.kind === 'at' ? parsed.wake.targetAt : undefined);

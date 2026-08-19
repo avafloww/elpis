@@ -86,7 +86,7 @@ A `run` result is internal. The inhabitant speaks to people only by calling `elp
 
 ## Turn yielding
 
-`run` accepts an optional exact sandbox alias and one wake: `{ after: "5m" }` or `{ at: "<future ISO-8601 with timezone>" }`. Only a final successful, non-detached run with a valid future wake under 24 hours yields. `after` starts after code completes; `at` keeps wall time and continues if it elapses during execution. Omit `wake` while another branch remains active.
+`run` accepts an optional exact sandbox alias and one wake: `{ auto: true }`, `{ after: "5m" }`, or `{ at: "<future ISO-8601 with timezone>" }`. Prefer `auto` whenever cadence is uncertain; a fresh classifier-role advisor chooses 1/2/5/10/15/30/45/60 minutes from bounded work state. Explicit `after`/`at` is for concrete timing and may be no more than one hour; longer exact waits use Scheduler. Only a final successful, non-detached run with a valid wake yields. `after` starts after code completes; `at` keeps wall time and continues if it elapses during execution. Omit `wake` while another branch remains active.
 
 ## Background work
 

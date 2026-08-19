@@ -557,6 +557,7 @@
       let wake = `wake ${run.wake.state} · ${run.wake.kind}`;
       if (run.wake.targetAt) wake += ` → ${new Date(run.wake.targetAt).toISOString()}`;
       if (run.wake.taskId != null) wake += ` · task #${run.wake.taskId}`;
+      if (run.wake.advice) wake += ` · ${run.wake.advice.source} ${Math.round(run.wake.advice.delayMs / 60000)}m ${run.wake.advice.reason}`;
       parts.push(wake);
     }
     return parts.join(' · ');

@@ -37,7 +37,7 @@ export const EMPTY_WAKE: CompleteResult = {
   message: {
     role: 'assistant',
     content: '',
-    tool_calls: [{ id: 'tc-end', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"23h"}}' } }],
+    tool_calls: [{ id: 'tc-end', type: 'function', function: { name: 'run', arguments: '{"code":"","wake":{"after":"1h"}}' } }],
   },
   stripped: false,
   usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
