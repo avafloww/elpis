@@ -76,7 +76,7 @@ test('migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test('migration through v13 creates sandbox identity, tombstones, and cold notices', () => {
+test('migration through v14 creates sandbox identity, migration ledger, and cold notices', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name);
@@ -89,11 +89,16 @@ test('migration through v13 creates sandbox identity, tombstones, and cold notic
   assert.ok(triggers.includes('sandbox_aliases_no_delete'));
   const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
   assert.ok(columns.includes('cold_notice_pending'));
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
+  assert.deepEqual(
+    (db.prepare("SELECT component, name FROM elpis_migrations WHERE component = 'core'").all() as { component: string; name: string }[])
+      .map(({ component, name }) => ({ component, name })),
+    [{ component: 'core', name: '0013-legacy-through-v13' }],
+  );
   db.close();
 });
 
-test('migration v12→v13 adds cold notice state to an existing sandbox table', () => {
+test('migration v12→v14 adds cold notice state and the core baseline to an existing sandbox table', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE persistent_sandboxes (
@@ -115,8 +120,10 @@ test('migration v12→v13 adds cold notice state to an existing sandbox table', 
   runMigrations(db);
   const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
   assert.ok(columns.includes('cold_notice_pending'));
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM elpis_migrations WHERE component = 'core' AND name = '0013-legacy-through-v13'").get() as { n: number }).n, 1);
   runMigrations(db);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('persistent_sandboxes') WHERE name = 'cold_notice_pending'").get() as { n: number }).n, 1);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM elpis_migrations WHERE component = 'core' AND name = '0013-legacy-through-v13'").get() as { n: number }).n, 1);
   db.close();
 });

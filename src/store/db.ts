@@ -10,6 +10,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
+import { runComponentMigrations } from './migrations.js';
 
 export type Database = DatabaseSync;
 
@@ -19,7 +20,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -337,6 +338,12 @@ export function runMigrations(db: DatabaseSync): void {
     db.exec('ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))');
   }
 
+  // This receipt says only that the idempotent legacy blocks above completed;
+  // it does not invent checksummed history for schema versions 1 through 13.
+  runComponentMigrations(db, 'core', [{
+    name: '0013-legacy-through-v13',
+    sql: 'SELECT 1;',
+  }]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 

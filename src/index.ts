@@ -115,6 +115,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     dataDirectory: config.paths.dataDirectory,
     harnessRoot: config.paths.harnessRoot,
     agentName: () => readAgentName(config.paths.soulPath),
+    database: db,
     runLog: createRunLogger(extensionLogbuf),
     log: (level, ...args) => {
       if (level === 'warn') config.logger.warn(...args);

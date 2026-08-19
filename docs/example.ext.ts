@@ -18,10 +18,18 @@ export const extension = {
   // at boot and stays byte-stable until the next restart.
   prompt: `\`elpis.ext.example.greet(name)\` returns a greeting from the current agent.`,
 
+  // Names are append-only and sorted. SQL migrations are checksummed automatically
+  // and run transactionally before activate. Prefix tables with the extension name.
+  migrations: [{
+    name: '0001-example-state',
+    sql: `CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+  }],
+
   // activate may be synchronous or async. Return a plain API object containing
   // functions, primitives, arrays, and other plain objects.
   activate(context: ExtensionContext) {
     context.log('info', 'example extension activated');
+    context.database.prepare('SELECT COUNT(*) FROM example_state').get();
     return {
       greet(name: string) {
         context.runLog('example.greet:', name);

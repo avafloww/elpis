@@ -32,7 +32,12 @@ import type { ExtensionDefinition } from '../src/extensions.js';
 export const extension = {
   description: 'Small example tools.',
   prompt: `\`elpis.ext.example.greet(name)\` returns a greeting.`,
+  migrations: [{
+    name: '0001-state',
+    sql: 'CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
+  }],
   activate(context) {
+    context.database.prepare('SELECT COUNT(*) FROM example_state').get();
     return {
       greet(name: string) {
         return `hello, ${name} — from ${context.agentName()}`;
@@ -42,7 +47,7 @@ export const extension = {
 } satisfies ExtensionDefinition;
 ```
 
-All fields are optional, but a useful extension normally supplies `prompt`, `activate`, or both.
+All fields are optional, but a useful extension normally supplies `prompt`, `activate`, `migrations`, or a combination of them.
 
 `activate(context)` may be synchronous or asynchronous. Its context contains:
 
@@ -50,12 +55,23 @@ All fields are optional, but a useful extension normally supplies `prompt`, `act
 - `sourceFile` — the extension filename, without an absolute path;
 - `dataDirectory` and `harnessRoot`;
 - `agentName()` — reads the current `SOUL.md` frontmatter name;
+- `database` — the shared Node 24 `node:sqlite` `DatabaseSync`, after this extension's migrations have completed;
 - `log(level, ...args)` — writes through the operator-visible harness logger;
 - `runLog(...args)` — writes to the current sandbox `run` call's model-visible log buffer, with the same formatting and AsyncLocalStorage isolation as `console.log`.
 
 The returned API must be a plain object. It may contain functions, finite primitive values, arrays, and plain nested objects. Elpis copies and freezes the API tree before exposing it. Circular references, accessors, class instances, non-finite numbers, and prototype-control keys are rejected.
 
 Use `elpis.ext.$help()` to return frozen `{ namespace, file, description, members }[]` summaries for every loaded extension, or `elpis.ext.$help('example')` for one summary. Unknown namespaces throw. `elpis.ext.$failures()` returns frozen `{ file, namespace, stage, error }[]` records for extensions skipped during boot.
+
+## Database migrations
+
+`migrations` is an append-only array sorted by unique name. Elpis records applied entries in `elpis_migrations` under component `extension:<namespace>` before calling `activate`. Existing receipts must be an exact prefix of the declaration; removing, inserting before, reordering, or changing an applied migration fails that extension closed.
+
+A SQL migration has `{ name, sql }`. Elpis hashes the exact SQL bytes with SHA-256. A code migration has `{ name, checksum, up(database) }`; `up` must be synchronous, receives only a scoped `exec`/`prepare` capability that closes when the call returns or throws, and `checksum` must be an authored lowercase SHA-256 hex string because runtime function serialization is not a stable cross-version identity. Prepared statements and iterators from that scope close with it. Prefer SQL unless a data transformation genuinely needs code.
+
+Each unapplied migration and its receipt run in one `BEGIN IMMEDIATE` transaction. Migration code must not issue its own transaction-control statements. On failure Elpis rolls back that migration, exposes neither API nor prompt for that extension, records failure stage `migration`, and continues with later extensions. Earlier successful migrations remain committed so a repaired extension can resume from the exact prefix. Removing an extension does not delete its receipts, tables, or data; cleanup is an explicit later forward migration, not an automatic rollback.
+
+Extensions share one trusted database and therefore can affect each other despite separate migration components. Prefix extension-owned tables, indexes, and triggers with the extension namespace; component isolation is migration-history custody, not a SQLite permission boundary.
 
 ## Prompt injection and cache stability
 
@@ -67,9 +83,9 @@ Each extension prompt is headed by its `elpis.ext.<namespace>` path, description
 
 ## Lifecycle and failure
 
-Extensions are discovered and activated before the sandbox, LLM, and Discord runtime are constructed. Discovery, namespace, import/TypeScript parse, definition, prompt, activation, and API-shape errors are caught per extension. The broken extension contributes neither API nor prompt text, its failure is logged and exposed through `$failures()`, and Elpis continues loading the remaining extensions and starts normally. Namespace collisions quarantine every file claiming the collided namespace.
+Extensions are discovered and activated before the sandbox, LLM, and Discord runtime are constructed. Discovery, namespace, import/TypeScript parse, definition, prompt, migration, activation, and API-shape errors are caught per extension. The broken extension contributes neither API nor prompt text, its failure is logged and exposed through `$failures()`, and Elpis continues loading the remaining extensions and starts normally. Namespace collisions quarantine every file claiming the collided namespace.
 
-Activation can perform host side effects before throwing; Elpis can prevent exposure of a partial API and prompt, but cannot roll back arbitrary effects made by trusted extension code.
+A failed migration is transactionally rolled back. Activation can still perform arbitrary host side effects before throwing; Elpis can prevent exposure of a partial API and prompt, but cannot roll back non-migration effects made by trusted extension code.
 
 Changes take effect only after a harness restart. There is no hot reload: one process has one extension registry and one prompt projection.
 

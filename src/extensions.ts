@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
 import { resolveDataLayout } from './store/data-layout.js';
+import type { Database } from './store/db.js';
+import { runComponentMigrations, type Migration } from './store/migrations.js';
 
 const EXTENSION_FILE = /^(.+)\.ext\.(?:ts|mts|js|mjs)$/i;
 const MAX_DESCRIPTION_CHARS = 4_096;
@@ -16,6 +18,7 @@ export interface ExtensionContext {
   readonly dataDirectory: string;
   readonly harnessRoot: string;
   readonly agentName: () => string;
+  readonly database: Database;
   readonly log: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
   readonly runLog: (...args: unknown[]) => void;
 }
@@ -23,6 +26,7 @@ export interface ExtensionContext {
 export interface ExtensionDefinition {
   readonly description?: string;
   readonly prompt?: string;
+  readonly migrations?: readonly Migration[];
   readonly activate?: (context: ExtensionContext) => unknown | Promise<unknown>;
 }
 
@@ -33,7 +37,7 @@ export interface ExtensionSummary {
   readonly members: readonly string[];
 }
 
-export type ExtensionFailureStage = 'discovery' | 'namespace' | 'import' | 'definition' | 'prompt' | 'activation' | 'api';
+export type ExtensionFailureStage = 'discovery' | 'namespace' | 'import' | 'definition' | 'prompt' | 'migration' | 'activation' | 'api';
 
 export interface ExtensionFailure {
   readonly file: string;
@@ -53,6 +57,7 @@ export interface LoadExtensionsOptions {
   dataDirectory: string;
   harnessRoot: string;
   agentName: () => string;
+  database: Database;
   log?: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
   runLog?: (...args: unknown[]) => void;
   importModule?: (filePath: string) => Promise<Record<string, unknown>>;
@@ -124,6 +129,9 @@ function readDefinition(module: Record<string, unknown>, fileName: string): Exte
   if (!plainObject(candidate)) throw new Error(`${fileName} must export a plain object named extension`);
   if (candidate.activate != null && typeof candidate.activate !== 'function') {
     throw new Error(`${fileName} extension.activate must be a function`);
+  }
+  if (candidate.migrations != null && !Array.isArray(candidate.migrations)) {
+    throw new Error(`${fileName} extension.migrations must be an array`);
   }
   return candidate as ExtensionDefinition;
 }
@@ -218,12 +226,20 @@ export async function loadExtensions(options: LoadExtensionsOptions): Promise<Ex
       stage = 'prompt';
       const description = readString(definition.description, `${candidate.file} description`, MAX_DESCRIPTION_CHARS);
       const prompt = readString(definition.prompt, `${candidate.file} prompt`, MAX_PROMPT_CHARS);
+      stage = 'migration';
+      const migrationResult = runComponentMigrations(
+        options.database,
+        `extension:${candidate.namespace}`,
+        definition.migrations ?? [],
+      );
+      for (const name of migrationResult.applied) log('info', `extension migration applied: ${candidate.namespace}/${name}`);
       const context: ExtensionContext = Object.freeze({
         namespace: candidate.namespace,
         sourceFile: candidate.file,
         dataDirectory: options.dataDirectory,
         harnessRoot: options.harnessRoot,
         agentName: options.agentName,
+        database: options.database,
         log,
         runLog: (...args: unknown[]) => options.runLog?.(...args),
       });
