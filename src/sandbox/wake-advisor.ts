@@ -4,7 +4,7 @@ import type { Logger } from '../lib/log.js';
 import type { SandboxDeps } from '../types.js';
 
 export const WAKE_ADVISOR_BUCKETS_MS = [1, 2, 5, 10, 15, 30, 45, 60].map(minutes => minutes * 60_000) as readonly number[];
-export const WAKE_ADVISOR_TIMEOUT_MS = 10_000;
+export const WAKE_ADVISOR_TIMEOUT_MS = 30_000;
 
 export type WakeAdviceReason = 'active-work' | 'background-wait' | 'social-follow-up' | 'scheduled-soon' | 'quiet-exploration';
 export type WakeAdviceSource = 'classifier' | 'fallback';

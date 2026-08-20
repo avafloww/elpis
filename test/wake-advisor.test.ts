@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { adviseWake, buildWakeAdvisorHistory, fallbackWakeAdvice, snapshotWakeAdvisorState, WAKE_ADVISOR_BUCKETS_MS, type WakeAdvisorState } from '../src/sandbox/wake-advisor.js';
+import { adviseWake, buildWakeAdvisorHistory, fallbackWakeAdvice, snapshotWakeAdvisorState, WAKE_ADVISOR_BUCKETS_MS, WAKE_ADVISOR_TIMEOUT_MS, type WakeAdvisorState } from '../src/sandbox/wake-advisor.js';
 import type { SandboxDeps } from '../src/types.js';
 
 const quiet: WakeAdvisorState = {
@@ -15,6 +15,7 @@ function completion(content: string) {
 
 test('wake advisor exposes exactly the approved autonomy cadence buckets', () => {
   assert.deepEqual(WAKE_ADVISOR_BUCKETS_MS, [1, 2, 5, 10, 15, 30, 45, 60].map(minutes => minutes * 60_000));
+  assert.equal(WAKE_ADVISOR_TIMEOUT_MS, 30_000);
 });
 
 test('wake advisor snapshot is bounded to work facts and ignores reserved run wakes', () => {
