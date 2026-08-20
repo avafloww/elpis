@@ -95,9 +95,9 @@ export class SandboxManager {
     return this.registry.getByMind(mindId);
   }
 
-  async adviseWake(turn: WakeAdviceTurnContext): Promise<WakeAdvice> {
+  async adviseWake(turn: WakeAdviceTurnContext, history: ChatMessage[] = []): Promise<WakeAdvice> {
     const state = snapshotWakeAdvisorState(this.deps, turn, this.now());
-    return chooseWakeAdvice(this.deps, state, this.logger, this.wakeAdvisorTimeoutMs);
+    return chooseWakeAdvice(this.deps, state, this.logger, this.wakeAdvisorTimeoutMs, history);
   }
 
   handleMindStateChange(mindId: number, status: string, archived: boolean): void {

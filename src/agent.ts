@@ -25,7 +25,7 @@
 // cached in `memoryView` and refreshed only on context clear / compaction.
 
 import type { ManagedRunRequest } from './sandbox/manager.js';
-import { fallbackWakeAdvice, type WakeAdvice, type WakeAdviceTurnContext } from './sandbox/wake-advisor.js';
+import { buildWakeAdvisorHistory, fallbackWakeAdvice, type WakeAdvice, type WakeAdviceTurnContext } from './sandbox/wake-advisor.js';
 import type { Memory } from './store/memory.js';
 import { preview, cap, previewValue } from './sandbox/preview.js';
 import type { LLM, ChatMessage, LLMUsage } from './llm/llm.js';
@@ -401,7 +401,7 @@ export interface AgentDeps {
   config: Config;
   sandbox: {
     run(request: ManagedRunRequest): Promise<RunResult>;
-    adviseWake?(turn: WakeAdviceTurnContext): Promise<WakeAdvice>;
+    adviseWake?(turn: WakeAdviceTurnContext, history?: ChatMessage[]): Promise<WakeAdvice>;
   };
   memory: Memory;
   /** Dependency-aware external cortex. Optional so focused Agent tests and
@@ -1697,10 +1697,26 @@ export class Agent {
                 ranCode: /\S/.test(parsed.code),
                 continuedMindId: result.execution?.mindId ?? null,
               };
+              const contextRunMetadata: RunMessageMetadata = {
+                toolContractVersion: TOOL_CONTRACT_VERSION,
+                ok: result.ok,
+                ...(parsed.detail ? { detail: parsed.detail } : {}),
+                ...(result.failureKind ? { failureKind: result.failureKind } : {}),
+                ...(result.execution ? { execution: result.execution } : {}),
+                ...(result.detached !== undefined ? { detached: result.detached } : {}),
+                ...(result.bgId ? { bgId: result.bgId } : {}),
+              };
+              const contextResult = redactSecrets(formatRunResult(result, contextRunMetadata), this.secretValues);
+              const history = buildWakeAdvisorHistory(this.messages, this.turnChannel, {
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: contextResult,
+                run: contextRunMetadata,
+              });
               let advice: WakeAdvice;
               try {
                 advice = this.deps.sandbox.adviseWake
-                  ? await this.deps.sandbox.adviseWake(turn)
+                  ? await this.deps.sandbox.adviseWake(turn, history)
                   : fallbackWakeAdvice({ ...turn, inProgress: [], ready: [], waiting: [], runningBg: 0, nextScheduledInMs: null });
               } catch {
                 advice = fallbackWakeAdvice({ ...turn, inProgress: [], ready: [], waiting: [], runningBg: 0, nextScheduledInMs: null });

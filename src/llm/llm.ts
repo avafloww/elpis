@@ -143,6 +143,8 @@ export interface StandaloneCompleteOptions {
   model?: string;
   /** Optional reasoning-effort override for a controlled standalone comparison. */
   reasoningEffort?: string;
+  /** Replay a closed historical function-call/output chain without exposing tools for the new completion. */
+  allowHistoricalToolMessages?: boolean;
   /** Abort the provider request and response stream. */
   signal?: AbortSignal;
 }

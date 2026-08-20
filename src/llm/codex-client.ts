@@ -350,8 +350,35 @@ export function sanitizeCodexMessagesForReplay(messages: ChatMessage[]): ChatMes
   return changed ? sanitized : messages;
 }
 
-/** Build a tool-free, monocontext-free request for the selected Codex wire
- * grammar. The caller supplies an isolated cache/session identity. */
+function assertBalancedHistoricalToolMessages(messages: ChatMessage[]): void {
+  const pending = new Set<string>();
+  const seen = new Set<string>();
+  for (const message of messages) {
+    if (pending.size > 0 && message.role !== 'tool') {
+      throw new Error(`unresolved historical tool call: ${[...pending][0]}`);
+    }
+    if (message.role === 'assistant') {
+      for (const call of message.tool_calls ?? []) {
+        const id = call.id?.trim();
+        if (!id || call.type !== 'function' || !call.function.name?.trim()) {
+          throw new Error('invalid historical tool call');
+        }
+        if (seen.has(id)) throw new Error(`duplicate historical tool call: ${id}`);
+        seen.add(id);
+        pending.add(id);
+      }
+      continue;
+    }
+    if (message.role !== 'tool') continue;
+    const id = message.tool_call_id?.trim();
+    if (!id || !pending.has(id)) throw new Error(`orphan historical tool output: ${id || 'missing id'}`);
+    pending.delete(id);
+  }
+  if (pending.size > 0) throw new Error(`unresolved historical tool call: ${[...pending][0]}`);
+}
+
+/** Build a tool-declaration-free, monocontext-free request for the selected Codex wire
+ * grammar. Closed historical calls may be replayed explicitly, but the new completion gets no tools. */
 export function buildCodexStandaloneRequest(
   config: Config,
   messages: ChatMessage[],
@@ -360,9 +387,11 @@ export function buildCodexStandaloneRequest(
   opts: StandaloneCompleteOptions = {},
 ): OpenAI.Responses.ResponseCreateParamsStreaming {
   if (!cacheKey.trim()) throw new Error('Codex standalone cacheKey must be non-empty');
-  if (messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0)) {
+  const hasToolHistory = messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0);
+  if (hasToolHistory && !opts.allowHistoricalToolMessages) {
     throw new Error('Codex standalone completion does not accept tool messages or tool calls');
   }
+  if (hasToolHistory) assertBalancedHistoricalToolMessages(messages);
   const input = toResponsesInput(sanitizeCodexMessagesForReplay(messages));
   const model = opts.model ?? config.llm.model;
   const reasoningEffort = opts.reasoningEffort ?? config.llm.reasoningEffort;

@@ -239,6 +239,47 @@ test('Lite standalone request carries image input without inheriting turn tools'
   );
 });
 
+test('standalone historical tool context is opt-in and balanced without exposing tools', () => {
+  const messages = [
+    { role: 'system', content: 'Choose a wake.' },
+    {
+      role: 'assistant', content: '',
+      reasoning_items: [{ id: 'rs_wait', type: 'reasoning', status: 'completed', summary: [], encrypted_content: 'opaque-wait' }],
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'run', arguments: '{"detail":"check job"}' } }],
+    },
+    { role: 'tool', content: '[run ok] still running', tool_call_id: 'call-1' },
+    { role: 'user', content: 'Choose now.' },
+  ] as any;
+  assert.throws(
+    () => buildCodexStandaloneRequest(codexConfig('gpt-5.6-luna'), messages, 'wake-lane', true),
+    /does not accept tool messages/,
+  );
+  const body = buildCodexStandaloneRequest(codexConfig('gpt-5.6-luna'), messages, 'wake-lane', true, {
+    allowHistoricalToolMessages: true,
+  } as any) as unknown as Record<string, unknown>;
+  assert.equal('tools' in body, false);
+  assert.equal('tool_choice' in body, false);
+  assert.deepEqual(body.input, [
+    { role: 'developer', content: 'Choose a wake.' },
+    { type: 'reasoning', summary: [], encrypted_content: 'opaque-wait' },
+    { type: 'function_call', call_id: 'call-1', name: 'run', arguments: '{"detail":"check job"}' },
+    { type: 'function_call_output', call_id: 'call-1', output: '[run ok] still running' },
+    { role: 'user', content: 'Choose now.' },
+  ]);
+  assert.throws(
+    () => buildCodexStandaloneRequest(codexConfig(), [
+      { role: 'tool', content: 'orphan', tool_call_id: 'missing' },
+    ], 'lane', false, { allowHistoricalToolMessages: true } as any),
+    /orphan historical tool output/,
+  );
+  assert.throws(
+    () => buildCodexStandaloneRequest(codexConfig(), [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'pending', type: 'function', function: { name: 'run', arguments: '{}' } }] },
+    ], 'lane', false, { allowHistoricalToolMessages: true } as any),
+    /unresolved historical tool call/,
+  );
+});
+
 test('completeStandalone uses its lane key for authenticated transport and request cache identity', async () => {
   const { store } = fakeStore();
   let headers = new Headers();
