@@ -119,4 +119,13 @@ test('wake advisor failure and nonconforming output fall back deterministically 
   assert.deepEqual(malformed, fallbackWakeAdvice(active));
   const timedOut = await adviseWake({ completeStandalone: async () => await new Promise(() => {}) }, quiet, logger, 5);
   assert.deepEqual(timedOut, { delayMs: 3_600_000, reason: 'quiet-exploration', source: 'fallback' });
+  const warnings: string[] = [];
+  const failed = await adviseWake(
+    { completeStandalone: async () => { throw new Error('classifier lane broke'); } },
+    quiet,
+    { debug() {}, warn(message: string) { warnings.push(message); } },
+    100,
+  );
+  assert.deepEqual(failed, fallbackWakeAdvice(quiet));
+  assert.deepEqual(warnings, ['wake advisor unavailable: classifier lane broke']);
 });

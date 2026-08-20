@@ -252,7 +252,7 @@ export async function adviseWake(
     return { delayMs, reason: reason as WakeAdviceReason, source: 'classifier' };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.debug(`wake advisor unavailable: ${message.slice(0, 200)}`);
+    logger.warn(`wake advisor unavailable: ${message.slice(0, 200)}`);
     return fallback;
   } finally {
     if (timer) clearTimeout(timer);
