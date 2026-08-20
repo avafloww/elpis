@@ -266,6 +266,53 @@ function snapshot(episode: EpisodeRecord) {
 
 function append(file: string, event: Record<string, unknown>): void {
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
+function terminalTrace(file: string): boolean {
+  try {
+    return fs.readFileSync(file, 'utf8').trim().split('\n').some((line) => {
+      try { return TERMINAL_STATUSES.has(JSON.parse(line).type); } catch { return false; }
+    });
+  } catch {
+    return false;
+  }
+}
+
+function removeEpisodeFiles(episodesDir: string, episodeId: string): void {
+  for (const entry of fs.readdirSync(episodesDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const frameSuffix = entry.name.startsWith(episodeId) ? entry.name.slice(episodeId.length) : '';
+    if (entry.name === `${episodeId}.jsonl` || /^-\d{4}\.png$/.test(frameSuffix)) {
+      fs.rmSync(path.join(episodesDir, entry.name), { force: true });
+    }
+  }
+}
+
+function secureAndPruneEpisodeFiles(episodesDir: string): void {
+  fs.mkdirSync(episodesDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(episodesDir, 0o700);
+  const entries = fs.readdirSync(episodesDir, { withFileTypes: true });
+  const traces = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl')).map((entry) => {
+    const file = path.join(episodesDir, entry.name);
+    fs.chmodSync(file, 0o600);
+    return { id: entry.name.slice(0, -'.jsonl'.length), file, mtimeMs: fs.statSync(file).mtimeMs };
+  });
+  const traceIds = new Set(traces.map((trace) => trace.id));
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.png')) continue;
+    const file = path.join(episodesDir, entry.name);
+    fs.chmodSync(file, 0o600);
+    const match = /^(.*)-\d{4}\.png$/.exec(entry.name);
+    if (match && !traceIds.has(match[1])) fs.rmSync(file, { force: true });
+  }
+  let count = traces.length;
+  for (const trace of traces.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
+    if (count <= MAX_EPISODES) break;
+    if (!terminalTrace(trace.file)) continue;
+    removeEpisodeFiles(episodesDir, trace.id);
+    count--;
+  }
 }
 
 function oversightPacket(episode: EpisodeRecord): MotorOversightPacket {
@@ -295,7 +342,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
   const episodeNow = (episode: EpisodeRecord) => (episode.runtime.now ?? Date.now)();
   const episodeSleep = (episode: EpisodeRecord, ms: number) => (episode.runtime.sleep ?? ((delay: number) => new Promise<void>((resolve) => setTimeout(resolve, delay))))(ms);
   const episodesDir = path.join(resolveDataLayout(deps.dataDirectory).motor, 'episodes');
-  fs.mkdirSync(episodesDir, { recursive: true, mode: 0o700 });
+  secureAndPruneEpisodeFiles(episodesDir);
   const episodes = new Map<string, EpisodeRecord>();
 
   const getEpisode = (episodeId: string): EpisodeRecord => {
@@ -434,6 +481,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
 
         const frame = path.join(episodesDir, `${episode.episodeId}-${String(episode.turns).padStart(4, '0')}.png`);
         await episode.runtime.screenshot(frame);
+        fs.chmodSync(frame, 0o600);
         const dimensions = pngDimensions(frame);
         episode.frame = frame;
         const guidance = episode.pendingGuidance;
@@ -501,6 +549,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
     } finally {
       episode.loopRunning = false;
       episode.abortController = null;
+      if (TERMINAL_STATUSES.has(episode.status)) secureAndPruneEpisodeFiles(episodesDir);
     }
   };
 
@@ -553,6 +602,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       };
       episodes.set(episodeId, record);
       append(record.traceFile, { type: 'start', at: new Date(startedAt).toISOString(), episodeId, goal, authority: record.authority, options: record.opts });
+      secureAndPruneEpisodeFiles(episodesDir);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
     },
@@ -567,6 +617,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       episode.updatedAt = episodeNow(episode);
       episode.abortController?.abort();
       append(episode.traceFile, { type: 'interrupted', at: new Date(episode.updatedAt).toISOString(), checkpointSeq: episode.checkpointSeq });
+      secureAndPruneEpisodeFiles(episodesDir);
       return snapshot(episode);
     },
   };

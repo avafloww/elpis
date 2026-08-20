@@ -11,6 +11,7 @@ import {
   type MotorOversightPacket,
 } from '../src/sandbox/motor.js';
 import type { ChatMessage, StandaloneCompleteOptions, StandaloneCompleteResult } from '../src/llm/llm.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const usage = { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 };
 
@@ -129,6 +130,35 @@ test('resident motor completes a native click-write-done episode with parsed rec
   assert.equal(notifications.at(-1)?.status, 'completed');
   assert.equal(notifications.at(-1)?.recent.some((entry) => entry.reasoning === 'focus it'), true);
   assert.equal(notifications.at(-1)?.recent.at(-1)?.tool, 'done');
+  const frames = fs.readdirSync(path.dirname(ended.traceFile)).filter((name) => name.endsWith('.png'));
+  assert.ok(frames.length > 0);
+  for (const frame of frames) assert.equal(fs.statSync(path.join(path.dirname(ended.traceFile), frame)).mode & 0o777, 0o600);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('motor trace custody hardens files, drops orphan frames, and prunes only terminal history', () => {
+  const dir = tempDir();
+  const episodesDir = path.join(resolveDataLayout(dir).motor, 'episodes');
+  fs.mkdirSync(episodesDir, { recursive: true, mode: 0o755 });
+  for (let index = 0; index < 101; index++) {
+    const id = `retained-${String(index).padStart(3, '0')}`;
+    const trace = path.join(episodesDir, `${id}.jsonl`);
+    fs.writeFileSync(trace, `${JSON.stringify({ type: 'start' })}\n${JSON.stringify({ type: index === 1 ? 'awaiting_oversight' : 'completed' })}\n`, { mode: 0o644 });
+    fs.writeFileSync(path.join(episodesDir, `${id}-0000.png`), Buffer.alloc(24), { mode: 0o664 });
+    const at = new Date(1_000 + index * 1_000);
+    fs.utimesSync(trace, at, at);
+  }
+  fs.writeFileSync(path.join(episodesDir, 'orphan-0000.png'), Buffer.alloc(24), { mode: 0o664 });
+
+  fixture(dir, async () => completion('done', { summary: 'unused' }));
+
+  const files = fs.readdirSync(episodesDir);
+  assert.equal(files.filter((name) => name.endsWith('.jsonl')).length, 100);
+  assert.equal(files.includes('retained-000.jsonl'), false);
+  assert.equal(files.includes('retained-001.jsonl'), true, 'nonterminal trace is never pruned');
+  assert.equal(files.includes('orphan-0000.png'), false);
+  assert.equal(fs.statSync(episodesDir).mode & 0o777, 0o700);
+  for (const name of files) assert.equal(fs.statSync(path.join(episodesDir, name)).mode & 0o777, 0o600);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
