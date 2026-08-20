@@ -300,10 +300,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
     onFutureSettled: (id, value, rejected, logs, sends) =>
       agent.notifyFutureSettled(id, value, rejected, { logs, sends }),
     onLateProcessError: (event) => {
-      const notice = formatSandboxLateProcessErrorNotice(event);
-      log(notice);
-      const channel = config.discord.errorChannelId;
-      if (channel) agent.send(channel, notice).catch(() => {});
+      log(formatSandboxLateProcessErrorNotice(event));
     },
  // F-UX: expose the typing indicator so the agent can explicitly say "I'm
  // thinking" during long sandbox work. Routes through agent.typing (which
