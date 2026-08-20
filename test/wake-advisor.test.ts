@@ -43,7 +43,7 @@ test('wake advisor snapshot is bounded to work facts and ignores reserved run wa
   assert.equal(state.nextScheduledInMs, 30_000);
 });
 
-test('wake advisor history keeps two same-channel completed turns plus the current bounded run', () => {
+test('wake advisor history keeps the latest three same-channel model cycles', () => {
   const ended = (id: string, channel: string, code = 'return 1') => [
     { role: 'user', content: `wake ${id}`, channel },
     {
@@ -80,6 +80,45 @@ test('wake advisor history keeps two same-channel completed turns plus the curre
   assert.match(current.tool_calls![0].function.arguments, /omitted sha256=/);
   assert.ok(history.at(-1)!.content.length < 5_000);
   assert.match(history.at(-1)!.content, /omitted sha256=/);
+});
+
+test('wake advisor keeps exactly the newest three tool cycles inside one outer turn', () => {
+  const messages: any[] = [{ role: 'user', content: 'start', channel: 'room' }];
+  for (let index = 0; index < 4; index++) {
+    const id = `tool-cycle-${index}`;
+    messages.push({
+      role: 'assistant', content: `cycle ${index}`, channel: 'room',
+      tool_calls: [{ id, type: 'function', function: { name: 'run', arguments: JSON.stringify({ code: `return ${index}`, detail: `cycle ${index}` }) } }],
+    });
+    if (index < 3) messages.push({ role: 'tool', tool_call_id: id, content: `[run ok] ${index}`, channel: 'room', run: { toolContractVersion: 4, ok: true } });
+  }
+  const history = buildWakeAdvisorHistory(messages, 'room', {
+    role: 'tool', tool_call_id: 'tool-cycle-3', content: '[run ok] 3', run: { toolContractVersion: 4, ok: true },
+  } as any);
+  assert.deepEqual(history.flatMap(message => message.tool_calls ?? []).map(call => call.id), ['tool-cycle-1', 'tool-cycle-2', 'tool-cycle-3']);
+  assert.deepEqual(history.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['tool-cycle-1', 'tool-cycle-2', 'tool-cycle-3']);
+});
+
+test('wake advisor counts one plain response plus two tool generations as three cycles', () => {
+  const messages: any[] = [
+    { role: 'user', content: 'old request', channel: 'room' },
+    { role: 'assistant', content: 'old plain response', channel: 'room' },
+    { role: 'user', content: 'selected plain request', channel: 'room' },
+    { role: 'assistant', content: 'selected plain response', channel: 'room' },
+    { role: 'user', content: 'first tool request', channel: 'room' },
+    { role: 'assistant', content: 'first tool response', channel: 'room', tool_calls: [{ id: 'mixed-1', type: 'function', function: { name: 'run', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'mixed-1', content: '[run ok] one', channel: 'room', run: { toolContractVersion: 4, ok: true } },
+    { role: 'assistant', content: 'second tool response', channel: 'room', tool_calls: [{ id: 'mixed-2', type: 'function', function: { name: 'run', arguments: '{}' } }] },
+  ];
+  const history = buildWakeAdvisorHistory(messages, 'room', {
+    role: 'tool', tool_call_id: 'mixed-2', content: '[run ok] two', run: { toolContractVersion: 4, ok: true },
+  } as any);
+  assert.deepEqual(history.filter(message => message.role === 'assistant').map(message => message.content), [
+    'selected plain response', 'first tool response', 'second tool response',
+  ]);
+  assert.deepEqual(history.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['mixed-1', 'mixed-2']);
+  assert.equal(history.some(message => message.content === 'old plain response'), false);
+  assert.equal(history.some(message => message.content === 'selected plain request'), true);
 });
 
 test('wake advisor hard-bounds one oversized turn without orphaning tool chains', () => {

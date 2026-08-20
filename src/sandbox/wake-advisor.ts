@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { endsTurn, type ChatMessage } from '../llm/llm.js';
+import type { ChatMessage } from '../llm/llm.js';
 import type { Logger } from '../lib/log.js';
 import type { SandboxDeps } from '../types.js';
 
@@ -32,7 +32,7 @@ export interface WakeAdvice {
 }
 
 const REASONS: WakeAdviceReason[] = ['active-work', 'background-wait', 'social-follow-up', 'scheduled-soon', 'quiet-exploration'];
-const HISTORY_TURNS = 3;
+const HISTORY_CYCLES = 3;
 const HISTORY_CONTENT_CHARS = 4_096;
 const HISTORY_ARGUMENT_CHARS = 4_096;
 const HISTORY_VISIBLE_CHARS = 48_000;
@@ -173,17 +173,20 @@ function hardBoundHistory(messages: ChatMessage[]): ChatMessage[] {
   return [omitted, ...selected.flat()];
 }
 
-function completedTurnEnd(messages: ChatMessage[], assistantIndex: number): number {
-  if (!endsTurn(messages, assistantIndex)) return -1;
-  const assistant = messages[assistantIndex];
-  const last = assistant.tool_calls?.at(-1);
-  if (!last) return assistantIndex;
-  for (let index = assistantIndex + 1; index < messages.length; index++) {
-    const candidate = messages[index];
-    if (candidate.role === 'assistant') break;
-    if (candidate.role === 'tool' && candidate.tool_call_id === last.id) return index;
+function recentCycleHistory(units: ChatMessage[][]): ChatMessage[] {
+  let cycles = 0;
+  let start = 0;
+  for (let index = units.length - 1; index >= 0; index--) {
+    if (units[index][0]?.role !== 'assistant') continue;
+    cycles++;
+    if (cycles === HISTORY_CYCLES) {
+      start = index;
+      break;
+    }
   }
-  return assistantIndex;
+  if (cycles < HISTORY_CYCLES) start = 0;
+  while (start > 0 && units[start - 1][0]?.role !== 'assistant') start--;
+  return units.slice(start).flat();
 }
 
 export function buildWakeAdvisorHistory(
@@ -193,29 +196,9 @@ export function buildWakeAdvisorHistory(
 ): ChatMessage[] {
   const scoped = messages
     .filter(message => message.role !== 'system' && message.channel === channel)
-    .concat([{ ...currentTool, channel }]);
-  const segments: ChatMessage[][] = [];
-  let start = 0;
-  for (let index = 0; index < scoped.length; index++) {
-    if (scoped[index].role !== 'assistant') continue;
-    const end = completedTurnEnd(scoped, index);
-    if (end < 0) continue;
-    segments.push(scoped.slice(start, end + 1));
-    start = end + 1;
-    index = end;
-  }
-  if (start < scoped.length) segments.push(scoped.slice(start));
-
-  const selected: ChatMessage[][] = [];
-  let chars = 0;
-  for (let index = segments.length - 1; index >= 0 && selected.length < HISTORY_TURNS; index--) {
-    const bounded = segments[index].map(boundedMessage);
-    const segmentChars = visibleChars(bounded);
-    if (selected.length > 0 && chars + segmentChars > HISTORY_VISIBLE_CHARS) break;
-    selected.unshift(bounded);
-    chars += segmentChars;
-  }
-  const history = hardBoundHistory(selected.flat());
+    .concat([{ ...currentTool, channel }])
+    .map(boundedMessage);
+  const history = hardBoundHistory(recentCycleHistory(balancedHistoryUnits(scoped)));
   let reasoningBudget = HISTORY_REASONING_CHARS;
   for (let index = history.length - 1; index >= 0; index--) {
     const message = history[index];
