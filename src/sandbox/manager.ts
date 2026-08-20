@@ -102,22 +102,44 @@ export class SandboxManager {
 
   handleMindStateChange(mindId: number, status: string, archived: boolean): void {
     if (archived || status === 'done' || status === 'cancelled') {
-      this.registry.retireByMind(mindId);
+      const registration = this.registry.retireByMind(mindId);
+      if (registration) this.finalizeExpired(registration);
       this.registry.clearReminderByMind(mindId);
       return;
+    }
+    const registration = this.registry.getByMind(mindId);
+    if (registration?.retireRequested) {
+      const deadline = this.retirementDeadline(registration);
+      if (deadline !== null && deadline <= this.now()) {
+        this.finalizeExpired(registration);
+        return;
+      }
     }
     this.registry.cancelRetirement(mindId);
     if (status !== 'in_progress') this.registry.clearReminderByMind(mindId);
   }
 
+  private retirementDeadline(registration: SandboxRegistration): number | null {
+    if (!registration.retireRequested) return null;
+    if (registration.retireRequestedAt === null) {
+      throw new Error(`sandbox manager: retiring sandbox ${registration.alias} has no retirement timestamp`);
+    }
+    return registration.retireRequestedAt + this.deps.config.sandbox.persistentRetirementGraceMs;
+  }
+
+  private finalizeExpired(registration: SandboxRegistration): boolean {
+    const deadline = this.retirementDeadline(registration);
+    if (registration.lifecycle !== 'ready' || deadline === null || deadline > this.now()) return false;
+    const retired = this.registry.finalizeRetirement(registration.alias, { expired: true });
+    if (retired.lifecycle !== 'retired') return false;
+    this.contexts.delete(registration.alias);
+    return true;
+  }
+
   collectGarbage(): string[] {
-    const cutoff = this.now() - this.deps.config.sandbox.persistentIdleGcMs;
     const collected: string[] = [];
     for (const registration of this.registry.list()) {
-      if (registration.lifecycle !== 'ready' || !registration.retireRequested || registration.updatedAt > cutoff) continue;
-      const retired = this.registry.finalizeRetirement(registration.alias);
-      if (retired.lifecycle !== 'retired') continue;
-      this.contexts.delete(registration.alias);
+      if (!this.finalizeExpired(registration)) continue;
       collected.push(registration.alias);
     }
     return collected;
@@ -172,6 +194,12 @@ export class SandboxManager {
     }
     const mind = mindState(this.deps, before);
     const run = this.registry.beginRun(alias);
+    const retirementDeadlineAt = this.retirementDeadline(run.sandbox) ?? undefined;
+    if (retirementDeadlineAt !== undefined && retirementDeadlineAt <= this.now()) {
+      const ready = this.registry.finishRun(alias, run.runId);
+      this.finalizeExpired(ready);
+      throw new Error(`sandbox manager: ${alias} retired after its closed Mind grace period`);
+    }
     const coldStart = run.sandbox.coldNoticePending && this.registry.consumeColdNotice(alias);
     const statusReminder = mind.status === 'open' && !run.sandbox.reminderLatched && this.registry.latchReminder(alias);
     const execution: SandboxExecutionMetadata = {
@@ -186,6 +214,10 @@ export class SandboxManager {
       runId: run.runId,
       coldStart,
       retiring: run.sandbox.retireRequested,
+      retirementDeadlineAt,
+      retirementWarning: retirementDeadlineAt === undefined
+        ? undefined
+        : `Mind #${run.sandbox.mindId} is closed; sandbox ${alias} retires at ${new Date(retirementDeadlineAt).toISOString()}. Select or create a sandbox bound to active work.`,
       statusReminder,
       lifecycle: 'busy',
     };
@@ -197,7 +229,7 @@ export class SandboxManager {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
-      execution.lifecycle = 'reset';
+      execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
       return {
         ok: false,
         failureKind: 'runtime',
@@ -211,7 +243,7 @@ export class SandboxManager {
         const reset = this.registry.failRunAndReset(alias, run.runId);
         this.contexts.delete(alias);
         execution.resetGeneration = reset.generation;
-        execution.lifecycle = 'reset';
+        execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
         result.ok = false;
         result.detached = false;
         result.failureKind = 'runtime';
@@ -231,10 +263,10 @@ export class SandboxManager {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
-      execution.lifecycle = 'reset';
+      execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
     } else {
-      this.registry.finishRun(alias, run.runId);
-      execution.lifecycle = 'ready';
+      const finished = this.registry.finishRun(alias, run.runId);
+      execution.lifecycle = this.finalizeExpired(finished) ? 'retired' : 'ready';
     }
 
     result.execution = execution;
@@ -270,10 +302,11 @@ export class SandboxManager {
     if (!owner) return;
     this.detached.delete(bgId);
     if (rejected) {
-      this.registry.failRunAndReset(owner.alias, owner.runId);
+      const reset = this.registry.failRunAndReset(owner.alias, owner.runId);
       this.contexts.delete(owner.alias);
+      this.finalizeExpired(reset);
     } else {
-      this.registry.finishRun(owner.alias, owner.runId);
+      this.finalizeExpired(this.registry.finishRun(owner.alias, owner.runId));
     }
   }
 

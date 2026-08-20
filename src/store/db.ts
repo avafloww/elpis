@@ -20,7 +20,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -340,10 +340,23 @@ export function runMigrations(db: DatabaseSync): void {
 
   // This receipt says only that the idempotent legacy blocks above completed;
   // it does not invent checksummed history for schema versions 1 through 13.
-  runComponentMigrations(db, 'core', [{
-    name: '0013-legacy-through-v13',
-    sql: 'SELECT 1;',
-  }]);
+  runComponentMigrations(db, 'core', [
+    {
+      name: '0013-legacy-through-v13',
+      sql: 'SELECT 1;',
+    },
+    {
+      name: '0015-sandbox-retirement-deadline',
+      sql: `
+        ALTER TABLE persistent_sandboxes ADD COLUMN retire_requested_at INTEGER;
+        UPDATE persistent_sandboxes
+        SET retire_requested_at = updated_at
+        WHERE retire_requested = 1;
+        CREATE INDEX persistent_sandboxes_retirement_idx
+        ON persistent_sandboxes(retire_requested, retire_requested_at, lifecycle);
+      `,
+    },
+  ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 

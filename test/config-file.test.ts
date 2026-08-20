@@ -174,7 +174,7 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.discord.ambientAllowSend, true);
   assert.equal(c.sandbox.syncTimeoutMs, 15000);
   assert.equal(c.sandbox.asyncDeadlineMs, 120000);
-  assert.equal(c.sandbox.persistentIdleGcMs, 24 * 60 * 60 * 1000);
+  assert.equal(c.sandbox.persistentRetirementGraceMs, 10 * 60 * 1000);
   assert.equal(c.compaction.triggerTokens, 180000);
   assert.equal(c.compaction.keepTokens, 50000);
   assert.deepEqual(c.memory, { consolidationThresholdTokens: 32000, consolidationTargetTokens: 24000 });
@@ -277,11 +277,14 @@ test('configFile: compaction threshold validation (0 < keep < trigger)', () => {
   assert.equal(c.compaction.triggerTokens, 50000);
 });
 
-test('configFile: sandbox idle GC duration is configurable and typed', () => {
-  const c = loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: 4321\n`));
-  assert.equal(c.sandbox.persistentIdleGcMs, 4321);
-  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: "abc"\n`)), /sandbox\.persistent_idle_gc_ms/);
-  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: -1\n`)), /must be non-negative/);
+test('configFile: sandbox retirement grace is configurable with a bounded legacy alias', () => {
+  const current = loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_retirement_grace_ms: 4321\n`));
+  assert.equal(current.sandbox.persistentRetirementGraceMs, 4321);
+  const legacy = loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_idle_gc_ms: 9876\n`));
+  assert.equal(legacy.sandbox.persistentRetirementGraceMs, 9876);
+  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_retirement_grace_ms: "abc"\n`)), /sandbox\.persistent_retirement_grace_ms/);
+  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_retirement_grace_ms: -1\n`)), /non-negative integer/);
+  assert.throws(() => loadConfigFile(fixture(`${MINIMAL_OK}\nsandbox:\n  persistent_retirement_grace_ms: 1\n  persistent_idle_gc_ms: 2\n`)), /mutually exclusive/);
 });
 
 test('configFile: wrong-typed scalar throws naming the key', () => {

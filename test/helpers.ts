@@ -92,7 +92,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       reflectionMinMessages: 3,
       socialNudgeMs: 12 * 60 * 60 * 1000,
     },
-    sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, persistentIdleGcMs: 24 * 60 * 60 * 1000, previewMaxBytes: 2048, logMaxBytes: 2048 },
+    sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, persistentRetirementGraceMs: 24 * 60 * 60 * 1000, previewMaxBytes: 2048, logMaxBytes: 2048 },
     modules: { enabled: null, disabled: [] },
     console: { enabled: false, mcpEnabled: false, port: 8787, host: '127.0.0.1' },
     kagi: { apiKey: null },

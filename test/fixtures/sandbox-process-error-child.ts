@@ -19,7 +19,7 @@ process.on('uncaughtException', (error) => {
 
 const sandbox = createSandbox({
   config: {
-    sandbox: { syncTimeoutMs: 1_000, asyncDeadlineMs: 1_000, persistentIdleGcMs: 1_000, previewMaxBytes: 2_048, logMaxBytes: 2_048 },
+    sandbox: { syncTimeoutMs: 1_000, asyncDeadlineMs: 1_000, persistentRetirementGraceMs: 1_000, previewMaxBytes: 2_048, logMaxBytes: 2_048 },
     kagi: { apiKey: null },
     bluesky: null,
     paths: { harnessRoot: dir, dataDirectory: dir },

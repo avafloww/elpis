@@ -103,12 +103,16 @@ test('reminders latch once and retirement waits for explicit idle GC', () => {
   const retiring = registry.retireByMind(mindId)!;
   assert.equal(retiring.lifecycle, 'busy');
   assert.equal(retiring.retireRequested, true);
+  assert.ok(retiring.retireRequestedAt);
+  const requestedAt = retiring.retireRequestedAt;
   const idle = registry.finishRun(sandbox.id, run.runId);
   assert.equal(idle.lifecycle, 'ready');
   assert.equal(idle.retireRequested, true);
+  assert.equal(idle.retireRequestedAt, requestedAt);
   const finalRun = registry.beginRun(sandbox.id);
   assert.match(finalRun.runId, /:g1:r2$/);
-  registry.finishRun(sandbox.id, finalRun.runId);
+  assert.equal(finalRun.sandbox.retireRequestedAt, requestedAt);
+  assert.equal(registry.finishRun(sandbox.id, finalRun.runId).retireRequestedAt, requestedAt);
   const retired = registry.finalizeRetirement(sandbox.id);
   assert.equal(retired.lifecycle, 'retired');
   assert.ok(retired.retiredAt);
@@ -150,8 +154,11 @@ test('beginRun auto-marks a closed Mind retiring but preserves use until GC', ()
   const run = registry.beginRun(sandbox.id);
   assert.equal(run.sandbox.lifecycle, 'busy');
   assert.equal(run.sandbox.retireRequested, true);
+  assert.ok(run.sandbox.retireRequestedAt);
+  const requestedAt = run.sandbox.retireRequestedAt;
   const idle = registry.finishRun(sandbox.id, run.runId);
   assert.equal(idle.lifecycle, 'ready');
+  assert.equal(idle.retireRequestedAt, requestedAt);
   assert.equal(registry.finalizeRetirement(sandbox.id).lifecycle, 'retired');
   db.close();
 });
@@ -163,7 +170,9 @@ test('reopen cancels pending retirement and cold reset advances every live gener
   db.prepare("UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), mindId);
   registry.retireByMind(mindId);
   db.prepare("UPDATE mind_items SET status = 'open', closed_at = NULL, updated_at = ? WHERE id = ?").run(now(), mindId);
-  assert.equal(registry.cancelRetirement(mindId)!.retireRequested, false);
+  const reopened = registry.cancelRetirement(mindId)!;
+  assert.equal(reopened.retireRequested, false);
+  assert.equal(reopened.retireRequestedAt, null);
   assert.equal(registry.coldResetAll(), 1);
   const cold = registry.get(sandbox.id);
   assert.equal(cold.generation, 2);
@@ -182,5 +191,6 @@ test('finishRun requests retirement when the Mind closes during execution withou
   const finished = registry.finishRun(sandbox.alias, run.runId);
   assert.equal(finished.lifecycle, 'ready');
   assert.equal(finished.retireRequested, true);
+  assert.ok(finished.retireRequestedAt);
   db.close();
 });

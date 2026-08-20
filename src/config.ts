@@ -137,8 +137,8 @@ export interface Config {
     syncTimeoutMs: number;
     /** How long a turn waits before DETACHING a run's promise into bg. */
     asyncDeadlineMs: number;
-    /** Closed persistent sandboxes remain warm until idle for this duration. */
-    persistentIdleGcMs: number;
+    /** Hard grace from Mind closure before its persistent sandbox retires. */
+    persistentRetirementGraceMs: number;
     previewMaxBytes: number;
     logMaxBytes: number;
   };
@@ -910,9 +910,17 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     sandbox: {
       syncTimeoutMs: numOr(tree, 'sandbox.sync_timeout_ms', 15000, f),
       asyncDeadlineMs: numOr(tree, 'sandbox.async_deadline_ms', 120000, f),
-      persistentIdleGcMs: (() => {
-        const value = numOr(tree, 'sandbox.persistent_idle_gc_ms', 24 * 60 * 60 * 1000, f);
-        if (value < 0) throw new Error(`${f}: sandbox.persistent_idle_gc_ms must be non-negative`);
+      persistentRetirementGraceMs: (() => {
+        const currentKey = 'sandbox.persistent_retirement_grace_ms';
+        const legacyKey = 'sandbox.persistent_idle_gc_ms';
+        const current = at(tree, currentKey);
+        const legacy = at(tree, legacyKey);
+        if (current !== undefined && legacy !== undefined) {
+          throw new Error(`${f}: ${currentKey} and legacy ${legacyKey} are mutually exclusive`);
+        }
+        const key = legacy !== undefined ? legacyKey : currentKey;
+        const value = numOr(tree, key, 10 * 60 * 1000, f);
+        if (!Number.isInteger(value) || value < 0) throw new Error(`${f}: ${key} must be a non-negative integer`);
         return value;
       })(),
       previewMaxBytes: numOr(tree, 'sandbox.preview_max_bytes', 16384, f),

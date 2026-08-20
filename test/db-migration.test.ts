@@ -76,7 +76,7 @@ test('migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test('migration through v14 creates sandbox identity, migration ledger, and cold notices', () => {
+test('migration through v15 creates sandbox identity, migration ledger, cold notices, and retirement deadlines', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name);
@@ -89,16 +89,20 @@ test('migration through v14 creates sandbox identity, migration ledger, and cold
   assert.ok(triggers.includes('sandbox_aliases_no_delete'));
   const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
   assert.ok(columns.includes('cold_notice_pending'));
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
+  assert.ok(columns.includes('retire_requested_at'));
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 15);
   assert.deepEqual(
     (db.prepare("SELECT component, name FROM elpis_migrations WHERE component = 'core'").all() as { component: string; name: string }[])
       .map(({ component, name }) => ({ component, name })),
-    [{ component: 'core', name: '0013-legacy-through-v13' }],
+    [
+      { component: 'core', name: '0013-legacy-through-v13' },
+      { component: 'core', name: '0015-sandbox-retirement-deadline' },
+    ],
   );
   db.close();
 });
 
-test('migration v12→v14 adds cold notice state and the core baseline to an existing sandbox table', () => {
+test('migration v12→v15 adds cold notices and backfills retirement deadlines', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE persistent_sandboxes (
@@ -115,15 +119,24 @@ test('migration v12→v14 adds cold notice state and the core baseline to an exi
       updated_at INTEGER NOT NULL,
       retired_at INTEGER
     );
+    INSERT INTO persistent_sandboxes
+      (id, mind_id, executor_id, generation, lifecycle, reminder_latched, retire_requested, active_run_id, next_run_seq, created_at, updated_at, retired_at)
+    VALUES ('s1', 1, 'e1', 1, 'ready', 0, 1, NULL, 1, 100, 1234, NULL);
     PRAGMA user_version = 12;
   `);
   runMigrations(db);
   const columns = (db.prepare("SELECT name FROM pragma_table_info('persistent_sandboxes')").all() as { name: string }[]).map((row) => row.name);
   assert.ok(columns.includes('cold_notice_pending'));
-  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
-  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM elpis_migrations WHERE component = 'core' AND name = '0013-legacy-through-v13'").get() as { n: number }).n, 1);
+  assert.ok(columns.includes('retire_requested_at'));
+  assert.equal((db.prepare('SELECT retire_requested_at FROM persistent_sandboxes WHERE id = ?').get('s1') as { retire_requested_at: number }).retire_requested_at, 1234);
+  assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 15);
+  assert.deepEqual(
+    (db.prepare("SELECT name FROM elpis_migrations WHERE component = 'core' ORDER BY name").all() as { name: string }[]).map((row) => row.name),
+    ['0013-legacy-through-v13', '0015-sandbox-retirement-deadline'],
+  );
   runMigrations(db);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('persistent_sandboxes') WHERE name = 'cold_notice_pending'").get() as { n: number }).n, 1);
-  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM elpis_migrations WHERE component = 'core' AND name = '0013-legacy-through-v13'").get() as { n: number }).n, 1);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('persistent_sandboxes') WHERE name = 'retire_requested_at'").get() as { n: number }).n, 1);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM elpis_migrations WHERE component = 'core'").get() as { n: number }).n, 2);
   db.close();
 });

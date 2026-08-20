@@ -15,7 +15,7 @@ import { makeConfig } from './helpers.js';
 import type { SandboxDeps } from '../src/types.js';
 import type { StandaloneCompleteResult } from '../src/llm/llm.js';
 
-function fixture(opts: { deadlineMs?: number; classify?: SandboxDeps['completeStandalone']; coldStart?: boolean; idleGcMs?: number } = {}) {
+function fixture(opts: { deadlineMs?: number; classify?: SandboxDeps['completeStandalone']; coldStart?: boolean; retirementGraceMs?: number } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
@@ -35,7 +35,7 @@ function fixture(opts: { deadlineMs?: number; classify?: SandboxDeps['completeSt
     sandbox: {
       ...makeConfig().sandbox,
       asyncDeadlineMs: opts.deadlineMs ?? 5_000,
-      persistentIdleGcMs: opts.idleGcMs ?? 100,
+      persistentRetirementGraceMs: opts.retirementGraceMs ?? 100,
     },
   });
   const mind = new MindService({ db, scheduler, logger: noopLogger });
@@ -244,25 +244,83 @@ test('classifier sees bounded source only and is advisory on YES, malformed, or 
   f.close();
 });
 
-test('closing requests retirement, reopen cancels, and closed idle GC finalizes', async () => {
-  const f = fixture({ idleGcMs: 100 });
-  const item = f.mind.create({ title: 'retire later' });
+test('closure starts a hard grace, warns every call, reopen cancels, and use cannot extend expiry', async () => {
+  const f = fixture({ retirementGraceMs: 100 });
+  const item = f.mind.create({ title: 'retire on deadline' });
   const registration = f.manager.createPersistent(item.id);
   await f.manager.run({ sandbox: registration.alias, code: 'globalThis.warm = 1' });
   f.mind.setStatus(item.id, 'done', 'test');
   f.manager.handleMindStateChange(item.id, 'done', false);
-  assert.equal(f.registry.get(registration.alias).retireRequested, true);
-  const warned = await f.manager.run({ sandbox: registration.alias, code: 'warm' });
-  assert.equal(warned.execution?.retiring, true);
+  const firstRequest = f.registry.get(registration.alias).retireRequestedAt;
+  assert.ok(firstRequest);
+  const firstWarning = await f.manager.run({ sandbox: registration.alias, code: 'warm' });
+  assert.equal(firstWarning.execution?.retiring, true);
+  assert.equal(firstWarning.execution?.retirementDeadlineAt, firstRequest! + 100);
+  assert.match(firstWarning.execution?.retirementWarning ?? '', /Mind #\d+ is closed.*retires at.*Select or create/);
+
   f.mind.setStatus(item.id, 'open', 'test');
   f.manager.handleMindStateChange(item.id, 'open', false);
-  assert.equal(f.registry.get(registration.alias).retireRequested, false);
+  const reopened = f.registry.get(registration.alias);
+  assert.equal(reopened.retireRequested, false);
+  assert.equal(reopened.retireRequestedAt, null);
+
+  f.advance(10);
   f.mind.setStatus(item.id, 'done', 'test');
   f.manager.handleMindStateChange(item.id, 'done', false);
-  f.advance(101);
-  assert.deepEqual(f.manager.collectGarbage(), [registration.alias]);
+  const hardRequest = f.registry.get(registration.alias).retireRequestedAt;
+  assert.ok(hardRequest && hardRequest > firstRequest!);
+  f.advance(90);
+  const repeated = await f.manager.run({ sandbox: registration.alias, code: 'warm' });
+  assert.equal(repeated.ok, true);
+  assert.equal(repeated.execution?.retirementDeadlineAt, hardRequest! + 100);
+  assert.equal(f.registry.get(registration.alias).retireRequestedAt, hardRequest, 'begin/finish must not refresh closure time');
+  f.advance(11);
+  f.mind.setStatus(item.id, 'open', 'late reopen');
+  f.manager.handleMindStateChange(item.id, 'open', false);
+  assert.equal(f.registry.get(registration.alias).lifecycle, 'retired', 'reopening after expiry cannot resurrect the context');
+  const expired = await f.manager.run({ sandbox: registration.alias, code: 'warm' });
+  assert.equal(expired.ok, false);
+  assert.match(expired.error ?? '', /retired/);
+  f.close();
+});
+
+test('zero grace retires a ready sandbox in the closure callback', async () => {
+  const f = fixture({ retirementGraceMs: 0 });
+  const item = f.mind.create({ title: 'retire immediately' });
+  const registration = f.manager.createPersistent(item.id);
+  await f.manager.run({ sandbox: registration.alias, code: '1' });
+  f.mind.setStatus(item.id, 'done', 'test');
+  f.manager.handleMindStateChange(item.id, 'done', false);
   assert.equal(f.registry.get(registration.alias).lifecycle, 'retired');
   f.close();
+});
+
+test('active and detached runs finalize immediately when they settle after the hard deadline', async () => {
+  const active = fixture({ retirementGraceMs: 10 });
+  const activeItem = active.mind.create({ title: 'active retirement' });
+  const activeRegistration = active.manager.createPersistent(activeItem.id);
+  const activeRun = active.manager.run({ sandbox: activeRegistration.alias, code: 'await new Promise(resolve => setTimeout(() => resolve(7), 30))' });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  active.mind.setStatus(activeItem.id, 'done', 'test');
+  active.manager.handleMindStateChange(activeItem.id, 'done', false);
+  active.advance(11);
+  const activeResult = await activeRun;
+  assert.equal(activeResult.ok, true);
+  assert.equal(activeResult.execution?.lifecycle, 'retired');
+  assert.equal(active.registry.get(activeRegistration.alias).lifecycle, 'retired');
+  active.close();
+
+  const detached = fixture({ deadlineMs: 10, retirementGraceMs: 10 });
+  const detachedItem = detached.mind.create({ title: 'detached retirement' });
+  const detachedRegistration = detached.manager.createPersistent(detachedItem.id);
+  const detachedRun = await detached.manager.run({ sandbox: detachedRegistration.alias, code: 'await new Promise(resolve => setTimeout(() => resolve(8), 50))' });
+  assert.equal(detachedRun.detached, true);
+  detached.mind.setStatus(detachedItem.id, 'done', 'test');
+  detached.manager.handleMindStateChange(detachedItem.id, 'done', false);
+  detached.advance(11);
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(detached.registry.get(detachedRegistration.alias).lifecycle, 'retired');
+  detached.close();
 });
 
 test('cancelling a detached future releases ownership by resetting its generation', async () => {

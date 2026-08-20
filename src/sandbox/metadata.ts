@@ -1,6 +1,6 @@
 export interface SandboxExecutionMetadata {
   kind: 'ephemeral' | 'persistent';
-  lifecycle?: 'ephemeral' | 'ready' | 'busy' | 'detached' | 'reset';
+  lifecycle?: 'ephemeral' | 'ready' | 'busy' | 'detached' | 'reset' | 'retired';
   alias?: string;
   mindId?: number;
   mindTitle?: string;
@@ -12,6 +12,8 @@ export interface SandboxExecutionMetadata {
   runId?: string;
   coldStart?: boolean;
   retiring?: boolean;
+  retirementDeadlineAt?: number;
+  retirementWarning?: string;
   statusReminder?: boolean;
   classifierReminder?: boolean;
 }
@@ -62,7 +64,7 @@ export function parseRunMessageMetadata(raw: unknown): RunMessageMetadata | unde
     const source = value.execution as Record<string, unknown>;
     if (source.kind === 'ephemeral' || source.kind === 'persistent') {
       const execution: SandboxExecutionMetadata = { kind: source.kind };
-      if (source.lifecycle === 'ephemeral' || source.lifecycle === 'ready' || source.lifecycle === 'busy' || source.lifecycle === 'detached' || source.lifecycle === 'reset') execution.lifecycle = source.lifecycle;
+      if (source.lifecycle === 'ephemeral' || source.lifecycle === 'ready' || source.lifecycle === 'busy' || source.lifecycle === 'detached' || source.lifecycle === 'reset' || source.lifecycle === 'retired') execution.lifecycle = source.lifecycle;
       const alias = boundedString(source.alias, 256); if (alias) execution.alias = alias;
       const mindId = finiteInteger(source.mindId); if (mindId !== undefined) execution.mindId = mindId;
       const mindTitle = boundedString(source.mindTitle, 512); if (mindTitle) execution.mindTitle = mindTitle;
@@ -73,7 +75,10 @@ export function parseRunMessageMetadata(raw: unknown): RunMessageMetadata | unde
       const generation = finiteInteger(source.generation); if (generation !== undefined) execution.generation = generation;
       const resetGeneration = finiteInteger(source.resetGeneration); if (resetGeneration !== undefined) execution.resetGeneration = resetGeneration;
       const runId = boundedString(source.runId, 256); if (runId) execution.runId = runId;
+      const retirementDeadlineAt = finiteInteger(source.retirementDeadlineAt); if (retirementDeadlineAt !== undefined) execution.retirementDeadlineAt = retirementDeadlineAt;
+      const retirementWarning = boundedString(source.retirementWarning, 512); if (retirementWarning) execution.retirementWarning = retirementWarning;
       for (const key of ['coldStart', 'retiring', 'statusReminder', 'classifierReminder'] as const) {
+
         if (typeof source[key] === 'boolean') execution[key] = source[key];
       }
       parsed.execution = execution;

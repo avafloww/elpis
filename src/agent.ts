@@ -98,7 +98,12 @@ function runAttribution(metadata?: RunMessageMetadata): string {
     if (execution.generation !== undefined) sandbox.push(`generation=${execution.generation}`);
     if (execution.resetGeneration !== undefined) sandbox.push(`reset=${execution.resetGeneration}`);
     if (execution.coldStart) sandbox.push('cold');
-    if (execution.retiring) sandbox.push('retiring');
+    if (execution.retiring) {
+      sandbox.push('retiring');
+      if (execution.retirementDeadlineAt !== undefined) sandbox.push(`deadline=${new Date(execution.retirementDeadlineAt).toISOString()}`);
+      if (execution.retirementWarning) sandbox.push(`WARNING=${JSON.stringify(cap(execution.retirementWarning.replace(/\s+/g, ' '), 240))}`);
+    }
+
     if (execution.statusReminder) {
       sandbox.push('reminder=status');
       if (execution.latestComment) sandbox.push(`latest=${JSON.stringify(cap(execution.latestComment.replace(/\s+/g, ' '), 160))}`);

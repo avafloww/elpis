@@ -31,7 +31,7 @@ test('mind migrations are idempotent and create the complete schema', () => {
   runMigrations(db);
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mind_%' ORDER BY name").all() as { name: string }[]).map((x) => x.name);
   assert.deepEqual(tables, ['mind_claims', 'mind_comments', 'mind_dependencies', 'mind_events', 'mind_items', 'mind_reminders', 'mind_tags']);
-  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 14);
+  assert.equal(Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 15);
   db.close();
 });
 

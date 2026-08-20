@@ -68,7 +68,7 @@ export interface SandboxDeps {
     sandbox: {
       syncTimeoutMs: number;
       asyncDeadlineMs: number;
-      persistentIdleGcMs: number;
+      persistentRetirementGraceMs: number;
       previewMaxBytes: number;
       logMaxBytes: number;
     };
