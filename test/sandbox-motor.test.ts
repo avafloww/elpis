@@ -125,8 +125,13 @@ test('resident motor completes a native click-write-done episode with parsed rec
   const sameResident = createMotorController(deps) as any;
   assert.equal(sameResident.status('native-flow').status, 'completed');
   const events = fs.readFileSync(ended.traceFile, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events.map((event) => event.type), ['start', 'turn', 'turn', 'turn', 'completed']);
-  assert.equal(events[1].reasoning, 'focus it');
+  assert.deepEqual(events.map((event) => event.type), ['start', 'action_prepared', 'action_completed', 'turn', 'action_prepared', 'action_completed', 'turn', 'turn', 'completed']);
+  for (const prepared of events.filter((event) => event.type === 'action_prepared')) {
+    const completed = events.find((event) => event.type === 'action_completed' && event.effectId === prepared.effectId);
+    assert.ok(completed, `missing completion for ${prepared.effectId}`);
+    assert.ok(events.indexOf(prepared) < events.indexOf(completed));
+  }
+  assert.equal(events.find((event) => event.type === 'turn')?.reasoning, 'focus it');
   assert.equal(notifications.at(-1)?.status, 'completed');
   assert.equal(notifications.at(-1)?.recent.some((entry) => entry.reasoning === 'focus it'), true);
   assert.equal(notifications.at(-1)?.recent.at(-1)?.tool, 'done');

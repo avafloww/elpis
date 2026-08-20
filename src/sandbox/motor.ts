@@ -264,8 +264,14 @@ function snapshot(episode: EpisodeRecord) {
   };
 }
 
-function append(file: string, event: Record<string, unknown>): void {
-  fs.appendFileSync(file, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
+function append(file: string, event: Record<string, unknown>, durable = false): void {
+  const fd = fs.openSync(file, 'a', 0o600);
+  try {
+    fs.writeSync(fd, `${JSON.stringify(event)}\n`, undefined, 'utf8');
+    if (durable) fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.chmodSync(file, 0o600);
 }
 
@@ -503,7 +509,20 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         const completion = await complete(episode);
         if ((episode.status as EpisodeStatus) === 'interrupted') break;
         const { call, args } = parseMotorToolCall(completion.toolCalls);
+        const effectId = `${episode.episodeId}:${episode.checkpointSeq}`;
+        if (ACTION_TOOL_SET.has(call.function.name)) {
+          append(episode.traceFile, {
+            type: 'action_prepared', at: new Date(episodeNow(episode)).toISOString(), effectId,
+            checkpointSeq: episode.checkpointSeq, call, dimensions, counters: episode.counters,
+          }, true);
+        }
         const outcome = await execute(episode, call.function.name, args, dimensions);
+        if (ACTION_TOOL_SET.has(call.function.name)) {
+          append(episode.traceFile, {
+            type: 'action_completed', at: new Date(episodeNow(episode)).toISOString(), effectId,
+            checkpointSeq: episode.checkpointSeq, call, receipt: outcome.receipt, counters: episode.counters,
+          }, true);
+        }
         episode.messages.push({ role: 'assistant', content: completion.content ?? '', tool_calls: [call] });
         episode.messages.push({ role: 'tool', content: outcome.receipt, tool_call_id: call.id });
         episode.turns++;
@@ -521,7 +540,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         episode.recent = [...episode.recent, recent].slice(-4);
         append(episode.traceFile, {
           type: 'turn', at: recent.at, episodeId: episode.episodeId, turn: episode.turns - 1,
-          checkpointSeq: episode.checkpointSeq, frame, dimensions, call, receipt: outcome.receipt,
+          checkpointSeq: episode.checkpointSeq, frame, dimensions, call, receipt: outcome.receipt, counters: episode.counters,
           reasoning: completion.reasoningContent ?? null, content: completion.content ?? '', usage: completion.usage,
           latencyMs: Math.max(0, episode.updatedAt - started), model: completion.model,
           providerType: completion.providerType, apiSurface: completion.apiSurface, apiEndpoint: completion.apiEndpoint,
@@ -601,7 +620,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         originChannelId, runtime,
       };
       episodes.set(episodeId, record);
-      append(record.traceFile, { type: 'start', at: new Date(startedAt).toISOString(), episodeId, goal, authority: record.authority, options: record.opts });
+      append(record.traceFile, { type: 'start', at: new Date(startedAt).toISOString(), episodeId, goal, authority: record.authority, options: record.opts, originChannelId });
       secureAndPruneEpisodeFiles(episodesDir);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
