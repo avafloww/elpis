@@ -321,6 +321,131 @@ function secureAndPruneEpisodeFiles(episodesDir: string): void {
   }
 }
 
+function resolvedOptions(value: MotorStartOptions = {}): EpisodeRecord['opts'] {
+  const softTurnBudget = finiteInt(value.softTurnBudget ?? 8, 'motor softTurnBudget', 1, 100);
+  const hardTurnBudget = finiteInt(value.hardTurnBudget ?? 12, 'motor hardTurnBudget', 2, 200);
+  if (hardTurnBudget <= softTurnBudget) throw new Error('motor hardTurnBudget must exceed softTurnBudget');
+  return {
+    dryRun: value.dryRun === true,
+    maxTurns: finiteInt(value.maxTurns ?? 40, 'motor maxTurns', 1, 200),
+    softTurnBudget,
+    hardTurnBudget,
+    maxWallMs: finiteInt(value.maxWallMs ?? 300_000, 'motor maxWallMs', 1_000, 3_600_000),
+    settleMs: finiteInt(value.settleMs ?? 250, 'motor settleMs', 0, 5_000),
+    completionTimeoutMs: finiteInt(value.completionTimeoutMs ?? 30_000, 'motor completionTimeoutMs', 100, 300_000),
+  };
+}
+
+function incrementRecoveredCounters(counters: EpisodeCounters, call: NativeToolCall): void {
+  let args: Record<string, unknown> = {};
+  try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* malformed history stays visible without invented counters */ }
+  if (call.function.name === 'click' || call.function.name === 'double_click' || call.function.name === 'drag') counters.pointerActions++;
+  if (call.function.name === 'write') {
+    counters.writes++;
+    if (typeof args.text === 'string') counters.textChars += args.text.length;
+  }
+  if (call.function.name === 'press') counters.keyPresses++;
+  if (call.function.name === 'scroll') counters.scrolls++;
+}
+
+function restoreEpisode(traceFile: string, runtime: MotorControllerDeps): EpisodeRecord | null {
+  let events: Array<Record<string, unknown>>;
+  try {
+    events = fs.readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    return null;
+  }
+  const start = events.find((event) => event.type === 'start');
+  if (!start || typeof start.episodeId !== 'string' || typeof start.goal !== 'string') return null;
+  const episodeId = safeId(start.episodeId);
+  if (path.basename(traceFile) !== `${episodeId}.jsonl`) return null;
+  let goal: string;
+  let scope: MotorAuthority;
+  let opts: EpisodeRecord['opts'];
+  try {
+    goal = boundedText(start.goal, 'recovered motor goal', MAX_GOAL_CHARS);
+    scope = authority((start.authority ?? {}) as MotorAuthorityInput);
+    opts = resolvedOptions((start.options ?? {}) as MotorStartOptions);
+  } catch {
+    return null;
+  }
+  const startedAt = typeof start.at === 'string' && Number.isFinite(Date.parse(start.at)) ? Date.parse(start.at) : fs.statSync(traceFile).birthtimeMs;
+  const messages: ChatMessage[] = [{ role: 'system', content: `${MOTOR_SYSTEM_PROMPT}\n\nScoped goal: ${goal}` }];
+  const counters: EpisodeCounters = { pointerActions: 0, writes: 0, textChars: 0, keyPresses: 0, scrolls: 0 };
+  const recent: EpisodeRecord['recent'] = [];
+  const prepared = new Set<string>();
+  const completed = new Set<string>();
+  let status: EpisodeStatus = 'running';
+  let turns = 0;
+  let checkpointSeq = 0;
+  let frame: string | null = null;
+  let updatedAt = startedAt;
+  let lastError: string | null = null;
+
+  for (const event of events) {
+    if (typeof event.at === 'string' && Number.isFinite(Date.parse(event.at))) updatedAt = Date.parse(event.at);
+    if (event.type === 'action_prepared' && typeof event.effectId === 'string') prepared.add(event.effectId);
+    if (event.type === 'action_completed' && typeof event.effectId === 'string') completed.add(event.effectId);
+    if (event.type === 'turn') {
+      const call = event.call as NativeToolCall | undefined;
+      if (!call?.id || call.type !== 'function' || !call.function?.name || typeof event.receipt !== 'string') continue;
+      const restoredFrame = typeof event.frame === 'string' && fs.existsSync(event.frame) ? event.frame : null;
+      const text = `<observation>\nGoal: ${goal}\nRecovered durable interface state and authoritative tool receipt.\n`;
+      const observation: ChatMessage = { role: 'user', content: `${text}${restoredFrame ? '[screenshot]' : '[screenshot unavailable]'}\n</observation>` };
+      if (restoredFrame) observation.contentParts = [
+        { type: 'text', text },
+        { type: 'image_url', image_url: { url: dataUrl(restoredFrame), detail: 'auto' } },
+        { type: 'text', text: '\n</observation>' },
+      ];
+      messages.push(observation);
+      messages.push({ role: 'assistant', content: typeof event.content === 'string' ? event.content : '', tool_calls: [call] });
+      messages.push({ role: 'tool', content: event.receipt, tool_call_id: call.id });
+      incrementRecoveredCounters(counters, call);
+      turns = Math.max(turns, typeof event.turn === 'number' ? event.turn + 1 : turns + 1);
+      checkpointSeq = Math.max(checkpointSeq, typeof event.checkpointSeq === 'number' ? event.checkpointSeq : turns);
+      frame = restoredFrame ?? frame;
+      recent.push({
+        tool: call.function.name,
+        arguments: call.function.arguments.slice(0, 1_000),
+        receipt: event.receipt.slice(0, 1_000),
+        reasoning: typeof event.reasoning === 'string' ? event.reasoning.slice(0, 2_000) : '',
+        content: typeof event.content === 'string' ? event.content.slice(0, 500) : '',
+        latencyMs: typeof event.latencyMs === 'number' ? Math.max(0, event.latencyMs) : 0,
+        at: typeof event.at === 'string' ? event.at : new Date(updatedAt).toISOString(),
+      });
+      status = 'running';
+    }
+    if (event.type === 'continue' || event.type === 'guidance') status = 'running';
+    if (event.type === 'awaiting_oversight') status = 'awaiting_oversight';
+    if (event.type === 'needs_guidance') status = 'needs_guidance';
+    if (event.type === 'completed' || event.type === 'interrupted' || event.type === 'budget_exhausted' || event.type === 'failed') status = event.type;
+    if (event.type === 'failed' && typeof event.error === 'string') lastError = event.error;
+    if (typeof event.checkpointSeq === 'number') checkpointSeq = Math.max(checkpointSeq, event.checkpointSeq);
+  }
+  trimMotorImages(messages);
+  const unmatchedEffects = [...prepared].filter((effectId) => !completed.has(effectId));
+  const mustInterrupt = status === 'running' || (unmatchedEffects.length > 0 && status !== 'failed' && status !== 'interrupted');
+  if (mustInterrupt) {
+    status = 'interrupted';
+    lastError = unmatchedEffects.length > 0
+      ? `motor restart found ambiguous prepared effect(s): ${unmatchedEffects.join(', ')}; no action was retried`
+      : 'motor restarted while episode was running; no action was retried';
+    updatedAt = Date.now();
+    append(traceFile, { type: 'interrupted', at: new Date(updatedAt).toISOString(), checkpointSeq, reason: 'restart_recovery', unmatchedEffects, error: lastError }, true);
+  } else if (unmatchedEffects.length > 0) {
+    const ambiguity = `motor trace contains unmatched prepared effect(s): ${unmatchedEffects.join(', ')}`;
+    lastError = lastError ? `${lastError}; ${ambiguity}` : ambiguity;
+  }
+  return {
+    episodeId, goal, status, startedAt, updatedAt, turns, checkpointSeq,
+    lastAcknowledgedTurn: turns, lastNotifiedTurn: turns, frame, traceFile, messages,
+    authority: scope, counters, opts, pendingGuidance: null, recent: recent.slice(-4),
+    abortController: null, loopRunning: false, lastError,
+    originChannelId: typeof start.originChannelId === 'string' && start.originChannelId.length <= 200 ? start.originChannelId : null,
+    runtime,
+  };
+}
+
 function oversightPacket(episode: EpisodeRecord): MotorOversightPacket {
   return {
     episodeId: episode.episodeId,
@@ -350,6 +475,11 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
   const episodesDir = path.join(resolveDataLayout(deps.dataDirectory).motor, 'episodes');
   secureAndPruneEpisodeFiles(episodesDir);
   const episodes = new Map<string, EpisodeRecord>();
+  for (const entry of fs.readdirSync(episodesDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+    const restored = restoreEpisode(path.join(episodesDir, entry.name), deps);
+    if (restored) episodes.set(restored.episodeId, restored);
+  }
 
   const getEpisode = (episodeId: string): EpisodeRecord => {
     const episode = episodes.get(safeId(episodeId));
@@ -599,23 +729,14 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       const startedAt = now();
       const runtime = deps;
       const originChannelId = runtime.originChannelId?.() ?? null;
-      const softTurnBudget = finiteInt(opts.softTurnBudget ?? 8, 'motor softTurnBudget', 1, 100);
-      const hardTurnBudget = finiteInt(opts.hardTurnBudget ?? 12, 'motor hardTurnBudget', 2, 200);
-      if (hardTurnBudget <= softTurnBudget) throw new Error('motor hardTurnBudget must exceed softTurnBudget');
+      const episodeOptions = resolvedOptions(opts);
       const record: EpisodeRecord = {
         episodeId, goal, status: 'running', startedAt, updatedAt: startedAt, turns: 0, checkpointSeq: 0,
         lastAcknowledgedTurn: 0, lastNotifiedTurn: 0, frame: null,
         traceFile: path.join(episodesDir, `${episodeId}.jsonl`),
         messages: [{ role: 'system', content: `${MOTOR_SYSTEM_PROMPT}\n\nScoped goal: ${goal}` }],
         authority: authority(opts.authority), counters: { pointerActions: 0, writes: 0, textChars: 0, keyPresses: 0, scrolls: 0 },
-        opts: {
-          dryRun: opts.dryRun === true,
-          maxTurns: finiteInt(opts.maxTurns ?? 40, 'motor maxTurns', 1, 200),
-          softTurnBudget, hardTurnBudget,
-          maxWallMs: finiteInt(opts.maxWallMs ?? 300_000, 'motor maxWallMs', 1_000, 3_600_000),
-          settleMs: finiteInt(opts.settleMs ?? 250, 'motor settleMs', 0, 5_000),
-          completionTimeoutMs: finiteInt(opts.completionTimeoutMs ?? 30_000, 'motor completionTimeoutMs', 100, 300_000),
-        },
+        opts: episodeOptions,
         pendingGuidance: null, recent: [], abortController: null, loopRunning: false, lastError: null,
         originChannelId, runtime,
       };
@@ -642,6 +763,10 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
   };
 
   return { api, updateDeps(value) { deps = value; } };
+}
+
+export function resetResidentMotorForTest(dataDirectory: string): void {
+  RESIDENTS.delete(path.resolve(dataDirectory));
 }
 
 export function createMotorController(deps: MotorControllerDeps): Record<string, unknown> {

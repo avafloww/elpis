@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   createMotorController,
+  resetResidentMotorForTest,
   parseMotorToolCall,
   trimMotorImages,
   type MotorControllerDeps,
@@ -249,5 +250,59 @@ test('interrupt aborts an in-flight provider call without executing an action', 
   const ended = await until(() => motor.status('interrupt'), (value) => value.status === 'interrupted');
   assert.equal(ended.lastError, null);
   assert.equal(calls.click.length + calls.drag.length + calls.type.length + calls.key.length + calls.scroll.length, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+test('cold restart restores paused history and resumes only after matching oversight', async () => {
+  const dir = tempDir();
+  const outputs = [
+    completion('scroll', { direction: 'down', amount: 'small' }),
+    completion('scroll', { direction: 'down', amount: 'small' }),
+    completion('done', { summary: 'finished after restart' }),
+  ];
+  const first = fixture(dir, async () => outputs.shift()!, { originChannelId: () => 'origin-room' });
+  first.motor.start('resume safely', { episodeId: 'restart-paused', settleMs: 0, softTurnBudget: 1, hardTurnBudget: 2 });
+  const paused = await until(() => first.motor.status('restart-paused'), (value) => value.status === 'awaiting_oversight');
+  assert.equal(paused.counters.scrolls, 2);
+
+  resetResidentMotorForTest(dir);
+  const seen: ChatMessage[][] = [];
+  const notifications: MotorOversightPacket[] = [];
+  const second = fixture(dir, async (messages) => { seen.push(structuredClone(messages)); return outputs.shift()!; }, { notifyOversight: (packet) => { notifications.push(packet); } });
+  const restored = second.motor.status('restart-paused');
+  assert.equal(restored.status, 'awaiting_oversight');
+  assert.equal(restored.turns, 2);
+  assert.equal(restored.counters.scrolls, 2);
+  assert.equal(restored.recent.length, 2);
+  second.motor.continue('restart-paused', restored.checkpointSeq);
+  const ended = await until(() => second.motor.status('restart-paused'), (value) => value.status === 'completed');
+  assert.equal(ended.turns, 3);
+  assert.equal(seen[0].filter((message) => message.role === 'tool').length, 2);
+  assert.equal(notifications.at(-1)?.originChannelId, 'origin-room');
+  resetResidentMotorForTest(dir);
+  const terminal = fixture(dir, async () => { throw new Error('terminal recovery must not call model'); }).motor.status('restart-paused');
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.turns, 3);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cold restart interrupts running or unmatched-effect traces without retrying', () => {
+  const dir = tempDir();
+  const episodesDir = path.join(resolveDataLayout(dir).motor, 'episodes');
+  fs.mkdirSync(episodesDir, { recursive: true });
+  const trace = path.join(episodesDir, 'restart-ambiguous.jsonl');
+  const start = { type: 'start', at: new Date(1_000).toISOString(), episodeId: 'restart-ambiguous', goal: 'do not duplicate', authority: { allowedTools: ['click'], maxPointerActions: 1, maxWrites: 0, maxTextChars: 0, maxKeyPresses: 0, maxScrolls: 0 }, options: { dryRun: false, maxTurns: 4, softTurnBudget: 2, hardTurnBudget: 4, maxWallMs: 60_000, settleMs: 0, completionTimeoutMs: 1_000 }, originChannelId: 'origin-room' };
+  const prepared = { type: 'action_prepared', at: new Date(2_000).toISOString(), effectId: 'restart-ambiguous:0', checkpointSeq: 0, call: { id: 'c', type: 'function', function: { name: 'click', arguments: '{"element":"safe","x":1,"y":1}' } } };
+  fs.writeFileSync(trace, `${JSON.stringify(start)}\n${JSON.stringify(prepared)}\n`, { mode: 0o600 });
+  let called = false;
+  const restored = fixture(dir, async () => { called = true; return completion('click', { element: 'unsafe retry', x: 1, y: 1 }); }).motor;
+  const status = restored.status('restart-ambiguous');
+  assert.equal(status.status, 'interrupted');
+  assert.match(status.lastError, /ambiguous prepared effect/);
+  assert.equal(called, false);
+  const events = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.at(-1).type, 'interrupted');
+  assert.equal(events.at(-1).reason, 'restart_recovery');
+  resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });
