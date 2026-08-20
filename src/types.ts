@@ -52,6 +52,14 @@ export interface RunResult {
   sends?: { channel: string; text: string }[];
 }
 
+export interface SandboxLateProcessError {
+  kind: 'unhandledRejection' | 'uncaughtException';
+  error: unknown;
+  alias?: string;
+  generation?: number;
+  runId?: string;
+}
+
 export interface SandboxDeps {
   /** Capability surface. Full preserves the host-local control room; core is the fresh ephemeral allowlist. */
   surface?: 'full' | 'core';
@@ -177,6 +185,8 @@ export interface SandboxDeps {
  * there is one history, so no origin channel is tracked.
  * `sends` carries any channel.send made after the run detached. */
   onFutureSettled?: (id: string, value: unknown, rejected: boolean, logs?: string, sends?: { channel: string; text: string }[]) => void;
+  /** A callback owned by a completed run fired later from a leaked async resource. */
+  onLateProcessError?: (event: SandboxLateProcessError) => void;
   /** Fleet registry (elpis.fleet.*): spawn/manage detached sub-agent runners. */
   fleet?: FleetHandle;
   /** The killswitch's self-mute path : backs

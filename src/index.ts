@@ -18,10 +18,10 @@ import { replayIdentityForConfig } from './llm/provenance.js';
 import { Agent, computeEffectiveTrigger, type InboundMessage } from './agent.js';
 import { createDiscord } from './discord/discord.js';
 import { createEmoteRegistry } from './discord/emotes.js';
-import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID, type SandboxDeps } from './types.js';
+import { CONSOLE_CHANNEL_ID, INTERNAL_CHANNEL_ID, type SandboxDeps, type SandboxLateProcessError } from './types.js';
 import { createBgRegistry } from './sandbox/bg.js';
 import { createSshRegistry } from './sandbox/ssh.js';
-import { createRunLogger, runScope } from './sandbox/globals.js';
+import { createRunLogger, routeRunProcessError, runScope } from './sandbox/globals.js';
 import { consumeResumeMarker } from './store/resume.js';
 import { readUnseenChangelogs, formatChangelogNotice, markChangelogsSeen } from './store/changelog.js';
 import { createChannelDirectory } from './store/channels.js';
@@ -74,6 +74,14 @@ export function isUnannouncedRestart(resumedMessageCount: number, markerConsumed
 export function formatProcessErrorNotice(kind: 'unhandledRejection' | 'uncaughtException', err: unknown): string {
   const msg = err instanceof Error ? (err.stack || err.message) : String(err);
   return `[harness ${kind}] ${msg.slice(0, 1500)}`;
+}
+
+export function formatSandboxLateProcessErrorNotice(event: SandboxLateProcessError): string {
+  const msg = event.error instanceof Error ? (event.error.stack || event.error.message) : String(event.error);
+  const owner = event.alias ? ` alias=${event.alias} generation=${event.generation ?? 'unknown'}` : '';
+  const run = event.runId ? ` run=${event.runId}` : '';
+  return `[sandbox late ${event.kind}${owner}${run}] ${msg.slice(0, 1500)}`;
+
 }
 
 export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): Promise<ElpisRuntime> {
@@ -291,6 +299,12 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // message into the one history and wake the loop.
     onFutureSettled: (id, value, rejected, logs, sends) =>
       agent.notifyFutureSettled(id, value, rejected, { logs, sends }),
+    onLateProcessError: (event) => {
+      const notice = formatSandboxLateProcessErrorNotice(event);
+      log(notice);
+      const channel = config.discord.errorChannelId;
+      if (channel) agent.send(channel, notice).catch(() => {});
+    },
  // F-UX: expose the typing indicator so the agent can explicitly say "I'm
  // thinking" during long sandbox work. Routes through agent.typing (which
  // forwards to deps.onThinking) rather than the Discord layer directly —
@@ -592,6 +606,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // channel via the public send path, then keep running. Never process.exit
  // here; the whole point is surviving instead of crashing silently.
   function reportProcessError(kind: 'unhandledRejection' | 'uncaughtException', err: unknown): void {
+    if (routeRunProcessError(kind, err)) return;
     const notice = formatProcessErrorNotice(kind, err);
     log(notice);
     const ch = config.discord.errorChannelId;

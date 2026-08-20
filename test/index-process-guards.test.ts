@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createElpisRuntime, isUnannouncedRestart, formatProcessErrorNotice } from '../src/index.js';
+import { createElpisRuntime, isUnannouncedRestart, formatProcessErrorNotice, formatSandboxLateProcessErrorNotice } from '../src/index.js';
 
 test('production runtime composition is exported without booting on import', () => {
   assert.equal(typeof createElpisRuntime, 'function');
@@ -27,4 +27,11 @@ test('formatProcessErrorNotice: prefixes kind and includes message', () => {
   const out = formatProcessErrorNotice('unhandledRejection', new Error('boom'));
   assert.match(out, /^\[harness unhandledRejection\]/);
   assert.match(out, /boom/);
+});
+
+test('formatSandboxLateProcessErrorNotice: identifies stale sandbox owner without harness blame', () => {
+  const out = formatSandboxLateProcessErrorNotice({ kind: 'uncaughtException', error: new Error('missing preview'), alias: 'quiet-otter', generation: 4, runId: 'executor:g4:r9' });
+  assert.match(out, /^\[sandbox late uncaughtException alias=quiet-otter generation=4 run=executor:g4:r9\]/);
+  assert.match(out, /missing preview/);
+  assert.doesNotMatch(out, /^\[harness/);
 });

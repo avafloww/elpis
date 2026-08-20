@@ -46,8 +46,20 @@ import { parseMindId } from '../store/mind.js';
 // NEXT run. `childPids` is a LIVE set: sh/sudo add on spawn and remove on exit,
 // so a detach can adopt the currently-live children (bg.cancel / TTL reap kill
 // the tree).
-export interface RunScope { logbuf: string[]; childPids: Set<number>; sends: { channel: string; text: string }[]; }
+export type RunProcessErrorKind = 'unhandledRejection' | 'uncaughtException';
+export interface RunScope {
+  logbuf: string[];
+  childPids: Set<number>;
+  sends: { channel: string; text: string }[];
+  processError?: (kind: RunProcessErrorKind, error: unknown) => boolean;
+}
 export const runScope = new AsyncLocalStorage<RunScope>();
+
+export function routeRunProcessError(kind: RunProcessErrorKind, error: unknown): boolean {
+  const handler = runScope.getStore()?.processError;
+  if (!handler) return false;
+  try { return handler(kind, error); } catch { return false; }
+}
 
 /** Max bytes accumulated per sh/sudo stream before truncation. Matches
  * the old spawnSync maxBuffer (per-stream). Overridable via opts.maxBuffer for

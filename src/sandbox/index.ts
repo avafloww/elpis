@@ -11,14 +11,14 @@
 // it; worst case the harness process restarts.
 
 import vm from 'node:vm';
-import { buildGlobals, runScope, type RunScope } from './globals.js';
+import { buildGlobals, runScope, type RunProcessErrorKind, type RunScope } from './globals.js';
 import { transform } from './transform.js';
 import { preview, capLines } from './preview.js';
 import { parseFailureHints } from './parse-hints.js';
-import type { RunResult, SandboxDeps } from '../types.js';
+import type { RunResult, SandboxDeps, SandboxLateProcessError } from '../types.js';
 
 export interface Sandbox {
-  run(code: string): Promise<RunResult>;
+  run(code: string, owner?: { runId?: string }): Promise<RunResult>;
 }
 
 /** `import()` inside the vm context has no dynamic-import callback wired up
@@ -37,6 +37,49 @@ function friendlyRunError(err: unknown): string {
 /** A detach deadline that RESOLVES (not rejects) with a sentinel so the run can
  * register the still-pending promise as a future instead of killing it. */
 const DETACH_SENTINEL = Symbol('detach-deadline');
+const RUN_PROCESS_ERROR = Symbol('run-process-error');
+
+type RunProcessError = { marker: typeof RUN_PROCESS_ERROR; kind: RunProcessErrorKind; error: unknown };
+
+function createRunProcessErrorTrap(
+  scope: RunScope,
+  onLateError: SandboxDeps['onLateProcessError'],
+): { promise: Promise<RunProcessError>; complete: () => void; fail: () => void } {
+  let state: 'active' | 'completed' | 'failed' = 'active';
+  let lateReported = false;
+  let resolveError!: (event: RunProcessError) => void;
+  const promise = new Promise<RunProcessError>((resolve) => { resolveError = resolve; });
+  const handler = (kind: RunProcessErrorKind, error: unknown): boolean => {
+    if (state === 'active') {
+      state = 'failed';
+      resolveError({ marker: RUN_PROCESS_ERROR, kind, error });
+      return true;
+    }
+    if (state === 'failed') return true;
+    if (!onLateError) return false;
+    if (!lateReported) {
+      lateReported = true;
+      onLateError({ kind, error });
+    }
+    return true;
+  };
+  scope.processError = handler;
+  return {
+    promise,
+    complete: () => {
+      if (state !== 'active') return;
+      state = 'completed';
+      if (!onLateError && scope.processError === handler) delete scope.processError;
+    },
+    fail: () => {
+      if (state === 'active') state = 'failed';
+    },
+  };
+}
+
+function processErrorFailure(event: RunProcessError): Error {
+  return new Error(`asynchronous sandbox ${event.kind}: ${friendlyRunError(event.error)}`);
+}
 
 function deadlineAfter(ms: number): { promise: Promise<typeof DETACH_SENTINEL>; clear: () => void } {
   let timer: NodeJS.Timeout | undefined;
@@ -56,16 +99,16 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
  // globals object IS the sandbox global
   const ctx = vm.createContext(globals);
 
-  function run(code: string): Promise<RunResult> {
+  function run(code: string, owner?: { runId?: string }): Promise<RunResult> {
  // Per-run scope: the run's own log buffer + live child-pid set,
  // carried through every await AND every post-detach continuation via
  // AsyncLocalStorage. No global buffer swap → reentrant, and a detached run's
  // late console.log lands in ITS buffer (delivered with the settle notice).
     const scope: RunScope = { logbuf: [], childPids: new Set(), sends: [] };
-    return runScope.run(scope, () => runInScope(code, scope));
+    return runScope.run(scope, () => runInScope(code, scope, owner));
   }
 
-  async function runInScope(code: string, scope: RunScope): Promise<RunResult> {
+  async function runInScope(code: string, scope: RunScope, owner?: { runId?: string }): Promise<RunResult> {
     const runLogbuf = scope.logbuf;
  // A no-op run (empty string, whitespace, or comments only) executes
  // nothing — say so instead of returning a bare `ok: true` that reads as
@@ -129,6 +172,16 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
     let value: unknown;
     let detached = false;
     let bgId: string | undefined;
+    const lateReporter = deps.onLateProcessError
+      ? (event: SandboxLateProcessError) => deps.onLateProcessError!({
+        kind: event.kind,
+        error: event.error,
+        ...(owner?.runId ? { runId: owner.runId } : {}),
+      })
+      : undefined;
+    const processErrorTrap = createRunProcessErrorTrap(scope, lateReporter);
+
+    let guardedPromise: Promise<unknown> | undefined;
     try {
  // Sync portion (incl. any sync runaway up to first await) is bounded by
  // sandbox.sync_timeout_ms — a tight runaway-JS backstop now that nothing
@@ -136,7 +189,12 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       const maybePromise = vm.runInContext(toRun, ctx, {
         timeout: deps.config.sandbox.syncTimeoutMs,
         filename: 'agent.js',
-      });
+      }) as Promise<unknown>;
+      guardedPromise = Promise.race([
+        maybePromise,
+        processErrorTrap.promise.then((event) => { throw processErrorFailure(event); }),
+      ]);
+      guardedPromise.then(processErrorTrap.complete, processErrorTrap.fail);
 
  // we always wrap in an async IIFE (see transform), so this is a promise.
  // The async deadline DETACHES (not kills) the run when sandbox.async_deadline_ms
@@ -144,7 +202,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       const { promise: deadlinePromise, clear: clearDeadline } = deadlineAfter(deps.config.sandbox.asyncDeadlineMs);
       try {
         const raced = await Promise.race([
-          maybePromise as Promise<unknown>,
+          guardedPromise,
           deadlinePromise,
         ]);
         if (raced === DETACH_SENTINEL) {
@@ -154,7 +212,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
  //: one history, so no origin routing — the settle notice enqueues
  // into the single stream (B3).
           if (deps.bg) {
-            bgId = deps.bg.registerFuture(code.slice(0, 200), maybePromise as Promise<unknown>, {
+            bgId = deps.bg.registerFuture(code.slice(0, 200), guardedPromise, {
               childPids: scope.childPids, // adopt the run's live children
             });
  // Post-detach logs + sends (review S2): everything written
@@ -165,7 +223,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
             const postDetachSends = scope.sends.length;
             const lateLogs = () => capLines(runLogbuf.slice(postDetachStart).join('\n'), deps.config.sandbox.logMaxBytes);
             const lateSends = () => scope.sends.slice(postDetachSends);
-            (maybePromise as Promise<unknown>).then(
+            guardedPromise.then(
               (v) => {
                 if (deps.bg!.settleFuture(bgId!, v, false)) {
                   deps.onFutureSettled?.(bgId!, v, false, lateLogs(), lateSends());
@@ -178,6 +236,8 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
                 }
               },
             );
+          } else {
+            processErrorTrap.fail();
           }
         } else {
           value = raced;
@@ -186,6 +246,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
         clearDeadline();
       }
     } catch (err) {
+      if (!guardedPromise) processErrorTrap.fail();
       return {
         ok: false,
         failureKind: 'runtime',

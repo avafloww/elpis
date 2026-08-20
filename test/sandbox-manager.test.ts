@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { createBgRegistry } from '../src/sandbox/bg.js';
 import { createSandboxManager } from '../src/sandbox/manager.js';
 import { createSandboxRegistry } from '../src/sandbox/registry.js';
+import { routeRunProcessError, runScope, type RunScope } from '../src/sandbox/globals.js';
 import { runMigrations } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
 import { noopLogger } from '../src/lib/log.js';
@@ -114,6 +115,73 @@ test('preparse preserves persistent state while uncaught runtime failure resets 
   const after = await f.manager.run({ sandbox: registration.alias, code: 'typeof kept' });
   assert.match(after.preview ?? '', /"undefined"/);
   assert.equal(after.execution?.generation, 2);
+  f.close();
+});
+
+test('run-scoped callback exception resets only the owning persistent generation', async () => {
+  const f = fixture();
+  const item = f.mind.create({ title: 'callback reset' });
+  const registration = f.manager.createPersistent(item.id);
+  let routed = false;
+  f.deps.send = async () => {
+    routed = routeRunProcessError('uncaughtException', new Error('request callback ENOENT'));
+  };
+  const failed = await f.manager.run({
+    sandbox: registration.alias,
+    code: `globalThis.beforeCallback = 1; await elpis.channel('console').send('trigger'); await new Promise(() => {})`,
+  });
+  assert.equal(routed, true);
+  assert.equal(failed.failureKind, 'runtime');
+  assert.match(failed.error ?? '', /asynchronous sandbox uncaughtException:.*request callback ENOENT/s);
+  assert.equal(failed.execution?.generation, 1);
+  assert.equal(failed.execution?.resetGeneration, 2);
+  const after = await f.manager.run({ sandbox: registration.alias, code: 'typeof beforeCallback' });
+  assert.match(after.preview ?? '', /"undefined"/);
+  assert.equal(after.execution?.generation, 2);
+  f.close();
+});
+
+test('completed persistent run attributes one stale-listener error to alias and generation', async () => {
+  const f = fixture();
+  const item = f.mind.create({ title: 'late callback owner' });
+  const registration = f.manager.createPersistent(item.id);
+  let captured: RunScope | undefined;
+  const late: Array<{ alias?: string; generation?: number; runId?: string; kind: string; error: unknown }> = [];
+  f.deps.send = async () => { captured = runScope.getStore(); };
+  f.deps.onLateProcessError = (event) => late.push(event);
+  const completed = await f.manager.run({ sandbox: registration.alias, code: `await elpis.channel('console').send('capture'); 7` });
+  assert.equal(completed.ok, true);
+  assert.ok(captured?.processError);
+  const error = new Error('stale server ENOENT');
+  assert.equal(captured!.processError!('uncaughtException', error), true);
+  assert.equal(captured!.processError!('uncaughtException', new Error('repeat')), true);
+  assert.deepEqual(late, [{ alias: registration.alias, generation: 1, runId: completed.execution?.runId, kind: 'uncaughtException', error }]);
+  assert.equal(f.registry.get(registration.alias).generation, 1);
+  assert.equal(f.registry.get(registration.alias).lifecycle, 'ready');
+  f.close();
+});
+
+test('detached callback exception rejects its future and resets ownership', async () => {
+  const f = fixture({ deadlineMs: 20 });
+  const item = f.mind.create({ title: 'detached callback reset' });
+  const registration = f.manager.createPersistent(item.id);
+  let routed = false;
+  f.deps.send = async () => {
+    setTimeout(() => {
+      routed = routeRunProcessError('uncaughtException', new Error('late request callback ENOENT'));
+    }, 50);
+  };
+  const detached = await f.manager.run({
+    sandbox: registration.alias,
+    code: `await elpis.channel('console').send('arm'); await new Promise(() => {})`,
+  });
+  assert.equal(detached.detached, true);
+  assert.equal(f.registry.get(registration.alias).lifecycle, 'detached');
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(routed, true);
+  const reset = f.registry.get(registration.alias);
+  assert.equal(reset.lifecycle, 'ready');
+  assert.equal(reset.generation, 2);
   f.close();
 });
 

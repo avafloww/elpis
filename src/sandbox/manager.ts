@@ -192,7 +192,7 @@ export class SandboxManager {
 
     let result: RunResult;
     try {
-      result = await this.context(alias, run.sandbox).run(code);
+      result = await this.context(alias, run.sandbox).run(code, { runId: run.runId });
     } catch (error) {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
@@ -245,6 +245,7 @@ export class SandboxManager {
     const existing = this.contexts.get(alias);
     if (existing?.generation === registration.generation) return existing.sandbox;
     const notify = this.deps.onFutureSettled;
+    const notifyLate = this.deps.onLateProcessError;
     const sandbox = this.create(cloneDeps(this.deps, {
       surface: 'full',
       mindDefaultId: registration.mindId,
@@ -254,6 +255,11 @@ export class SandboxManager {
         else this.earlySettlements.set(id, { rejected });
         notify?.(id, value, rejected, logs, sends);
       },
+      onLateProcessError: notifyLate ? (event) => notifyLate({
+        ...event,
+        alias,
+        generation: registration.generation,
+      }) : undefined,
     }));
     this.contexts.set(alias, { sandbox, generation: registration.generation });
     return sandbox;
