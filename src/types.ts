@@ -154,8 +154,10 @@ export interface SandboxDeps {
   watch?: (paths: string[], note: string, channelId?: string | null) => { ok: boolean; count: number };
   /** Exact wire identity allowed to receive opaque standalone reasoning. */
   replayIdentity?: ReplayIdentity | null;
-  /** Isolated tool-free model lane used by the bounded game motor controller. */
+  /** Isolated classifier lane used by wake advice and other small judgments. */
   completeStandalone?: (messages: ChatMessage[], opts?: StandaloneCompleteOptions) => Promise<StandaloneCompleteResult>;
+  /** Isolated native-tool lane owned by the configured motor role. */
+  motorCompleteStandalone?: (messages: ChatMessage[], opts?: StandaloneCompleteOptions) => Promise<StandaloneCompleteResult>;
   /** Durable dependency-aware work graph exposed as elpis.mind. */
   mind?: MindService;
   /** Bound Mind item for a persistent sandbox. Omitted in unbound control rooms. */

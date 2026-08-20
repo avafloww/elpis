@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Config } from '../src/config.js';
 import { createLlmRoleClients, type LLM } from '../src/llm/llm.js';
+import { completeStandaloneForRole } from '../src/index.js';
 import { createLlmModelRegistry } from '../src/llm/model-registry.js';
 import { makeConfig } from './helpers.js';
 
@@ -73,4 +74,22 @@ test('inactive motor is not resolved or constructed', () => {
   });
   assert.deepEqual(models, ['wire-main', 'wire-classifier']);
   assert.equal(clients.motor, null);
+});
+test('standalone role dispatch never sends motor work through classifier', async () => {
+  const calls: string[] = [];
+  const result = {
+    content: '',
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    toolCalls: [{ id: 'motor-call', type: 'function' as const, function: { name: 'click', arguments: '{"element":"safe","x":1,"y":1}' } }],
+    model: 'motor-model', providerType: 'openai-compatible' as const,
+    apiSurface: 'chat-completions' as const, apiEndpoint: 'http://motor/v1/chat/completions',
+  };
+  const classifier = fakeLlm('classifier');
+  classifier.completeStandalone = async () => { calls.push('classifier'); throw new Error('classifier must not receive motor tools'); };
+  const motor = fakeLlm('motor');
+  motor.completeStandalone = async () => { calls.push('motor'); return result; };
+  const llms = { main: fakeLlm('main'), classifier, motor };
+
+  assert.equal(await completeStandaloneForRole(llms, 'motor', [{ role: 'user', content: 'move' }]), result);
+  assert.deepEqual(calls, ['motor']);
 });

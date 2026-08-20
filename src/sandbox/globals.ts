@@ -797,8 +797,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     e.motor = createMotorController({
       dataDirectory: deps.config.paths.dataDirectory,
       completeStandalone: (messages, opts) => {
-        if (!deps.completeStandalone) throw new Error('elpis.motor: configured LLM provider has no isolated standalone completion path');
-        return deps.completeStandalone(messages, opts);
+        if (!deps.motorCompleteStandalone) throw new Error('elpis.motor: configured motor role has no isolated standalone completion path');
+        return deps.motorCompleteStandalone(messages, opts);
       },
       screenshot: (filename) => motorComputer.screenshot({ filename }),
       click: (x, y, opts) => motorComputer.click(x, y, opts),

@@ -4,7 +4,7 @@
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { configForLlmRole, loadConfigFile, ensureDataDirectory, type Config } from './config.js';
-import { fetchContextWindow, createLLM, createLlmRoleClients, type LLM, type LlmRoleClients } from './llm/llm.js';
+import { fetchContextWindow, createLLM, createLlmRoleClients, type ChatMessage, type LLM, type LlmRoleClients, type StandaloneCompleteOptions, type StandaloneCompleteResult } from './llm/llm.js';
 import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
 import { MemoryConsolidator, effectiveMemoryLimits } from './store/memory-consolidator.js';
 import { createSandbox } from './sandbox/index.js';
@@ -82,6 +82,17 @@ export function formatSandboxLateProcessErrorNotice(event: SandboxLateProcessErr
   const run = event.runId ? ` run=${event.runId}` : '';
   return `[sandbox late ${event.kind}${owner}${run}] ${msg.slice(0, 1500)}`;
 
+}
+
+export function completeStandaloneForRole(
+  llms: LlmRoleClients,
+  role: 'classifier' | 'motor',
+  messages: ChatMessage[],
+  opts?: StandaloneCompleteOptions,
+): Promise<StandaloneCompleteResult> {
+  const client = llms[role];
+  if (!client?.completeStandalone) throw new Error(`configured ${role} role has no isolated standalone completion path`);
+  return client.completeStandalone(messages, opts);
 }
 
 export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): Promise<ElpisRuntime> {
@@ -313,11 +324,8 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // message (kind 'watch' → stripped after one generation, text-only in the
  // transcript). The frame-building lives on the Agent (enqueueWatch).
     watch: (paths: string[], note: string, channelId?: string | null) => agent.enqueueWatch(paths, note, channelId),
-    completeStandalone: (messages, opts) => {
-      const classifier = llms.classifier;
-      if (!classifier.completeStandalone) throw new Error('configured classifier role has no isolated standalone completion path');
-      return classifier.completeStandalone(messages, opts);
-    },
+    completeStandalone: (messages, opts) => completeStandaloneForRole(llms, 'classifier', messages, opts),
+    motorCompleteStandalone: (messages, opts) => completeStandaloneForRole(llms, 'motor', messages, opts),
  // Persistent task scheduler exposed to schedule/unschedule/tasks globals.
     scheduler,
     mind,
