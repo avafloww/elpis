@@ -763,7 +763,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
 
   type MotorComputerApi = {
     screenshot(opts: { filename: string }): Promise<{ file: string }>;
-    hold(keys: string[], durationMs: number): Promise<unknown>;
+    click(x: number, y: number, opts?: { count?: number }): Promise<unknown>;
+    drag(fromX: number, fromY: number, toX: number, toY: number): Promise<unknown>;
+    type(text: string): Promise<unknown>;
+    key(keys: string | string[]): Promise<unknown>;
+    scroll(clicks: number): Promise<unknown>;
   };
   let computerApi: MotorComputerApi | null = null;
 
@@ -797,8 +801,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         return deps.completeStandalone(messages, opts);
       },
       screenshot: (filename) => motorComputer.screenshot({ filename }),
-      hold: (keys, durationMs) => motorComputer.hold(keys, durationMs),
-      replayIdentity: deps.replayIdentity ?? null,
+      click: (x, y, opts) => motorComputer.click(x, y, opts),
+      drag: (fromX, fromY, toX, toY) => motorComputer.drag(fromX, fromY, toX, toY),
+      type: (text) => motorComputer.type(text),
+      key: (keys) => motorComputer.key(keys),
+      scroll: (clicks) => motorComputer.scroll(clicks),
+      notifyOversight: (packet) => {
+        if (!packet.frame) return;
+        deps.watch?.([packet.frame], `motor oversight episode=${packet.episodeId} checkpoint=${packet.checkpointSeq} status=${packet.status} turns=${packet.turns}\ngoal: ${packet.goal}\nrecent: ${JSON.stringify(packet.recent)}`);
+      },
     });
   } else installUnavailableModule('motor');
 

@@ -143,7 +143,15 @@ export interface StandaloneCompleteOptions {
   model?: string;
   /** Optional reasoning-effort override for a controlled standalone comparison. */
   reasoningEffort?: string;
-  /** Replay a closed historical function-call/output chain without exposing tools for the new completion. */
+  /** Native function tools for a new isolated Chat Completions generation. */
+  tools?: OpenAI.ChatCompletionTool[];
+  toolChoice?: OpenAI.ChatCompletionToolChoiceOption;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
+  chatTemplateKwargs?: Record<string, unknown>;
+  /** Replay a closed historical function-call/output chain. */
   allowHistoricalToolMessages?: boolean;
   /** Abort the provider request and response stream. */
   signal?: AbortSignal;
@@ -152,6 +160,7 @@ export interface StandaloneCompleteOptions {
 export interface StandaloneCompleteResult {
   content: string;
   reasoningContent?: string;
+  toolCalls?: ChatMessage['tool_calls'];
   /** Raw Responses reasoning output items, encrypted_content included, for stateless replay. */
   reasoningItems?: ReasoningItemParam[];
   usage: LLMUsage;
@@ -811,7 +820,17 @@ export async function streamComplete(
   config: Config,
   messages: ChatMessage[],
   hub?: ConsoleHub,
-  options: { toolFree?: boolean; signal?: AbortSignal } = {},
+  options: {
+    toolFree?: boolean;
+    tools?: OpenAI.ChatCompletionTool[];
+    toolChoice?: OpenAI.ChatCompletionToolChoiceOption;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    maxTokens?: number;
+    chatTemplateKwargs?: Record<string, unknown>;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<CompleteResult> {
   try {
     try { hub?.streamStart(); } catch { /* observer must never break generation */ }
@@ -820,10 +839,17 @@ export async function streamComplete(
     else options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
     const prepared = prepareForApi(messages);
     const charsSent = computeCharsSent(prepared, false);
+    if (options.toolFree && options.tools?.length) throw new Error('tool-free completion cannot declare tools');
     const base = {
       model: config.llm.model,
       messages: prepared.map(toApiMessage),
-      ...(options.toolFree ? {} : { tools: [RUN_TOOL] }),
+      ...(options.toolFree ? {} : { tools: options.tools ?? [RUN_TOOL] }),
+      ...(options.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
+      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options.topP !== undefined ? { top_p: options.topP } : {}),
+      ...(options.topK !== undefined ? { top_k: options.topK } : {}),
+      ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+      ...(options.chatTemplateKwargs !== undefined ? { chat_template_kwargs: options.chatTemplateKwargs } : {}),
       stream: true as const,
       stream_options: { include_usage: true as const },
     };
@@ -893,6 +919,7 @@ function standaloneResult(result: CompleteResult, config: Config, surface: 'resp
   return {
     content: result.message.content ?? '',
     ...(result.message.reasoning_content ? { reasoningContent: result.message.reasoning_content } : {}),
+    ...(result.message.tool_calls?.length ? { toolCalls: result.message.tool_calls } : {}),
     ...(result.message.reasoning_items ? { reasoningItems: result.message.reasoning_items } : {}),
     usage: result.usage,
     ...(result.requestId ? { requestId: result.requestId } : {}),
@@ -1061,10 +1088,30 @@ export function createLLM(config: Config, hub?: ConsoleHub, db?: DatabaseSync): 
     model: config.llm.model,
     runTool: RUN_TOOL,
     async completeStandalone(messages: ChatMessage[], opts: StandaloneCompleteOptions = {}): Promise<StandaloneCompleteResult> {
-      if (messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0)) {
-        throw new Error('standalone completion does not accept tool messages or tool calls');
+      const hasToolHistory = messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0);
+      if (hasToolHistory && !opts.allowHistoricalToolMessages) {
+        throw new Error('standalone completion tool history requires allowHistoricalToolMessages');
       }
       const isolated = standaloneConfig(config, opts);
+      if (opts.tools !== undefined) {
+        if (opts.tools.length === 0) throw new Error('standalone native tools must not be empty');
+        if (opts.tools.length > 32) throw new Error('standalone native tools may contain at most 32 functions');
+        if (isolated.llm.api === 'responses') throw new Error('standalone native tools require the Chat Completions API surface');
+        return standaloneResult(
+          await streamComplete(client, isolated, messages, undefined, {
+            tools: opts.tools,
+            toolChoice: opts.toolChoice ?? 'required',
+            temperature: opts.temperature,
+            topP: opts.topP,
+            topK: opts.topK,
+            maxTokens: opts.maxTokens,
+            chatTemplateKwargs: opts.chatTemplateKwargs,
+            signal: opts.signal,
+          }),
+          isolated,
+          'chat-completions',
+        );
+      }
       return routeCall(
         async () => standaloneResult(
           await streamResponsesComplete(client, isolated, messages, undefined, {

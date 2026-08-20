@@ -42,11 +42,65 @@ test('OpenAI Chat standalone omits tools and reports the resolved role identity'
   assert.equal(result.apiSurface, 'chat-completions');
   await assert.rejects(
     () => llm.completeStandalone!([{ role: 'tool', content: 'nope' }]),
-    /does not accept tool messages/,
+    /requires allowHistoricalToolMessages/,
   );
   await assert.rejects(
     () => llm.completeStandalone!([{ role: 'user', content: 'nope' }], { model: 'raw-wire-override' }),
     /configured role target/,
+  );
+});
+
+test('OpenAI Chat standalone sends native tools and returns streamed function calls', async () => {
+  const llm = createLLM(config('chat'));
+  let body: Record<string, any> | undefined;
+  (llm.client as any).chat.completions.create = async (params: Record<string, any>) => {
+    body = params;
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { choices: [{ delta: { reasoning_content: 'locate target' } }] };
+        yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_click', type: 'function', function: { name: 'click', arguments: '{"x":' } }] } }] };
+        yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '500,"y":250}' } }] } }] };
+        yield { choices: [{ delta: {} }], usage: { prompt_tokens: 9, completion_tokens: 4, total_tokens: 13 } };
+      },
+    };
+  };
+  const tools = [{
+    type: 'function' as const,
+    function: {
+      name: 'click', description: 'click a point',
+      parameters: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' } }, required: ['x', 'y'] },
+    },
+  }];
+  const history = [
+    { role: 'assistant' as const, content: '', tool_calls: [{ id: 'old_call', type: 'function' as const, function: { name: 'click', arguments: '{"x":1,"y":2}' } }] },
+    { role: 'tool' as const, content: 'ok', tool_call_id: 'old_call' },
+    { role: 'user' as const, content: 'next frame' },
+  ];
+  const result = await llm.completeStandalone!(history, {
+    tools, toolChoice: 'required', allowHistoricalToolMessages: true,
+    reasoningEffort: 'medium', temperature: 0.8, topP: 0.95, topK: 20,
+    maxTokens: 384, chatTemplateKwargs: { enable_thinking: true },
+  });
+  assert.deepEqual(body?.tools, tools);
+  assert.equal(body?.tool_choice, 'required');
+  assert.equal(body?.reasoning_effort, 'medium');
+  assert.equal(body?.temperature, 0.8);
+  assert.equal(body?.top_p, 0.95);
+  assert.equal(body?.top_k, 20);
+  assert.equal(body?.max_tokens, 384);
+  assert.deepEqual(body?.chat_template_kwargs, { enable_thinking: true });
+  assert.equal(body?.messages[0].tool_calls[0].id, 'old_call');
+  assert.equal(body?.messages[1].tool_call_id, 'old_call');
+  assert.equal(result.reasoningContent, 'locate target');
+  assert.deepEqual(result.toolCalls, [{ id: 'call_click', type: 'function', function: { name: 'click', arguments: '{"x":500,"y":250}' } }]);
+  assert.equal(result.apiSurface, 'chat-completions');
+});
+
+test('OpenAI Responses standalone rejects caller-defined native tools', async () => {
+  const llm = createLLM(config('responses'));
+  await assert.rejects(
+    () => llm.completeStandalone!([{ role: 'user', content: 'act' }], { tools: [{ type: 'function', function: { name: 'act', parameters: { type: 'object' } } }] }),
+    /require the Chat Completions API surface/,
   );
 });
 
@@ -105,6 +159,10 @@ test('Anthropic standalone omits tools and tool choice on the wire', async () =>
   };
   try {
     const llm = createAnthropicOAuthLLM(value, store, undefined);
+    await assert.rejects(
+      () => llm.completeStandalone!([{ role: 'user', content: 'act' }], { tools: [{ type: 'function', function: { name: 'act', parameters: { type: 'object' } } }] }),
+      /does not support caller-defined native tools/,
+    );
     const result = await llm.completeStandalone!([{ role: 'user', content: 'classify' }]);
     assert.ok(body && !Object.hasOwn(body, 'tools'));
     assert.ok(body && !Object.hasOwn(body, 'tool_choice'));

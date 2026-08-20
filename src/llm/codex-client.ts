@@ -500,6 +500,7 @@ export function createCodexOAuthLLM(
       sessionId = randomUUID();
     },
     async completeStandalone(messages: ChatMessage[], opts: StandaloneCompleteOptions = {}): Promise<StandaloneCompleteResult> {
+      if (opts.tools !== undefined) throw new Error('Codex standalone completion does not support caller-defined native tools');
       const laneId = opts.cacheKey ?? randomUUID();
       if (typeof laneId !== 'string' || !laneId.trim()) throw new Error('completeStandalone cacheKey must be a non-empty string');
       const model = opts.model ?? config.llm.model;

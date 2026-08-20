@@ -470,6 +470,7 @@ export function createAnthropicOAuthLLM(
     model: config.llm.model,
     runTool: RUN_TOOL,
     async completeStandalone(messages: ChatMessage[], opts: StandaloneCompleteOptions = {}): Promise<StandaloneCompleteResult> {
+      if (opts.tools !== undefined) throw new Error('Anthropic standalone completion does not support caller-defined native tools');
       if (messages.some((message) => message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0)) {
         throw new Error('standalone completion does not accept tool messages or tool calls');
       }

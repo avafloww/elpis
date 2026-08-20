@@ -1,311 +1,217 @@
-import { test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createMotorController, extractMotorJson, parseMotorAction } from '../src/sandbox/motor.js';
-import { RetriableError, type ChatMessage, type StandaloneCompleteOptions } from '../src/llm/llm.js';
-import { resolveDataLayout } from '../src/store/data-layout.js';
+import {
+  createMotorController,
+  parseMotorToolCall,
+  trimMotorImages,
+  type MotorControllerDeps,
+  type MotorOversightPacket,
+} from '../src/sandbox/motor.js';
+import type { ChatMessage, StandaloneCompleteOptions, StandaloneCompleteResult } from '../src/llm/llm.js';
 
 const usage = { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 };
 
-const motorIdentity = {
-  providerType: 'codex-oauth' as const,
-  model: 'gpt-5.6-luna',
-  apiSurface: 'codex-responses' as const,
-  apiEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
-};
-
 function tempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-motor-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-resident-motor-test-'));
 }
 
-test('motor JSON extraction respects braces inside strings and validates bounded actions', () => {
-  const text = 'noise {"keys":["Up","f"],"duration_ms":250,"wait_ms":100,"done":false,"reason":"door {ahead}","confidence":0.8} tail';
-  assert.equal(extractMotorJson(text), text.slice(6, -5));
-  assert.deepEqual(parseMotorAction(text), {
-    keys: ['Up', 'f'], durationMs: 250, waitMs: 100, done: false, reason: 'door {ahead}', confidence: 0.8,
-  });
-  assert.throws(() => parseMotorAction('{"keys":["Control_L"],"duration_ms":20,"wait_ms":0,"done":false,"reason":"no"}'), /not allowed/);
-  assert.throws(() => parseMotorAction('{"keys":[],"duration_ms":0,"wait_ms":0,"done":false,"reason":"no"}'), /requires at least one key/);
-  assert.deepEqual(parseMotorAction('{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"objective visible"}'), {
-    keys: [], durationMs: 0, waitMs: 0, done: true, reason: 'objective visible',
-  });
-});
+function fakePng(file: string, width = 1280, height = 800): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const header = Buffer.alloc(24);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(header, 0);
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  fs.writeFileSync(file, header);
+}
 
-test('motor step sends an ephemeral screenshot, acts once, waits, and appends a trace', async () => {
-  const dir = tempDir();
-  const holds: Array<{ keys: string[]; durationMs: number }> = [];
-  const waits: number[] = [];
-  let received: ChatMessage[] = [];
-  let receivedOpts: StandaloneCompleteOptions = {};
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async (keys: string[], durationMs: number) => { holds.push({ keys, durationMs }); return { ok: true }; },
-    sleep: async (ms: number) => { waits.push(ms); },
-    completeStandalone: async (messages: ChatMessage[], opts?: StandaloneCompleteOptions) => {
-      received = messages; receivedOpts = opts ?? {};
-      return { content: '{"keys":["Up","f"],"duration_ms":250,"wait_ms":50,"done":false,"reason":"advance and fire"}', usage, requestId: 'resp_1', model: opts?.model, reasoningEffort: opts?.reasoningEffort }; 
-    },
-  });
-  const result = await motor.step('reach the exit', { traceId: 'step-case', settleMs: 25, reasoningEffort: 'low' });
-  assert.deepEqual(holds, [{ keys: ['Up', 'f'], durationMs: 250 }]);
-  assert.deepEqual(waits, [75]);
-  assert.equal(receivedOpts.cacheKey, 'motor-step-case');
-  assert.equal(receivedOpts.reasoningEffort, 'low');
-  assert.ok(receivedOpts.signal instanceof AbortSignal);
-  assert.equal(received[0].role, 'system');
-  assert.match(received[0].content ?? '', /not a conversational agent and not a person/);
-  assert.match(received[0].content ?? '', /f = fire; space = use\/open/);
-  assert.equal(received[1].contentParts?.[1].type, 'image_url');
-  assert.match((received[1].contentParts?.[1] as any).image_url.url, /^data:image\/png;base64,/);
-  assert.equal(result.action.reason, 'advance and fire');
-  assert.equal(result.requestId, 'resp_1');
-  assert.equal(result.reasoningEffort, 'low');
-  const lines = fs.readFileSync(result.traceFile, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(lines.length, 1);
-  assert.equal(lines[0].type, 'step');
-  assert.equal(lines[0].acted, true);
-  assert.equal(lines[0].actualWaitMs, 75);
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('motor carries encrypted reasoning from one screenshot decision into the next', async () => {
-  const dir = tempDir();
-  const calls: ChatMessage[][] = [];
-  let completion = 0;
-  const reasoningItem = {
-    id: 'rs_motor', type: 'reasoning' as const, status: 'completed', summary: [], encrypted_content: 'opaque-spatial-state',
+function completion(name: string, args: Record<string, unknown>, extra: Partial<StandaloneCompleteResult> = {}): StandaloneCompleteResult {
+  return {
+    content: '', usage,
+    toolCalls: [{ id: `call-${name}-${Math.random()}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+    model: 'holo-test', providerType: 'openai-compatible', apiSurface: 'chat-completions', apiEndpoint: 'http://local/v1/chat/completions',
+    ...extra,
   };
-  const motor: any = createMotorController({
+}
+
+async function until(read: () => any, predicate: (value: any) => boolean, timeoutMs = 2_000): Promise<any> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = read();
+    if (predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`condition not reached; last=${JSON.stringify(read())}`);
+}
+
+function fixture(dir: string, completeStandalone: MotorControllerDeps['completeStandalone'], overrides: Partial<MotorControllerDeps> = {}) {
+  const calls = { click: [] as any[], drag: [] as any[], type: [] as any[], key: [] as any[], scroll: [] as any[] };
+  const deps: MotorControllerDeps = {
     dataDirectory: dir,
-    replayIdentity: motorIdentity,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {},
+    completeStandalone,
+    screenshot: async (file) => { fakePng(file); return { file }; },
+    click: async (x, y, opts) => { calls.click.push({ x, y, opts }); return { ok: true }; },
+    drag: async (fromX, fromY, toX, toY) => { calls.drag.push({ fromX, fromY, toX, toY }); return { ok: true }; },
+    type: async (text) => { calls.type.push(text); return { ok: true }; },
+    key: async (keys) => { calls.key.push(keys); return { ok: true }; },
+    scroll: async (clicks) => { calls.scroll.push(clicks); return { ok: true }; },
     sleep: async () => {},
-    completeStandalone: async (messages: ChatMessage[]) => {
-      calls.push(messages);
-      if (completion++ === 0) {
-        return {
-          content: '{"keys":["Right"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"remember this turn"}',
-          reasoningItems: [reasoningItem], usage, ...motorIdentity,
-        };
-      }
-      return { content: '{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"continued"}', usage, ...motorIdentity };
-    },
+    ...overrides,
+  };
+  return { motor: createMotorController(deps) as any, calls, deps };
+}
+
+test('native motor tool parser requires exactly one closed function call', () => {
+  assert.deepEqual(parseMotorToolCall([{ id: 'c', type: 'function', function: { name: 'click', arguments: '{"x":1}' } }]), {
+    call: { id: 'c', type: 'function', function: { name: 'click', arguments: '{"x":1}' } }, args: { x: 1 },
   });
-  const result = await motor.run('continue spatial reasoning', { traceId: 'reasoning-carry', maxSteps: 2, dryRun: true, settleMs: 0 });
-  assert.equal(result.done, true);
-  assert.equal(calls[0].length, 2);
-  assert.equal(calls[1].length, 3);
-  assert.equal(calls[1][1].role, 'assistant');
-  assert.equal(calls[1][1].content, '{"keys":["Right"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"remember this turn"}');
-  assert.deepEqual(calls[1][1].reasoning_items, [reasoningItem]);
-  assert.equal(calls[1][2].role, 'user');
-  const events = fs.readFileSync(result.traceFile, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events[0].reasoningItems, [reasoningItem]);
-  assert.equal(events[0].reasoningItemsIn, 0);
-  assert.equal(events[0].reasoningBytesOut, 'opaque-spatial-state'.length);
-  assert.match(events[0].replaySourceId, /^[0-9a-f]{64}$/);
-  assert.notEqual(events[0].replaySourceId, fs.readFileSync(path.join(resolveDataLayout(dir).motor, 'traces', '.source-id'), 'utf8').trim());
-  assert.equal(events[0].providerType, motorIdentity.providerType);
-  assert.equal(events[0].apiSurface, motorIdentity.apiSurface);
-  assert.equal(events[0].apiEndpoint, motorIdentity.apiEndpoint);
-  assert.equal(events[1].reasoningItemsIn, 1);
-  assert.equal(events[1].reasoningBytesIn, 'opaque-spatial-state'.length);
+  assert.throws(() => parseMotorToolCall(undefined), /exactly one/);
+  assert.throws(() => parseMotorToolCall([
+    { id: 'a', type: 'function', function: { name: 'click', arguments: '{}' } },
+    { id: 'b', type: 'function', function: { name: 'write', arguments: '{}' } },
+  ]), /exactly one/);
+  assert.throws(() => parseMotorToolCall([{ id: 'c', type: 'function', function: { name: 'click', arguments: '{' } }]), /invalid JSON/);
+});
+
+test('motor image metabolism preserves only the newest three screenshots', () => {
+  const messages: ChatMessage[] = Array.from({ length: 5 }, (_, index) => ({
+    role: 'user' as const, content: `observation ${index}`,
+    contentParts: [
+      { type: 'text' as const, text: '<observation>' },
+      { type: 'image_url' as const, image_url: { url: `data:image/png;base64,${index}` } },
+      { type: 'text' as const, text: '</observation>' },
+    ],
+  }));
+  trimMotorImages(messages);
+  const images = messages.flatMap((message) => message.contentParts ?? []).filter((part) => part.type === 'image_url');
+  const evicted = messages.flatMap((message) => message.contentParts ?? []).filter((part) => part.type === 'text' && part.text === '[screenshot evicted]');
+  assert.equal(images.length, 3);
+  assert.equal(evicted.length, 2);
+  assert.equal((images[0] as any).image_url.url.endsWith('2'), true);
+});
+
+test('resident motor completes a native click-write-done episode with parsed receipts', async () => {
+  const dir = tempDir();
+  const modelCalls: Array<{ messages: ChatMessage[]; opts: StandaloneCompleteOptions }> = [];
+  const outputs = [
+    completion('click', { element: 'search field', x: 500, y: 250 }, { reasoningContent: 'focus it' }),
+    completion('write', { text: 'ACME-1042' }),
+    completion('done', { summary: 'visible success' }),
+  ];
+  const notifications: MotorOversightPacket[] = [];
+  const { motor, calls, deps } = fixture(dir, async (messages, opts = {}) => {
+    modelCalls.push({ messages: structuredClone(messages), opts });
+    return outputs.shift()!;
+  }, { notifyOversight: (packet) => { notifications.push(packet); } });
+  const started = motor.start('search and finish', { episodeId: 'native-flow', settleMs: 0 });
+  assert.equal(started.status, 'running');
+  const ended = await until(() => motor.status('native-flow'), (value) => value.status === 'completed');
+  assert.equal(ended.turns, 3);
+  assert.deepEqual(calls.click, [{ x: 640, y: 200, opts: { count: 1 } }]);
+  assert.deepEqual(calls.type, ['ACME-1042']);
+  assert.equal(modelCalls.length, 3);
+  assert.equal(modelCalls[0].opts.toolChoice, 'required');
+  assert.equal(modelCalls[0].opts.reasoningEffort, 'medium');
+  assert.equal(modelCalls[0].opts.temperature, 0.8);
+  assert.equal(modelCalls[0].opts.topK, 20);
+  assert.deepEqual(modelCalls[0].opts.chatTemplateKwargs, { enable_thinking: true });
+  assert.equal(modelCalls[0].messages[1].contentParts?.[0].type, 'text');
+  assert.match((modelCalls[0].messages[1].contentParts?.[0] as any).text, /^<observation>/);
+  assert.equal(modelCalls[1].messages.some((message) => message.role === 'tool' && message.tool_call_id), true);
+  assert.deepEqual(Object.keys(motor).sort(), ['continue', 'guide', 'interrupt', 'start', 'status']);
+  const sameResident = createMotorController(deps) as any;
+  assert.equal(sameResident.status('native-flow').status, 'completed');
+  const events = fs.readFileSync(ended.traceFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.map((event) => event.type), ['start', 'turn', 'turn', 'turn', 'completed']);
+  assert.equal(events[1].reasoning, 'focus it');
+  assert.equal(notifications.at(-1)?.status, 'completed');
+  assert.equal(notifications.at(-1)?.recent.some((entry) => entry.reasoning === 'focus it'), true);
+  assert.equal(notifications.at(-1)?.recent.at(-1)?.tool, 'done');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-
-test('motor strips opaque reasoning when attribution is missing or a trace lacks the local source nonce', async () => {
+test('authority validation fails closed before an ungranted action', async () => {
   const dir = tempDir();
-  const calls: ChatMessage[][] = [];
-  let completion = 0;
-  const reasoningItem = { type: 'reasoning' as const, summary: [], encrypted_content: 'untrusted-opaque' };
-  const makeMotor = (dataDirectory: string) => createMotorController({
-    dataDirectory,
-    replayIdentity: motorIdentity,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {},
-    sleep: async () => {},
-    completeStandalone: async (messages: ChatMessage[]) => {
-      calls.push(messages);
-      if (completion++ === 0) return {
-        content: '{"keys":["Right"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"first"}',
-        reasoningItems: [reasoningItem], usage,
-      };
-      return { content: '{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"done"}', usage, ...motorIdentity };
-    },
-  }) as any;
-  await makeMotor(dir).run('missing attribution', { traceId: 'untrusted', maxSteps: 2, dryRun: true, settleMs: 0 });
-  assert.equal(calls[1].length, 2, 'missing provider identity must not replay opaque state');
-
-  const sourceDir = tempDir();
-  completion = 0;
-  calls.length = 0;
-  const sourceMotor = createMotorController({
-    dataDirectory: sourceDir, replayIdentity: motorIdentity,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {}, sleep: async () => {},
-    completeStandalone: async () => ({
-      content: '{"keys":["Right"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"source"}',
-      reasoningItems: [reasoningItem], usage, ...motorIdentity,
-    }),
-  }) as any;
-  const source = await sourceMotor.run('source trace', { traceId: 'copied', maxSteps: 1, dryRun: true, settleMs: 0 });
-  const importedDir = tempDir();
-  const importedTraceDir = path.join(resolveDataLayout(importedDir).motor, 'traces');
-  fs.mkdirSync(importedTraceDir, { recursive: true });
-  fs.copyFileSync(source.traceFile, path.join(importedTraceDir, 'copied.jsonl'));
-  let importedMessages: ChatMessage[] = [];
-  const importedMotor: any = createMotorController({
-    dataDirectory: importedDir, replayIdentity: motorIdentity,
-    screenshot: async (file: string) => { fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {}, sleep: async () => {},
-    completeStandalone: async (messages: ChatMessage[]) => {
-      importedMessages = messages;
-      return { content: '{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"imported"}', usage, ...motorIdentity };
-    },
-  });
-  await importedMotor.run('imported trace', { traceId: 'copied', resume: true, maxSteps: 1, dryRun: true, settleMs: 0 });
-  assert.equal(importedMessages.length, 2, 'copying the trace without its local source nonce must not replay opaque state');
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(sourceDir, { recursive: true, force: true });
-  fs.rmSync(importedDir, { recursive: true, force: true });
-});
-
-test('motor validation failure never acts and leaves an append-only error event', async () => {
-  const dir = tempDir();
-  let holds = 0;
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => { holds++; },
-    completeStandalone: async () => ({ content: '{"keys":["Control_L"],"duration_ms":20,"wait_ms":0,"done":false,"reason":"escape sandbox"}', usage }),
-  });
-  await assert.rejects(motor.step('stay safe', { traceId: 'bad-key' }), /not allowed/);
-  assert.equal(holds, 0);
-  const trace = path.join(resolveDataLayout(dir).motor, 'traces', 'bad-key.jsonl');
-  const event = JSON.parse(fs.readFileSync(trace, 'utf8').trim());
-  assert.equal(event.type, 'error');
-  assert.equal(event.stage, 'validate');
-  assert.match(event.response, /Control_L/);
+  const { motor, calls } = fixture(dir, async () => completion('press', { key: 'ENTER' }));
+  motor.start('click only', { episodeId: 'authority-cut', settleMs: 0, authority: { allowedTools: ['click'] } });
+  const ended = await until(() => motor.status('authority-cut'), (value) => value.status === 'failed');
+  assert.match(ended.lastError, /outside authority/);
+  assert.equal(calls.key.length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('motor aborts a hung standalone request and leaves a bounded timeout cut', async () => {
+test('soft oversight continues, hard oversight pauses, and stale continuation is rejected', async () => {
   const dir = tempDir();
-  let aborts = 0;
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {},
-    sleep: async () => {},
-    completeStandalone: async (_messages: ChatMessage[], opts?: StandaloneCompleteOptions) => new Promise((_resolve, reject) => {
-      assert.ok(opts?.signal);
-      opts.signal.addEventListener('abort', () => {
-        aborts++;
-        reject(Object.assign(new Error('transport aborted'), { name: 'AbortError' }));
-      }, { once: true });
-    }),
-  });
-  await assert.rejects(
-    motor.step('timeout test', { traceId: 'timeout-case', dryRun: true, retries: 1, completionTimeoutMs: 20 }),
-    /timed out after 20ms/,
-  );
-  assert.equal(aborts, 1);
-  const event = JSON.parse(fs.readFileSync(path.join(resolveDataLayout(dir).motor, 'traces', 'timeout-case.jsonl'), 'utf8').trim());
-  assert.equal(event.type, 'error');
-  assert.equal(event.stage, 'complete');
-  assert.equal(event.completionAttempts, 1);
-  assert.equal(event.completionTimeoutMs, 20);
-  assert.deepEqual(event.completionErrors, ['motor completion timed out after 20ms']);
+  const notifications: MotorOversightPacket[] = [];
+  const outputs = [
+    completion('scroll', { direction: 'down', amount: 'small' }),
+    completion('scroll', { direction: 'down', amount: 'small' }),
+    completion('done', { summary: 'finished after supervision' }),
+  ];
+  const { motor } = fixture(dir, async () => outputs.shift()!, { notifyOversight: (packet) => { notifications.push(packet); } });
+  motor.start('bounded browse', { episodeId: 'oversight', settleMs: 0, softTurnBudget: 1, hardTurnBudget: 2 });
+  const paused = await until(() => motor.status('oversight'), (value) => value.status === 'awaiting_oversight');
+  assert.equal(paused.turns, 2);
+  assert.ok(notifications.some((packet) => packet.turns === 1));
+  assert.ok(notifications.some((packet) => packet.status === 'awaiting_oversight'));
+  assert.throws(() => motor.continue('oversight', paused.checkpointSeq - 1), /stale checkpoint/);
+  motor.continue('oversight', paused.checkpointSeq);
+  const ended = await until(() => motor.status('oversight'), (value) => value.status === 'completed');
+  assert.equal(ended.turns, 3);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('motor retries transient completion failures and records the interruption in the successful step', async () => {
+test('needs_guidance pauses and matching guidance enters the next observation', async () => {
   const dir = tempDir();
-  let attempts = 0;
-  const waits: number[] = [];
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async () => {},
-    sleep: async (ms: number) => { waits.push(ms); },
-    completeStandalone: async () => {
-      if (attempts++ === 0) throw new RetriableError(new Error('503 upstream reset'));
-      return { content: '{"keys":["Up"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"continue"}', usage };
-    },
-  });
-  const result = await motor.step('continue', { traceId: 'retry-case', dryRun: true, retries: 2, settleMs: 0 });
-  assert.equal(result.completionAttempts, 2);
-  assert.deepEqual(result.completionErrors, ['503 upstream reset']);
-  assert.deepEqual(waits, [500]);
-  const event = JSON.parse(fs.readFileSync(result.traceFile, 'utf8').trim());
-  assert.equal(event.completionAttempts, 2);
-  assert.deepEqual(event.completionErrors, ['503 upstream reset']);
+  const seen: ChatMessage[][] = [];
+  const outputs = [
+    completion('needs_guidance', { reason: 'two plausible buttons' }),
+    completion('done', { summary: 'used guidance and succeeded' }),
+  ];
+  const { motor } = fixture(dir, async (messages) => { seen.push(structuredClone(messages)); return outputs.shift()!; });
+  motor.start('choose safely', { episodeId: 'guided', settleMs: 0 });
+  const paused = await until(() => motor.status('guided'), (value) => value.status === 'needs_guidance');
+  motor.guide('guided', paused.checkpointSeq, 'choose the blue Continue button');
+  await until(() => motor.status('guided'), (value) => value.status === 'completed');
+  const latestObservation = seen[1].filter((message) => message.role === 'user').at(-1)!;
+  assert.match(latestObservation.content, /Supervisor guidance: choose the blue Continue button/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('motor run resumes after a marked error without overwriting frame or step indices', async () => {
+test('an active episode keeps its origin provider and oversight route across later sandbox globals', async () => {
   const dir = tempDir();
-  let calls = 0;
-  let recovered = false;
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, file); return { file }; },
-    hold: async () => {},
-    sleep: async () => {},
-    completeStandalone: async () => {
-      calls++;
-      if (!recovered && calls === 1) return { content: '{"keys":["Up"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"first"}', usage };
-      if (!recovered) throw new Error('non-retriable cut');
-      return { content: '{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"recovered"}', usage };
-    },
-  });
-  await assert.rejects(motor.run('resume test', { traceId: 'resume-case', maxSteps: 3, settleMs: 0 }), /non-retriable cut/);
-  const file = path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case.jsonl');
-  let events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events.map((event) => [event.type, event.step]), [['step', 0], ['error', 1]]);
-  assert.equal(fs.existsSync(path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case-0001.png')), true);
-  recovered = true;
-  const resumed = await motor.run('resume test', { traceId: 'resume-case', resume: true, maxSteps: 3, settleMs: 0 });
-  assert.equal(resumed.resumedFrom, 2);
-  assert.equal(resumed.done, true);
-  assert.equal(resumed.steps[0].step, 2);
-  events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events.map((event) => [event.type, event.step]), [['step', 0], ['error', 1], ['step', 2]]);
-  assert.equal(fs.existsSync(path.join(resolveDataLayout(dir).motor, 'traces', 'resume-case-0002.png')), true);
+  const firstNotifications: MotorOversightPacket[] = [];
+  const secondNotifications: MotorOversightPacket[] = [];
+  let release!: (value: StandaloneCompleteResult) => void;
+  const pending = new Promise<StandaloneCompleteResult>((resolve) => { release = resolve; });
+  const first = fixture(dir, async () => pending, { notifyOversight: (packet) => { firstNotifications.push(packet); } });
+  first.motor.start('stay in origin room', { episodeId: 'origin-bound', settleMs: 0 });
+  await until(() => first.motor.status('origin-bound').frame, Boolean);
+  fixture(dir, async () => { throw new Error('later provider must not be used'); }, { notifyOversight: (packet) => { secondNotifications.push(packet); } });
+  release(completion('done', { summary: 'origin route retained' }));
+  await until(() => first.motor.status('origin-bound'), (value) => value.status === 'completed');
+  assert.equal(firstNotifications.at(-1)?.status, 'completed');
+  assert.equal(secondNotifications.length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('motor run stops on done and replay is dry unless execute is explicit', async () => {
+test('interrupt aborts an in-flight provider call without executing an action', async () => {
   const dir = tempDir();
-  let completion = 0;
-  const holds: Array<{ keys: string[]; durationMs: number }> = [];
-  const motor: any = createMotorController({
-    dataDirectory: dir,
-    screenshot: async (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'png'); return { file }; },
-    hold: async (keys: string[], durationMs: number) => { holds.push({ keys, durationMs }); },
-    sleep: async () => {},
-    completeStandalone: async () => ({
-      content: completion++ === 0
-        ? '{"keys":["Right"],"duration_ms":100,"wait_ms":0,"done":false,"reason":"turn toward corridor"}'
-        : '{"keys":[],"duration_ms":0,"wait_ms":0,"done":true,"reason":"exit reached"}',
-      usage,
-    }),
+  let entered = false;
+  const { motor, calls } = fixture(dir, async (_messages, opts) => {
+    entered = true;
+    return await new Promise<StandaloneCompleteResult>((_resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+    });
   });
-  const result = await motor.run('reach exit', { traceId: 'run-case', maxSteps: 10, settleMs: 0 });
-  assert.equal(result.done, true);
-  assert.equal(result.steps.length, 2);
-  assert.equal(holds.length, 1);
-  const dry = await motor.replay(result.traceFile);
-  assert.equal(dry.execute, false);
-  assert.equal(holds.length, 1);
-  const live = await motor.replay(result.traceFile, { execute: true });
-  assert.equal(live.execute, true);
-  assert.equal(holds.length, 2);
-  assert.equal((await motor.list())[0].traceId, 'run-case');
+  motor.start('stop safely', { episodeId: 'interrupt', settleMs: 0 });
+  await until(() => entered, Boolean);
+  const current = motor.status('interrupt');
+  motor.interrupt('interrupt', current.checkpointSeq);
+  const ended = await until(() => motor.status('interrupt'), (value) => value.status === 'interrupted');
+  assert.equal(ended.lastError, null);
+  assert.equal(calls.click.length + calls.drag.length + calls.type.length + calls.key.length + calls.scroll.length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
