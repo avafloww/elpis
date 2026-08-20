@@ -151,7 +151,7 @@ export interface SandboxDeps {
   typing?: (channelId: string) => void;
   /** Enqueue a watch-mode message: image frames from local paths delivered as
  * ephemeral multimodal content for exactly one generation. Used by elpis.watch. */
-  watch?: (paths: string[], note: string) => { ok: boolean; count: number };
+  watch?: (paths: string[], note: string, channelId?: string | null) => { ok: boolean; count: number };
   /** Exact wire identity allowed to receive opaque standalone reasoning. */
   replayIdentity?: ReplayIdentity | null;
   /** Isolated tool-free model lane used by the bounded game motor controller. */

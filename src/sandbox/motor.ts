@@ -63,6 +63,7 @@ export interface MotorOversightPacket {
   frame: string | null;
   turns: number;
   traceFile: string;
+  originChannelId: string | null;
   recent: Array<{ tool: string; arguments: string; receipt: string; reasoning: string; content: string; latencyMs: number; at: string }>;
 }
 
@@ -77,6 +78,7 @@ export interface MotorControllerDeps {
   scroll: (clicks: number) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  originChannelId?: () => string | null;
   notifyOversight?: (packet: MotorOversightPacket) => void | Promise<void>;
 }
 
@@ -109,6 +111,7 @@ interface EpisodeRecord {
   abortController: AbortController | null;
   loopRunning: boolean;
   lastError: string | null;
+  originChannelId: string | null;
   runtime: MotorControllerDeps;
 }
 
@@ -274,6 +277,7 @@ function oversightPacket(episode: EpisodeRecord): MotorOversightPacket {
     frame: episode.frame,
     turns: episode.turns,
     traceFile: episode.traceFile,
+    originChannelId: episode.originChannelId,
     recent: [...episode.recent],
   };
 }
@@ -525,6 +529,8 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       const episodeId = safeId(opts.episodeId ?? `motor-${new Date(now()).toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`);
       if (episodes.has(episodeId) || fs.existsSync(path.join(episodesDir, `${episodeId}.jsonl`))) throw new Error(`elpis.motor: episode already exists: ${episodeId}`);
       const startedAt = now();
+      const runtime = deps;
+      const originChannelId = runtime.originChannelId?.() ?? null;
       const softTurnBudget = finiteInt(opts.softTurnBudget ?? 8, 'motor softTurnBudget', 1, 100);
       const hardTurnBudget = finiteInt(opts.hardTurnBudget ?? 12, 'motor hardTurnBudget', 2, 200);
       if (hardTurnBudget <= softTurnBudget) throw new Error('motor hardTurnBudget must exceed softTurnBudget');
@@ -543,7 +549,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
           completionTimeoutMs: finiteInt(opts.completionTimeoutMs ?? 30_000, 'motor completionTimeoutMs', 100, 300_000),
         },
         pendingGuidance: null, recent: [], abortController: null, loopRunning: false, lastError: null,
-        runtime: deps,
+        originChannelId, runtime,
       };
       episodes.set(episodeId, record);
       append(record.traceFile, { type: 'start', at: new Date(startedAt).toISOString(), episodeId, goal, authority: record.authority, options: record.opts });

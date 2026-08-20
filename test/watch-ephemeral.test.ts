@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { buildTestAgent, EMPTY_WAKE } from './helpers.js';
+import { buildTestAgent, EMPTY_WAKE, makeConfig } from './helpers.js';
 
 /** Returns the shared empty-run one-shot wake every call. It has to be a
  * real terminating run call: since a bare no-tool-call reply is
@@ -82,4 +82,63 @@ test('watch message: parts reach one generation, then strip from history and tra
   assert.ok(txWatch, 'watch line in transcript');
   assert.equal(txWatch.contentParts, undefined, 'transcript never holds the image parts');
   assert.equal(txWatch.ephemeral, undefined, 'no ephemeral flag in transcript');
+});
+test('scoped watch keeps synthetic frames in the originating channel history', async () => {
+  const llm = oneShotLLM();
+  const { agent, tmpDir } = buildTestAgent({
+    llm,
+    config: { heartbeat: { intervalMs: 60_000, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 } },
+    tmpPrefix: 'harness-watch-scoped-',
+  });
+  const imgPath = path.join(tmpDir, 'frame.png');
+  fs.writeFileSync(imgPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  void agent.loop();
+  agent.enqueueWatch([imgPath], 'motor oversight', '100');
+  for (let i = 0; i < 200 && llm.calls === 0; i++) await sleep(20);
+  for (let i = 0; i < 50; i++) await sleep(20);
+  agent.stop();
+  assert.equal(llm.calls, 1);
+  const history = agent.messagesForTest as { channel?: string; content: string; contentParts?: unknown[] }[];
+  const watch = history.find((message) => message.content.includes('[watch] motor oversight'));
+  assert.ok(watch);
+  assert.equal(watch.channel, '100');
+  assert.equal(watch.contentParts, undefined);
+  const sessionsDir = path.join(tmpDir, 'sessions', 'discord', 'main');
+  const files = fs.readdirSync(sessionsDir).filter((file) => file.endsWith('.jsonl'));
+  const lines = fs.readFileSync(path.join(sessionsDir, files[0]!), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const persisted = lines.find((line: { content?: string }) => line.content?.includes('[watch] motor oversight'));
+  assert.equal(persisted.channel, '100');
+});
+test('scoped social watch does not inherit internal Mind frontier permission', async () => {
+  const llm = oneShotLLM();
+  const base = makeConfig();
+  const mindItem = {
+    id: 1, title: 'private commitment', body: '', kind: 'task', status: 'in_progress', effectiveStatus: 'in_progress',
+    priority: 3, parentId: null, dueAt: null, createdBy: 'agent', createdAt: 1, updatedAt: 1,
+    closedAt: null, archivedAt: null, tags: [], blockedBy: [], blocks: [], childCount: 0,
+    commentCount: 0, reminderCount: 0,
+  };
+  const mind = {
+    stats: () => ({ active: 1, ready: 0, blocked: 0, waiting: 0, overdue: 0, done: 0, inbox: 0 }),
+    list: () => [mindItem],
+  };
+  const { agent, tmpDir, cleanup } = buildTestAgent({
+    llm,
+    config: { discord: { ...base.discord, guilds: [
+      { id: 'g-home', slug: 'home', slashCommands: false, quietHours: null, timezone: null, channels: { '100': 'private' } },
+      { id: 'g-social', slug: 'social', slashCommands: false, quietHours: null, timezone: null, channels: { '200': 'lounge' } },
+    ] } },
+    agentDeps: { mind: mind as any },
+    tmpPrefix: 'harness-watch-social-',
+  });
+  const imgPath = path.join(tmpDir, 'frame.png');
+  fs.writeFileSync(imgPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  void agent.loop();
+  agent.enqueueWatch([imgPath], 'social motor oversight', '200');
+  for (let i = 0; i < 200 && llm.calls === 0; i++) await sleep(20);
+  for (let i = 0; i < 50; i++) await sleep(20);
+  agent.stop();
+  assert.equal(llm.calls, 1);
+  assert.ok(llm.lastMessages.every((message: any) => !String(message.content).startsWith('<mind-frontier>')));
+  cleanup();
 });

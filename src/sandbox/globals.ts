@@ -806,9 +806,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       type: (text) => motorComputer.type(text),
       key: (keys) => motorComputer.key(keys),
       scroll: (clicks) => motorComputer.scroll(clicks),
+      originChannelId: () => deps.inbound?.channelId ?? null,
       notifyOversight: (packet) => {
         if (!packet.frame) return;
-        deps.watch?.([packet.frame], `motor oversight episode=${packet.episodeId} checkpoint=${packet.checkpointSeq} status=${packet.status} turns=${packet.turns}\ngoal: ${packet.goal}\nrecent: ${JSON.stringify(packet.recent)}`);
+        deps.watch?.([packet.frame], `motor oversight episode=${packet.episodeId} checkpoint=${packet.checkpointSeq} status=${packet.status} turns=${packet.turns}\ngoal: ${packet.goal}\nrecent: ${JSON.stringify(packet.recent)}`, packet.originChannelId);
       },
     });
   } else installUnavailableModule('motor');

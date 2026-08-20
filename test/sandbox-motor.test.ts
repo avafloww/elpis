@@ -186,13 +186,14 @@ test('an active episode keeps its origin provider and oversight route across lat
   const secondNotifications: MotorOversightPacket[] = [];
   let release!: (value: StandaloneCompleteResult) => void;
   const pending = new Promise<StandaloneCompleteResult>((resolve) => { release = resolve; });
-  const first = fixture(dir, async () => pending, { notifyOversight: (packet) => { firstNotifications.push(packet); } });
+  const first = fixture(dir, async () => pending, { originChannelId: () => 'origin-channel', notifyOversight: (packet) => { firstNotifications.push(packet); } });
   first.motor.start('stay in origin room', { episodeId: 'origin-bound', settleMs: 0 });
   await until(() => first.motor.status('origin-bound').frame, Boolean);
-  fixture(dir, async () => { throw new Error('later provider must not be used'); }, { notifyOversight: (packet) => { secondNotifications.push(packet); } });
+  fixture(dir, async () => { throw new Error('later provider must not be used'); }, { originChannelId: () => 'later-channel', notifyOversight: (packet) => { secondNotifications.push(packet); } });
   release(completion('done', { summary: 'origin route retained' }));
   await until(() => first.motor.status('origin-bound'), (value) => value.status === 'completed');
   assert.equal(firstNotifications.at(-1)?.status, 'completed');
+  assert.equal(firstNotifications.at(-1)?.originChannelId, 'origin-channel');
   assert.equal(secondNotifications.length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });

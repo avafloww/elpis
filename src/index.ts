@@ -312,7 +312,7 @@ export async function createElpisRuntime(adapters: ElpisRuntimeAdapters = {}): P
  // Watch mode: deliver local image frames as one ephemeral multimodal
  // message (kind 'watch' → stripped after one generation, text-only in the
  // transcript). The frame-building lives on the Agent (enqueueWatch).
-    watch: (paths: string[], note: string) => agent.enqueueWatch(paths, note),
+    watch: (paths: string[], note: string, channelId?: string | null) => agent.enqueueWatch(paths, note, channelId),
     completeStandalone: (messages, opts) => {
       const classifier = llms.classifier;
       if (!classifier.completeStandalone) throw new Error('configured classifier role has no isolated standalone completion path');

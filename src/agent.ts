@@ -1035,12 +1035,13 @@ export class Agent {
       attachments?: InboundMessageAttachment[];
       onDelivered?: () => void;
       sendScope?: 'observe_only';
+      channelId?: string;
     },
   ): void {
     const author = extras.author ?? 'harness';
     const message: InboundMessage = {
       id: extras.id,
-      channelId: INTERNAL_CHANNEL_ID,
+      channelId: extras.channelId ?? INTERNAL_CHANNEL_ID,
       channelName,
       author,
       authorId: extras.authorId ?? author,
@@ -1059,7 +1060,7 @@ export class Agent {
  * multimodal message (kind 'watch' → stripped after one generation, text-only
  * in the transcript). Builds the attachment shape here so index.ts just wires
  * the sandbox callback to it. */
-  enqueueWatch(paths: string[], note: string): { ok: boolean; count: number } {
+  enqueueWatch(paths: string[], note: string, channelId?: string | null): { ok: boolean; count: number } {
     const mime: Record<string, string> = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
     const attachments: InboundMessageAttachment[] = paths
       .map((p) => ({
@@ -1070,8 +1071,10 @@ export class Agent {
         size: fs.statSync(p).size,
       }))
       .filter((a) => a.contentType);
-    this.enqueueInternal('watch', 'watch', `[watch] ${note}`, {
-      id: `watch-${Date.now()}`, author: 'harness', attachments,
+    const scopedChannelId = channelId && channelId !== INTERNAL_CHANNEL_ID ? channelId : INTERNAL_CHANNEL_ID;
+    const channelName = scopedChannelId === INTERNAL_CHANNEL_ID ? 'watch' : this.qualifiedChannelLabel(scopedChannelId);
+    this.enqueueInternal('watch', channelName, `[watch] ${note}`, {
+      id: `watch-${Date.now()}`, author: 'harness', attachments, channelId: scopedChannelId,
     });
     return { ok: true, count: attachments.length };
   }
@@ -1383,8 +1386,9 @@ export class Agent {
  // absent/'discord' is a real Discord message OR a fleet/scheduler notice
  // (both keep flowing through the real-user branch as they always have).
         const isInternal = m.kind === 'heartbeat' || m.kind === 'harness' || m.kind === 'watch';
+        const isScopedInternal = isInternal && m.channelId !== INTERNAL_CHANNEL_ID;
         this.mindFrontierAllowedThisTurn = retainMindFrontierPermission(
-          this.mindFrontierAllowedThisTurn, m.channelId, isInternal || m.channelId === CONSOLE_CHANNEL_ID, this.deps.channels, this.config.discord.guilds,
+          this.mindFrontierAllowedThisTurn, m.channelId, (isInternal && !isScopedInternal) || m.channelId === CONSOLE_CHANNEL_ID, this.deps.channels, this.config.discord.guilds,
         );
         const createdAtMs = Date.parse(m.createdAt);
         const timeMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
@@ -1421,7 +1425,7 @@ export class Agent {
         if (isInternal) {
           this.logger.info('[agent] internal/harness turn start');
           if (!this.realUserTurn) this.sendsThisTurn = 0;
-          if (wakes) { this.turnChannel = INTERNAL_CHANNEL_ID; this.lastInbound = m; }
+          if (wakes) { this.turnChannel = isScopedInternal ? m.channelId : INTERNAL_CHANNEL_ID; this.lastInbound = m; }
         } else if (isAmbient) {
  // Ambient room chat: enters history with full provenance
  // but must not coerce speech — no realUserTurn, no nudge reset, no
@@ -1440,7 +1444,7 @@ export class Agent {
           if (wakes) { this.turnChannel = m.channelId; this.lastInbound = m; }
           if (m.authorId) this.participants.set(m.authorId, { author: m.author, lastSeenAt: Date.now() });
         }
-        this.pushMessage(userMsg, isInternal ? INTERNAL_CHANNEL_ID : m.channelId);
+        this.pushMessage(userMsg, isInternal && !isScopedInternal ? INTERNAL_CHANNEL_ID : m.channelId);
         if (m.onDelivered) {
           try { m.onDelivered(); } catch (e) {
             this.logger.warn(`[agent] onDelivered callback failed: ${e instanceof Error ? e.message : String(e)}`);
