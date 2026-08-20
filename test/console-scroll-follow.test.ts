@@ -12,8 +12,11 @@ function fixture() {
   vm.runInNewContext(src, { window });
   const scrollListeners: Array<() => void> = [];
   const clickListeners: Array<() => void> = [];
+  let scrollTop = 800;
   const scroller = {
-    scrollHeight: 1000, scrollTop: 800, clientHeight: 200,
+    scrollHeight: 1000, clientHeight: 200,
+    get scrollTop() { return scrollTop; },
+    set scrollTop(value: number) { scrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
     addEventListener(type: string, fn: () => void) { if (type === 'scroll') scrollListeners.push(fn); },
   };
   const button = {
@@ -44,13 +47,28 @@ test('scroll follower follows growth at latest and click-to-latest resumes follo
   const f = fixture();
   f.scroller.scrollHeight = 1200;
   f.api.afterGrowth();
-  assert.equal(f.scroller.scrollTop, 1200);
+  assert.equal(f.scroller.scrollTop, 1000);
   f.scroller.scrollTop = 200;
   f.scroll();
   f.click();
-  assert.equal(f.scroller.scrollTop, 1200);
+  assert.equal(f.scroller.scrollTop, 1000);
   assert.equal(f.api.isFollowing(), true);
   assert.equal(f.button.hidden, true);
+});
+
+test('latest click survives its delayed scroll event after content growth', () => {
+  const f = fixture();
+  f.scroller.scrollTop = 300;
+  f.scroll();
+  f.scroller.scrollHeight = 1200;
+  f.click();
+  assert.equal(f.scroller.scrollTop, 1000);
+  f.scroller.scrollHeight = 1400;
+  f.scroll();
+  assert.equal(f.api.isFollowing(), true);
+  assert.equal(f.button.hidden, true);
+  f.api.afterGrowth();
+  assert.equal(f.scroller.scrollTop, 1200);
 });
 
 test('scroll follower preserves a paused position across a full Context rerender', () => {
