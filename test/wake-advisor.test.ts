@@ -82,6 +82,82 @@ test('wake advisor history keeps two same-channel completed turns plus the curre
   assert.match(history.at(-1)!.content, /omitted sha256=/);
 });
 
+test('wake advisor hard-bounds one oversized turn without orphaning tool chains', () => {
+  const messages: any[] = [{ role: 'user', content: 'one long current turn', channel: 'room' }];
+  for (let index = 0; index < 12; index++) {
+    const id = `cycle-${index}`;
+    messages.push({
+      role: 'assistant', content: `assistant-${index}-` + 'a'.repeat(8_000), channel: 'room',
+      reasoning_items: [{ type: 'reasoning', summary: [], encrypted_content: 'r'.repeat(3_000) }],
+      tool_calls: [{ id, type: 'function', function: { name: 'run', arguments: JSON.stringify({ code: 'x'.repeat(10_000), detail: `cycle ${index}` }) } }],
+    });
+    if (index < 11) messages.push({
+      role: 'tool', tool_call_id: id, content: `tool-${index}-` + 'y'.repeat(10_000), channel: 'room',
+      run: { toolContractVersion: 4, ok: true },
+    });
+  }
+  const history = buildWakeAdvisorHistory(messages, 'room', {
+    role: 'tool', tool_call_id: 'cycle-11', content: 'tool-11-' + 'z'.repeat(10_000), run: { toolContractVersion: 4, ok: true },
+  } as any);
+  const visible = history.reduce((sum, message) => sum + message.content.length
+    + (message.tool_calls ?? []).reduce((callSum, call) => callSum + call.function.arguments.length, 0), 0);
+  assert.ok(visible <= 48_000, `visible history exceeded hard cap: ${visible}`);
+  const calls = history.flatMap(message => message.tool_calls ?? []).map(call => call.id);
+  const outputs = history.filter(message => message.role === 'tool').map(message => message.tool_call_id);
+  assert.deepEqual(outputs, calls);
+  assert.equal(calls.at(-1), 'cycle-11');
+  assert.equal(calls.includes('cycle-0'), false);
+});
+
+test('wake advisor drops incomplete tool edges even when the visible tail is under cap', () => {
+  const messages: any[] = [
+    { role: 'user', content: 'partial older edge', channel: 'room' },
+    {
+      role: 'assistant', content: 'unfinished but readable', channel: 'room',
+      tool_calls: [{ id: 'missing', type: 'function', function: { name: 'run', arguments: '{}' } }],
+    },
+    { role: 'user', content: 'current', channel: 'room' },
+    {
+      role: 'assistant', content: 'current response', channel: 'room',
+      tool_calls: [{ id: 'current-edge', type: 'function', function: { name: 'run', arguments: '{}' } }],
+    },
+  ];
+  const history = buildWakeAdvisorHistory(messages, 'room', {
+    role: 'tool', tool_call_id: 'current-edge', content: '[run ok]', run: { toolContractVersion: 4, ok: true },
+  } as any);
+  const calls = history.flatMap(message => message.tool_calls ?? []).map(call => call.id);
+  const outputs = history.filter(message => message.role === 'tool').map(message => message.tool_call_id);
+  assert.deepEqual(calls, ['current-edge']);
+  assert.deepEqual(outputs, calls);
+  assert.equal(history.some(message => message.content === 'unfinished but readable'), true);
+});
+
+test('wake advisor fits the newest complete subset of one oversized multi-call generation', () => {
+  const calls = Array.from({ length: 12 }, (_, index) => ({
+    id: `multi-${index}`,
+    type: 'function',
+    function: { name: 'run', arguments: JSON.stringify({ code: 'x'.repeat(10_000), detail: `multi ${index}` }) },
+  }));
+  const messages: any[] = [
+    { role: 'user', content: 'one oversized generation', channel: 'room' },
+    { role: 'assistant', content: 'parallel calls', channel: 'room', tool_calls: calls },
+    ...calls.slice(0, -1).map(call => ({
+      role: 'tool', tool_call_id: call.id, content: 'y'.repeat(10_000), channel: 'room', run: { toolContractVersion: 4, ok: true },
+    })),
+  ];
+  const history = buildWakeAdvisorHistory(messages, 'room', {
+    role: 'tool', tool_call_id: calls.at(-1)!.id, content: 'z'.repeat(10_000), run: { toolContractVersion: 4, ok: true },
+  } as any);
+  const visible = history.reduce((sum, message) => sum + message.content.length
+    + (message.tool_calls ?? []).reduce((callSum, call) => callSum + call.function.arguments.length, 0), 0);
+  assert.ok(visible <= 48_000, `visible history exceeded hard cap: ${visible}`);
+  const keptCalls = history.flatMap(message => message.tool_calls ?? []).map(call => call.id);
+  const keptOutputs = history.filter(message => message.role === 'tool').map(message => message.tool_call_id);
+  assert.deepEqual(keptOutputs, keptCalls);
+  assert.equal(keptCalls.at(-1), 'multi-11');
+  assert.equal(keptCalls.includes('multi-0'), false);
+});
+
 test('wake advisor sends bounded historical tool context with authoritative current state', async () => {
   let cacheKey = '';
   let prompt = '';

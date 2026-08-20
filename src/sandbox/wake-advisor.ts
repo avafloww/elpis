@@ -102,6 +102,77 @@ function reasoningChars(message: ChatMessage): number {
     + (item.content ?? []).reduce((partSum, part) => partSum + (part.text?.length ?? 0), 0), 0);
 }
 
+function balancedHistoryUnits(messages: ChatMessage[]): ChatMessage[][] {
+  const units: ChatMessage[][] = [];
+  for (let index = 0; index < messages.length;) {
+    const message = messages[index];
+    if (message.role !== 'assistant' || !message.tool_calls?.length) {
+      if (message.role !== 'tool') units.push([message]);
+      index++;
+      continue;
+    }
+    const callIds = new Set(message.tool_calls.map(call => call.id));
+    const outputs: ChatMessage[] = [];
+    let cursor = index + 1;
+    while (cursor < messages.length && messages[cursor].role === 'tool') {
+      const output = messages[cursor];
+      if (output.tool_call_id && callIds.has(output.tool_call_id)) outputs.push(output);
+      cursor++;
+    }
+    const outputIds = new Set(outputs.map(output => output.tool_call_id));
+    const completeCalls = message.tool_calls.filter(call => outputIds.has(call.id));
+    if (completeCalls.length > 0) {
+      const completeIds = new Set(completeCalls.map(call => call.id));
+      units.push([
+        { ...message, tool_calls: completeCalls },
+        ...outputs.filter(output => output.tool_call_id && completeIds.has(output.tool_call_id)),
+      ]);
+    } else if (message.content) {
+      const assistant = { ...message };
+      delete assistant.tool_calls;
+      units.push([assistant]);
+    }
+    index = cursor;
+  }
+  return units;
+}
+
+function fitNewestCompleteCalls(unit: ChatMessage[], maxChars: number): ChatMessage[] {
+  if (visibleChars(unit) <= maxChars) return unit;
+  const assistant = unit[0];
+  if (assistant?.role !== 'assistant' || !assistant.tool_calls?.length) return [];
+  for (let start = assistant.tool_calls.length - 1; start >= 0; start--) {
+    const calls = assistant.tool_calls.slice(start);
+    const ids = new Set(calls.map(call => call.id));
+    const candidate = [
+      { ...assistant, tool_calls: calls },
+      ...unit.slice(1).filter(output => output.tool_call_id && ids.has(output.tool_call_id)),
+    ];
+    if (visibleChars(candidate) <= maxChars) return candidate;
+  }
+  return [];
+}
+
+function hardBoundHistory(messages: ChatMessage[]): ChatMessage[] {
+  const units = balancedHistoryUnits(messages);
+  const balanced = units.flat();
+  if (visibleChars(balanced) <= HISTORY_VISIBLE_CHARS) return balanced;
+  const omitted: ChatMessage = {
+    role: 'user',
+    content: `[older same-channel wake history omitted to enforce ${HISTORY_VISIBLE_CHARS}-character bound]`,
+  };
+  const selected: ChatMessage[][] = [];
+  let remaining = HISTORY_VISIBLE_CHARS - visibleChars([omitted]);
+  for (let index = units.length - 1; index >= 0; index--) {
+    const unit = selected.length === 0 ? fitNewestCompleteCalls(units[index], remaining) : units[index];
+    const chars = visibleChars(unit);
+    if (unit.length === 0 || chars > remaining) break;
+    selected.unshift(unit);
+    remaining -= chars;
+  }
+  return [omitted, ...selected.flat()];
+}
+
 function completedTurnEnd(messages: ChatMessage[], assistantIndex: number): number {
   if (!endsTurn(messages, assistantIndex)) return -1;
   const assistant = messages[assistantIndex];
@@ -144,7 +215,7 @@ export function buildWakeAdvisorHistory(
     selected.unshift(bounded);
     chars += segmentChars;
   }
-  const history = selected.flat();
+  const history = hardBoundHistory(selected.flat());
   let reasoningBudget = HISTORY_REASONING_CHARS;
   for (let index = history.length - 1; index >= 0; index--) {
     const message = history[index];
