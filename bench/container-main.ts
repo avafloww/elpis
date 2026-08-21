@@ -15,7 +15,7 @@ import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
 import { evaluateOutcome, recipientSatisfied, targetChannelSatisfied } from './outcome.js';
-import { successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
+import { runResultTraceData, successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { parseEpisodeBootstrap } from './bootstrap.js';
 import { resolveCandidateIngressBatch } from './ingress.js';
@@ -258,9 +258,10 @@ async function main(): Promise<void> {
     const messages = currentMessages();
     for (const message of messages.slice(indexedMessages)) {
       if (message.role !== 'tool') continue;
-      const ok = /^\[run ok/m.test(message.content); const end = endFor(message, messages);
-      recorder.add({ kind: 'tool-result', callId: message.tool_call_id, ok, end, detail: message.content.slice(0, 500), data: { blocked: /\bblocked\b/i.test(message.content) } });
-      if (ok) recordRequiredOutcome();
+      const receipt = runResultTraceData(message.run, message.content);
+      const end = endFor(message, messages);
+      recorder.add({ kind: 'tool-result', callId: message.tool_call_id, ok: receipt.ok, end, detail: message.content.slice(0, 500), data: receipt.data });
+      if (receipt.ok) recordRequiredOutcome();
     }
     indexedMessages = messages.length;
   };

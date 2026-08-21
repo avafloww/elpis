@@ -1,4 +1,16 @@
+import { parseRunMessageMetadata, type RunMessageMetadata } from '../src/sandbox/metadata.js';
 import { SCHEMA_VERSION, type TraceEvent, type TraceMetrics } from './schema.js';
+
+export function runResultTraceData(raw: unknown, content: string): { ok: boolean; data: Record<string, unknown> } {
+  const metadata = parseRunMessageMetadata(raw);
+  return {
+    ok: metadata?.ok ?? /^\[run ok/m.test(content),
+    data: {
+      blocked: /\bblocked\b/i.test(content),
+      ...(metadata?.wake ? { wake: metadata.wake } : {}),
+    },
+  };
+}
 
 export class TraceRecorder {
   private readonly events: TraceEvent[];
