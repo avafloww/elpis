@@ -10,7 +10,7 @@ Type=simple
 Environment=ELPIS_DISPLAY=:0
 Environment=ELPIS_VT=7
 Environment=ELPIS_AGENT_USER=<AGENT_USER>
-Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/computer
+Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/elpis-data/computer
 ExecStart=<HARNESS_ROOT>/deploy/start-xorg.sh
 ExecStartPost=/usr/bin/chvt 7
 ExecStopPost=-/usr/bin/chvt 1

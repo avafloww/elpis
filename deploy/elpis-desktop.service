@@ -9,8 +9,8 @@ After=network.target
 Type=simple
 Environment=ELPIS_DISPLAY=:0
 Environment=ELPIS_GEOMETRY=1280x800
-Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/computer
-Environment=XAUTHORITY=<DATA_DIR>/computer/Xauthority
+Environment=ELPIS_DESKTOP_DIR=<DATA_DIR>/elpis-data/computer
+Environment=XAUTHORITY=<DATA_DIR>/elpis-data/computer/Xauthority
 ExecStart=<HARNESS_ROOT>/deploy/start-desktop.sh
 Restart=on-failure
 RestartSec=2
