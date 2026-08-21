@@ -1,4 +1,5 @@
 import { parseDuration } from "../config.js";
+import { TOOL_CONTRACT_VERSION } from "../llm/provenance.js";
 
 export const MAX_RUN_WAKE_MS = 60 * 60 * 1000;
 export const MAX_RUN_DETAIL_CHARS = 120;
@@ -23,8 +24,11 @@ export interface ParsedRunCall {
   wake?: ParsedRunWake;
 }
 
+export const RUN_WAKE_PAYLOAD_TYPE = `${TOOL_CONTRACT_VERSION}-wake` as const;
+export const RUN_WAKE_TASK_PREFIX = `__${RUN_WAKE_PAYLOAD_TYPE.replaceAll("-", "_")}__` as const;
+
 export interface DurableRunWakePayload {
-  type: "elpis-run-wake-v3";
+  type: typeof RUN_WAKE_PAYLOAD_TYPE;
   kind: "after" | "at" | "auto";
   state: "armed" | "preempted" | "fired";
   requestedAt: number;
@@ -36,7 +40,9 @@ export interface DurableRunWakePayload {
   };
 }
 
-export const RUN_WAKE_TASK_PREFIX = "__elpis_run_wake_v3__";
+export function isRunWakeTaskName(name: string): boolean {
+  return name.startsWith(RUN_WAKE_TASK_PREFIX);
+}
 
 export function parseRunWake(
   value: unknown,
@@ -158,7 +164,7 @@ export function parseRunWakePayload(raw: string): DurableRunWakePayload | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     return null;
   const value = parsed as Record<string, unknown>;
-  if (value.type !== "elpis-run-wake-v3") return null;
+  if (value.type !== RUN_WAKE_PAYLOAD_TYPE) return null;
   if (value.kind !== "after" && value.kind !== "at" && value.kind !== "auto")
     return null;
   if (
@@ -173,7 +179,7 @@ export function parseRunWakePayload(raw: string): DurableRunWakePayload | null {
   )
     return null;
   const result: DurableRunWakePayload = {
-    type: "elpis-run-wake-v3",
+    type: RUN_WAKE_PAYLOAD_TYPE,
     kind: value.kind,
     state: value.state,
     requestedAt: value.requestedAt as number,
@@ -188,7 +194,7 @@ export function parseRunWakePayload(raw: string): DurableRunWakePayload | null {
     if (
       (advice.source === "classifier" || advice.source === "fallback") &&
       Number.isSafeInteger(advice.delayMs) &&
-      (advice.delayMs as number) > 0 &&
+      (advice.delayMs as number) >= 0 &&
       (advice.delayMs as number) <= MAX_RUN_WAKE_MS &&
       typeof advice.reason === "string" &&
       advice.reason.length > 0 &&

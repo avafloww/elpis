@@ -53,7 +53,7 @@ import { parseSoul, DEFAULT_AGENT_NAME } from './store/soul.js';
 import type { ChannelDirectory } from './store/channels.js';
 import type { MuteStore } from './store/mutes.js';
 import type { ScheduledTask, Scheduler } from './store/scheduler.js';
-import { encodeRunWakePayload, parseRunCallArguments, parseRunWakePayload, resolveRunWake, RUN_WAKE_TASK_PREFIX, type DurableRunWakePayload } from './sandbox/wake.js';
+import { encodeRunWakePayload, isRunWakeTaskName, parseRunCallArguments, parseRunWakePayload, resolveRunWake, RUN_WAKE_PAYLOAD_TYPE, RUN_WAKE_TASK_PREFIX, type DurableRunWakePayload } from './sandbox/wake.js';
 import type { RunMessageMetadata, RunWakeMetadata } from './sandbox/metadata.js';
 import { TOOL_CONTRACT_VERSION } from './llm/provenance.js';
 import type { RunResult } from './types.js';
@@ -897,7 +897,7 @@ export class Agent {
   private recoverRunWake(): void {
     if (!this.deps.scheduler) return;
     const reserved = this.deps.scheduler.list()
-      .filter((task) => task.doneAt == null && task.name.startsWith(RUN_WAKE_TASK_PREFIX))
+      .filter((task) => task.doneAt == null && isRunWakeTaskName(task.name))
       .map((task) => ({ task, payload: parseRunWakePayload(task.payload) }));
     for (const invalid of reserved.filter((entry) => entry.payload?.state !== 'armed')) {
       this.deps.scheduler.markDone(invalid.task.id);
@@ -942,7 +942,7 @@ export class Agent {
     }
     this.preemptRunWake('superseded by a newer run wake');
     const payload: DurableRunWakePayload = {
-      type: 'elpis-run-wake-v3', kind: metadata.kind, state: 'armed',
+      type: RUN_WAKE_PAYLOAD_TYPE, kind: metadata.kind, state: 'armed',
       requestedAt: metadata.requestedAt, targetAt: metadata.targetAt!,
       ...(metadata.advice ? { advice: metadata.advice } : {}),
     };
@@ -963,7 +963,7 @@ export class Agent {
   }
 
   notifyRunWake(task: ScheduledTask): boolean {
-    if (!task.name.startsWith(RUN_WAKE_TASK_PREFIX)) return false;
+    if (!isRunWakeTaskName(task.name)) return false;
     const payload = parseRunWakePayload(task.payload);
     if (!payload) {
       this.logger.warn(`[agent] swallowed malformed reserved run wake task ${task.id}`);

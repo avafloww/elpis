@@ -3,6 +3,7 @@ import type { ChatMessage } from "../llm/llm.js";
 import type { Logger } from "../lib/log.js";
 import type { SandboxDeps } from "../types.js";
 import type { MindId } from "../store/mind-id.js";
+import { isRunWakeTaskName } from "./wake.js";
 
 export const WAKE_ADVISOR_BUCKETS_MS = [0, 1, 2, 5, 10, 15, 30, 45, 60].map(
   (minutes) => minutes * 60_000,
@@ -350,7 +351,7 @@ export function snapshotWakeAdvisorState(
         (task) =>
           task.doneAt == null &&
           typeof task.nextRunAt === "number" &&
-          !String(task.name ?? "").startsWith("__elpis_run_wake_v3__"),
+          !isRunWakeTaskName(String(task.name ?? "")),
       )
       .map((task) =>
         Math.max(

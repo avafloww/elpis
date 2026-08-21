@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_RUN_WAKE_MS,
+  RUN_WAKE_PAYLOAD_TYPE,
+  RUN_WAKE_TASK_PREFIX,
   encodeRunWakePayload,
   parseRunCallArguments,
   parseRunWake,
@@ -183,16 +185,18 @@ test("run-call parsing rejects legacy end and validates wake before execution", 
   );
 });
 
-test("durable run-wake payload round-trips only the bounded v3 shape", () => {
+test("durable wake receipts derive from the canonical v4 tool contract", () => {
+  assert.equal(RUN_WAKE_PAYLOAD_TYPE, "elpis-run-v4-wake");
+  assert.equal(RUN_WAKE_TASK_PREFIX, "__elpis_run_v4_wake__");
   const payload = {
-    type: "elpis-run-wake-v3" as const,
+    type: RUN_WAKE_PAYLOAD_TYPE,
     kind: "auto" as const,
     state: "armed" as const,
     requestedAt: 1000,
-    targetAt: 2000,
+    targetAt: 1000,
     advice: {
       source: "classifier" as const,
-      delayMs: 60_000,
+      delayMs: 0,
       reason: "active-work",
     },
   };
@@ -200,7 +204,13 @@ test("durable run-wake payload round-trips only the bounded v3 shape", () => {
   assert.equal(parseRunWakePayload('{"type":"other"}'), null);
   assert.equal(
     parseRunWakePayload(
-      '{"type":"elpis-run-wake-v3","kind":"at","state":"armed","requestedAt":1.2,"targetAt":2}',
+      '{"type":"elpis-run-v3-wake","kind":"at","state":"armed","requestedAt":1,"targetAt":2}',
+    ),
+    null,
+  );
+  assert.equal(
+    parseRunWakePayload(
+      '{"type":"elpis-run-v4-wake","kind":"at","state":"armed","requestedAt":1.2,"targetAt":2}',
     ),
     null,
   );

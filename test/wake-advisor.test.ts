@@ -10,6 +10,7 @@ import {
   type WakeAdvisorState,
 } from "../src/sandbox/wake-advisor.js";
 import type { SandboxDeps } from "../src/types.js";
+import { RUN_WAKE_TASK_PREFIX } from "../src/sandbox/wake.js";
 
 const quiet: WakeAdvisorState = {
   turnKind: "autonomous",
@@ -59,7 +60,7 @@ test("wake advisor snapshot is bounded to work facts and ignores reserved run wa
     bg: { list: () => [{ running: true }, { running: false }] },
     scheduler: {
       list: () => [
-        { name: "__elpis_run_wake_v3__-old", nextRunAt: 10_100, doneAt: null },
+        { name: `${RUN_WAKE_TASK_PREFIX}-old`, nextRunAt: 10_100, doneAt: null },
         { name: "real", nextRunAt: 40_000, doneAt: null },
       ],
     },
