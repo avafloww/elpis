@@ -597,6 +597,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
   const runEpisode = async (episode: EpisodeRecord): Promise<void> => {
     if (episode.loopRunning || episode.status !== 'running') return;
     episode.loopRunning = true;
+    let pendingEffectId: string | null = null;
     try {
       while (episode.status === 'running') {
         const elapsed = episodeNow(episode) - episode.startedAt;
@@ -641,6 +642,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         const { call, args } = parseMotorToolCall(completion.toolCalls);
         const effectId = `${episode.episodeId}:${episode.checkpointSeq}`;
         if (ACTION_TOOL_SET.has(call.function.name)) {
+          pendingEffectId = effectId;
           append(episode.traceFile, {
             type: 'action_prepared', at: new Date(episodeNow(episode)).toISOString(), effectId,
             checkpointSeq: episode.checkpointSeq, call, dimensions, counters: episode.counters,
@@ -652,6 +654,8 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
             type: 'action_completed', at: new Date(episodeNow(episode)).toISOString(), effectId,
             checkpointSeq: episode.checkpointSeq, call, receipt: outcome.receipt, counters: episode.counters,
           }, true);
+          pendingEffectId = null;
+          if ((episode.status as EpisodeStatus) === 'interrupted') break;
         }
         episode.messages.push({ role: 'assistant', content: completion.content ?? '', tool_calls: [call] });
         episode.messages.push({ role: 'tool', content: outcome.receipt, tool_call_id: call.id });
@@ -688,7 +692,10 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         if (episode.opts.settleMs > 0) await episodeSleep(episode, episode.opts.settleMs);
       }
     } catch (error) {
-      if (episode.status !== 'interrupted') {
+      if (episode.status === 'interrupted' && pendingEffectId) {
+        episode.lastError = `interrupted motor effect ${pendingEffectId} has an ambiguous outcome`;
+        append(episode.traceFile, { type: 'action_ambiguous', at: new Date(episodeNow(episode)).toISOString(), effectId: pendingEffectId, checkpointSeq: episode.checkpointSeq, error: episode.lastError }, true);
+      } else if (episode.status !== 'interrupted') {
         episode.status = 'failed';
         episode.lastError = error instanceof Error ? error.message : String(error);
         episode.updatedAt = episodeNow(episode);

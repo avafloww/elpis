@@ -306,3 +306,27 @@ test('cold restart interrupts running or unmatched-effect traces without retryin
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+test('interrupt during an actuator settles that effect but records no turn or next action', async () => {
+  const dir = tempDir();
+  let entered = false;
+  let release!: () => void;
+  const actuator = new Promise<void>((resolve) => { release = resolve; });
+  const { motor } = fixture(dir, async () => completion('click', { element: 'bounded target', x: 500, y: 500 }), {
+    click: async () => { entered = true; await actuator; return { ok: true }; },
+  });
+  motor.start('interrupt actuator', { episodeId: 'interrupt-actuator', settleMs: 0, authority: { allowedTools: ['click'], maxPointerActions: 1 } });
+  await until(() => entered, Boolean);
+  const current = motor.status('interrupt-actuator');
+  motor.interrupt('interrupt-actuator', current.checkpointSeq);
+  release();
+  const ended = motor.status('interrupt-actuator');
+  assert.equal(ended.status, 'interrupted');
+  assert.equal(ended.turns, 0);
+  const events = await until(
+    () => fs.readFileSync(ended.traceFile, 'utf8').trim().split('\n').map(JSON.parse),
+    (value) => value.some((event: any) => event.type === 'action_completed'),
+  );
+  assert.deepEqual(events.map((event: any) => event.type), ['start', 'action_prepared', 'interrupted', 'action_completed']);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

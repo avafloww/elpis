@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { coordinateGridFilter, createComputerTools, displayShellCommand, heldKeysScript, parseWindows, shellQuote, type ComputerProcessResult } from '../src/sandbox/computer.js';
+import { coordinateGridFilter, createComputerTools, displayShellCommand, heldKeysScript, parseWindows, pointerClickScript, pointerDragScript, shellQuote, type ComputerProcessResult } from '../src/sandbox/computer.js';
 
 test('parseWindows reads wmctrl geometry, class, and spaced titles', () => {
   const rows = parseWindows('0x04600007  0 1234 10 20 800 600 Navigator.Firefox host Example Domain - Mozilla Firefox\n');
@@ -34,6 +34,17 @@ test('held key script traps cleanup and releases chords in reverse order', () =>
   assert.throws(() => heldKeysScript('Up', 30_001), /durationMs must be <= 30000/);
 });
 
+test('pointer scripts trap cleanup around every mouse-down path', () => {
+  const click = pointerClickScript(12, 34, 3, 2);
+  assert.match(click, /cleanup\(\) \{ xdotool mouseup 3 \|\| true; \}/);
+  assert.match(click, /trap cleanup EXIT INT TERM/);
+  assert.match(click, /mousemove --sync 12 34.*mousedown 3.*mouseup 3/);
+  const drag = pointerDragScript(1, 2, 30, 40);
+  assert.match(drag, /cleanup\(\) \{ xdotool mouseup 1 \|\| true; \}/);
+  assert.match(drag, /mousedown 1.*mousemove --sync 30 40.*mouseup 1/);
+  assert.throws(() => pointerClickScript(1, 2, 1, 101), /count must be <= 100/);
+});
+
 test('coordinate grid filter uses magenta and labels the top and left edges', () => {
   const filter = coordinateGridFilter(320, 240, 100);
   assert.match(filter, /drawgrid=width=100:height=100/);
@@ -54,7 +65,8 @@ test('computer maps input and app launch onto deterministic X11 commands', async
   const computer: any = createComputerTools({ computerDir: dir, display: ':77', xauthority: dir + '/auth', run });
 
   await computer.click(12.4, 33.6, { button: 'right', count: 2 });
-  assert.equal(calls[0], 'xdotool mousemove --sync 12 34 click --repeat 2 3');
+  assert.match(calls[0], /trap cleanup EXIT INT TERM/);
+  assert.match(calls[0], /mousemove --sync 12 34.*mousedown 3.*mouseup 3/);
 
   const launched = await computer.launch('firefox-esr https://example.com', { name: 'web', cwd: '/tmp' });
   assert.match(calls[1], /^systemd-run --user --collect /);

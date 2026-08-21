@@ -95,6 +95,24 @@ export function heldKeysScript(keysValue: string | string[], durationValue: numb
   return `set -eu; cleanup() { ${release}; }; trap cleanup EXIT INT TERM; ${press}; sleep ${sleepSeconds(durationMs)}`;
 }
 
+export function pointerClickScript(xValue: number, yValue: number, buttonValue: number, countValue: number): string {
+  const x = finiteInt(xValue, 'click x', 0);
+  const y = finiteInt(yValue, 'click y', 0);
+  const button = finiteInt(buttonValue, 'click button', 1);
+  if (button > 3) throw new Error('elpis.computer: click button must be 1..3');
+  const count = finiteInt(countValue, 'click count', 1);
+  if (count > 100) throw new Error('elpis.computer: click count must be <= 100');
+  return `set -eu; cleanup() { xdotool mouseup ${button} || true; }; trap cleanup EXIT INT TERM; xdotool mousemove --sync ${x} ${y}; i=0; while [ "$i" -lt ${count} ]; do xdotool mousedown ${button}; xdotool mouseup ${button}; i=$((i + 1)); done`;
+}
+
+export function pointerDragScript(fromXValue: number, fromYValue: number, toXValue: number, toYValue: number): string {
+  const fromX = finiteInt(fromXValue, 'drag fromX', 0);
+  const fromY = finiteInt(fromYValue, 'drag fromY', 0);
+  const toX = finiteInt(toXValue, 'drag toX', 0);
+  const toY = finiteInt(toYValue, 'drag toY', 0);
+  return `set -eu; cleanup() { xdotool mouseup 1 || true; }; trap cleanup EXIT INT TERM; xdotool mousemove --sync ${fromX} ${fromY}; xdotool mousedown 1; xdotool mousemove --sync ${toX} ${toY}; xdotool mouseup 1`;
+}
+
 export interface ComputerSequenceStep {
   keys: string | string[];
   durationMs: number;
@@ -267,13 +285,13 @@ export function createComputerTools(options: ComputerToolsOptions): Record<strin
       const button = buttons[buttonName];
       if (!button) throw new Error('elpis.computer.click: button must be left, middle, or right');
       const count = finiteInt(opts.count ?? 1, 'count', 1);
-      await exec('click', `xdotool mousemove --sync ${px} ${py} click --repeat ${count} ${button}`, opts);
+      await exec('click', pointerClickScript(px, py, button, count), opts);
       return { ok: true, x: px, y: py, button: buttonName, count };
     },
     drag: async (fromX: number, fromY: number, toX: number, toY: number, opts: ComputerRunOptions = {}) => {
       const x1 = finiteInt(fromX, 'fromX', 0), y1 = finiteInt(fromY, 'fromY', 0);
       const x2 = finiteInt(toX, 'toX', 0), y2 = finiteInt(toY, 'toY', 0);
-      await exec('drag', `xdotool mousemove --sync ${x1} ${y1} mousedown 1 mousemove --sync ${x2} ${y2} mouseup 1`, opts);
+      await exec('drag', pointerDragScript(x1, y1, x2, y2), opts);
       return { ok: true, from: [x1, y1], to: [x2, y2] };
     },
     type: async (text: string, opts: ComputerRunOptions & { delay?: number } = {}) => {
