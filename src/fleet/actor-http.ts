@@ -4,6 +4,12 @@ import {
   ActorCompletionError,
   type ActorCompletionReply,
 } from "./actor-completion.js";
+import { ActorMindError } from "./actor-mind.js";
+import {
+  ActorMindRequestError,
+  dispatchActorMindRequest,
+  type ActorMindService,
+} from "./actor-mind-request.js";
 
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -17,6 +23,7 @@ export interface ActorCompletionService {
 
 export interface ActorCompletionHttpOptions {
   broker: ActorCompletionService;
+  mind?: ActorMindService;
   host: string;
   port: number;
   logger: Logger;
@@ -82,6 +89,17 @@ function statusFor(error: ActorCompletionError): number {
   }
 }
 
+function statusForMind(error: ActorMindError): number {
+  switch (error.code) {
+    case "unauthorized":
+      return 401;
+    case "outside_scope":
+      return 403;
+    case "not_found":
+      return 404;
+  }
+}
+
 function bearer(req: http.IncomingMessage): string | null {
   const value = req.headers.authorization;
   if (typeof value !== "string") return null;
@@ -94,7 +112,12 @@ export function createActorCompletionHttpServer(
 ): http.Server {
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   return http.createServer(async (req, res) => {
-    if (req.url !== "/v1/complete") {
+    const mindRequest = req.url === "/v1/mind";
+    if (req.url !== "/v1/complete" && !mindRequest) {
+      json(res, 404, { error: "not found" });
+      return;
+    }
+    if (mindRequest && !options.mind) {
       json(res, 404, { error: "not found" });
       return;
     }
@@ -118,6 +141,10 @@ export function createActorCompletionHttpServer(
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw new HttpInputError(400, "request must be an object");
       const input = body as Record<string, unknown>;
+      if (mindRequest) {
+        json(res, 200, dispatchActorMindRequest(options.mind!, token, input));
+        return;
+      }
       if (input.protocol !== 1)
         throw new HttpInputError(400, "protocol must equal 1");
       const unknown = Object.keys(input).filter(
@@ -138,11 +165,27 @@ export function createActorCompletionHttpServer(
       if (res.writableEnded || res.destroyed) return;
       if (error instanceof HttpInputError) {
         json(res, error.status, { error: error.message });
+      } else if (error instanceof ActorMindRequestError) {
+        json(res, 400, { error: error.message, code: "invalid_request" });
+      } else if (error instanceof ActorMindError) {
+        json(res, statusForMind(error), {
+          error: error.message,
+          code: error.code,
+        });
       } else if (error instanceof ActorCompletionError) {
         json(res, statusFor(error), { error: error.message, code: error.code });
       } else {
-        options.logger.error("actor completion request failed", error);
-        json(res, 502, { error: "actor completion failed" });
+        options.logger.error(
+          mindRequest
+            ? "actor Mind request failed"
+            : "actor completion request failed",
+          error,
+        );
+        json(res, 502, {
+          error: mindRequest
+            ? "actor Mind request failed"
+            : "actor completion failed",
+        });
       }
     }
   });
