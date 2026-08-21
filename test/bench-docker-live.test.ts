@@ -11,7 +11,7 @@ import { prepareEpisodeMounts, withContainerTimeout } from '../bench/docker.js';
 import type { BenchConfig } from '../bench/config.js';
 import { runScenario } from '../bench/runner.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
-import { AMBIENT_BATCH_TEST_SCENARIO, RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import { AMBIENT_BATCH_TEST_SCENARIO, HEARTBEAT_EFFECT_TEST_SCENARIO, HEARTBEAT_NOOP_TEST_SCENARIO, HEARTBEAT_WAIT_TEST_SCENARIO, RESTART_TEST_SCENARIO, SEEDED_HEARTBEAT_TEST_SCENARIO } from './bench-scenario-fixtures.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const live = process.env.ELPISBENCH_DOCKER_LIVE === '1';
@@ -222,6 +222,38 @@ test('live production runtime preserves state across a fresh container restart',
     const sessionDir = path.join(resolveDataLayout(work).sessions, 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('live oracle distinguishes heartbeat effect, wait, and no-op decisions', { skip: !live }, async () => {
+  for (const scenario of [HEARTBEAT_EFFECT_TEST_SCENARIO, HEARTBEAT_WAIT_TEST_SCENARIO, HEARTBEAT_NOOP_TEST_SCENARIO]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpisbench-heartbeat-live-'));
+    const dataDirectory = path.join(root, 'data');
+    const provider = { provider_type: 'openai-compatible' as const, model: 'oracle-unused', base_url: 'https://oracle.invalid/v1', api_key: 'unused', api: 'auto' as const };
+    const config: BenchConfig = {
+      version: 1, default_provider: 'oracle', generator_provider: 'oracle', providers: { oracle: provider },
+      judges: [
+        { id: 'a', provider: 'oracle', family: 'one', teacher_pool: true },
+        { id: 'b', provider: 'oracle', family: 'two', teacher_pool: true },
+        { id: 'c', provider: 'oracle', family: 'three', teacher_pool: false },
+      ],
+      image, concurrency: 1, allow_private_input: false, data_directory: dataDirectory,
+    };
+    try {
+      const record = await runScenario(config, scenario, 'oracle', { oracle: true });
+      assert.equal(Object.values(record.gates).every(Boolean), true, scenario.id);
+      assert.equal(record.metrics.dispatchCount, 1, scenario.id);
+      const terminal = [...record.events].reverse().find((event) => event.kind === 'tool-result');
+      const wake = terminal?.data?.wake as { kind?: string } | undefined;
+      assert.equal(wake?.kind, scenario.expected.decision === 'no-op' ? 'auto' : 'after', scenario.id);
+      const [episode] = fs.readdirSync(path.join(dataDirectory, 'episodes'));
+      const work = path.join(dataDirectory, 'episodes', episode, 'work');
+      if (scenario.expected.decision === 'effect') assert.equal(fs.readFileSync(path.join(work, 'repair.txt'), 'utf8'), 'fixed\n');
+      else {
+        assert.equal(record.metrics.sendsPerRun, 0, scenario.id);
+        assert.equal(fs.readFileSync(path.join(work, 'guard.txt'), 'utf8'), 'unchanged\n');
+      }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test('live Docker timeout removes the named container', { skip: !live }, async () => {

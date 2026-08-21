@@ -75,6 +75,7 @@ const expectedSchema = z.object({
   exclusiveTarget: z.boolean().default(false),
   workPaths: z.array(z.string()).default([]),
   action: z.enum(['required', 'optional']).default('required'),
+  decision: z.enum(['effect', 'wait', 'no-op']).optional(),
   checks: z.array(outcomeCheckSchema).default([]),
 });
 
@@ -103,7 +104,6 @@ const schedulerSeedSchema = z.object({
 
 const sandboxSeedSchema = z.object({
   mindKey: z.string().regex(/^[a-z][a-z0-9-]*$/),
-  alias: z.string().regex(/^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*){2}$/),
 });
 
 const scenarioSpecBase = z.object({
@@ -142,7 +142,13 @@ const scenarioSpecBase = z.object({
   expected: expectedSchema,
   judgeCriteria: z.array(z.string()).default([]),
 });
-export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) => {
+export const scenarioSpecSchema = scenarioSpecBase.transform((scenario) => ({
+  ...scenario,
+  expected: {
+    ...scenario.expected,
+    decision: scenario.expected.decision ?? (scenario.expected.action === 'required' ? 'effect' as const : 'no-op' as const),
+  },
+})).superRefine((scenario, ctx) => {
   const primaryIngressCount = Number(scenario.ingress !== undefined) + Number(scenario.ingressBatch !== undefined);
   const resumeIngressCount = Number(scenario.resumeIngress !== undefined) + Number(scenario.resumeIngressBatch !== undefined);
   if (scenario.track === 'production' && primaryIngressCount !== 1) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ingress'], message: 'production scenarios require exactly one of ingress or ingressBatch' });
@@ -196,15 +202,12 @@ export const scenarioSpecSchema = scenarioSpecBase.superRefine((scenario, ctx) =
     if (task.channel && !scenario.fixture.channels[task.channel]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'scheduler', index, 'channel'], message: `unknown fixture channel ${task.channel}` });
   }
   const sandboxMindKeys = new Set<string>();
-  const sandboxAliases = new Set<string>();
   for (const [index, sandbox] of scenario.fixture.sandboxes.entries()) {
     const mind = scenario.fixture.mind.find((item) => item.key === sandbox.mindKey);
     if (!mind) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `unknown Mind seed key ${sandbox.mindKey}` });
     else if (mind.status === 'done' || mind.status === 'cancelled') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `sandbox Mind seed ${sandbox.mindKey} is closed` });
     if (sandboxMindKeys.has(sandbox.mindKey)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'mindKey'], message: `duplicate sandbox Mind seed ${sandbox.mindKey}` });
-    if (sandboxAliases.has(sandbox.alias)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fixture', 'sandboxes', index, 'alias'], message: `duplicate sandbox alias ${sandbox.alias}` });
     sandboxMindKeys.add(sandbox.mindKey);
-    sandboxAliases.add(sandbox.alias);
   }
 });
 export type ScenarioSpec = z.infer<typeof scenarioSpecSchema>;

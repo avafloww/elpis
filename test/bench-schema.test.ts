@@ -48,6 +48,12 @@ test('production heartbeat ingress is the irreducible live wake', () => {
   assert.equal(ingress.createdAt, '2026-01-01T00:00:00.000Z');
 });
 
+test('heartbeat decisions default compatibly and preserve explicit wait', () => {
+  assert.equal(parseScenario(base).expected.decision, 'no-op');
+  assert.equal(parseScenario({ ...base, expected: { ...base.expected, action: 'required' } }).expected.decision, 'effect');
+  assert.equal(parseScenario({ ...base, expected: { ...base.expected, decision: 'wait' } }).expected.decision, 'wait');
+});
+
 test('production ingress requires a deterministic clock', () => {
   const fixture = { ...base.fixture } as Record<string, unknown>;
   delete fixture.clockAt;
@@ -162,16 +168,12 @@ test('sandbox fixture seeds reject unknown, closed, and duplicate Mind bindings'
     ...base,
     fixture: { ...base.fixture, mind, sandboxes },
   });
-  assert.throws(() => parseScenario(scenario([{ mindKey: 'missing', alias: 'quiet-ready-workspace' }])), /unknown Mind seed key missing/);
-  assert.throws(() => parseScenario(scenario([{ mindKey: 'closed', alias: 'quiet-ready-workspace' }])), /sandbox Mind seed closed is closed/);
+  assert.throws(() => parseScenario(scenario([{ mindKey: 'missing' }])), /unknown Mind seed key missing/);
+  assert.throws(() => parseScenario(scenario([{ mindKey: 'closed' }])), /sandbox Mind seed closed is closed/);
   assert.throws(() => parseScenario(scenario([
-    { mindKey: 'workspace', alias: 'quiet-ready-workspace' },
-    { mindKey: 'workspace', alias: 'other-ready-workspace' },
+    { mindKey: 'workspace' },
+    { mindKey: 'workspace' },
   ])), /duplicate sandbox Mind seed workspace/);
-  assert.throws(() => parseScenario(scenario([
-    { mindKey: 'workspace', alias: 'quiet-ready-workspace' },
-    { mindKey: 'closed', alias: 'quiet-ready-workspace' },
-  ])), /duplicate sandbox alias quiet-ready-workspace/);
 });
 
 test('current production fixture rejects multiple Discord guild slugs rather than collapsing server walls', () => {

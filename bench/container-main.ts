@@ -15,7 +15,7 @@ import { RUN_TOOL } from '../src/llm/llm.js';
 import { SCHEMA_VERSION, type RunRecord, type ScenarioSpec } from './schema.js';
 import { scenarioDigest } from './scenarios.js';
 import { evaluateOutcome, recipientSatisfied, targetChannelSatisfied } from './outcome.js';
-import { runResultTraceData, successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
+import { heartbeatDecisionSatisfied, runResultTraceData, successfulTerminalEnd, traceMetrics, TraceRecorder } from './trace.js';
 import { writeJsonLine, type GatewayResponse } from './gateway.js';
 import { parseEpisodeBootstrap } from './bootstrap.js';
 import { resolveCandidateIngressBatch } from './ingress.js';
@@ -360,7 +360,8 @@ async function main(): Promise<void> {
   const terminal = successfulTerminalEnd(recorder.snapshot());
   const targetId = spec.expected.targetChannel ? spec.fixture.channels[spec.expected.targetChannel] : undefined;
   const outcomeResult = currentOutcome();
-  const outcome = hasOutcome() || outcomeResult.ok;
+  const decision = heartbeatDecisionSatisfied(spec.expected.decision, recorder.snapshot(), sends.length);
+  const outcome = (hasOutcome() || outcomeResult.ok) && decision;
   if (!hasOutcome()) recorder.add({ kind: 'outcome', ok: outcome, detail: spec.expected.outcome, data: { checks: outcomeResult.checks } });
   const beforeQuiet = dispatches + sends.length;
   await new Promise((resolve) => setTimeout(resolve, 300));

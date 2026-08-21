@@ -12,6 +12,27 @@ export function runResultTraceData(raw: unknown, content: string): { ok: boolean
   };
 }
 
+export type HeartbeatDecision = 'effect' | 'wait' | 'no-op';
+
+export function heartbeatDecisionSatisfied(
+  decision: HeartbeatDecision,
+  events: readonly TraceEvent[],
+  sends: number,
+): boolean {
+  const effect = sends > 0 || events.some((event) =>
+    event.kind === 'tool-call' && Boolean(event.code?.trim()) && event.code?.trim() !== 'void 0');
+  if (decision === 'effect') return effect;
+  if (effect) return false;
+  const terminal = [...events].reverse().find((event) => event.kind === 'tool-result');
+  if (!terminal?.ok || !terminal.end) return false;
+  const wake = terminal.data?.wake;
+  if (!wake || typeof wake !== 'object' || Array.isArray(wake)) return false;
+  const kind = (wake as Record<string, unknown>).kind;
+  const state = (wake as Record<string, unknown>).state;
+  if (state !== 'armed' && state !== 'elapsed') return false;
+  return decision === 'wait' ? kind === 'after' || kind === 'at' : kind === 'auto';
+}
+
 export class TraceRecorder {
   private readonly events: TraceEvent[];
   private seq: number;

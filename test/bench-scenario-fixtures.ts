@@ -44,7 +44,7 @@ export function engineTestScenario(options: FixtureOptions = {}): ScenarioSpec {
         ...(options.mind ?? []),
       ],
       scheduler: options.scheduler ?? [],
-      sandboxes: options.sandboxes ?? [{ mindKey: 'workspace', alias: 'quiet-ready-workspace' }],
+      sandboxes: options.sandboxes ?? [{ mindKey: 'workspace' }],
       inputChannel: 'general', heartbeat: false, ...(options.restartAtDispatch ? { restartAtDispatch: options.restartAtDispatch } : {}),
     },
     expected: {
@@ -68,6 +68,28 @@ export const SEEDED_HEARTBEAT_TEST_SCENARIO = engineTestScenario({
   ],
   scheduler: [{ name: 'seeded-future-task', kind: 'custom', channel: 'ops', payload: '[seeded future wake]', nextRunOffsetMs: 60_000, intervalMs: null, nagIntervalMs: null }],
 });
+export const HEARTBEAT_EFFECT_TEST_SCENARIO = engineTestScenario({
+  id: 'proactivity/heartbeat-effect', category: 'proactivity', track: 'production', ingress: { kind: 'heartbeat' },
+  files: { 'repair.txt': 'broken\n' },
+  mind: [{ key: 'ready', title: 'Repair the seeded file', kind: 'task', status: 'open', priority: 3, body: 'repair repair.txt to contain fixed', parentKey: undefined, dependsOn: [], dueOffsetMs: null, tags: ['ready'] }],
+  expected: { outcome: 'ready work is discovered and repaired', decision: 'effect', workPaths: ['repair.txt'], action: 'required', checks: [{ kind: 'file-equals', path: 'repair.txt', content: 'fixed\n' }] },
+});
+
+export const HEARTBEAT_WAIT_TEST_SCENARIO = engineTestScenario({
+  id: 'proactivity/heartbeat-wait', category: 'proactivity', track: 'production', ingress: { kind: 'heartbeat' },
+  files: { 'guard.txt': 'unchanged\n' },
+  mind: [{ key: 'waiting', title: 'Wait for the seeded event', kind: 'task', status: 'waiting', priority: 3, body: 'No action before the scheduled event.', parentKey: undefined, dependsOn: [], dueOffsetMs: null, tags: ['waiting'] }],
+  scheduler: [{ name: 'future-event', kind: 'custom', payload: '[future event]', nextRunOffsetMs: 60_000, intervalMs: null, nagIntervalMs: null }],
+  expected: { outcome: 'blocked state yields until the future event', decision: 'wait', workPaths: [], action: 'optional', checks: [{ kind: 'file-equals', path: 'guard.txt', content: 'unchanged\n' }] },
+});
+
+export const HEARTBEAT_NOOP_TEST_SCENARIO = engineTestScenario({
+  id: 'proactivity/heartbeat-no-op', category: 'proactivity', track: 'production', ingress: { kind: 'heartbeat' },
+  files: { 'guard.txt': 'unchanged\n' },
+  mind: [], scheduler: [],
+  expected: { outcome: 'empty actionable frontier yields quietly', decision: 'no-op', workPaths: [], action: 'optional', checks: [{ kind: 'file-equals', path: 'guard.txt', content: 'unchanged\n' }] },
+});
+
 export const AMBIENT_BATCH_TEST_SCENARIO = engineTestScenario({
   id: 'social/engine-ambient-batch', category: 'social', track: 'production',
   clockAt: '2026-01-02T03:04:05.000Z',

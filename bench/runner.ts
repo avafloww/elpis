@@ -78,8 +78,10 @@ function oracleLLM(scenario: ScenarioSpec): LLM {
     async complete() {
       calls++;
       const code = oracleCode(scenario, calls);
-      const sandbox = scenario.fixture.sandboxes[0]?.alias;
-      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Apply the oracle outcome', ...(sandbox ? { sandbox } : {}), wake: { after: '1h' } }) } }] };
+      const sandboxSeed = scenario.fixture.sandboxes[0];
+      const sandbox = sandboxSeed ? scenario.fixture.mind.find((item) => item.key === sandboxSeed.mindKey)?.title : undefined;
+      const wake = scenario.expected.decision === 'no-op' ? { auto: true } : { after: '1h' };
+      const message = { role: 'assistant' as const, content: '', tool_calls: [{ id: `oracle-${calls}`, type: 'function' as const, function: { name: 'run', arguments: JSON.stringify({ code, detail: 'Apply the oracle outcome', ...(sandbox ? { sandbox } : {}), wake }) } }] };
       stampGeneration(message, { providerType: 'openai-compatible', model: 'elpisbench-oracle', apiSurface: 'responses', apiEndpoint: 'https://oracle.elpisbench.invalid/v1/responses' });
       return { message, stripped: false, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
     },

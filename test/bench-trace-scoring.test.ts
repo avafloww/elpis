@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCHEMA_VERSION, type RunRecord } from '../bench/schema.js';
-import { TraceRecorder, runResultTraceData, traceMetrics, successfulTerminalEnd } from '../bench/trace.js';
+import { TraceRecorder, heartbeatDecisionSatisfied, runResultTraceData, traceMetrics, successfulTerminalEnd } from '../bench/trace.js';
 import { aggregateJudgePanel, buildSuiteSummary, compareSummaries, mechanicalCategoryScore } from '../bench/scoring.js';
 
 test('trace metrics distinguish malformed/failed/blocked/missing-end/duplicates/post-outcome', () => {
@@ -21,6 +21,20 @@ test('run result trace preserves canonical wake receipts', () => {
     data: { blocked: true, wake },
   });
   assert.deepEqual(runResultTraceData(undefined, '[run ok]'), { ok: true, data: { blocked: false } });
+});
+
+test('heartbeat decisions require effect or an exact terminal wake receipt', () => {
+  const result = (kind: 'after' | 'at' | 'auto', state: 'armed' | 'elapsed' | 'rejected' = 'armed') =>
+    [{ schemaVersion: SCHEMA_VERSION, seq: 0, at: 'x', kind: 'tool-result' as const, ok: true, end: true, data: { wake: { kind, state } } }];
+  assert.equal(heartbeatDecisionSatisfied('effect', [{ schemaVersion: SCHEMA_VERSION, seq: 0, at: 'x', kind: 'tool-call', code: 'fs.writeFileSync("x", "y")' }], 0), true);
+  assert.equal(heartbeatDecisionSatisfied('effect', [], 1), true);
+  assert.equal(heartbeatDecisionSatisfied('wait', result('after'), 0), true);
+  assert.equal(heartbeatDecisionSatisfied('wait', result('at', 'elapsed'), 0), true);
+  assert.equal(heartbeatDecisionSatisfied('wait', result('auto'), 0), false);
+  assert.equal(heartbeatDecisionSatisfied('no-op', result('auto'), 0), true);
+  assert.equal(heartbeatDecisionSatisfied('no-op', result('after'), 0), false);
+  assert.equal(heartbeatDecisionSatisfied('no-op', result('auto', 'rejected'), 0), false);
+  assert.equal(heartbeatDecisionSatisfied('no-op', [...result('auto'), { schemaVersion: SCHEMA_VERSION, seq: 1, at: 'x', kind: 'tool-call', code: 'touch("x")' }], 0), false);
 });
 
 function record(gates=true): RunRecord { return {schemaVersion:SCHEMA_VERSION,runId:'r',scenarioId:'tool/x',scenarioDigest:'d',startedAt:'x',finishedAt:'y',harnessCommit:'h',containerImage:'i',providerType:'openai-compatible',model:'m',events:[],metrics:{naturalTurns:1,dispatchCount:1,usefulActionLatency:1,malformedCalls:0,failedCalls:0,blockedCalls:0,unchangedRetries:0,missingTerminalFlags:0,failedTerminalFlags:0,emptyTerminalCalls:0,postOutcomeDispatches:0,duplicateWork:0,sendsPerRun:1,surplusModelTurns:0},gates:{outcome:gates,targeting:true,containment:true,terminalEnd:true,bounded:true,quiescent:true},artifacts:{},timedOut:false}; }
