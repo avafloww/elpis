@@ -127,7 +127,7 @@ test("migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test("migration through v16 creates shared Mind identity, migration ledger, cold notices, and retirement deadlines", () => {
+test("migration through v17 creates shared Mind identity, fleet actor sessions, migration ledger, cold notices, and retirement deadlines", () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (
@@ -163,7 +163,7 @@ test("migration through v16 creates shared Mind identity, migration ledger, cold
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    16,
+    17,
   );
   assert.deepEqual(
     (
@@ -177,6 +177,7 @@ test("migration through v16 creates shared Mind identity, migration ledger, cold
       { component: "core", name: "0013-legacy-through-v13" },
       { component: "core", name: "0015-sandbox-retirement-deadline" },
       { component: "core", name: "0016-mind-elm-identities" },
+      { component: "core", name: "0017-fleet-actor-sessions" },
     ],
   );
   db.close();
@@ -237,7 +238,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    16,
+    17,
   );
   assert.deepEqual(
     (
@@ -251,6 +252,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
       "0013-legacy-through-v13",
       "0015-sandbox-retirement-deadline",
       "0016-mind-elm-identities",
+      "0017-fleet-actor-sessions",
     ],
   );
   runMigrations(db);
@@ -282,7 +284,60 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
         )
         .get() as { n: number }
     ).n,
-    3,
+    4,
   );
   db.close();
+});
+
+test("migration v16→v17 preserves legacy fleet sessions and marks their runtime honestly", () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.prepare(
+    `INSERT INTO fleet_sessions (
+    id, name, cwd, status, model, effort, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("fleet-legacy", "legacy", "/tmp", "idle", "opus", "high", 1, 1);
+  db.close();
+
+  const reopened = openDatabase(dir);
+  const row = reopened
+    .prepare(
+      "SELECT model, model_ref, mind_id, runtime, control_token_digest FROM fleet_sessions WHERE id = ?",
+    )
+    .get("fleet-legacy") as {
+    model: string;
+    model_ref: string | null;
+    mind_id: string | null;
+    runtime: string;
+    control_token_digest: string | null;
+  };
+  assert.deepEqual(
+    { ...row },
+    {
+      model: "opus",
+      model_ref: null,
+      mind_id: null,
+      runtime: "claude-sdk",
+      control_token_digest: null,
+    },
+  );
+  const version = (
+    reopened.prepare("PRAGMA user_version").get() as { user_version: number }
+  ).user_version;
+  assert.equal(version, 17);
+  assert.throws(
+    () =>
+      reopened
+        .prepare("UPDATE fleet_sessions SET mind_id = ? WHERE id = ?")
+        .run("elm-missing0", "fleet-legacy"),
+    /FOREIGN KEY constraint failed/,
+  );
+  assert.throws(
+    () =>
+      reopened
+        .prepare("UPDATE fleet_sessions SET runtime = ? WHERE id = ?")
+        .run("host", "fleet-legacy"),
+    /CHECK constraint failed/,
+  );
+  reopened.close();
 });

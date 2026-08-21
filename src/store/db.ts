@@ -24,7 +24,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -388,6 +388,19 @@ export function runMigrations(db: DatabaseSync): void {
       name: "0016-mind-elm-identities",
       checksum: MIND_ID_MIGRATION_CHECKSUM,
       up: migrateMindIds,
+    },
+    {
+      name: "0017-fleet-actor-sessions",
+      sql: `
+        ALTER TABLE fleet_sessions ADD COLUMN model_ref TEXT;
+        ALTER TABLE fleet_sessions ADD COLUMN mind_id TEXT REFERENCES mind_items(id);
+        ALTER TABLE fleet_sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude-sdk'
+          CHECK (runtime IN ('claude-sdk', 'trusted', 'kubernetes'));
+        ALTER TABLE fleet_sessions ADD COLUMN control_token_digest TEXT;
+        CREATE INDEX fleet_sessions_mind_idx ON fleet_sessions(mind_id, created_at);
+        CREATE UNIQUE INDEX fleet_sessions_control_token_idx
+          ON fleet_sessions(control_token_digest) WHERE control_token_digest IS NOT NULL;
+      `,
     },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
