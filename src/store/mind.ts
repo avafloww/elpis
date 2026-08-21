@@ -640,6 +640,24 @@ export class MindStore {
   }
 
   resolve(ref: unknown): MindId {
+    const legacyId =
+      typeof ref === "number" && Number.isSafeInteger(ref)
+        ? ref
+        : typeof ref === "string" && /^#?\d+$/.test(ref.trim())
+          ? Number(ref.trim().replace(/^#/, ""))
+          : null;
+    if (legacyId !== null) {
+      const migrated = this.db
+        .prepare(
+          "SELECT mind_id FROM mind_id_migration_map WHERE legacy_id = ?",
+        )
+        .get(legacyId) as { mind_id: MindId } | undefined;
+      if (migrated) {
+        throw new Error(
+          `mind: legacy item ${JSON.stringify(ref)} migrated to ${migrated.mind_id}; use that canonical elm-* id instead`,
+        );
+      }
+    }
     const rows = this.db
       .prepare("SELECT id, title FROM mind_items ORDER BY id")
       .all() as { id: MindId; title: string }[];

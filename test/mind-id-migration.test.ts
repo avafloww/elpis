@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { migrateMindIds } from "../src/store/mind-id-migration.js";
 import type { MindId } from "../src/store/mind-id.js";
+import { MindStore } from "../src/store/mind.js";
 
 const ids = ["elm-00000001", "elm-00000002"] as MindId[];
 
@@ -85,5 +86,15 @@ test("v15 Mind relations and sandbox state migrate to shared elm identities", ()
     0,
   );
   assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+  const mind = new MindStore(db);
+  assert.throws(
+    () => mind.resolve(1),
+    /legacy item 1 migrated to elm-00000001; use that canonical elm-\* id instead/,
+  );
+  assert.throws(
+    () => mind.resolve("#2"),
+    /legacy item "#2" migrated to elm-00000002; use that canonical elm-\* id instead/,
+  );
+  assert.equal(mind.resolve(ids[0]), ids[0]);
   db.close();
 });
