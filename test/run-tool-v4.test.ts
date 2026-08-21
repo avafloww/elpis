@@ -191,7 +191,7 @@ test('a due durable run wake fires through Scheduler and starts a new outer turn
     const first = h.scheduler.list().find((task) => task.name.startsWith(RUN_WAKE_TASK_PREFIX) && parseRunWakePayload(task.payload)?.requestedAt === h.agent.messagesForTest.find((message) => message.tool_call_id === 'first')?.run?.wake?.requestedAt);
     assert.ok(first?.doneAt);
     assert.equal(parseRunWakePayload(first!.payload)?.state, 'fired');
-    assert.ok(h.agent.messagesForTest.some((message) => message.role === 'user' && String(message.content).includes('[run wake]')));
+    assert.ok(h.agent.messagesForTest.some((message) => message.role === 'user' && /\[wake @ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{2}:\d{2}\]/.test(String(message.content))));
   } finally {
     h.agent.stop();
     h.scheduler.stop();
@@ -256,5 +256,40 @@ test('auto wake consults the bounded advisor and persists its visible provenance
   assert.match(String(tool?.content), /advice=classifier:2m:active-work/);
   const task = h.scheduler.list().find((candidate) => candidate.id === tool?.run?.wake?.taskId);
   assert.deepEqual(task && parseRunWakePayload(task.payload)?.advice, { delayMs: 120_000, reason: 'active-work', source: 'classifier' });
+  h.cleanup();
+});
+
+test('zero-delay auto advice arms and fires an immediate continuation turn', async () => {
+  const llm = scripted([
+    runResponse({ code: 'continue', wake: { auto: true } }, 'auto-zero'),
+    {
+      message: { role: 'assistant', content: 'continued immediately' },
+      stripped: false,
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+  ]);
+  const h = buildTestAgent({
+    llm,
+    tmpPrefix: 'run-v4-auto-zero-',
+    agentDeps: {
+      sandbox: {
+        run: async ({ code }) => success(code),
+        adviseWake: async () => ({ delayMs: 0, reason: 'active-work', source: 'classifier' as const }),
+      },
+    },
+  });
+  void h.agent.loop();
+  h.scheduler.start();
+  h.agent.enqueue(inbound());
+  await settle(200);
+  h.agent.stop();
+  h.scheduler.stop();
+  const tool = h.agent.messagesForTest.find((message) => message.tool_call_id === 'auto-zero');
+  assert.equal(tool?.run?.wake?.advice?.delayMs, 0);
+  assert.equal(tool?.run?.wake?.state, 'fired');
+  assert.ok(llm.calls >= 2, 'immediate wake starts the next model turn');
+  const task = h.scheduler.list().find((candidate) => candidate.id === tool?.run?.wake?.taskId);
+  assert.equal(task && parseRunWakePayload(task.payload)?.state, 'fired');
+  assert.ok(task?.doneAt);
   h.cleanup();
 });

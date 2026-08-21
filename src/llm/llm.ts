@@ -522,7 +522,7 @@ export const RUN_TOOL: RunTool = {
               type: "boolean",
               enum: [true],
               description:
-                "Ask the fresh classifier-role wake advisor to choose 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live state.",
+                "Ask the fresh classifier-role wake advisor to choose 0, 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live state; 0 means continue immediately, never no future wake.",
             },
           },
           oneOf: [

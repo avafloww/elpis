@@ -34,7 +34,7 @@ function completion(content: string) {
 test("wake advisor exposes exactly the approved autonomy cadence buckets", () => {
   assert.deepEqual(
     WAKE_ADVISOR_BUCKETS_MS,
-    [1, 2, 5, 10, 15, 30, 45, 60].map((minutes) => minutes * 60_000),
+    [0, 1, 2, 5, 10, 15, 30, 45, 60].map((minutes) => minutes * 60_000),
   );
   assert.equal(WAKE_ADVISOR_TIMEOUT_MS, 30_000);
 });
@@ -528,6 +528,35 @@ test("wake advisor sends bounded historical tool context with authoritative curr
   assert.deepEqual(captured.slice(1, -1), history);
   assert.match(prompt, /"runningBg":1/);
   assert.match(captured[0].content, /current structured state.*outranks/i);
+});
+
+test("wake advisor accepts zero only as immediate continuation", async () => {
+  let system = "";
+  const result = await adviseWake(
+    {
+      completeStandalone: async (messages: any[]) => {
+        system = messages[0].content;
+        return completion('{"minutes":0,"reason":"active-work"}');
+      },
+    },
+    {
+      ...quiet,
+      ranCode: true,
+      continuedMindId: "elm-a2b3k7q9",
+      inProgress: [{ id: "elm-a2b3k7q9", title: "continue now" }],
+    },
+    logger,
+    100,
+    [{ role: "assistant", content: "I am continuing immediately." }],
+  );
+  assert.deepEqual(result, {
+    delayMs: 0,
+    reason: "active-work",
+    source: "classifier",
+  });
+  assert.match(system, /Zero means continue immediately/);
+  assert.match(system, /stop, rest, exit the loop, or wait/);
+  assert.match(system, /never means no future wake/);
 });
 
 test("wake advisor failure and nonconforming output fall back deterministically without failing yield", async () => {

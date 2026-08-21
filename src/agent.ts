@@ -974,8 +974,16 @@ export class Agent {
     this.deps.scheduler?.update(task.id, { payload: encodeRunWakePayload(payload) });
     if (this.pendingRunWake?.metadata) this.pendingRunWake.metadata.state = 'fired';
     this.pendingRunWake = null;
-    this.enqueueInternal('harness', 'run-wake', '[run wake] Your requested one-shot wake is due. Continue from the work you deliberately yielded.', {
-      id: `run-wake-${task.id}-${Date.now()}`, author: 'harness',
+    const firedAt = Date.now();
+    const fired = new Date(firedAt);
+    const offsetMinutes = -fired.getTimezoneOffset();
+    const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+    const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0');
+    const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, '0');
+    const local = new Date(firedAt + offsetMinutes * 60_000).toISOString().slice(0, 16);
+    const stamp = `${local}${offsetSign}${offsetHours}:${offsetRemainder}`;
+    this.enqueueInternal('harness', 'run-wake', `[wake @ ${stamp}]`, {
+      id: `run-wake-${task.id}-${firedAt}`, author: 'harness',
     });
     return true;
   }
