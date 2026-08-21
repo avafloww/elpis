@@ -4,6 +4,12 @@ import {
   ActorCompletionError,
   type ActorCompletionReply,
 } from "./actor-completion.js";
+import { ActorMailboxError } from "./actor-mailbox.js";
+import {
+  ActorMailboxRequestError,
+  dispatchActorMailboxRequest,
+  type ActorMailboxService,
+} from "./actor-mailbox-request.js";
 import { ActorMindError } from "./actor-mind.js";
 import {
   ActorMindRequestError,
@@ -24,6 +30,7 @@ export interface ActorCompletionService {
 export interface ActorCompletionHttpOptions {
   broker: ActorCompletionService;
   mind?: ActorMindService;
+  mailbox?: ActorMailboxService;
   host: string;
   port: number;
   logger: Logger;
@@ -100,6 +107,19 @@ function statusForMind(error: ActorMindError): number {
   }
 }
 
+function statusForMailbox(error: ActorMailboxError): number {
+  switch (error.code) {
+    case "unauthorized":
+      return 401;
+    case "invalid_request":
+      return 400;
+    case "not_found":
+      return 404;
+    case "conflict":
+      return 409;
+  }
+}
+
 function bearer(req: http.IncomingMessage): string | null {
   const value = req.headers.authorization;
   if (typeof value !== "string") return null;
@@ -113,11 +133,15 @@ export function createActorCompletionHttpServer(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   return http.createServer(async (req, res) => {
     const mindRequest = req.url === "/v1/mind";
-    if (req.url !== "/v1/complete" && !mindRequest) {
+    const mailboxRequest = req.url === "/v1/mailbox";
+    if (req.url !== "/v1/complete" && !mindRequest && !mailboxRequest) {
       json(res, 404, { error: "not found" });
       return;
     }
-    if (mindRequest && !options.mind) {
+    if (
+      (mindRequest && !options.mind) ||
+      (mailboxRequest && !options.mailbox)
+    ) {
       json(res, 404, { error: "not found" });
       return;
     }
@@ -145,6 +169,14 @@ export function createActorCompletionHttpServer(
         json(res, 200, dispatchActorMindRequest(options.mind!, token, input));
         return;
       }
+      if (mailboxRequest) {
+        json(
+          res,
+          200,
+          dispatchActorMailboxRequest(options.mailbox!, token, input),
+        );
+        return;
+      }
       if (input.protocol !== 1)
         throw new HttpInputError(400, "protocol must equal 1");
       const unknown = Object.keys(input).filter(
@@ -165,26 +197,35 @@ export function createActorCompletionHttpServer(
       if (res.writableEnded || res.destroyed) return;
       if (error instanceof HttpInputError) {
         json(res, error.status, { error: error.message });
-      } else if (error instanceof ActorMindRequestError) {
+      } else if (
+        error instanceof ActorMindRequestError ||
+        error instanceof ActorMailboxRequestError
+      ) {
         json(res, 400, { error: error.message, code: "invalid_request" });
       } else if (error instanceof ActorMindError) {
         json(res, statusForMind(error), {
           error: error.message,
           code: error.code,
         });
+      } else if (error instanceof ActorMailboxError) {
+        json(res, statusForMailbox(error), {
+          error: error.message,
+          code: error.code,
+        });
       } else if (error instanceof ActorCompletionError) {
         json(res, statusFor(error), { error: error.message, code: error.code });
       } else {
-        options.logger.error(
-          mindRequest
-            ? "actor Mind request failed"
-            : "actor completion request failed",
-          error,
-        );
+        const operation = mindRequest
+          ? "Mind"
+          : mailboxRequest
+            ? "mailbox"
+            : "completion";
+        options.logger.error(`actor ${operation} request failed`, error);
         json(res, 502, {
-          error: mindRequest
-            ? "actor Mind request failed"
-            : "actor completion failed",
+          error:
+            mindRequest || mailboxRequest
+              ? `actor ${operation} request failed`
+              : "actor completion failed",
         });
       }
     }

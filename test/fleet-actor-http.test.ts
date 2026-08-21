@@ -6,6 +6,8 @@ import {
   listenActorCompletionHttpServer,
 } from "../src/fleet/actor-http.js";
 import { ActorCompletionError } from "../src/fleet/actor-completion.js";
+import { ActorMailboxError } from "../src/fleet/actor-mailbox.js";
+import type { ActorMailboxService } from "../src/fleet/actor-mailbox-request.js";
 import { ActorMindError } from "../src/fleet/actor-mind.js";
 import type { ActorMindService } from "../src/fleet/actor-mind-request.js";
 import { noopLogger } from "../src/lib/log.js";
@@ -18,10 +20,12 @@ async function fixture(
   >[0]["broker"]["complete"],
   maxBodyBytes?: number,
   mind?: ActorMindService,
+  mailbox?: ActorMailboxService,
 ) {
   const server = createActorCompletionHttpServer({
     broker: { complete },
     mind,
+    mailbox,
     host: "127.0.0.1",
     port: 0,
     logger: noopLogger,
@@ -33,6 +37,7 @@ async function fixture(
     server,
     url: `http://127.0.0.1:${port}/v1/complete`,
     mindUrl: `http://127.0.0.1:${port}/v1/mind`,
+    mailboxUrl: `http://127.0.0.1:${port}/v1/mailbox`,
   };
 }
 
@@ -329,6 +334,192 @@ test("HTTP Mind route is opt-in and maps authentication and scope failures", asy
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), {
     error: "actor Mind request failed",
+  });
+  await close(failed.server);
+});
+
+test("HTTP mailbox transport exposes only token-bound pull, ack, and post", async () => {
+  const calls: unknown[] = [];
+  const message = {
+    id: 7,
+    sessionId: "f-1",
+    direction: "actor_to_dispatcher" as const,
+    kind: "message" as const,
+    messageKey: "progress-1",
+    sender: "fleet:otter",
+    body: "working",
+    createdAt: 1,
+    acknowledgedAt: null,
+  };
+  const mailbox: ActorMailboxService = {
+    pullForActor(token, limit) {
+      calls.push({ method: "pull", token, limit });
+      return {
+        binding: {
+          sessionId: "f-1",
+          actor: "fleet:otter",
+          modelRef: "p/actor",
+          mindId: "elm-a2b3k7q9",
+          runtime: "kubernetes",
+        },
+        messages: [],
+      };
+    },
+    acknowledgeForActor(token, ids) {
+      calls.push({ method: "ack", token, ids });
+      return ids.length;
+    },
+    postFromActor(token, messageKey, kind, body) {
+      calls.push({ method: "post", token, messageKey, kind, body });
+      return { ...message, messageKey, kind, body };
+    },
+  };
+  const f = await fixture(
+    async () => {
+      throw new Error("unused");
+    },
+    undefined,
+    undefined,
+    mailbox,
+  );
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+  let response = await fetch(f.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "pull", limit: 5 }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).binding.actor, "fleet:otter");
+  response = await fetch(f.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      protocol: 1,
+      operation: "post",
+      messageKey: "progress-1",
+      kind: "message",
+      body: "working",
+    }),
+  });
+  assert.equal(response.status, 200);
+  response = await fetch(f.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "ack", ids: [3, 4] }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).acknowledged, 2);
+  assert.deepEqual(calls, [
+    { method: "pull", token: TOKEN, limit: 5 },
+    {
+      method: "post",
+      token: TOKEN,
+      messageKey: "progress-1",
+      kind: "message",
+      body: "working",
+    },
+    { method: "ack", token: TOKEN, ids: [3, 4] },
+  ]);
+
+  response = await fetch(f.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      protocol: 1,
+      operation: "post",
+      messageKey: "x",
+      kind: "message",
+      body: "x",
+      sender: "fleet:spoof",
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(calls.length, 3);
+  await close(f.server);
+});
+
+test("HTTP mailbox route is opt-in and redacts failures", async () => {
+  const disabled = await fixture(async () => {
+    throw new Error("unused");
+  });
+  assert.equal(
+    (await fetch(disabled.mailboxUrl, { method: "POST" })).status,
+    404,
+  );
+  await close(disabled.server);
+
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+  const conflict = await fixture(
+    async () => {
+      throw new Error("unused");
+    },
+    undefined,
+    undefined,
+    {
+      pullForActor() {
+        throw new Error("unused");
+      },
+      acknowledgeForActor() {
+        throw new Error("unused");
+      },
+      postFromActor() {
+        throw new ActorMailboxError(
+          "conflict",
+          "actor session already has a finish message",
+        );
+      },
+    },
+  );
+  let response = await fetch(conflict.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      protocol: 1,
+      operation: "post",
+      messageKey: "finish-2",
+      kind: "finish",
+      body: "again",
+    }),
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "actor session already has a finish message",
+    code: "conflict",
+  });
+  await close(conflict.server);
+
+  const failed = await fixture(
+    async () => {
+      throw new Error("unused");
+    },
+    undefined,
+    undefined,
+    {
+      pullForActor() {
+        throw new Error("database secret detail");
+      },
+      acknowledgeForActor() {
+        throw new Error("unused");
+      },
+      postFromActor() {
+        throw new Error("unused");
+      },
+    },
+  );
+  response = await fetch(failed.mailboxUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "pull" }),
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), {
+    error: "actor mailbox request failed",
   });
   await close(failed.server);
 });

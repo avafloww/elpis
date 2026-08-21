@@ -24,7 +24,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -400,6 +400,30 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE INDEX fleet_sessions_mind_idx ON fleet_sessions(mind_id, created_at);
         CREATE UNIQUE INDEX fleet_sessions_control_token_idx
           ON fleet_sessions(control_token_digest) WHERE control_token_digest IS NOT NULL;
+      `,
+    },
+    {
+      name: "0018-fleet-actor-mailbox",
+      sql: `
+        CREATE TABLE fleet_mailbox_messages (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id      TEXT NOT NULL REFERENCES fleet_sessions(id) ON DELETE CASCADE,
+          direction       TEXT NOT NULL CHECK (direction IN ('dispatcher_to_actor', 'actor_to_dispatcher')),
+          kind            TEXT NOT NULL CHECK (kind IN ('message', 'finish')),
+          message_key     TEXT NOT NULL CHECK (length(message_key) BETWEEN 1 AND 80),
+          sender          TEXT NOT NULL CHECK (length(sender) BETWEEN 1 AND 80),
+          body            TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 100000),
+          created_at      INTEGER NOT NULL,
+          acknowledged_at INTEGER,
+          CHECK (direction = 'actor_to_dispatcher' OR kind = 'message'),
+          UNIQUE (session_id, direction, message_key)
+        );
+        CREATE INDEX fleet_mailbox_pending_idx
+          ON fleet_mailbox_messages(session_id, direction, id)
+          WHERE acknowledged_at IS NULL;
+        CREATE UNIQUE INDEX fleet_mailbox_actor_finish_idx
+          ON fleet_mailbox_messages(session_id)
+          WHERE direction = 'actor_to_dispatcher' AND kind = 'finish';
       `,
     },
   ]);
