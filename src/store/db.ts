@@ -8,9 +8,13 @@
 // pragma_table_info checks before ALTER TABLE ADD COLUMN) — there is no
 // version-gated early return. See docs/persistence.md.
 
-import { DatabaseSync } from 'node:sqlite';
-import * as path from 'node:path';
-import { runComponentMigrations } from './migrations.js';
+import { DatabaseSync } from "node:sqlite";
+import * as path from "node:path";
+import { runComponentMigrations } from "./migrations.js";
+import {
+  migrateMindIds,
+  MIND_ID_MIGRATION_CHECKSUM,
+} from "./mind-id-migration.js";
 
 export type Database = DatabaseSync;
 
@@ -20,11 +24,11 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
- // v0 -> 
+  // v0 ->
   db.exec(`
     CREATE TABLE IF NOT EXISTS channels (
       id         TEXT PRIMARY KEY,
@@ -55,7 +59,7 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // -> v2 (scheduled_tasks baseline)
+  // -> v2 (scheduled_tasks baseline)
   db.exec(`
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,19 +75,25 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // v2 -> v3 (nagging columns)
-  const columns = (db.prepare(`SELECT name FROM pragma_table_info('scheduled_tasks')`).all() as { name: string }[]).map((r) => r.name);
-  if (!columns.includes('nag_interval_ms')) {
-    db.exec('ALTER TABLE scheduled_tasks ADD COLUMN nag_interval_ms INTEGER');
+  // v2 -> v3 (nagging columns)
+  const columns = (
+    db
+      .prepare(`SELECT name FROM pragma_table_info('scheduled_tasks')`)
+      .all() as { name: string }[]
+  ).map((r) => r.name);
+  if (!columns.includes("nag_interval_ms")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN nag_interval_ms INTEGER");
   }
-  if (!columns.includes('parent_id')) {
-    db.exec('ALTER TABLE scheduled_tasks ADD COLUMN parent_id INTEGER');
+  if (!columns.includes("parent_id")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN parent_id INTEGER");
   }
-  if (!columns.includes('nag_count')) {
-    db.exec('ALTER TABLE scheduled_tasks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0');
+  if (!columns.includes("nag_count")) {
+    db.exec(
+      "ALTER TABLE scheduled_tasks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0",
+    );
   }
 
- // v3 -> v4 (fleet: coding-agent sessions + their worktrees)
+  // v3 -> v4 (fleet: coding-agent sessions + their worktrees)
   db.exec(`
     CREATE TABLE IF NOT EXISTS fleet_sessions (
       id                TEXT PRIMARY KEY,
@@ -115,10 +125,14 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // v4 -> v5 (multi-server: channel guild provenance + the killswitch)
-  const chanCols = (db.prepare(`SELECT name FROM pragma_table_info('channels')`).all() as { name: string }[]).map((r) => r.name);
-  if (!chanCols.includes('guild_id')) {
-    db.exec('ALTER TABLE channels ADD COLUMN guild_id TEXT');
+  // v4 -> v5 (multi-server: channel guild provenance + the killswitch)
+  const chanCols = (
+    db.prepare(`SELECT name FROM pragma_table_info('channels')`).all() as {
+      name: string;
+    }[]
+  ).map((r) => r.name);
+  if (!chanCols.includes("guild_id")) {
+    db.exec("ALTER TABLE channels ADD COLUMN guild_id TEXT");
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS channel_mutes (
@@ -130,17 +144,17 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // v5 -> v6 (multi-server: a thread's parent channel id). A thread carries its
- // own Discord channel id and never gets a killswitch row of its own, so
- // Agent.send needs the recorded parent to make a mute on #general hold
- // inside the threads under it — the same inheritance ingest already applies
- // via resolvePolicyChannelId. NULL for a normal (non-thread) channel.
-  if (!chanCols.includes('parent_id')) {
-    db.exec('ALTER TABLE channels ADD COLUMN parent_id TEXT');
+  // v5 -> v6 (multi-server: a thread's parent channel id). A thread carries its
+  // own Discord channel id and never gets a killswitch row of its own, so
+  // Agent.send needs the recorded parent to make a mute on #general hold
+  // inside the threads under it — the same inheritance ingest already applies
+  // via resolvePolicyChannelId. NULL for a normal (non-thread) channel.
+  if (!chanCols.includes("parent_id")) {
+    db.exec("ALTER TABLE channels ADD COLUMN parent_id TEXT");
   }
 
- // v6 -> v7 (calibrated token density: per-model chars-per-token ratio, learned
- // from observed usage.prompt_tokens; see src/llm/density.ts + docs/persistence.md).
+  // v6 -> v7 (calibrated token density: per-model chars-per-token ratio, learned
+  // from observed usage.prompt_tokens; see src/llm/density.ts + docs/persistence.md).
   db.exec(`
     CREATE TABLE IF NOT EXISTS token_density (
       model      TEXT PRIMARY KEY,
@@ -150,10 +164,10 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // v8: generic subscription-OAuth credential store, one row per provider
- // ('anthropic' today; 'openai-codex' etc. later). Keyed by provider so a
- // single table serves every provider_type that authenticates by OAuth.
- // Secrets live here rather than on disk (src/llm/oauth/store.ts).
+  // v8: generic subscription-OAuth credential store, one row per provider
+  // ('anthropic' today; 'openai-codex' etc. later). Keyed by provider so a
+  // single table serves every provider_type that authenticates by OAuth.
+  // Secrets live here rather than on disk (src/llm/oauth/store.ts).
   db.exec(`
     CREATE TABLE IF NOT EXISTS oauth_credentials (
       provider      TEXT PRIMARY KEY,
@@ -169,9 +183,9 @@ export function runMigrations(db: DatabaseSync): void {
     );
   `);
 
- // v9: elpis.mind — durable external cortex. Items carry hierarchy and state;
- // dependency edges derive readiness; comments/events preserve the lived work;
- // reminders point into the existing scheduler rather than duplicating clocks.
+  // v9: elpis.mind — durable external cortex. Items carry hierarchy and state;
+  // dependency edges derive readiness; comments/events preserve the lived work;
+  // reminders point into the existing scheduler rather than duplicating clocks.
   db.exec(`
     CREATE TABLE IF NOT EXISTS mind_items (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -244,8 +258,8 @@ export function runMigrations(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS mind_reminders_item_idx ON mind_reminders(item_id, fire_at);
   `);
 
- // v10: atomic external-worker claims. The lease principal is session-specific;
- // owner is the human-readable MCP client actor preserved in the audit trail.
+  // v10: atomic external-worker claims. The lease principal is session-specific;
+  // owner is the human-readable MCP client actor preserved in the audit trail.
   db.exec(`
     CREATE TABLE IF NOT EXISTS mind_claims (
       item_id     INTEGER PRIMARY KEY REFERENCES mind_items(id) ON DELETE CASCADE,
@@ -259,13 +273,21 @@ export function runMigrations(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS mind_claims_expires_idx ON mind_claims(expires_at);
   `);
 
- // v11: comments can be explicit replies, allowing waitable task-bound MCP
- // correspondence without treating an unrelated later comment as the answer.
-  const mindCommentColumns = (db.prepare(`SELECT name FROM pragma_table_info('mind_comments')`).all() as { name: string }[]).map((r) => r.name);
-  if (!mindCommentColumns.includes('reply_to_id')) {
-    db.exec('ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL');
+  // v11: comments can be explicit replies, allowing waitable task-bound MCP
+  // correspondence without treating an unrelated later comment as the answer.
+  const mindCommentColumns = (
+    db.prepare(`SELECT name FROM pragma_table_info('mind_comments')`).all() as {
+      name: string;
+    }[]
+  ).map((r) => r.name);
+  if (!mindCommentColumns.includes("reply_to_id")) {
+    db.exec(
+      "ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL",
+    );
   }
-  db.exec('CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)');
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)",
+  );
 
   // v12: persistent run-v3 sandboxes. Registrations and alias reservations are
   // durable identity records, not disposable executor state.
@@ -333,20 +355,26 @@ export function runMigrations(db: DatabaseSync): void {
   // v13: process-cold generation notices survive until the next selected run.
   // Existing v12 databases gain the column idempotently; fresh databases already
   // have it in the CREATE TABLE above.
-  const sandboxColumns = (db.prepare(`SELECT name FROM pragma_table_info('persistent_sandboxes')`).all() as { name: string }[]).map((r) => r.name);
-  if (!sandboxColumns.includes('cold_notice_pending')) {
-    db.exec('ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))');
+  const sandboxColumns = (
+    db
+      .prepare(`SELECT name FROM pragma_table_info('persistent_sandboxes')`)
+      .all() as { name: string }[]
+  ).map((r) => r.name);
+  if (!sandboxColumns.includes("cold_notice_pending")) {
+    db.exec(
+      "ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))",
+    );
   }
 
   // This receipt says only that the idempotent legacy blocks above completed;
   // it does not invent checksummed history for schema versions 1 through 13.
-  runComponentMigrations(db, 'core', [
+  runComponentMigrations(db, "core", [
     {
-      name: '0013-legacy-through-v13',
-      sql: 'SELECT 1;',
+      name: "0013-legacy-through-v13",
+      sql: "SELECT 1;",
     },
     {
-      name: '0015-sandbox-retirement-deadline',
+      name: "0015-sandbox-retirement-deadline",
       sql: `
         ALTER TABLE persistent_sandboxes ADD COLUMN retire_requested_at INTEGER;
         UPDATE persistent_sandboxes
@@ -355,6 +383,11 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE INDEX persistent_sandboxes_retirement_idx
         ON persistent_sandboxes(retire_requested, retire_requested_at, lifecycle);
       `,
+    },
+    {
+      name: "0016-mind-elm-identities",
+      checksum: MIND_ID_MIGRATION_CHECKSUM,
+      up: migrateMindIds,
     },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -365,10 +398,10 @@ export function runMigrations(db: DatabaseSync): void {
  * SQLITE_BUSY — the offline scripts/feedback.ts reconcile may write
  * message_index while the live harness inserts a feedback row. */
 export function openDatabase(dataDirectory: string): DatabaseSync {
-  const db = new DatabaseSync(path.join(dataDirectory, 'elpis.db'));
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('PRAGMA busy_timeout = 5000');
+  const db = new DatabaseSync(path.join(dataDirectory, "elpis.db"));
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
   runMigrations(db);
   return db;
 }
