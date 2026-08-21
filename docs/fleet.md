@@ -52,6 +52,14 @@ Runner events are appended to `events.jsonl` and streamed over a local socket. R
 
 Registry and worktree metadata live in `elpis-data/elpis.db`; session files live under `elpis-data/fleet/`.
 
+## Scoped actor server
+
+Scoped actors are a separate native path from the legacy Claude Agent SDK runners. `fleet.actor_server.enabled` is false by default; its default bind is `127.0.0.1:8790`. A non-loopback bind requires an explicit host firewall or NetworkPolicy.
+
+One random control token resolves a server-owned session, actor slug, canonical `model_ref`, and linked Mind root. The actor HTTP surface provides bounded completion, linked-root/descendant Mind operations, and a durable two-way mailbox. Callers cannot submit a route, model, session, actor, mailbox direction, or different Mind root. The database stores only the token digest.
+
+The mailbox is retry-safe and receiver-acknowledged. An actor can pull dispatcher messages, acknowledge them, post progress, and post one terminal finish. Dispatcher-side send/read/ack operations are internal only.
+
 ## Delegation boundary
 
 Fleet is appropriate for searches, mechanical edits, test runs, and bounded implementation. The main inhabitant remains responsible for task framing, consequential decisions, review, and what is ultimately committed or said.

@@ -219,8 +219,18 @@ fleet:
   # error, and the system prompt tells the agent to do the work itself.
   # enabled: true
 
-  # Max concurrently-running fleet agents (Claude Agent SDK subprocesses).
+  # Per-path cap: legacy runners and simultaneous scoped-actor completions each
+  # enforce this bound independently.
   max_concurrent: 4
+
+  # Native scoped-actor broker. OFF by default and loopback-only by default.
+  # It exposes token-bound completion, Mind-subtree, and mailbox routes; callers
+  # cannot choose their session, model, Mind root, actor identity, or direction.
+  # Bind beyond loopback only behind an explicit host firewall/NetworkPolicy.
+  actor_server:
+    enabled: false
+    host: 127.0.0.1
+    port: 8790
 
   # --- endpoint (all optional) ------------------------------------------------
   # Every key below is a pure OVERRIDE: leave it unset and the harness passes the

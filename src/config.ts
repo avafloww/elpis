@@ -181,8 +181,14 @@ export interface Config {
      * the system prompt swaps the elpis.fleet section for a "not available —
      * do the work yourself" note. ON by default (opt-out). */
     enabled: boolean;
-    /** Max concurrently-running fleet agents. */
+    /** Independent cap for legacy runners and simultaneous actor completions. */
     maxConcurrent: number;
+    /** Native scoped-actor HTTP broker. Explicit opt-in; loopback by default. */
+    actorServer: {
+      enabled: boolean;
+      host: string;
+      port: number;
+    };
     /** Default Claude Agent SDK model for a spawned agent. null = don't send
      * `options.model` at all — the SDK picks its own default. */
     defaultModel: string | null;
@@ -1451,6 +1457,18 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     fleet: {
       enabled: boolOr(tree, "fleet.enabled", true, f),
       maxConcurrent: numOr(tree, "fleet.max_concurrent", 4, f),
+      actorServer: (() => {
+        const port = numOr(tree, "fleet.actor_server.port", 8790, f);
+        if (!Number.isInteger(port) || port < 1 || port > 65_535)
+          throw new Error(
+            `${f}: fleet.actor_server.port must be an integer from 1 to 65535`,
+          );
+        return {
+          enabled: boolOr(tree, "fleet.actor_server.enabled", false, f),
+          host: optStr(tree, "fleet.actor_server.host", f) ?? "127.0.0.1",
+          port,
+        };
+      })(),
       // Absent → our documented default ('opus'/'high'); explicit null → the
       // option is not sent to the Agent SDK at all. `default_effort` must name
       // a member of `efforts`, so a narrowed endpoint can't be handed a value

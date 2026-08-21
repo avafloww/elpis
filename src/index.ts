@@ -85,6 +85,10 @@ import { createConsoleServer, type ConsoleServer } from "./console/server.js";
 import { createArchivedReader } from "./console/history.js";
 import { createMcpEndpoint } from "./mcp/server.js";
 import { createFleet } from "./fleet/index.js";
+import {
+  startScopedActorServer,
+  type ScopedActorServerRuntime,
+} from "./fleet/actor-runtime.js";
 import { createUsageTracker } from "./llm/usage-tracker.js";
 import { spawnText } from "./lib/proc.js";
 import { migrateDataLayout } from "./store/data-layout.js";
@@ -108,6 +112,7 @@ export interface ElpisRuntime {
   modules: BuiltinModuleRegistry;
   profile: RuntimeProfile;
   llms: LlmRoleClients;
+  actorServer: ScopedActorServerRuntime | null;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -473,6 +478,13 @@ export async function createElpisRuntime(
     create: adapters.createLLM ?? createLLM,
   });
   llm = llms.main;
+  const actorServer = await startScopedActorServer({
+    db,
+    config,
+    mind,
+    logger: config.logger,
+    create: adapters.createLLM,
+  });
   const density = createDensityModel(db, config.llm.model, config.logger);
   const memoryLimits = effectiveMemoryLimits(
     config.memory.consolidationThresholdTokens,
@@ -759,6 +771,11 @@ export async function createElpisRuntime(
       /* non-fatal */
     }
     try {
+      actorServer?.stop();
+    } catch {
+      /* non-fatal */
+    }
+    try {
       fleet?.dispose();
     } catch {
       /* non-fatal */
@@ -826,6 +843,7 @@ export async function createElpisRuntime(
     modules,
     profile,
     llms,
+    actorServer,
   };
 }
 

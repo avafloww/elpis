@@ -574,11 +574,36 @@ test("fleet config defaults", () => {
   const c = loadConfigFile(fixture(MINIMAL_OK));
   assert.equal(c.fleet.enabled, true);
   assert.equal(c.fleet.maxConcurrent, 4);
+  assert.deepEqual(c.fleet.actorServer, {
+    enabled: false,
+    host: "127.0.0.1",
+    port: 8790,
+  });
   assert.equal(c.fleet.defaultModel, "opus");
   assert.equal(c.fleet.defaultEffort, "high");
   assert.equal(c.fleet.idleTimeoutMs, 7_200_000);
   assert.equal(c.fleet.reapAfterMs, 14 * 86_400_000);
   assert.deepEqual(c.fleet.env, {});
+});
+
+test("fleet actor server is explicit and validates its bind port", () => {
+  const c = loadConfigFile(
+    fixture(
+      `${MINIMAL_OK}\nfleet:\n  actor_server:\n    enabled: true\n    host: 10.42.0.1\n    port: 18890\n`,
+    ),
+  );
+  assert.deepEqual(c.fleet.actorServer, {
+    enabled: true,
+    host: "10.42.0.1",
+    port: 18890,
+  });
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${MINIMAL_OK}\nfleet:\n  actor_server:\n    port: 70000\n`),
+      ),
+    /actor_server\.port must be an integer from 1 to 65535/,
+  );
 });
 
 test("fleet.enabled: false parses (the fleet opt-out)", () => {
