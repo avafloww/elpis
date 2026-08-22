@@ -141,6 +141,11 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       enabled: false,
       maxConcurrent: 1,
       server: { enabled: false, host: "127.0.0.1", port: 8790 },
+      workspace: {
+        sourceRoot: null,
+        maxSourceBytes: 8 * 1024 * 1024,
+        maxArtifactBytes: 8 * 1024 * 1024,
+      },
       kubernetes: {
         enabled: false,
         namespace: "elpis-workers",

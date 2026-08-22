@@ -55,13 +55,13 @@ test("runMigrations is idempotent and sets user_version", () => {
   const v1 = (
     db.prepare("PRAGMA user_version").get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 20, "user_version bumped to 20");
+  assert.equal(v1, 21, "user_version bumped to 21");
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare("PRAGMA user_version").get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 20);
+  assert.equal(v2, 21);
   db.close();
 });
 
@@ -94,11 +94,12 @@ test("fresh v4 database creates fleet tables (idempotent)", () => {
   assert.ok(tables.includes("fleet_mailbox_messages"));
   assert.ok(tables.includes("worker_sessions"));
   assert.ok(tables.includes("worker_mailbox_messages"));
+  assert.ok(tables.includes("worker_workspace_artifacts"));
   runMigrations(db); // second run: no throw
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    20,
+    21,
   );
   db.close();
 });
@@ -184,7 +185,7 @@ test("true v3→v4 upgrade path preserves data and creates fleet tables", () => 
   const finalVersion = (
     upgradedDb.prepare("PRAGMA user_version").get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 20, "user_version upgraded to 20");
+  assert.equal(finalVersion, 21, "user_version upgraded to 21");
 
   // Assert fleet tables exist
   const tableNames = (

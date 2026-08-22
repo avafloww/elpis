@@ -219,12 +219,18 @@ workers:
   enabled: false
   max_concurrent: 4
   # Loopback-only by default. This server exposes token-bound completion, Mind,
-  # and mailbox routes; callers cannot choose another model, Mind root, worker
-  # identity, or mailbox direction.
+  # mailbox, and workspace-custody routes; callers cannot choose another model,
+  # Mind root, worker identity, source path, or mailbox direction.
   server:
     enabled: false
     host: 127.0.0.1
     port: 8790
+  # Optional clean Git repository exported at tracked HEAD before Pod creation.
+  # Archives and returned artifacts are kept privately under DATA_DIR/elpis-data/workers.
+  workspace:
+    source_root: null
+    max_source_bytes: 8388608
+    max_artifact_bytes: 8388608
   # One operator-owned PodTemplate. The caller cannot override its image,
   # command, mounts, service account, resources, namespace, or security context.
   kubernetes:

@@ -45,10 +45,20 @@ function fixture(opts: { max?: number } = {}) {
   const cleaned: WorkerSession[] = [];
   const states = new Map<string, WorkerProvisionState>();
   let provisionError: Error | null = null;
+  let provisionHook: ((request: WorkerProvisionRequest) => void) | null = null;
+  let sourceReceipt: {
+    revision: string;
+    sha256: string;
+    sizeBytes: number;
+  } | null = null;
+  let sourceError: Error | null = null;
+  const preparedSources: string[] = [];
+  const discardedSources: string[] = [];
   let cleanupHook: ((session: WorkerSession) => void) | null = null;
   const runtime: WorkerPodRuntime = {
     async provision(request) {
       provisioned.push(request);
+      provisionHook?.(request);
       if (provisionError) throw provisionError;
       const receipt = {
         podName: `pod-${request.sessionId}`,
@@ -77,6 +87,16 @@ function fixture(opts: { max?: number } = {}) {
     config,
     mind,
     runtime,
+    workspace: {
+      async prepareSource(sessionId) {
+        preparedSources.push(sessionId);
+        if (sourceError) throw sourceError;
+        return sourceReceipt;
+      },
+      discardSource(sessionId) {
+        discardedSources.push(sessionId);
+      },
+    },
     now: () => ++now,
     credential: () => credentials[cred++],
     id: () => `wrk-test000${++id}`,
@@ -93,6 +113,17 @@ function fixture(opts: { max?: number } = {}) {
     cleaned,
     states,
     credentials,
+    preparedSources,
+    discardedSources,
+    setSourceReceipt(receipt: typeof sourceReceipt) {
+      sourceReceipt = receipt;
+    },
+    setSourceError(error: Error | null) {
+      sourceError = error;
+    },
+    setProvisionHook(hook: typeof provisionHook) {
+      provisionHook = hook;
+    },
     setProvisionError(error: Error | null) {
       provisionError = error;
     },
@@ -181,6 +212,55 @@ test("closed, blocked, unknown-model, disabled, and capacity failures are pre-ef
     () => f.broker.start(other.id),
     (e: unknown) => e instanceof WorkerSpawnError && e.code === "disabled",
   );
+  f.close();
+});
+
+test("source receipt is durably bound before Pod provisioning", async () => {
+  const f = fixture();
+  const source = {
+    revision: "a".repeat(40),
+    sha256: "b".repeat(64),
+    sizeBytes: 12345,
+  };
+  f.setSourceReceipt(source);
+  f.setProvisionHook((request) => {
+    const row = f.db
+      .prepare(
+        "SELECT status, source_revision, source_sha256, source_bytes FROM worker_sessions WHERE id = ?",
+      )
+      .get(request.sessionId) as Record<string, unknown>;
+    assert.equal(row.status, "spawning");
+    assert.equal(row.source_revision, source.revision);
+    assert.equal(row.source_sha256, source.sha256);
+    assert.equal(row.source_bytes, source.sizeBytes);
+  });
+  const session = await f.broker.start(f.item.id);
+  assert.deepEqual(f.preparedSources, [session.id]);
+  assert.deepEqual(f.discardedSources, []);
+  assert.equal(session.sourceRevision, source.revision);
+  assert.equal(session.sourceSha256, source.sha256);
+  assert.equal(session.sourceBytes, source.sizeBytes);
+  f.close();
+});
+
+test("source preparation failure creates no Pod and revokes the failed session", async () => {
+  const f = fixture();
+  f.setSourceError(new Error("dirty source root detail"));
+  await assert.rejects(
+    () => f.broker.start(f.item.id),
+    (error: unknown) =>
+      error instanceof WorkerSpawnError &&
+      error.code === "workspace_failed" &&
+      !error.message.includes("dirty"),
+  );
+  assert.equal(f.provisioned.length, 0);
+  assert.equal(f.preparedSources.length, 1);
+  assert.deepEqual(f.discardedSources, f.preparedSources);
+  const failed = f.broker.list()[0];
+  assert.equal(failed.status, "failed");
+  assert.match(failed.lastError ?? "", /dirty source root detail/);
+  assert.equal(failed.sourceRevision, null);
+  assert.equal(resolveWorkerSession(f.db, f.credentials[0].token), null);
   f.close();
 });
 

@@ -9,7 +9,15 @@ import {
 import { WorkerJournal } from "./kernel/worker-journal.js";
 import { createSandbox, type Sandbox } from "./sandbox/index.js";
 import type { SandboxDeps } from "./types.js";
-import { WorkerHttpClient } from "./worker/client.js";
+import {
+  WorkerHttpClient,
+  type WorkerWorkspaceArtifactReceipt,
+  type WorkerWorkspaceSource,
+} from "./worker/client.js";
+import {
+  checkoutWorkerSource,
+  createWorkerPatch,
+} from "./worker/worktree.js";
 
 const DISABLED_MODULES: BuiltinModuleRegistry = Object.freeze({
   statuses: Object.freeze([]),
@@ -27,9 +35,22 @@ export interface WorkerEnvironment {
   dataDirectory: string;
 }
 
+export interface WorkerWorkspaceBroker {
+  getWorkspaceSource(signal?: AbortSignal): Promise<WorkerWorkspaceSource | null>;
+  putWorkspaceArtifact(
+    input: {
+      key: string;
+      kind: "unified_patch_gzip";
+      sourceSha256: string;
+      data: Buffer;
+    },
+    signal?: AbortSignal,
+  ): Promise<WorkerWorkspaceArtifactReceipt>;
+}
+
 export interface WorkerProcessOptions {
   env?: NodeJS.ProcessEnv;
-  broker?: WorkerEpisodeBroker;
+  broker?: WorkerEpisodeBroker & Partial<WorkerWorkspaceBroker>;
   sandbox?: Sandbox;
 }
 
@@ -103,7 +124,6 @@ export async function runWorkerProcess(
   options: WorkerProcessOptions = {},
 ): Promise<void> {
   const environment = workerEnvironment(options.env);
-  const sandbox = options.sandbox ?? createWorkerSandbox(environment);
   const broker =
     options.broker ??
     new WorkerHttpClient({
@@ -119,9 +139,48 @@ export async function runWorkerProcess(
   process.once("SIGINT", abort);
   process.once("SIGTERM", abort);
   try {
-    await new WorkerEpisode({ broker, sandbox, journal }).run(
-      controller.signal,
-    );
+    let checkedOut: WorkerWorkspaceSource | null = null;
+    if (
+      typeof broker.getWorkspaceSource === "function" &&
+      typeof broker.putWorkspaceArtifact === "function"
+    ) {
+      checkedOut = await broker.getWorkspaceSource(controller.signal);
+      if (checkedOut) {
+        await checkoutWorkerSource(
+          checkedOut,
+          environment.workspace,
+          environment.dataDirectory,
+        );
+      }
+    }
+    const sandbox = options.sandbox ?? createWorkerSandbox(environment);
+    const beforeFinish = checkedOut
+      ? async () => {
+          const current = await broker.getWorkspaceSource!(controller.signal);
+          if (!current || current.sha256 !== checkedOut.sha256)
+            throw new Error("worker source baseline changed before artifact export");
+          const artifact = await createWorkerPatch(
+            current,
+            environment.workspace,
+            environment.dataDirectory,
+          );
+          await broker.putWorkspaceArtifact!(
+            {
+              key: "workspace.patch.gz",
+              kind: "unified_patch_gzip",
+              sourceSha256: current.sha256,
+              data: artifact,
+            },
+            controller.signal,
+          );
+        }
+      : undefined;
+    await new WorkerEpisode({
+      broker,
+      sandbox,
+      journal,
+      beforeFinish,
+    }).run(controller.signal);
   } finally {
     process.off("SIGINT", abort);
     process.off("SIGTERM", abort);

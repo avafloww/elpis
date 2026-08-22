@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   WorkerEpisodeBroker,
   WorkerGuidance,
@@ -7,6 +8,8 @@ import type { ChatMessage, CompleteResult } from "../llm/llm.js";
 import { parseWorkerMessages } from "./completion.js";
 
 const MAX_REPLY_BYTES = 8 * 1024 * 1024;
+const MAX_WORKSPACE_REPLY_BYTES =
+  Math.ceil((64 * 1024 * 1024 * 4) / 3) + 16 * 1024;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const SESSION_RE = /^wrk-[a-z0-9]{8}$/;
 
@@ -15,6 +18,23 @@ export interface WorkerHttpClientOptions {
   token: string;
   sessionId: string;
   fetch?: typeof fetch;
+}
+
+export interface WorkerWorkspaceSource {
+  revision: string;
+  sha256: string;
+  sizeBytes: number;
+  data: Buffer;
+}
+
+export interface WorkerWorkspaceArtifactReceipt {
+  sessionId: string;
+  key: string;
+  kind: "unified_patch_gzip";
+  sourceSha256: string;
+  sha256: string;
+  sizeBytes: number;
+  createdAt: number;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -70,9 +90,10 @@ export class WorkerHttpClient implements WorkerEpisodeBroker {
   }
 
   private async post(
-    route: "/v1/complete" | "/v1/mind" | "/v1/mailbox",
+    route: "/v1/complete" | "/v1/mind" | "/v1/mailbox" | "/v1/workspace",
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    maxReplyBytes = MAX_REPLY_BYTES,
   ): Promise<Record<string, unknown>> {
     const response = await this.fetch(`${this.origin}${route}`, {
       method: "POST",
@@ -85,7 +106,7 @@ export class WorkerHttpClient implements WorkerEpisodeBroker {
       signal,
     });
     const raw = await response.text();
-    if (Buffer.byteLength(raw) > MAX_REPLY_BYTES)
+    if (Buffer.byteLength(raw) > maxReplyBytes)
       throw new Error("worker broker reply is too large");
     let value: Record<string, unknown>;
     try {
@@ -103,6 +124,86 @@ export class WorkerHttpClient implements WorkerEpisodeBroker {
     if (value.protocol !== 1)
       throw new Error("worker broker protocol mismatch");
     return value;
+  }
+
+  async getWorkspaceSource(
+    signal?: AbortSignal,
+  ): Promise<WorkerWorkspaceSource | null> {
+    const reply = await this.post(
+      "/v1/workspace",
+      { protocol: 1, operation: "source" },
+      signal,
+      MAX_WORKSPACE_REPLY_BYTES,
+    );
+    if (reply.source === null) return null;
+    this.binding(reply.binding);
+    const source = record(reply.source, "worker workspace source");
+    if (source.encoding !== "base64")
+      throw new Error("worker workspace source encoding is unsupported");
+    const revision = text(source.revision, "worker workspace source revision");
+    const sha256 = text(source.sha256, "worker workspace source digest");
+    const sizeBytes = Number(source.sizeBytes);
+    const encoded = text(source.data, "worker workspace source data");
+    const data = Buffer.from(encoded, "base64");
+    if (data.toString("base64") !== encoded)
+      throw new Error("worker workspace source is not canonical base64");
+    if (
+      !Number.isSafeInteger(sizeBytes) ||
+      sizeBytes < 0 ||
+      data.length !== sizeBytes ||
+      createHash("sha256").update(data).digest("hex") !== sha256
+    )
+      throw new Error("worker workspace source failed verification");
+    return { revision, sha256, sizeBytes, data };
+  }
+
+  async putWorkspaceArtifact(
+    input: {
+      key: string;
+      kind: "unified_patch_gzip";
+      sourceSha256: string;
+      data: Buffer;
+    },
+    signal?: AbortSignal,
+  ): Promise<WorkerWorkspaceArtifactReceipt> {
+    const sha256 = createHash("sha256").update(input.data).digest("hex");
+    const reply = await this.post(
+      "/v1/workspace",
+      {
+        protocol: 1,
+        operation: "put_artifact",
+        key: input.key,
+        kind: input.kind,
+        sourceSha256: input.sourceSha256,
+        sha256,
+        data: input.data.toString("base64"),
+      },
+      signal,
+    );
+    const artifact = record(reply.artifact, "worker workspace artifact");
+    const receipt = {
+      sessionId: text(artifact.sessionId, "worker workspace artifact session"),
+      key: text(artifact.key, "worker workspace artifact key"),
+      kind: artifact.kind as "unified_patch_gzip",
+      sourceSha256: text(
+        artifact.sourceSha256,
+        "worker workspace artifact source digest",
+      ),
+      sha256: text(artifact.sha256, "worker workspace artifact digest"),
+      sizeBytes: Number(artifact.sizeBytes),
+      createdAt: Number(artifact.createdAt),
+    };
+    if (
+      receipt.sessionId !== this.options.sessionId ||
+      receipt.key !== input.key ||
+      receipt.kind !== input.kind ||
+      receipt.sourceSha256 !== input.sourceSha256 ||
+      receipt.sha256 !== sha256 ||
+      receipt.sizeBytes !== input.data.length ||
+      !Number.isSafeInteger(receipt.createdAt)
+    )
+      throw new Error("worker workspace artifact receipt does not match upload");
+    return receipt;
   }
 
   async getMandate(signal?: AbortSignal): Promise<WorkerMandate> {

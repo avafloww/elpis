@@ -1870,6 +1870,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       send: (ref: string, text: string) => deps.worker!.send(ref, text),
       list: () => deps.worker!.list(),
       status: (ref: string) => deps.worker!.status(ref),
+      artifact: (ref: string, key?: string) => deps.worker!.artifact(ref, key),
       dismiss: (ref: string) => deps.worker!.dismiss(ref),
     };
   }

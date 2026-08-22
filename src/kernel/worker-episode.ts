@@ -49,6 +49,10 @@ export interface WorkerEpisodeOptions {
   broker: WorkerEpisodeBroker;
   sandbox: WorkerEpisodeSandbox;
   journal: WorkerJournal;
+  beforeFinish?: (
+    value: { key: string; body: string },
+    signal?: AbortSignal,
+  ) => Promise<void>;
   maxTurns?: number;
   maxMessages?: number;
 }
@@ -299,6 +303,7 @@ export class WorkerEpisode {
         );
       }
       const key = finishKey(body);
+      await this.options.beforeFinish?.({ key, body }, signal);
       this.options.journal.prepareFinish(key, body);
       await this.options.broker.finish(key, body, signal);
       this.options.journal.completeFinish(key, body);

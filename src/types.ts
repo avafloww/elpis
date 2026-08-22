@@ -17,6 +17,10 @@ import type {
 import type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
 import type { WorkerSession } from "./worker/spawn.js";
 import type { WorkerMailboxMessage } from "./worker/mailbox.js";
+import type {
+  WorkerArtifactFile,
+  WorkerArtifactReceipt,
+} from "./worker/workspace.js";
 
 export type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
 
@@ -191,7 +195,9 @@ export interface SandboxDeps {
     status(ref: string): Promise<{
       session: WorkerSession;
       messages: WorkerMailboxMessage[];
+      artifacts: Array<Omit<WorkerArtifactReceipt, "relativePath">>;
     }>;
+    artifact(ref: string, key?: string): Promise<WorkerArtifactFile>;
     dismiss(ref: string): Promise<WorkerSession>;
   };
   /** Bound Mind item for a persistent sandbox. Omitted in unbound control rooms. */

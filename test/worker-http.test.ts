@@ -10,6 +10,7 @@ import { WorkerMailboxError } from "../src/worker/mailbox.js";
 import type { WorkerMailboxService } from "../src/worker/mailbox-request.js";
 import { WorkerMindError } from "../src/worker/mind.js";
 import type { WorkerMindService } from "../src/worker/mind-request.js";
+import type { WorkerWorkspaceService } from "../src/worker/workspace-request.js";
 import { noopLogger } from "../src/lib/log.js";
 
 const TOKEN = "a".repeat(43);
@@ -21,11 +22,13 @@ async function fixture(
   maxBodyBytes?: number,
   mind?: WorkerMindService,
   mailbox?: WorkerMailboxService,
+  workspace?: WorkerWorkspaceService,
 ) {
   const server = createWorkerCompletionHttpServer({
     broker: { complete },
     mind,
     mailbox,
+    workspace,
     host: "127.0.0.1",
     port: 0,
     logger: noopLogger,
@@ -38,8 +41,87 @@ async function fixture(
     url: `http://127.0.0.1:${port}/v1/complete`,
     mindUrl: `http://127.0.0.1:${port}/v1/mind`,
     mailboxUrl: `http://127.0.0.1:${port}/v1/mailbox`,
+    workspaceUrl: `http://127.0.0.1:${port}/v1/workspace`,
   };
 }
+
+test("HTTP workspace transport dispatches only token-bound closed operations", async () => {
+  const calls: unknown[] = [];
+  const sourceData = Buffer.from("source");
+  const workspace: WorkerWorkspaceService = {
+    sourceForWorker(token) {
+      calls.push({ operation: "source", token });
+      return {
+        binding: {
+          sessionId: "wrk-a1b2c3d4",
+          worker: "worker:otter",
+          modelRef: "p/worker",
+          mindId: "elm-worker001",
+          runtime: "kubernetes",
+        },
+        revision: "a".repeat(40),
+        sha256: "b".repeat(64),
+        sizeBytes: sourceData.length,
+        data: sourceData,
+      };
+    },
+    putArtifactForWorker(input) {
+      calls.push({ operation: "put", token: input.token, key: input.key });
+      return {
+        id: 1,
+        sessionId: "wrk-a1b2c3d4",
+        key: input.key,
+        kind: input.kind,
+        sourceSha256: input.sourceSha256,
+        sha256: input.sha256!,
+        sizeBytes: input.data.length,
+        relativePath: "not-returned",
+        createdAt: 1,
+      };
+    },
+  };
+  const f = await fixture(
+    async () => {
+      throw new Error("completion must not run");
+    },
+    undefined,
+    undefined,
+    undefined,
+    workspace,
+  );
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+  let response = await fetch(f.workspaceUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "source" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).source.data, sourceData.toString("base64"));
+  const patch = Buffer.from("patch");
+  response = await fetch(f.workspaceUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      protocol: 1,
+      operation: "put_artifact",
+      key: "workspace.patch.gz",
+      kind: "unified_patch_gzip",
+      sourceSha256: "b".repeat(64),
+      sha256: "c".repeat(64),
+      data: patch.toString("base64"),
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).artifact.key, "workspace.patch.gz");
+  assert.deepEqual(calls, [
+    { operation: "source", token: TOKEN },
+    { operation: "put", token: TOKEN, key: "workspace.patch.gz" },
+  ]);
+  await close(f.server);
+});
 
 async function close(
   server: ReturnType<typeof createWorkerCompletionHttpServer>,

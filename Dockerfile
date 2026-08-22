@@ -10,7 +10,7 @@ FROM node:24-trixie-slim AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash ca-certificates curl file git jq less openssh-client procps \
-    python3 python3-pip python3-venv ripgrep tini wget \
+    python3 python3-pip python3-venv ripgrep tar tini wget \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 elpis \
   && useradd --uid 10001 --gid 10001 --home-dir /data/home --shell /bin/bash elpis

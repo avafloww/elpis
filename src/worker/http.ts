@@ -16,6 +16,12 @@ import {
   dispatchWorkerMindRequest,
   type WorkerMindService,
 } from "./mind-request.js";
+import { WorkerWorkspaceError } from "./workspace.js";
+import {
+  WorkerWorkspaceRequestError,
+  dispatchWorkerWorkspaceRequest,
+  type WorkerWorkspaceService,
+} from "./workspace-request.js";
 
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -31,10 +37,12 @@ export interface WorkerCompletionHttpOptions {
   broker: WorkerCompletionService;
   mind?: WorkerMindService;
   mailbox?: WorkerMailboxService;
+  workspace?: WorkerWorkspaceService;
   host: string;
   port: number;
   logger: Logger;
   maxBodyBytes?: number;
+  workspaceMaxBodyBytes?: number;
 }
 
 function json(res: http.ServerResponse, status: number, value: unknown): void {
@@ -120,6 +128,21 @@ function statusForMailbox(error: WorkerMailboxError): number {
   }
 }
 
+function statusForWorkspace(error: WorkerWorkspaceError): number {
+  switch (error.code) {
+    case "unauthorized":
+      return 401;
+    case "invalid_request":
+      return 400;
+    case "unavailable":
+      return 404;
+    case "conflict":
+      return 409;
+    case "corrupt":
+      return 502;
+  }
+}
+
 function bearer(req: http.IncomingMessage): string | null {
   const value = req.headers.authorization;
   if (typeof value !== "string") return null;
@@ -131,16 +154,25 @@ export function createWorkerCompletionHttpServer(
   options: WorkerCompletionHttpOptions,
 ): http.Server {
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const workspaceMaxBodyBytes =
+    options.workspaceMaxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   return http.createServer(async (req, res) => {
     const mindRequest = req.url === "/v1/mind";
     const mailboxRequest = req.url === "/v1/mailbox";
-    if (req.url !== "/v1/complete" && !mindRequest && !mailboxRequest) {
+    const workspaceRequest = req.url === "/v1/workspace";
+    if (
+      req.url !== "/v1/complete" &&
+      !mindRequest &&
+      !mailboxRequest &&
+      !workspaceRequest
+    ) {
       json(res, 404, { error: "not found" });
       return;
     }
     if (
       (mindRequest && !options.mind) ||
-      (mailboxRequest && !options.mailbox)
+      (mailboxRequest && !options.mailbox) ||
+      (workspaceRequest && !options.workspace)
     ) {
       json(res, 404, { error: "not found" });
       return;
@@ -161,7 +193,10 @@ export function createWorkerCompletionHttpServer(
       if (!res.writableEnded) controller.abort();
     });
     try {
-      const body = await readBody(req, maxBodyBytes);
+      const body = await readBody(
+        req,
+        workspaceRequest ? workspaceMaxBodyBytes : maxBodyBytes,
+      );
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw new HttpInputError(400, "request must be an object");
       const input = body as Record<string, unknown>;
@@ -174,6 +209,14 @@ export function createWorkerCompletionHttpServer(
           res,
           200,
           dispatchWorkerMailboxRequest(options.mailbox!, token, input),
+        );
+        return;
+      }
+      if (workspaceRequest) {
+        json(
+          res,
+          200,
+          dispatchWorkerWorkspaceRequest(options.workspace!, token, input),
         );
         return;
       }
@@ -199,7 +242,8 @@ export function createWorkerCompletionHttpServer(
         json(res, error.status, { error: error.message });
       } else if (
         error instanceof WorkerMindRequestError ||
-        error instanceof WorkerMailboxRequestError
+        error instanceof WorkerMailboxRequestError ||
+        error instanceof WorkerWorkspaceRequestError
       ) {
         json(res, 400, { error: error.message, code: "invalid_request" });
       } else if (error instanceof WorkerMindError) {
@@ -212,6 +256,11 @@ export function createWorkerCompletionHttpServer(
           error: error.message,
           code: error.code,
         });
+      } else if (error instanceof WorkerWorkspaceError) {
+        json(res, statusForWorkspace(error), {
+          error: error.message,
+          code: error.code,
+        });
       } else if (error instanceof WorkerCompletionError) {
         json(res, statusFor(error), { error: error.message, code: error.code });
       } else {
@@ -219,11 +268,13 @@ export function createWorkerCompletionHttpServer(
           ? "Mind"
           : mailboxRequest
             ? "mailbox"
-            : "completion";
+            : workspaceRequest
+              ? "workspace"
+              : "completion";
         options.logger.error(`worker ${operation} request failed`, error);
         json(res, 502, {
           error:
-            mindRequest || mailboxRequest
+            mindRequest || mailboxRequest || workspaceRequest
               ? `worker ${operation} request failed`
               : "worker completion failed",
         });

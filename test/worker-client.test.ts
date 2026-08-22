@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { WorkerHttpClient } from "../src/worker/client.js";
 
@@ -122,6 +123,91 @@ test("worker HTTP client speaks exact bound completion, Mind, and mailbox protoc
     assert.equal(Object.hasOwn(call.body, "mindId"), false);
     assert.equal(Object.hasOwn(call.body, "sessionId"), false);
   }
+});
+
+test("worker HTTP client verifies source bytes and bound artifact receipts", async () => {
+  const sourceData = Buffer.from("tracked source archive");
+  const sourceSha256 = createHash("sha256").update(sourceData).digest("hex");
+  const artifactData = Buffer.from("compressed patch bytes");
+  const artifactSha256 = createHash("sha256").update(artifactData).digest("hex");
+  const calls: Array<{ url: string; body: any }> = [];
+  const responses = [
+    reply({
+      protocol: 1,
+      binding,
+      source: {
+        revision: "a".repeat(40),
+        sha256: sourceSha256,
+        sizeBytes: sourceData.length,
+        encoding: "base64",
+        data: sourceData.toString("base64"),
+      },
+    }),
+    reply({
+      protocol: 1,
+      artifact: {
+        sessionId,
+        key: "workspace.patch.gz",
+        kind: "unified_patch_gzip",
+        sourceSha256,
+        sha256: artifactSha256,
+        sizeBytes: artifactData.length,
+        createdAt: 1234,
+      },
+    }),
+  ];
+  const client = new WorkerHttpClient({
+    brokerUrl: "https://broker.example.com",
+    token,
+    sessionId,
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return responses.shift()!;
+    },
+  });
+  const source = await client.getWorkspaceSource();
+  assert.deepEqual(source?.data, sourceData);
+  const artifact = await client.putWorkspaceArtifact({
+    key: "workspace.patch.gz",
+    kind: "unified_patch_gzip",
+    sourceSha256,
+    data: artifactData,
+  });
+  assert.equal(artifact.sha256, artifactSha256);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/v1/workspace", "/v1/workspace"].map(
+      (route) => `https://broker.example.com${route}`,
+    ),
+  );
+  assert.equal(calls[1].body.sha256, artifactSha256);
+  for (const call of calls) {
+    assert.equal(Object.hasOwn(call.body, "sessionId"), false);
+    assert.equal(Object.hasOwn(call.body, "modelRef"), false);
+    assert.equal(Object.hasOwn(call.body, "mindId"), false);
+  }
+
+  const tampered = new WorkerHttpClient({
+    brokerUrl: "https://broker.example.com",
+    token,
+    sessionId,
+    fetch: async () =>
+      reply({
+        protocol: 1,
+        binding,
+        source: {
+          revision: "a".repeat(40),
+          sha256: "0".repeat(64),
+          sizeBytes: sourceData.length,
+          encoding: "base64",
+          data: sourceData.toString("base64"),
+        },
+      }),
+  });
+  await assert.rejects(
+    () => tampered.getWorkspaceSource(),
+    /source failed verification/,
+  );
 });
 
 test("worker HTTP client rejects binding substitution and credentials in broker URL", async () => {

@@ -8,6 +8,7 @@ import {
   type WorkerControlCredential,
 } from "./auth.js";
 import { generateWorkerSlug, newWorkerId } from "./names.js";
+import type { WorkerSourceReceipt, WorkerWorkspaceStore } from "./workspace.js";
 
 export type WorkerSessionStatus =
   "spawning" | "running" | "idle" | "finished" | "failed" | "dismissed";
@@ -23,6 +24,9 @@ export interface WorkerSession {
   podName: string | null;
   podUid: string | null;
   workspaceRef: string | null;
+  sourceRevision: string | null;
+  sourceSha256: string | null;
+  sourceBytes: number | null;
   createdAt: number;
   updatedAt: number;
   lastError: string | null;
@@ -63,6 +67,7 @@ export class WorkerSpawnError extends Error {
       | "blocked"
       | "conflict"
       | "capacity"
+      | "workspace_failed"
       | "provision_failed"
       | "cleanup_failed",
     message: string,
@@ -77,6 +82,7 @@ export interface WorkerSpawnBrokerOptions {
   config: Config;
   mind: MindService;
   runtime: WorkerPodRuntime;
+  workspace?: Pick<WorkerWorkspaceStore, "prepareSource" | "discardSource">;
   now?: () => number;
   credential?: () => WorkerControlCredential;
   id?: () => string;
@@ -106,6 +112,10 @@ function rowSession(row: Record<string, unknown>): WorkerSession {
     podName: row.pod_name == null ? null : String(row.pod_name),
     podUid: row.pod_uid == null ? null : String(row.pod_uid),
     workspaceRef: row.workspace_ref == null ? null : String(row.workspace_ref),
+    sourceRevision:
+      row.source_revision == null ? null : String(row.source_revision),
+    sourceSha256: row.source_sha256 == null ? null : String(row.source_sha256),
+    sourceBytes: row.source_bytes == null ? null : Number(row.source_bytes),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     lastError: row.last_error == null ? null : String(row.last_error),
@@ -297,6 +307,51 @@ export class WorkerSpawnBroker {
       this.options.db.exec("ROLLBACK");
       if (error instanceof WorkerSpawnError) throw error;
       throw new WorkerSpawnError("conflict", boundedError(error));
+    }
+
+    let source: WorkerSourceReceipt | null = null;
+    if (this.options.workspace) {
+      try {
+        source = await this.options.workspace.prepareSource(id);
+        if (source) {
+          const bound = this.options.db
+            .prepare(
+              `UPDATE worker_sessions
+               SET source_revision = ?, source_sha256 = ?, source_bytes = ?, updated_at = ?
+               WHERE id = ? AND status = 'spawning'
+                 AND source_revision IS NULL AND source_sha256 IS NULL AND source_bytes IS NULL`,
+            )
+            .run(
+              source.revision,
+              source.sha256,
+              source.sizeBytes,
+              this.now(),
+              id,
+            );
+          if (Number(bound.changes) !== 1) {
+            this.options.workspace.discardSource(id);
+            throw new WorkerSpawnError(
+              "conflict",
+              "worker was revoked during source preparation",
+            );
+          }
+        }
+      } catch (error) {
+        this.options.workspace.discardSource(id);
+        const detail = boundedError(error);
+        this.options.db
+          .prepare(
+            `UPDATE worker_sessions
+             SET status = 'failed', updated_at = ?, last_error = ?
+             WHERE id = ? AND status = 'spawning'`,
+          )
+          .run(this.now(), detail, id);
+        if (error instanceof WorkerSpawnError) throw error;
+        throw new WorkerSpawnError(
+          "workspace_failed",
+          "worker source preparation failed",
+        );
+      }
     }
 
     let receipt: WorkerProvisionReceipt;

@@ -182,6 +182,24 @@ export class WorkerMailboxBroker {
         "conflict",
         "worker session mailbox is already finished",
       );
+    if (direction === "worker_to_dispatcher" && kind === "finish") {
+      const source = this.db
+        .prepare("SELECT source_sha256 FROM worker_sessions WHERE id = ?")
+        .get(sessionId) as { source_sha256: string | null } | undefined;
+      if (source?.source_sha256) {
+        const artifact = this.db
+          .prepare(
+            `SELECT 1 FROM worker_workspace_artifacts
+             WHERE session_id = ? AND source_sha256 = ? LIMIT 1`,
+          )
+          .get(sessionId, source.source_sha256);
+        if (!artifact)
+          throw new WorkerMailboxError(
+            "conflict",
+            "worker source artifact must be in custody before finish",
+          );
+      }
+    }
     try {
       const result = this.db
         .prepare(

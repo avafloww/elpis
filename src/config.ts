@@ -165,6 +165,12 @@ export interface Config {
       host: string;
       port: number;
     };
+    /** Optional clean Git source root and bounded host artifact custody. */
+    workspace: {
+      sourceRoot: string | null;
+      maxSourceBytes: number;
+      maxArtifactBytes: number;
+    };
     /** Fixed operator-owned Kubernetes worker template. */
     kubernetes: {
       enabled: boolean;
@@ -1320,12 +1326,16 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       const mapping = (raw ?? {}) as Record<string, unknown>;
       const unknown = Object.keys(mapping).filter(
         (key) =>
-          !["enabled", "max_concurrent", "server", "kubernetes"].includes(key),
+          !["enabled", "max_concurrent", "server", "workspace", "kubernetes"].includes(key),
       );
       if (unknown.length)
         throw new Error(`${f}: unknown workers key(s): ${unknown.join(", ")}`);
       for (const [pathKey, allowed] of [
         ["workers.server", ["enabled", "host", "port"]],
+        [
+          "workers.workspace",
+          ["source_root", "max_source_bytes", "max_artifact_bytes"],
+        ],
         [
           "workers.kubernetes",
           [
@@ -1371,6 +1381,33 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         host: optStr(tree, "workers.server.host", f) ?? "127.0.0.1",
           port,
         };
+      const sourceRoot = optStr(tree, "workers.workspace.source_root", f);
+      if (sourceRoot !== null && !path.isAbsolute(sourceRoot))
+        throw new Error(
+          `${f}: workers.workspace.source_root must be an absolute path`,
+        );
+      const maxSourceBytes = numOr(
+        tree,
+        "workers.workspace.max_source_bytes",
+        8 * 1024 * 1024,
+        f,
+      );
+      const maxArtifactBytes = numOr(
+        tree,
+        "workers.workspace.max_artifact_bytes",
+        8 * 1024 * 1024,
+        f,
+      );
+      for (const [key, value] of [
+        ["max_source_bytes", maxSourceBytes],
+        ["max_artifact_bytes", maxArtifactBytes],
+      ] as const) {
+        if (!Number.isSafeInteger(value) || value < 1024 || value > 64 * 1024 * 1024)
+          throw new Error(
+            `${f}: workers.workspace.${key} must be an integer from 1024 to 67108864`,
+          );
+      }
+      const workspace = { sourceRoot, maxSourceBytes, maxArtifactBytes };
       const kubernetesEnabled = boolOr(
         tree,
         "workers.kubernetes.enabled",
@@ -1440,7 +1477,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
             `${f}: workers.kubernetes.enabled requires workers.kubernetes.broker_url`,
           );
       }
-      return { enabled, maxConcurrent, server, kubernetes };
+      return { enabled, maxConcurrent, server, workspace, kubernetes };
       })(),
     usageTracker: {
       enabled: boolOr(tree, "usage_tracker.enabled", true, f),

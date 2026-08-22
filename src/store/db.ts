@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 21;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -473,6 +473,47 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     MIND_PROPOSAL_STATUS_MIGRATION,
+    {
+      name: "0021-worker-workspace-custody",
+      sql: `
+        ALTER TABLE worker_sessions ADD COLUMN source_revision TEXT
+          CHECK (source_revision IS NULL OR length(source_revision) BETWEEN 1 AND 128);
+        ALTER TABLE worker_sessions ADD COLUMN source_sha256 TEXT
+          CHECK (source_sha256 IS NULL OR length(source_sha256) = 64);
+        ALTER TABLE worker_sessions ADD COLUMN source_bytes INTEGER
+          CHECK (source_bytes IS NULL OR source_bytes >= 0);
+
+        CREATE TRIGGER worker_sessions_source_insert_guard
+        BEFORE INSERT ON worker_sessions
+        WHEN (NEW.source_revision IS NULL) != (NEW.source_sha256 IS NULL)
+          OR (NEW.source_revision IS NULL) != (NEW.source_bytes IS NULL)
+        BEGIN
+          SELECT RAISE(ABORT, 'worker source receipt must be complete');
+        END;
+        CREATE TRIGGER worker_sessions_source_update_guard
+        BEFORE UPDATE OF source_revision, source_sha256, source_bytes ON worker_sessions
+        WHEN (NEW.source_revision IS NULL) != (NEW.source_sha256 IS NULL)
+          OR (NEW.source_revision IS NULL) != (NEW.source_bytes IS NULL)
+        BEGIN
+          SELECT RAISE(ABORT, 'worker source receipt must be complete');
+        END;
+
+        CREATE TABLE worker_workspace_artifacts (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id     TEXT NOT NULL REFERENCES worker_sessions(id) ON DELETE CASCADE,
+          artifact_key   TEXT NOT NULL CHECK (length(artifact_key) BETWEEN 1 AND 80),
+          kind           TEXT NOT NULL CHECK (kind IN ('unified_patch_gzip')),
+          source_sha256  TEXT NOT NULL CHECK (length(source_sha256) = 64),
+          sha256         TEXT NOT NULL CHECK (length(sha256) = 64),
+          size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
+          relative_path  TEXT NOT NULL CHECK (length(relative_path) BETWEEN 1 AND 240),
+          created_at     INTEGER NOT NULL,
+          UNIQUE (session_id, artifact_key)
+        );
+        CREATE INDEX worker_workspace_artifacts_session_idx
+          ON worker_workspace_artifacts(session_id, id);
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

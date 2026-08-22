@@ -23,6 +23,7 @@ test("enabled worker section is Mind-rooted and has no arbitrary prompt field", 
   assert.match(prompt, /elpis\.worker\.start\(mindId, \{ modelRef\? \}\)/);
   assert.match(prompt, /there is no arbitrary prompt field/);
   assert.match(prompt, /elpis\.worker\.send\(ref, text\)/);
+  assert.match(prompt, /elpis\.worker\.artifact\(ref, key\?\)/);
   assert.match(prompt, /elpis\.worker\.dismiss\(ref\)/);
   assert.match(prompt, /fixed restricted Pod/);
   assert.doesNotMatch(prompt, /Claude Code|elpis\.fleet/);

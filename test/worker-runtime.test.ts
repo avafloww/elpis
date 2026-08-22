@@ -183,6 +183,14 @@ test("scoped worker server owns completion, Mind, mailbox, and clean stop", asyn
     [sent.id],
   );
 
+  response = await fetch(`${base}/v1/workspace`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "source" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).source, null);
+
   const closed = once(runtime.server, "close");
   runtime.stop();
   runtime.stop();

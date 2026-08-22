@@ -7,12 +7,14 @@ import type { SandboxDeps } from "../types.js";
 import { KubectlWorkerRuntime } from "./kubernetes.js";
 import type { WorkerMailboxBroker } from "./mailbox.js";
 import { WorkerSpawnBroker, type WorkerPodRuntime } from "./spawn.js";
+import type { WorkerWorkspaceStore } from "./workspace.js";
 
 export interface WorkerSupervisorOptions {
   db: Database;
   config: Config;
   mind: MindService;
   mailbox: WorkerMailboxBroker | null;
+  workspace?: WorkerWorkspaceStore | null;
   logger: Logger;
   runtime?: WorkerPodRuntime;
 }
@@ -46,9 +48,13 @@ export async function startWorkerSupervisor(
     config: options.config,
     mind: options.mind,
     runtime,
+    workspace: options.workspace ?? undefined,
   });
   await spawn.recover();
   const mailbox = options.mailbox;
+  const workspace = options.workspace ?? null;
+  const publicArtifacts = (sessionId: string) =>
+    workspace?.listArtifacts(sessionId).map(({ relativePath: _, ...receipt }) => receipt) ?? [];
   const refresh = async () => {
     await spawn.recover();
   };
@@ -73,7 +79,15 @@ export async function startWorkerSupervisor(
       return {
         session,
         messages: mailbox.pullFromWorker(session.id, 100),
+        artifacts: publicArtifacts(session.id),
       };
+    },
+    async artifact(ref, key = "workspace.patch.gz") {
+      await refresh();
+      const session = spawn.status(ref);
+      if (!workspace)
+        throw new Error("worker artifact custody is unavailable");
+      return workspace.artifactFile(session.id, key);
     },
     dismiss: (ref) => spawn.dismiss(ref),
   };

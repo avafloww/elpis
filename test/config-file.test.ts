@@ -574,6 +574,11 @@ test("native workers default disabled with a loopback broker", () => {
     enabled: false,
     maxConcurrent: 4,
     server: { enabled: false, host: "127.0.0.1", port: 8790 },
+    workspace: {
+      sourceRoot: null,
+      maxSourceBytes: 8 * 1024 * 1024,
+      maxArtifactBytes: 8 * 1024 * 1024,
+    },
     kubernetes: {
       enabled: false,
       namespace: "elpis-workers",
@@ -596,6 +601,11 @@ test("native worker server configuration is explicit and bounded", () => {
     enabled: true,
     maxConcurrent: 8,
     server: { enabled: true, host: "10.42.0.1", port: 18890 },
+    workspace: {
+      sourceRoot: null,
+      maxSourceBytes: 8 * 1024 * 1024,
+      maxArtifactBytes: 8 * 1024 * 1024,
+    },
     kubernetes: {
       enabled: false,
       namespace: "elpis-workers",
@@ -617,6 +627,37 @@ test("native worker server configuration is explicit and bounded", () => {
         fixture(`${MINIMAL_OK}\nworkers:\n  server:\n    port: 70000\n`),
       ),
     /workers\.server\.port must be an integer from 1 to 65535/,
+  );
+  const workspace = loadConfigFile(
+    fixture(
+      `${MINIMAL_OK}\nworkers:\n  workspace:\n    source_root: /srv/elpis\n    max_source_bytes: 1048576\n    max_artifact_bytes: 2097152\n`,
+    ),
+  );
+  assert.deepEqual(workspace.workers.workspace, {
+    sourceRoot: "/srv/elpis",
+    maxSourceBytes: 1048576,
+    maxArtifactBytes: 2097152,
+  });
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${MINIMAL_OK}\nworkers:\n  workspace:\n    source_root: relative/path\n`),
+      ),
+    /workers\.workspace\.source_root must be an absolute path/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${MINIMAL_OK}\nworkers:\n  workspace:\n    max_source_bytes: 1\n`),
+      ),
+    /workers\.workspace\.max_source_bytes must be an integer/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${MINIMAL_OK}\nworkers:\n  workspace:\n    mount: escape\n`),
+      ),
+    /unknown workers\.workspace key.*mount/,
   );
 });
 

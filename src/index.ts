@@ -471,6 +471,7 @@ export async function createElpisRuntime(
     config,
     mind,
     mailbox: workerServer?.mailbox ?? null,
+    workspace: workerServer?.workspace ?? null,
     logger: config.logger,
   });
   workerSupervisor = workerRuntime?.api;

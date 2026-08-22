@@ -155,6 +155,67 @@ test("worker episode executes with durable receipts and idempotent guidance", as
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("worker completes custody hook before preparing and sending finish", async () => {
+  const root = dir();
+  const journal = new WorkerJournal(path.join(root, "episode.jsonl"));
+  const order: string[] = [];
+  const broker = new FakeBroker([
+    result({ role: "assistant", content: "finished" }),
+  ]);
+  const originalFinish = broker.finish.bind(broker);
+  broker.finish = async (key, body) => {
+    order.push("finish");
+    assert.equal(journal.state().pendingFinish?.key, key);
+    await originalFinish(key, body);
+  };
+  await new WorkerEpisode({
+    broker,
+    journal,
+    sandbox: {
+      async run() {
+        throw new Error("not called");
+      },
+    },
+    async beforeFinish(value) {
+      order.push("custody");
+      assert.equal(value.body, "finished");
+      assert.equal(journal.state().pendingFinish, null);
+    },
+  }).run();
+  assert.deepEqual(order, ["custody", "finish"]);
+  journal.close();
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("custody failure leaves no prepared finish or dispatcher result", async () => {
+  const root = dir();
+  const journal = new WorkerJournal(path.join(root, "episode.jsonl"));
+  const broker = new FakeBroker([
+    result({ role: "assistant", content: "finished" }),
+  ]);
+  await assert.rejects(
+    () =>
+      new WorkerEpisode({
+        broker,
+        journal,
+        sandbox: {
+          async run() {
+            throw new Error("not called");
+          },
+        },
+        async beforeFinish() {
+          throw new Error("artifact upload failed");
+        },
+      }).run(),
+    /artifact upload failed/,
+  );
+  assert.equal(journal.state().pendingFinish, null);
+  assert.equal(journal.state().finished, null);
+  assert.equal(broker.finishes.length, 0);
+  journal.close();
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("worker rejects wake and sandbox fields before code execution", async () => {
   const root = dir();
   const journal = new WorkerJournal(path.join(root, "episode.jsonl"));

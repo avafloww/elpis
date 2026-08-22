@@ -195,6 +195,45 @@ test("mailbox records one idempotent terminal finish and rejects a second", () =
   close(f);
 });
 
+test("source-bound worker cannot finish before matching artifact custody", () => {
+  const f = fixture();
+  f.db
+    .prepare(
+      `UPDATE worker_sessions
+       SET source_revision = ?, source_sha256 = ?, source_bytes = ?
+       WHERE id = 'wrk-worker1'`,
+    )
+    .run("a".repeat(40), "b".repeat(64), 10);
+  assert.throws(
+    () =>
+      f.broker.postFromWorker(
+        f.credential.token,
+        "finish-before-artifact",
+        "finish",
+        "done",
+      ),
+    (error: unknown) =>
+      error instanceof WorkerMailboxError &&
+      error.code === "conflict" &&
+      /artifact must be in custody/.test(error.message),
+  );
+  f.db
+    .prepare(
+      `INSERT INTO worker_workspace_artifacts
+       (session_id,artifact_key,kind,source_sha256,sha256,size_bytes,relative_path,created_at)
+       VALUES ('wrk-worker1','workspace.patch.gz','unified_patch_gzip',?,?,1,'artifacts/path',1)`,
+    )
+    .run("b".repeat(64), "c".repeat(64));
+  const finish = f.broker.postFromWorker(
+    f.credential.token,
+    "finish-after-artifact",
+    "finish",
+    "done",
+  );
+  assert.equal(finish.kind, "finish");
+  close(f);
+});
+
 test("mailbox token and session gates fail closed", () => {
   const f = fixture();
   assert.throws(

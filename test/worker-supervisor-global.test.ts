@@ -21,7 +21,11 @@ function deps(surface: "full" | "core" | "worker") {
     },
     async status(ref: string) {
       calls.push(["status", ref]);
-      return { session: { id: "wrk-a1b2c3d4" }, messages: [] } as never;
+      return { session: { id: "wrk-a1b2c3d4" }, messages: [], artifacts: [] } as never;
+    },
+    async artifact(ref: string, key?: string) {
+      calls.push(["artifact", ref, key]);
+      return { localPath: "/tmp/artifact" } as never;
     },
     async dismiss(ref: string) {
       calls.push(["dismiss", ref]);
@@ -48,6 +52,7 @@ test("full sandbox exposes a frozen forwarding worker supervisor", async () => {
   const f = deps("full");
   const elpis = buildGlobals(f.value).elpis as any;
   assert.deepEqual(Object.keys(elpis.worker).sort(), [
+    "artifact",
     "dismiss",
     "list",
     "send",
@@ -57,12 +62,14 @@ test("full sandbox exposes a frozen forwarding worker supervisor", async () => {
   await elpis.worker.start("elm-a1b2c3d4", { modelRef: "p/model" });
   await elpis.worker.send("quiet-otter", "steer");
   await elpis.worker.status("quiet-otter");
+  await elpis.worker.artifact("quiet-otter", "workspace.patch.gz");
   await elpis.worker.list();
   await elpis.worker.dismiss("quiet-otter");
   assert.deepEqual(f.calls, [
     ["start", "elm-a1b2c3d4", { modelRef: "p/model" }],
     ["send", "quiet-otter", "steer"],
     ["status", "quiet-otter"],
+    ["artifact", "quiet-otter", "workspace.patch.gz"],
     ["list"],
     ["dismiss", "quiet-otter"],
   ]);

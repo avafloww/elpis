@@ -7,6 +7,7 @@ import { noopLogger } from "../src/lib/log.js";
 import { openDatabase } from "../src/store/db.js";
 import { MindService } from "../src/store/mind.js";
 import { WorkerMailboxBroker } from "../src/worker/mailbox.js";
+import { WorkerWorkspaceStore } from "../src/worker/workspace.js";
 import type {
   WorkerPodRuntime,
   WorkerProvisionRequest,
@@ -77,6 +78,13 @@ function fixture() {
     requests,
     cleaned,
     mailbox: new WorkerMailboxBroker(db),
+    workspace: new WorkerWorkspaceStore({
+      db,
+      storageRoot: path.join(root, "custody"),
+      sourceRoot: null,
+      maxSourceBytes: 8 * 1024 * 1024,
+      maxArtifactBytes: 8 * 1024 * 1024,
+    }),
     close() {
       db.close();
       fs.rmSync(root, { recursive: true, force: true });
@@ -91,6 +99,7 @@ test("supervisor owns spawn, live refresh, mailbox steering, and dismissal", asy
     config: f.config,
     mind: f.mind,
     mailbox: f.mailbox,
+    workspace: f.workspace,
     logger: noopLogger,
     runtime: f.runtime,
   });
@@ -102,6 +111,30 @@ test("supervisor owns spawn, live refresh, mailbox steering, and dismissal", asy
   const status = await runtime.api.status(session.id);
   assert.equal(status.session.status, "running");
   assert.equal(status.messages[0].body, "evidence ready");
+  assert.deepEqual(status.artifacts, []);
+
+  f.db
+    .prepare(
+      `UPDATE worker_sessions
+       SET source_revision = ?, source_sha256 = ?, source_bytes = ?
+       WHERE id = ?`,
+    )
+    .run("a".repeat(40), "b".repeat(64), 10, session.id);
+  const artifactData = Buffer.from("review patch");
+  const artifact = f.workspace.putArtifactForWorker({
+    token,
+    key: "workspace.patch.gz",
+    kind: "unified_patch_gzip",
+    sourceSha256: "b".repeat(64),
+    data: artifactData,
+  });
+  const withArtifact = await runtime.api.status(session.id);
+  assert.equal(withArtifact.artifacts.length, 1);
+  assert.equal(withArtifact.artifacts[0].sha256, artifact.sha256);
+  assert.equal(Object.hasOwn(withArtifact.artifacts[0], "relativePath"), false);
+  const review = await runtime.api.artifact(session.id);
+  assert.equal(review.sha256, artifact.sha256);
+  assert.equal(fs.readFileSync(review.localPath, "utf8"), "review patch");
 
   const sent = await runtime.api.send(session.worker, "verify once more");
   assert.equal(sent.direction, "dispatcher_to_worker");
