@@ -480,6 +480,7 @@ export async function createElpisRuntime(
     logger: config.logger,
     create: adapters.createLLM,
     secretaryCompletion: secretaryRuntime?.completion,
+    secretaryConversation: secretaryRuntime?.conversationTransport,
     secretaryMind: secretaryRuntime?.mind,
   });
   const workerRuntime = await startWorkerSupervisor({

@@ -10,6 +10,7 @@ import { WorkerMailboxError } from "../src/worker/mailbox.js";
 import type { WorkerMailboxService } from "../src/worker/mailbox-request.js";
 import { WorkerMindError } from "../src/worker/mind.js";
 import type { WorkerMindService } from "../src/worker/mind-request.js";
+import type { SecretaryConversationService } from "../src/secretary/conversation-request.js";
 import type { WorkerWorkspaceService } from "../src/worker/workspace-request.js";
 import { noopLogger } from "../src/lib/log.js";
 
@@ -23,12 +24,14 @@ async function fixture(
   mind?: WorkerMindService,
   mailbox?: WorkerMailboxService,
   workspace?: WorkerWorkspaceService,
+  secretaryConversation?: SecretaryConversationService,
 ) {
   const server = createWorkerCompletionHttpServer({
     broker: { complete },
     mind,
     mailbox,
     workspace,
+    secretaryConversation,
     host: "127.0.0.1",
     port: 0,
     logger: noopLogger,
@@ -42,6 +45,7 @@ async function fixture(
     mindUrl: `http://127.0.0.1:${port}/v1/mind`,
     mailboxUrl: `http://127.0.0.1:${port}/v1/mailbox`,
     workspaceUrl: `http://127.0.0.1:${port}/v1/workspace`,
+    secretaryConversationUrl: `http://127.0.0.1:${port}/v1/secretary/conversation`,
   };
 }
 
@@ -99,7 +103,10 @@ test("HTTP workspace transport dispatches only token-bound closed operations", a
     body: JSON.stringify({ protocol: 1, operation: "source" }),
   });
   assert.equal(response.status, 200);
-  assert.equal(((await response.json()) as any).source.data, sourceData.toString("base64"));
+  assert.equal(
+    ((await response.json()) as any).source.data,
+    sourceData.toString("base64"),
+  );
   const patch = Buffer.from("patch");
   response = await fetch(f.workspaceUrl, {
     method: "POST",
@@ -115,11 +122,71 @@ test("HTTP workspace transport dispatches only token-bound closed operations", a
     }),
   });
   assert.equal(response.status, 200);
-  assert.equal(((await response.json()) as any).artifact.key, "workspace.patch.gz");
+  assert.equal(
+    ((await response.json()) as any).artifact.key,
+    "workspace.patch.gz",
+  );
   assert.deepEqual(calls, [
     { operation: "source", token: TOKEN },
     { operation: "put", token: TOKEN, key: "workspace.patch.gz" },
   ]);
+  await close(f.server);
+});
+
+test("HTTP secretary conversation route dispatches only strict token-bound operations", async () => {
+  const calls: unknown[] = [];
+  const secretaryConversation: SecretaryConversationService = {
+    pull(token) {
+      calls.push({ operation: "pull", token });
+      return {
+        binding: {
+          sessionId: "sec-AAAAAAAAAAAAAAAAAAAAAA",
+          rootMindId: "elm-000000a1",
+          modelRef: "p/secretary",
+          runtime: "kubernetes",
+        },
+        turn: null,
+      };
+    },
+    complete() {
+      throw new Error("complete must not run");
+    },
+  };
+  const f = await fixture(
+    async () => {
+      throw new Error("worker completion must not run");
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    secretaryConversation,
+  );
+  const response = await fetch(f.secretaryConversationUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ protocol: 1, operation: "pull" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).protocol, 1);
+  assert.deepEqual(calls, [{ operation: "pull", token: TOKEN }]);
+  const spoofed = await fetch(f.secretaryConversationUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      protocol: 1,
+      operation: "pull",
+      sessionId: "spoof",
+    }),
+  });
+  assert.equal(spoofed.status, 400);
+  assert.equal(calls.length, 1);
   await close(f.server);
 });
 

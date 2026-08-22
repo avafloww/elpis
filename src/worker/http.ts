@@ -1,5 +1,11 @@
 import * as http from "node:http";
 import type { Logger } from "../lib/log.js";
+import { SecretaryConversationError } from "../secretary/conversation.js";
+import {
+  SecretaryConversationRequestError,
+  dispatchSecretaryConversationRequest,
+  type SecretaryConversationService,
+} from "../secretary/conversation-request.js";
 import {
   SecretaryCompletionError,
   type SecretaryCompletionReply,
@@ -55,6 +61,7 @@ export interface WorkerCompletionHttpOptions {
   broker: WorkerCompletionService;
   mind?: WorkerMindService;
   secretaryCompletion?: SecretaryCompletionService;
+  secretaryConversation?: SecretaryConversationService;
   secretaryMind?: SecretaryMindService;
   mailbox?: WorkerMailboxService;
   workspace?: WorkerWorkspaceService;
@@ -210,6 +217,8 @@ export function createWorkerCompletionHttpServer(
     const mailboxRequest = req.url === "/v1/mailbox";
     const workspaceRequest = req.url === "/v1/workspace";
     const secretaryCompletionRequest = req.url === "/v1/secretary/complete";
+    const secretaryConversationRequest =
+      req.url === "/v1/secretary/conversation";
     const secretaryMindRequest = req.url === "/v1/secretary/mind";
     if (
       req.url !== "/v1/complete" &&
@@ -217,6 +226,7 @@ export function createWorkerCompletionHttpServer(
       !mailboxRequest &&
       !workspaceRequest &&
       !secretaryCompletionRequest &&
+      !secretaryConversationRequest &&
       !secretaryMindRequest
     ) {
       json(res, 404, { error: "not found" });
@@ -227,6 +237,7 @@ export function createWorkerCompletionHttpServer(
       (mailboxRequest && !options.mailbox) ||
       (workspaceRequest && !options.workspace) ||
       (secretaryCompletionRequest && !options.secretaryCompletion) ||
+      (secretaryConversationRequest && !options.secretaryConversation) ||
       (secretaryMindRequest && !options.secretaryMind)
     ) {
       json(res, 404, { error: "not found" });
@@ -241,7 +252,9 @@ export function createWorkerCompletionHttpServer(
     if (!token) {
       json(res, 401, {
         error:
-          secretaryCompletionRequest || secretaryMindRequest
+          secretaryCompletionRequest ||
+          secretaryConversationRequest ||
+          secretaryMindRequest
             ? "secretary session is unavailable"
             : "worker session is unavailable",
       });
@@ -260,6 +273,17 @@ export function createWorkerCompletionHttpServer(
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw new HttpInputError(400, "request must be an object");
       const input = body as Record<string, unknown>;
+      if (secretaryConversationRequest) {
+        json(res, 200, {
+          protocol: 1,
+          ...dispatchSecretaryConversationRequest(
+            options.secretaryConversation!,
+            token,
+            input,
+          ),
+        });
+        return;
+      }
       if (secretaryMindRequest) {
         json(
           res,
@@ -298,15 +322,28 @@ export function createWorkerCompletionHttpServer(
           400,
           `unknown request field ${JSON.stringify(unknown[0])}`,
         );
-      const reply = await (secretaryCompletionRequest
-        ? options.secretaryCompletion!
-        : options.broker
+      const reply = await (
+        secretaryCompletionRequest
+          ? options.secretaryCompletion!
+          : options.broker
       ).complete(token, input.messages, controller.signal);
       json(res, 200, { protocol: 1, ...reply });
     } catch (error) {
       if (res.writableEnded || res.destroyed) return;
       if (error instanceof HttpInputError) {
         json(res, error.status, { error: error.message });
+      } else if (error instanceof SecretaryConversationRequestError) {
+        json(res, 400, { error: error.message, code: "invalid_request" });
+      } else if (error instanceof SecretaryConversationError) {
+        const status =
+          error.code === "unauthorized"
+            ? 401
+            : error.code === "invalid_request"
+              ? 400
+              : error.code === "not_found"
+                ? 404
+                : 409;
+        json(res, status, { error: error.message, code: error.code });
       } else if (error instanceof SecretaryMindRequestError) {
         json(res, 400, { error: error.message, code: "invalid_request" });
       } else if (error instanceof SecretaryMindError) {
@@ -343,8 +380,16 @@ export function createWorkerCompletionHttpServer(
       } else if (error instanceof WorkerCompletionError) {
         json(res, statusFor(error), { error: error.message, code: error.code });
       } else {
-        if (secretaryCompletionRequest || secretaryMindRequest) {
-          const operation = secretaryMindRequest ? "Mind" : "completion";
+        if (
+          secretaryCompletionRequest ||
+          secretaryConversationRequest ||
+          secretaryMindRequest
+        ) {
+          const operation = secretaryMindRequest
+            ? "Mind"
+            : secretaryConversationRequest
+              ? "conversation"
+              : "completion";
           options.logger.error(`secretary ${operation} request failed`, error);
           json(res, 502, {
             error: `secretary ${operation} request failed`,

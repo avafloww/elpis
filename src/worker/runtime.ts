@@ -5,6 +5,7 @@ import { createLLM } from "../llm/llm.js";
 import type { Logger } from "../lib/log.js";
 import type { Database } from "../store/db.js";
 import type { MindService } from "../store/mind.js";
+import type { SecretaryConversationService } from "../secretary/conversation-request.js";
 import type { SecretaryMindService } from "../secretary/mind-request.js";
 import type { SecretaryCompletionService } from "./http.js";
 import { WorkerCompletionBroker } from "./completion.js";
@@ -32,6 +33,7 @@ export interface ScopedWorkerServerOptions {
   logger: Logger;
   create?: typeof createLLM;
   secretaryCompletion?: SecretaryCompletionService;
+  secretaryConversation?: SecretaryConversationService;
   secretaryMind?: SecretaryMindService;
 }
 
@@ -65,6 +67,7 @@ export async function startScopedWorkerServer(
     mailbox,
     workspace,
     secretaryCompletion: options.secretaryCompletion,
+    secretaryConversation: options.secretaryConversation,
     secretaryMind: options.secretaryMind,
     host: bind.host,
     port: bind.port,

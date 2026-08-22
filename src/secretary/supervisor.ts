@@ -3,6 +3,10 @@ import type { Logger } from "../lib/log.js";
 import { createLLM } from "../llm/llm.js";
 import type { MindService } from "../store/mind.js";
 import { SecretaryCompletionBroker } from "./completion.js";
+import {
+  SecretaryConversationBroker,
+  SecretaryConversationStore,
+} from "./conversation.js";
 import { SecretaryMindBroker } from "./mind.js";
 import type { Database } from "../store/db.js";
 import {
@@ -14,6 +18,8 @@ import { SecretarySpawnBroker, type SecretaryPodRuntime } from "./spawn.js";
 export interface SecretarySupervisorRuntime {
   broker: SecretarySpawnBroker;
   completion: SecretaryCompletionBroker;
+  conversation: SecretaryConversationStore;
+  conversationTransport: SecretaryConversationBroker;
   mind: SecretaryMindBroker;
 }
 
@@ -47,6 +53,12 @@ export async function startSecretarySupervisor(
   const runtime =
     options.runtime ??
     new KubectlSecretaryRuntime(kubernetesOptions(options.config));
+  const conversation = new SecretaryConversationStore({ db: options.db });
+  const ambiguous = conversation.recoverClaimed();
+  const conversationTransport = new SecretaryConversationBroker(
+    options.db,
+    conversation,
+  );
   const broker = new SecretarySpawnBroker({
     db: options.db,
     config: options.config,
@@ -63,7 +75,7 @@ export async function startSecretarySupervisor(
   });
   const mind = new SecretaryMindBroker(options.db, options.mind);
   options.logger.info(
-    `secretary supervisor recovered ${active} active session(s)`,
+    `secretary supervisor recovered ${active} active session(s); marked ${ambiguous} claimed turn(s) ambiguous`,
   );
-  return { broker, completion, mind };
+  return { broker, completion, conversation, conversationTransport, mind };
 }

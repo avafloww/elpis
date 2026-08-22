@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 23;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -569,6 +569,103 @@ export function runMigrations(db: DatabaseSync): void {
           )
         BEGIN
           SELECT RAISE(ABORT, 'invalid secretary session status transition');
+        END;
+      `,
+    },
+    {
+      name: "0023-secretary-conversation-turns",
+      sql: `
+        CREATE TABLE secretary_turns (
+          id               TEXT PRIMARY KEY
+            CHECK (
+              length(id) = 26
+              AND substr(id, 1, 4) = 'stn-'
+              AND substr(id, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          session_id       TEXT NOT NULL REFERENCES secretary_sessions(id) ON DELETE CASCADE,
+          sequence         INTEGER NOT NULL CHECK (sequence >= 1),
+          status           TEXT NOT NULL
+            CHECK (status IN ('queued','claimed','completed','ambiguous','cancelled')),
+          request_json     TEXT NOT NULL
+            CHECK (
+              length(request_json) BETWEEN 2 AND 262144
+              AND json_valid(request_json)
+              AND json_type(request_json) = 'object'
+            ),
+          response_json    TEXT
+            CHECK (
+              response_json IS NULL
+              OR (
+                length(response_json) BETWEEN 2 AND 262144
+                AND json_valid(response_json)
+                AND json_type(response_json) = 'object'
+              )
+            ),
+          created_at       INTEGER NOT NULL,
+          updated_at       INTEGER NOT NULL CHECK (updated_at >= created_at),
+          claimed_at       INTEGER CHECK (claimed_at IS NULL OR claimed_at >= created_at),
+          completed_at     INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+          last_error       TEXT CHECK (last_error IS NULL OR length(last_error) <= 1000),
+          UNIQUE (session_id, sequence)
+        );
+        CREATE UNIQUE INDEX secretary_turns_active_session_idx
+          ON secretary_turns(session_id)
+          WHERE status IN ('queued','claimed');
+        CREATE INDEX secretary_turns_session_sequence_idx
+          ON secretary_turns(session_id, sequence);
+        CREATE INDEX secretary_turns_status_idx
+          ON secretary_turns(status, updated_at);
+
+        CREATE TRIGGER secretary_turns_identity_no_update
+        BEFORE UPDATE OF id, session_id, sequence, request_json, created_at
+        ON secretary_turns
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary turn identity and request are immutable');
+        END;
+        CREATE TRIGGER secretary_turns_status_transition_guard
+        BEFORE UPDATE OF status ON secretary_turns
+        WHEN NEW.status != OLD.status
+          AND NOT (
+            (OLD.status = 'queued' AND NEW.status IN ('claimed','cancelled'))
+            OR (OLD.status = 'claimed' AND NEW.status IN ('completed','ambiguous','cancelled'))
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid secretary turn status transition');
+        END;
+        CREATE TRIGGER secretary_turns_pristine_insert_guard
+        BEFORE INSERT ON secretary_turns
+        WHEN NEW.status != 'queued'
+          OR NEW.response_json IS NOT NULL
+          OR NEW.claimed_at IS NOT NULL
+          OR NEW.completed_at IS NOT NULL
+          OR NEW.last_error IS NOT NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'new secretary turns must be pristine');
+        END;
+        CREATE TRIGGER secretary_sessions_settle_turns_before_terminal
+        BEFORE UPDATE OF status ON secretary_sessions
+        WHEN OLD.status IN ('starting','ready')
+          AND NEW.status IN ('closed','failed')
+        BEGIN
+          UPDATE secretary_turns
+          SET status='cancelled', updated_at=MAX(updated_at, NEW.updated_at),
+              last_error=COALESCE(NEW.last_error, 'secretary session closed')
+          WHERE session_id=OLD.id AND status='queued';
+          UPDATE secretary_turns
+          SET status='ambiguous', updated_at=MAX(updated_at, NEW.updated_at),
+              last_error=COALESCE(NEW.last_error, 'secretary session closed')
+          WHERE session_id=OLD.id AND status='claimed';
+        END;
+        CREATE TRIGGER secretary_turns_lifecycle_update_guard
+        BEFORE UPDATE ON secretary_turns
+        WHEN
+          (NEW.status = 'queued' AND (NEW.claimed_at IS NOT NULL OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'claimed' AND (NEW.claimed_at IS NULL OR NEW.claimed_at > NEW.updated_at OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'completed' AND (NEW.claimed_at IS NULL OR NEW.completed_at IS NULL OR NEW.completed_at < NEW.claimed_at OR NEW.completed_at > NEW.updated_at OR NEW.response_json IS NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'ambiguous' AND (NEW.claimed_at IS NULL OR NEW.claimed_at > NEW.updated_at OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NULL))
+          OR (NEW.status = 'cancelled' AND (NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NULL))
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary turn lifecycle fields do not match status');
         END;
       `,
     },

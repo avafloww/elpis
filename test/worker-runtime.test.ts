@@ -155,6 +155,13 @@ test("scoped worker server owns completion, Mind, mailbox, and clean stop", asyn
   });
   assert.equal(response.status, 404);
 
+  response = await fetch(`${base}/v1/secretary/conversation`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "pull" }),
+  });
+  assert.equal(response.status, 404);
+
   response = await fetch(`${base}/v1/secretary/mind`, {
     method: "POST",
     headers,

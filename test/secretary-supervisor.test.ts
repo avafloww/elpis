@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { noopLogger, type Logger } from "../src/lib/log.js";
+import { SecretaryConversationStore } from "../src/secretary/conversation.js";
 import { startSecretarySupervisor } from "../src/secretary/supervisor.js";
 import { SecretarySessionStore } from "../src/secretary/session.js";
 import type { SecretaryPodRuntime } from "../src/secretary/spawn.js";
@@ -82,6 +83,9 @@ test("enabled secretary supervisor recovers exact starting session identity once
   assert.ok(result);
   assert.equal(f.inspections(), 1);
   assert.ok(result.completion);
+  assert.ok(result.conversation);
+  assert.ok(result.conversationTransport);
+  assert.equal(result.conversationTransport.store, result.conversation);
   assert.ok(result.mind);
   assert.deepEqual(result.broker.list(), [
     {
@@ -93,7 +97,33 @@ test("enabled secretary supervisor recovers exact starting session identity once
     },
   ]);
   assert.deepEqual(f.logs, [
-    "secretary supervisor recovered 1 active session(s)",
+    "secretary supervisor recovered 1 active session(s); marked 0 claimed turn(s) ambiguous",
+  ]);
+  f.close();
+});
+
+test("enabled supervisor marks claimed turns ambiguous before exposure", async () => {
+  const f = fixture(true);
+  const sessions = new SecretarySessionStore({ db: f.db });
+  const created = sessions.create(ROOT, f.config.llm.registry.roles.secretary!);
+  const ready = sessions.ready(created.session.id, {
+    podName: `pod-${created.session.id}`,
+    podUid: `uid-${created.session.id}`,
+  });
+  const conversation = new SecretaryConversationStore({ db: f.db });
+  const turn = conversation.enqueue(ready.id, {
+    role: "user",
+    content: "claimed before restart",
+  });
+  conversation.claim(ready.id);
+
+  const result = await startSecretarySupervisor(f);
+  assert.ok(result);
+  assert.equal(f.inspections(), 1);
+  assert.equal(result.conversation.status(turn.id).status, "ambiguous");
+  assert.equal(result.conversation.claim(ready.id), null);
+  assert.deepEqual(f.logs, [
+    "secretary supervisor recovered 1 active session(s); marked 1 claimed turn(s) ambiguous",
   ]);
   f.close();
 });
