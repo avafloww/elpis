@@ -21,27 +21,6 @@ import {
   type ResolvedLlmTarget,
 } from "./llm/model-registry.js";
 
-/** The Claude Agent SDK alias slots backed by ANTHROPIC_DEFAULT_<ALIAS>_MODEL. */
-export const MODEL_ALIASES = ["opus", "sonnet", "haiku", "fable"] as const;
-export type FleetModelAlias = (typeof MODEL_ALIASES)[number];
-
-/**
- * One `fleet.models.<alias>` entry. Two YAML spellings collapse to this shape:
- *
- * opus: big-model → { name: 'big-model', context: null }
- * opus: { name: big-model, context: 262144 }
- *
- * The string shorthand is the common case (remap the alias, let the context
- * window be discovered); the mapping form pins the window explicitly and so
- * skips the `models/info` probe for any session running on that model.
- */
-export interface FleetModelOverride {
-  /** → ANTHROPIC_DEFAULT_<ALIAS>_MODEL. null keeps the SDK's own alias target. */
-  name: string | null;
-  /** Context window in tokens → CLAUDE_CODE_MAX_CONTEXT_TOKENS. null = probe. */
-  context: number | null;
-}
-
 /** A channel's wake tier — how eagerly the agent responds in it. Later tasks
  * (the wake classifier) consume this; only parses and carries it. */
 export type ChannelTier = "direct" | "social" | "quiet";
@@ -175,53 +154,27 @@ export interface Config {
     /** app password (not the account password) */
     appPassword: string;
   } | null;
-  fleet: {
-    /** false disables the fleet entirely: no registry is constructed, boot
-     * recovery is skipped, elpis.fleet.* verbs throw a teachable error, and
-     * the system prompt swaps the elpis.fleet section for a "not available —
-     * do the work yourself" note. ON by default (opt-out). */
+  workers: {
+    /** Native workers are opt-in until a fixed-template spawn broker is configured. */
     enabled: boolean;
-    /** Independent cap for legacy runners and simultaneous actor completions. */
+    /** Global cap across token-bound worker completions and active worker sessions. */
     maxConcurrent: number;
-    /** Native scoped-actor HTTP broker. Explicit opt-in; loopback by default. */
-    actorServer: {
+    /** Token-authenticated completion/Mind/mailbox broker listener. */
+    server: {
       enabled: boolean;
       host: string;
       port: number;
     };
-    /** Default Claude Agent SDK model for a spawned agent. null = don't send
-     * `options.model` at all — the SDK picks its own default. */
-    defaultModel: string | null;
-    /** Default reasoning effort for a spawned agent. null = don't send
-     * `options.effort` at all — the SDK picks its own default. */
-    defaultEffort: string | null;
-    /** Reasoning-effort values this endpoint accepts. Defaults to the Claude
-     * Agent SDK's own `EffortLevel` union; a custom endpoint can narrow or
-     * rename it. `[]` = the endpoint has no effort parameter. */
-    efforts: string[];
-    /** API endpoint overrides for the SDK subprocess. Each null field is simply
-     * not set in the child env, so the SDK falls back to its own default. */
-    endpoint: {
-      /** → ANTHROPIC_BASE_URL */
-      baseUrl: string | null;
-      /** → ANTHROPIC_API_KEY (the ONLY config path that can set it — see buildEnv). */
-      apiKey: string | null;
-      /** → ANTHROPIC_AUTH_TOKEN */
-      authToken: string | null;
+    /** Fixed operator-owned Kubernetes worker template. */
+    kubernetes: {
+      enabled: boolean;
+      namespace: string;
+      template: string;
+      container: string;
+      brokerUrl: string | null;
+      kubectlPath: string;
+      context: string | null;
     };
-    /** SDK model-alias overrides. `name` → ANTHROPIC_DEFAULT_<ALIAS>_MODEL (null
-     * leaves the SDK's own alias table alone); `context` → this model's context
-     * window in tokens, which SKIPS the models/info probe when a session runs
-     * on it (null = probe). Both null = the alias is entirely unconfigured. */
-    models: Record<FleetModelAlias, FleetModelOverride>;
-    /** An idle runner exits gracefully after this long with no activity; the
-     * session stays revivable via elpis.fleet.send. */
-    idleTimeoutMs: number;
-    /** Deletes the on-disk session dir of DISMISSED sessions this long after
-     * dismissal; DB rows are kept forever. */
-    reapAfterMs: number;
-    /** Extra environment variables passed to every spawned agent. */
-    env: Record<string, string>;
   };
   /** Provider subscription-usage tracker (console rail widget + /usage). The
    * provider itself is auto-detected from llm.base_url; this section only
@@ -607,24 +560,6 @@ function boolOr(
   return v;
 }
 
-/** A string key that distinguishes ABSENT from an explicit `null`. Absent means
- * "no opinion, use the fallback"; explicit `null` means "deliberately unset"
- * — for the fleet SDK knobs those are different requests (inherit our default
- * vs. don't send the option to the Agent SDK at all), so they can't collapse
- * the way optStr collapses them. */
-function nullableStr(
-  tree: YamlTree,
-  dotted: string,
-  file: string,
-): string | null | undefined {
-  const v = at(tree, dotted);
-  if (v === undefined) return undefined;
-  if (v === null || v === "") return null;
-  if (typeof v !== "string")
-    throw new Error(`${file}: key \`${dotted}\` must be a string or null`);
-  return v;
-}
-
 /** A list-of-non-empty-strings key; absent/null falls back to `fallback`. */
 function strListOr(
   tree: YamlTree,
@@ -644,82 +579,6 @@ function strListOr(
     }
     return item;
   });
-}
-
-/** The Claude Agent SDK's own `EffortLevel` union — the default for
- * `fleet.efforts` so an un-configured harness accepts exactly what the SDK
- * does. Kept in sync with `EffortLevel` in the pinned sdk.d.ts. */
-export const SDK_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-
-/**
- * One `fleet.models.<alias>` entry, accepting either spelling:
- *
- * opus: big-model (string shorthand — context probed)
- * opus: { name: big-model, context: 262144 }
- *
- * `context` alone is legal too (`opus: { context: N }`): keep the SDK's own
- * alias target but pin its window. Absent/null reads as the fully-unset entry.
- */
-function modelOverride(
-  tree: YamlTree,
-  dotted: string,
-  file: string,
-): FleetModelOverride {
-  const v = at(tree, dotted);
-  if (v === undefined || v === null || v === "")
-    return { name: null, context: null };
-  if (typeof v === "string") return { name: v, context: null };
-  if (typeof v !== "object" || Array.isArray(v)) {
-    throw new Error(
-      `${file}: key \`${dotted}\` must be a model name or a mapping of { name, context }`,
-    );
-  }
-  for (const k of Object.keys(v as Record<string, unknown>)) {
-    if (k !== "name" && k !== "context") {
-      throw new Error(
-        `${file}: unknown key \`${dotted}.${k}\` (expected \`name\` and/or \`context\`)`,
-      );
-    }
-  }
-  const context = optNum(tree, `${dotted}.context`, file);
-  if (context !== null && !(context > 0)) {
-    throw new Error(
-      `${file}: key \`${dotted}.context\` must be a positive number of tokens`,
-    );
-  }
-  return { name: optStr(tree, `${dotted}.name`, file), context };
-}
-
-/**
- * Normalize `fleet.base_url` to the shape `ANTHROPIC_BASE_URL` actually wants:
- * the API ROOT, with no version segment. The Claude CLI appends `//messages`
- * itself, so a base ending in `/` produces `///messages` — a 404 the CLI
- * surfaces as the deeply unhelpful "There's an issue with the selected model
- * (…). It may not exist or you may not have access to it."
- *
- * That trailing `/` is the single most likely mistake here, because the
- * adjacent `llm.base_url` key REQUIRES it (an OpenAI-compatible client posts to
- * `<base>/chat/completions`, so its base carries the version). Two neighbouring
- * URL keys with opposite conventions is a trap, so rather than let it fail
- * three layers down inside a detached subprocess, strip it and say so loudly.
- * Warn-and-normalize, never silent: the operator still learns their file is
- * wrong, but a fleet-only typo doesn't have to take the harness down at boot.
- */
-export function normalizeAnthropicBaseUrl(
-  url: string | null,
-  logger?: Logger,
-): string | null {
-  if (url === null) return null;
-  const trimmed = url.replace(/\/+$/, "");
-  const stripped = trimmed.replace(/\/v\d+$/, "");
-  if (stripped !== trimmed) {
-    logger?.warn(
-      `config: fleet.base_url ended in a version segment ('${url}') — using '${stripped}'. ` +
-        `ANTHROPIC_BASE_URL is the API root; the Claude CLI appends /v1/messages itself. ` +
-        `(llm.base_url is different — that one does need its /v1.)`,
-    );
-  }
-  return stripped === "" ? null : stripped;
 }
 
 /** The ChatGPT subscription token is accepted only by the fixed Codex backend.
@@ -909,7 +768,7 @@ export function configForLlmTarget(
 export function configForLlmRef(config: Config, ref: string): Config {
   return configForLlmTarget(
     config,
-    resolveLlmModelTarget(config.llm.registry, ref, "config: fleet model"),
+    resolveLlmModelTarget(config.llm.registry, ref, "config: worker model"),
   );
 }
 
@@ -1249,14 +1108,11 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     );
   }
 
-  // fleet.efforts gates fleet.default_effort below, so it has to be resolved
-  // before the object literal. Unset → exactly the SDK's own EffortLevel union.
-  const fleetEfforts = strListOr(tree, "fleet.efforts", SDK_EFFORT_LEVELS, f);
-  const fleetDefaultModel = nullableStr(tree, "fleet.default_model", f);
-  const fleetBaseUrl = normalizeAnthropicBaseUrl(
-    optStr(tree, "fleet.base_url", f),
-    logger,
+  if (at(tree, "fleet") !== undefined) {
+    throw new Error(
+      `${f}: legacy \`fleet\` configuration was removed; use the native \`workers\` section`,
   );
+  }
 
   return {
     llm: parseLlmConfig(tree, f, logger),
@@ -1454,78 +1310,138 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         appPassword: pw,
       };
     })(),
-    fleet: {
-      enabled: boolOr(tree, "fleet.enabled", true, f),
-      maxConcurrent: numOr(tree, "fleet.max_concurrent", 4, f),
-      actorServer: (() => {
-        const port = numOr(tree, "fleet.actor_server.port", 8790, f);
+    workers: (() => {
+      const raw = at(tree, "workers");
+      if (
+        raw !== undefined &&
+        (!raw || typeof raw !== "object" || Array.isArray(raw))
+      )
+        throw new Error(`${f}: workers must be a mapping`);
+      const mapping = (raw ?? {}) as Record<string, unknown>;
+      const unknown = Object.keys(mapping).filter(
+        (key) =>
+          !["enabled", "max_concurrent", "server", "kubernetes"].includes(key),
+      );
+      if (unknown.length)
+        throw new Error(`${f}: unknown workers key(s): ${unknown.join(", ")}`);
+      for (const [pathKey, allowed] of [
+        ["workers.server", ["enabled", "host", "port"]],
+        [
+          "workers.kubernetes",
+          [
+            "enabled",
+            "namespace",
+            "template",
+            "container",
+            "broker_url",
+            "kubectl_path",
+            "context",
+          ],
+        ],
+      ] as const) {
+        const nested = at(tree, pathKey);
+        if (nested === undefined) continue;
+        if (!nested || typeof nested !== "object" || Array.isArray(nested))
+          throw new Error(`${f}: ${pathKey} must be a mapping`);
+        const nestedUnknown = Object.keys(nested).filter(
+          (key) => !(allowed as readonly string[]).includes(key),
+        );
+        if (nestedUnknown.length)
+          throw new Error(
+            `${f}: unknown ${pathKey} key(s): ${nestedUnknown.join(", ")}`,
+          );
+      }
+      const enabled = boolOr(tree, "workers.enabled", false, f);
+      const maxConcurrent = numOr(tree, "workers.max_concurrent", 4, f);
+      if (
+        !Number.isInteger(maxConcurrent) ||
+        maxConcurrent < 1 ||
+        maxConcurrent > 128
+      )
+        throw new Error(
+          `${f}: workers.max_concurrent must be an integer from 1 to 128`,
+        );
+      const port = numOr(tree, "workers.server.port", 8790, f);
         if (!Number.isInteger(port) || port < 1 || port > 65_535)
           throw new Error(
-            `${f}: fleet.actor_server.port must be an integer from 1 to 65535`,
+          `${f}: workers.server.port must be an integer from 1 to 65535`,
           );
-        return {
-          enabled: boolOr(tree, "fleet.actor_server.enabled", false, f),
-          host: optStr(tree, "fleet.actor_server.host", f) ?? "127.0.0.1",
+      const server = {
+        enabled: boolOr(tree, "workers.server.enabled", false, f),
+        host: optStr(tree, "workers.server.host", f) ?? "127.0.0.1",
           port,
         };
-      })(),
-      // Absent → our documented default ('opus'/'high'); explicit null → the
-      // option is not sent to the Agent SDK at all. `default_effort` must name
-      // a member of `efforts`, so a narrowed endpoint can't be handed a value
-      // it doesn't support; when `efforts` omits 'high' (or is empty) the
-      // fallback slides to the first supported level rather than erroring on
-      // an operator who never set the key.
-      defaultModel:
-        fleetDefaultModel === undefined ? "opus" : fleetDefaultModel,
-      defaultEffort: (() => {
-        const raw = nullableStr(tree, "fleet.default_effort", f);
-        if (raw === null) return null;
-        if (raw === undefined)
-          return fleetEfforts.includes("high")
-            ? "high"
-            : (fleetEfforts[0] ?? null);
-        if (!fleetEfforts.includes(raw)) {
-          throw new Error(
-            `${f}: fleet.default_effort (${raw}) must be one of fleet.efforts [${fleetEfforts.join(", ")}] or null`,
-          );
-        }
-        return raw;
-      })(),
-      efforts: fleetEfforts,
-      endpoint: {
-        baseUrl: fleetBaseUrl,
-        apiKey: optStr(tree, "fleet.api_key", f),
-        authToken: optStr(tree, "fleet.auth_token", f),
-      },
-      models: (() => {
-        const v = at(tree, "fleet.models") ?? {};
-        if (typeof v !== "object" || Array.isArray(v))
-          throw new Error(`${f}: fleet.models must be a mapping`);
-        for (const k of Object.keys(v as Record<string, unknown>)) {
-          if (!(MODEL_ALIASES as readonly string[]).includes(k)) {
+      const kubernetesEnabled = boolOr(
+        tree,
+        "workers.kubernetes.enabled",
+        false,
+        f,
+      );
+      const kubernetes = {
+        enabled: kubernetesEnabled,
+        namespace:
+          optStr(tree, "workers.kubernetes.namespace", f) ?? "elpis-workers",
+        template:
+          optStr(tree, "workers.kubernetes.template", f) ?? "elpis-worker",
+        container: optStr(tree, "workers.kubernetes.container", f) ?? "worker",
+        brokerUrl: optStr(tree, "workers.kubernetes.broker_url", f),
+        kubectlPath:
+          optStr(tree, "workers.kubernetes.kubectl_path", f) ?? "kubectl",
+        context: optStr(tree, "workers.kubernetes.context", f),
+      };
+      const dnsLabel = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
+      for (const [key, value] of [
+        ["namespace", kubernetes.namespace],
+        ["template", kubernetes.template],
+        ["container", kubernetes.container],
+      ] as const) {
+        if (!dnsLabel.test(value) || value.length > 63)
             throw new Error(
-              `${f}: unknown fleet.models alias \`${k}\` (expected one of ${MODEL_ALIASES.join(", ")})`,
+            `${f}: workers.kubernetes.${key} must be a Kubernetes DNS label`,
             );
           }
+      if (!kubernetes.kubectlPath)
+        throw new Error(
+          `${f}: workers.kubernetes.kubectl_path must not be empty`,
+        );
+      if (kubernetes.brokerUrl !== null) {
+        let broker: URL;
+        try {
+          broker = new URL(kubernetes.brokerUrl);
+        } catch {
+          throw new Error(
+            `${f}: workers.kubernetes.broker_url must be an absolute http(s) origin`,
+          );
         }
-        const out = {} as Record<FleetModelAlias, FleetModelOverride>;
-        for (const k of MODEL_ALIASES)
-          out[k] = modelOverride(tree, `fleet.models.${k}`, f);
-        return out;
+        if (
+          (broker.protocol !== "http:" && broker.protocol !== "https:") ||
+          broker.username ||
+          broker.password ||
+          broker.search ||
+          broker.hash ||
+          (broker.pathname !== "/" && broker.pathname !== "")
+        )
+          throw new Error(
+            `${f}: workers.kubernetes.broker_url must be a credential-free http(s) origin`,
+          );
+        kubernetes.brokerUrl = broker.origin;
+      }
+      if (kubernetesEnabled) {
+        if (!enabled)
+          throw new Error(
+            `${f}: workers.kubernetes.enabled requires workers.enabled`,
+          );
+        if (!server.enabled)
+          throw new Error(
+            `${f}: workers.kubernetes.enabled requires workers.server.enabled`,
+          );
+        if (!kubernetes.brokerUrl)
+          throw new Error(
+            `${f}: workers.kubernetes.enabled requires workers.kubernetes.broker_url`,
+          );
+      }
+      return { enabled, maxConcurrent, server, kubernetes };
       })(),
-      idleTimeoutMs: durOr(tree, "fleet.idle_timeout", 2 * 3_600_000, f),
-      reapAfterMs: durOr(tree, "fleet.reap_after", 14 * 86_400_000, f),
-      env: (() => {
-        const v = at(tree, "fleet.env") ?? {};
-        if (typeof v !== "object" || Array.isArray(v))
-          throw new Error(`${f}: fleet.env must be a mapping`);
-        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-          if (typeof val !== "string")
-            throw new Error(`${f}: fleet.env.${k} must be a string`);
-        }
-        return v as Record<string, string>;
-      })(),
-    },
     usageTracker: {
       enabled: boolOr(tree, "usage_tracker.enabled", true, f),
       pollIntervalMs: numOr(tree, "usage_tracker.poll_interval_ms", 300000, f),

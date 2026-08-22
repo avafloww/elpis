@@ -25,7 +25,7 @@ These layers deliberately have different refresh and cache behavior. Dynamic car
 
 Discord messages are serialized into `<incoming-message>` envelopes. Envelopes carry channel and author metadata without asking the model to infer it from prose. Attachments are either represented by metadata, inlined when small and textual, or passed as multimodal parts when supported.
 
-Console messages carry console provenance. Scheduler, heartbeat, fleet, watch, and harness notices are marked synthetic.
+Console messages carry console provenance. Scheduler, heartbeat, watch, and harness notices are marked synthetic. Worker progress crosses the durable mailbox rather than resident conversation ingress.
 
 ## Request projection
 

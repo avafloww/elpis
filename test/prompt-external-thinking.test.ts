@@ -5,7 +5,7 @@ import { build, type PromptInputs } from '../src/llm/prompt.js';
 function input(externalThinking: boolean): PromptInputs {
   return {
     soul: 'self', memory: '', now: '', harnessRoot: '/harness', dataDirectory: '/data',
-    fleetEnabled: false, guildCount: 1, externalThinking,
+    workersEnabled: false, guildCount: 1, externalThinking,
   };
 }
 

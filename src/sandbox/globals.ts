@@ -17,9 +17,8 @@ import { createStalenessTracker } from "./esm-staleness.js";
 import type { SandboxDeps } from "../types.js";
 import { isMindId, type MindId } from "../store/mind-id.js";
 import type { BgStartOpts } from "./bg.js";
-import type { FleetHandle } from "../fleet/index.js";
 import { INTERNAL_CHANNEL_ID } from "../types.js";
-import { SDK_EFFORT_LEVELS, type Config } from "../config.js";
+import type { Config } from "../config.js";
 import {
   resolveBuiltinModules,
   type BuiltinModuleId,
@@ -129,7 +128,7 @@ const require_ = Object.assign(function requireFresh(id: string): unknown {
 
 // ─── Reserved harness-global names ───────────────────────────────────────────
 // The renamed harness verbs (sh, sudo, channel, memory, …, ssh, …) now live
-// ONLY on the `elpis` namespace object — `fleet` included. Their bare names are
+// ONLY on the `elpis` namespace object. Their bare names are
 // free for the agent to use as ordinary variables. (No hand-count asserted here —
 // the set is enumerated in the `globals.ts` source-map row in AGENTS.md and in
 // docs/sandbox.md, and grows over time.)
@@ -303,12 +302,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // agent always reads the current message, not a boot-time snapshot. Restored
   // after the A6 rework dropped it while prompt.ts + RESERVED_GLOBALS still
   // referenced it (agents got a ReferenceError and couldn't even shadow it).
-  // Lives on `e` (elpis.inbound) — deepFreeze skips accessor descriptors, so
-  // this stays live even after `e` is frozen.
+  // Lives on `e` (elpis.inbound). It stays configurable only until the surface
+  // projection can omit it; deepFreeze seals retained accessors before exposure.
   Object.defineProperty(e, "inbound", {
     get: () => deps.inbound ?? null,
     enumerable: true,
-    configurable: false,
+    configurable: true,
   });
 
   // console capture → the CURRENT run's buffer. Reads runScope so each
@@ -570,7 +569,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // stderr, code, signal}` shape as `elpis.sh` (plus `host`); never throws on a
   // nonzero exit. Defined unconditionally: when deps.ssh is absent the global
   // surfaces a clear 'ssh not wired' error instead of `elpis.ssh` being
-  // undefined (same idiom as elpis.fleet). trackChild wires spawned ssh into the
+  // undefined. trackChild wires spawned ssh into the
   // current run's scope so a bg detach can kill the tree, matching shImpl.
   const requireSsh = (): SshRegistry => {
     if (!deps.ssh)
@@ -756,71 +755,6 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       cancel: (id: string) => bgReg.cancel(id),
     };
   }
-
-  // fleet — dispatch coding agents. elpis.fleet.{run,send,interrupt,
-  // list,status,tail,diff,dismiss} are thin deps.fleet passthroughs. Defined
-  // UNCONDITIONALLY (scheduler-global idiom — see e.schedule below and
-  // deps.scheduler in types.ts, the same optional-dep shape): each verb checks
-  // deps.fleet itself and throws a teachable 'fleet not wired' error rather
-  // than leaving `elpis.fleet` undefined, so a script gets a clear message
-  // instead of "Cannot read properties of undefined". The effort guard runs
-  // BEFORE the wiring check — confirmed with main ( review): a bad
-  // effort value is user-fixable regardless of whether fleet is wired, so it
-  // should surface even when fleet isn't wired at all. The accepted set is
-  // `fleet.efforts` from config.yaml (default: the Agent SDK's own levels), so
-  // a custom endpoint's levels are honored here and not just in the registry.
-  const fleetEfforts = deps.config.fleet?.efforts ?? SDK_EFFORT_LEVELS;
-  const assertFleetEffort = (o?: { effort?: string | null }) => {
-    if (o?.effort != null && !fleetEfforts.includes(o.effort)) {
-      const supported = fleetEfforts.length
-        ? fleetEfforts.join("|")
-        : "(none — this endpoint takes no effort parameter)";
-      throw new Error(
-        `fleet: effort must be ${supported} — got ${JSON.stringify(o.effort)}`,
-      );
-    }
-  };
-  const requireFleet = (): FleetHandle => {
-    if (!deps.fleet) {
-      // Distinguish "deliberately off" from "wiring bug": fleet.enabled: false
-      // means there is no fleet to reach for — do the work yourself.
-      throw new Error(
-        deps.config.fleet?.enabled === false
-          ? "fleet is disabled in config (fleet.enabled: false) — no sub-agents available; do the work yourself"
-          : "fleet not wired — the harness did not construct a fleet registry",
-      );
-    }
-    return deps.fleet;
-  };
-  const fleetApi = {
-    // async-wrapped (not just "return requireFleet...") so a missing-fleet
-    // or bad-effort throw surfaces as a REJECTED PROMISE, matching FleetHandle's
-    // own Promise-returning contract — a caller that `await`s consistently sees
-    // a rejection instead of a same-tick synchronous throw for these verbs.
-    run: async (prompt: string, opts?: Parameters<FleetHandle["run"]>[1]) => {
-      assertFleetEffort(opts);
-      return requireFleet().run(prompt, opts);
-    },
-    send: async (
-      ref: string,
-      text: string,
-      opts?: Parameters<FleetHandle["send"]>[2],
-    ) => requireFleet().send(ref, text, opts),
-    interrupt: async (ref: string) => requireFleet().interrupt(ref),
-    // list/status/tail are SYNCHRONOUS on FleetHandle — throw plainly, no
-    // promise wrapping, so `elpis.fleet.list` (no await) works as documented.
-    list: () => requireFleet().list(),
-    status: (ref: string) => requireFleet().status(ref),
-    tail: (ref: string, n?: number) => requireFleet().tail(ref, n),
-    diff: async (ref: string, opts?: Parameters<FleetHandle["diff"]>[1]) =>
-      requireFleet().diff(ref, opts),
-    dismiss: async (
-      ref: string,
-      opts?: Parameters<FleetHandle["dismiss"]>[1],
-    ) => requireFleet().dismiss(ref, opts),
-  };
-  if (modules.isActive("fleet")) e.fleet = fleetApi;
-  else installUnavailableModule("fleet");
 
   // memory.person(name, text) — append a dated bullet to people/<name>.md,
   // creating it with a frontmatter stub (ids pre-filled from inbound when the
@@ -1834,7 +1768,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // schedule(opts) — create a persistent scheduled task that wakes the agent when due.
   // schedule.done(name) — mark a task and its nags done.
   // schedule.snooze(name, until) — snooze a task and its nags until a timestamp.
-  // requireScheduler — same optional-dep idiom as requireFleet/requireSsh
+  // requireScheduler — the same optional-dependency idiom as requireSsh
   // above: throw a teachable error rather than leaving elpis.schedule/tasks
   // undefined when no scheduler was wired.
   const requireScheduler = (): NonNullable<SandboxDeps["scheduler"]> => {
@@ -1917,6 +1851,17 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // Deliberately NOT hooked into the sleep typing-indicator pause (see e.sleep,
   // above): timeout caps real running work, which is exactly what typing
   // should indicate — don't add sleepPause/sleepResume calls here.
+  if (deps.worker) {
+    e.worker = {
+      start: (mindId: unknown, options?: unknown) =>
+        deps.worker!.start(mindId, options),
+      send: (ref: string, text: string) => deps.worker!.send(ref, text),
+      list: () => deps.worker!.list(),
+      status: (ref: string) => deps.worker!.status(ref),
+      dismiss: (ref: string) => deps.worker!.dismiss(ref),
+    };
+  }
+
   e.timeout = async <T>(promise: Promise<T>, ms?: number): Promise<T> => {
     const delay =
       typeof ms === "number" && Number.isFinite(ms)
@@ -1956,6 +1901,19 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     ]);
     for (const key of Object.keys(e)) if (!coreElpis.has(key)) delete e[key];
     for (const key of Object.keys(g)) if (key !== "console") delete g[key];
+  } else if (deps.surface === "worker") {
+    const workerElpis = new Set([
+      "edit",
+      "fill",
+      "git",
+      "preview",
+      "read",
+      "sh",
+      "sleep",
+      "wait",
+      "timeout",
+    ]);
+    for (const key of Object.keys(e)) if (!workerElpis.has(key)) delete e[key];
   }
 
   // Deep-freeze the whole verb namespace, then hang it off `g.elpis` — the

@@ -17,11 +17,11 @@
 // The control-path + argv construction is split into PURE exported helpers so
 // it can be unit-tested without a live ssh (CI has no network).
 
-import { spawn } from 'node:child_process';
-import * as path from 'node:path';
-import * as fs from 'node:fs';
-import { slugify } from '../lib/slug.js';
-import { resolveDataLayout } from '../store/data-layout.js';
+import { spawn } from "node:child_process";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import { slugify } from "../lib/slug.js";
+import { resolveDataLayout } from "../store/data-layout.js";
 
 /** The shape returned by `elpis.ssh(host).exec(cmd)` — same as `elpis.sh` plus `host`. */
 export interface SshResult {
@@ -71,13 +71,13 @@ export interface SshRegistryOpts {
 export const SSH_MAX_BUFFER = 32 * 1024 * 1024;
 
 const DEFAULT_TIMEOUT = 60_000;
-const DEFAULT_PERSIST = '10m';
+const DEFAULT_PERSIST = "10m";
 
 /** Slugify an ssh target (host or user@host) into a filesystem-safe control-socket
  * name component. Collapses runs of non-alnum to a single dash, trims edges.
  * Pure + unit-tested. */
 export function slugifyHost(host: string): string {
-  return slugify(host, 'host');
+  return slugify(host, "host");
 }
 
 /** Derive the ControlPath socket for a host. Stable for a given (host, user, dir)
@@ -85,9 +85,9 @@ export function slugifyHost(host: string): string {
  * Pure + unit-tested (no fs, no network). */
 export function controlPath(
   host: string,
-  opts: { socketDir: string; user?: string } = { socketDir: '' },
+  opts: { socketDir: string; user?: string } = { socketDir: "" },
 ): string {
-  const u = opts.user ? `${slugifyHost(opts.user)}-` : '';
+  const u = opts.user ? `${slugifyHost(opts.user)}-` : "";
   return path.join(opts.socketDir, `elpis-ssh-${u}${slugifyHost(host)}`);
 }
 
@@ -99,23 +99,36 @@ export function controlPath(
  * a missing key surfaces as a nonzero exit + stderr, not an indefinite tty hang. */
 export function controlOpts(controlPathStr: string, persist: string): string[] {
   return [
-    '-o', 'ControlMaster=auto',
-    '-o', `ControlPath=${controlPathStr}`,
-    '-o', `ControlPersist=${persist}`,
-    '-o', 'BatchMode=yes',
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${controlPathStr}`,
+    "-o",
+    `ControlPersist=${persist}`,
+    "-o",
+    "BatchMode=yes",
   ];
 }
 
 /** Build the full argv for an `ssh ... host -- cmd` exec. PURE + unit-tested.
- * argv-array spawn, never `shell:true` (the harness-wide rule from fleet/git). */
+ * argv-array spawn, never `shell:true` (the harness-wide subprocess rule). */
 export function execArgv(
   binary: string,
   host: string,
   cmd: string,
-  opts: { controlPath: string; persist: string; user?: string } = { controlPath: '', persist: DEFAULT_PERSIST },
+  opts: { controlPath: string; persist: string; user?: string } = {
+    controlPath: "",
+    persist: DEFAULT_PERSIST,
+  },
 ): string[] {
   const target = opts.user ? `${opts.user}@${host}` : host;
-  return [binary, ...controlOpts(opts.controlPath, opts.persist), target, '--', cmd];
+  return [
+    binary,
+    ...controlOpts(opts.controlPath, opts.persist),
+    target,
+    "--",
+    cmd,
+  ];
 }
 
 /** Build the argv to tear down a master: `ssh -O exit -o ControlPath=... target`. PURE. */
@@ -126,7 +139,7 @@ export function closeArgv(
   user?: string,
 ): string[] {
   const target = user ? `${user}@${host}` : host;
-  return [binary, '-O', 'exit', '-o', `ControlPath=${controlPathStr}`, target];
+  return [binary, "-O", "exit", "-o", `ControlPath=${controlPathStr}`, target];
 }
 
 export interface SshRegistry {
@@ -138,10 +151,14 @@ export interface SshRegistry {
   dispose(): Promise<void>;
 }
 
-export function createSshRegistry(dataDirectory: string, opts?: SshRegistryOpts): SshRegistry {
-  const socketDir = opts?.socketDir ?? resolveDataLayout(dataDirectory).sshSockets;
+export function createSshRegistry(
+  dataDirectory: string,
+  opts?: SshRegistryOpts,
+): SshRegistry {
+  const socketDir =
+    opts?.socketDir ?? resolveDataLayout(dataDirectory).sshSockets;
   fs.mkdirSync(socketDir, { recursive: true });
-  const sshBinary = opts?.sshBinary ?? 'ssh';
+  const sshBinary = opts?.sshBinary ?? "ssh";
   const persist = opts?.controlPersist ?? DEFAULT_PERSIST;
   const trackChild = opts?.trackChild;
  // Track live handles so dispose can close every master we opened. A Map keyed
@@ -153,53 +170,123 @@ export function createSshRegistry(dataDirectory: string, opts?: SshRegistryOpts)
   /** The shared exec implementation. Mirrors `elpis.sh`'s shape: spawn detached,
  * cap each stream at maxBuffer, resolve with a TIMEOUT signal on overrun, and
  * NEVER throw — the caller checks `.code`. */
-  function exec(cmd: string, host: string, cp: string, user: string | undefined, o: SshExecOpts = {}): Promise<SshResult> {
+  function exec(
+    cmd: string,
+    host: string,
+    cp: string,
+    user: string | undefined,
+    o: SshExecOpts = {},
+  ): Promise<SshResult> {
     const timeoutMs = o.timeout ?? DEFAULT_TIMEOUT;
     const maxBuffer = o.maxBuffer ?? SSH_MAX_BUFFER;
-    const argv = execArgv(sshBinary, host, cmd, { controlPath: cp, persist, user });
+    const argv = execArgv(sshBinary, host, cmd, {
+      controlPath: cp,
+      persist,
+      user,
+    });
     const { promise, resolve } = Promise.withResolvers<SshResult>();
     const child = spawn(argv[0]!, argv.slice(1), { detached: true });
     const killGroup = (sig: NodeJS.Signals) => {
-      if (child.pid) { try { process.kill(-child.pid, sig); return; } catch { /* group gone */ } }
-      try { child.kill(sig); } catch { /* already gone */ }
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, sig);
+          return;
+        } catch {
+          /* group gone */
+        }
+      }
+      try {
+        child.kill(sig);
+      } catch {
+        /* already gone */
+      }
     };
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
     let stdoutTrunc = false;
     let stderrTrunc = false;
     let done = false;
-    const appendCapped = (cur: string, chunk: string, trunc: boolean): [string, boolean] => {
+    const appendCapped = (
+      cur: string,
+      chunk: string,
+      trunc: boolean,
+    ): [string, boolean] => {
       if (trunc) return [cur, true];
       if (cur.length + chunk.length <= maxBuffer) return [cur + chunk, false];
-      return [cur + chunk.slice(0, Math.max(0, maxBuffer - cur.length)) + `\n[output truncated at ${maxBuffer} bytes]`, true];
+      return [
+        cur +
+          chunk.slice(0, Math.max(0, maxBuffer - cur.length)) +
+          `\n[output truncated at ${maxBuffer} bytes]`,
+        true,
+      ];
     };
     let killTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       if (!done) {
         done = true;
-        killGroup('SIGTERM');
-        killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
+        killGroup("SIGTERM");
+        killTimer = setTimeout(() => killGroup("SIGKILL"), 5000);
         killTimer.unref?.();
-        resolve({ host, stdout, stderr: stderr + `\n[elpis.ssh TIMED OUT after ${timeoutMs}ms — output above is partial]`, code: null, signal: 'TIMEOUT' });
+        resolve({
+          host,
+          stdout,
+          stderr:
+            stderr +
+            `\n[elpis.ssh TIMED OUT after ${timeoutMs}ms — output above is partial]`,
+          code: null,
+          signal: "TIMEOUT",
+        });
       }
     }, timeoutMs);
  // Track against the current run's scope so a bg detach / bg.cancel can
  // kill this ssh's process tree, exactly like `elpis.sh` children.
-    const unregister = child.pid && trackChild ? trackChild(child.pid) : undefined;
-    child.stdout?.on('data', (d: Buffer) => { [stdout, stdoutTrunc] = appendCapped(stdout, d.toString('utf8'), stdoutTrunc); });
-    child.stderr?.on('data', (d: Buffer) => { [stderr, stderrTrunc] = appendCapped(stderr, d.toString('utf8'), stderrTrunc); });
-    child.on('error', (err) => {
-      if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+    const unregister =
+      child.pid && trackChild ? trackChild(child.pid) : undefined;
+    child.stdout?.on("data", (d: Buffer) => {
+      [stdout, stdoutTrunc] = appendCapped(
+        stdout,
+        d.toString("utf8"),
+        stdoutTrunc,
+      );
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      [stderr, stderrTrunc] = appendCapped(
+        stderr,
+        d.toString("utf8"),
+        stderrTrunc,
+      );
+    });
+    child.on("error", (err) => {
+      if (killTimer) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
       if (!done) {
-        done = true; clearTimeout(timer); unregister?.();
+        done = true;
+        clearTimeout(timer);
+        unregister?.();
  // ssh binary missing / spawn failure — surface as a nonzero exit, not a
  // throw, matching the "never throws" contract the agent expects.
-        resolve({ host, stdout: '', stderr: `ssh spawn failed: ${err.message}`, code: 127, signal: null });
+        resolve({
+          host,
+          stdout: "",
+          stderr: `ssh spawn failed: ${err.message}`,
+          code: 127,
+          signal: null,
+        });
       }
     });
-    child.on('close', (code, signal) => {
-      if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
-      if (!done) { done = true; clearTimeout(timer); unregister?.(); resolve({ host, stdout, stderr, code, signal: signal ?? null }); }
+    child.on("close", (code, signal) => {
+      if (killTimer) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        unregister?.();
+        resolve({ host, stdout, stderr, code, signal: signal ?? null });
+      }
     });
     return promise;
   }
@@ -212,11 +299,21 @@ export function createSshRegistry(dataDirectory: string, opts?: SshRegistryOpts)
       exec: (cmd: string, o?: SshExecOpts) => exec(cmd, host, cp, user, o),
       close: async () => {
         const argv = closeArgv(sshBinary, host, cp, user);
-        const child = spawn(argv[0]!, argv.slice(1), { detached: true, stdio: 'ignore' });
+        const child = spawn(argv[0]!, argv.slice(1), {
+          detached: true,
+          stdio: "ignore",
+        });
  // `ssh -O exit` exits promptly; resolve once it closes.
         return new Promise<{ ok: boolean; note: string }>((r) => {
-          child.on('error', () => r({ ok: false, note: `close failed for ${host} (ssh not found)` }));
-          child.on('close', (code) => r({ ok: code === 0, note: `control master closed for ${host} (exit ${code})` }));
+          child.on("error", () =>
+            r({ ok: false, note: `close failed for ${host} (ssh not found)` }),
+          );
+          child.on("close", (code) =>
+            r({
+              ok: code === 0,
+              note: `control master closed for ${host} (exit ${code})`,
+            }),
+          );
           child.unref();
         });
       },
@@ -228,7 +325,10 @@ export function createSshRegistry(dataDirectory: string, opts?: SshRegistryOpts)
       const user = opts?.user;
       const key = controlPath(host, { socketDir, user });
       let h = handles.get(key);
-      if (!h) { h = makeHandle(host, user); handles.set(key, h); }
+      if (!h) {
+        h = makeHandle(host, user);
+        handles.set(key, h);
+      }
       return h;
     },
     async dispose() {

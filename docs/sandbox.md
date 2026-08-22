@@ -72,7 +72,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.watch` for ephemeral image batches;
 - `elpis.bsky` for AT Protocol;
 - `elpis.motor` for bounded screenshot-to-action control;
-- optional `elpis.fleet` for coding workers.
+- optional `elpis.worker` supervision for Mind-rooted workers; a worker sandbox itself receives only its parent-bound `run(code, detail)` tool and workspace allowlist.
 
 ### Local extensions
 

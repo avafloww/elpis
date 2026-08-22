@@ -180,13 +180,13 @@ sandbox:
   preview_max_bytes: 16384
   log_max_bytes: 32768
 
-# Optional built-in modules (kagi, bsky, browser, computer, motor, fleet) use
+# Optional built-in modules (kagi, bsky, browser, computer, motor) use
 # exactly ONE selection policy:
 #   enabled: [browser, computer]  # allowlist: only these are requested
 #   disabled: [bsky, motor]       # denylist: all except these are requested
 # An empty enabled list requests none. An empty disabled list requests all and
-# preserves the normal default. Kagi/Bluesky still require credentials, motor
-# requires an active computer module, and fleet still requires fleet.enabled.
+# preserves the normal default. Kagi/Bluesky still require credentials, and motor
+# requires an active computer module.
 modules:
   disabled: []
 
@@ -213,79 +213,28 @@ bluesky:
   # App password, not the account password.
   app_password: null
 
-fleet:
-  # ON by default (opt-out). false disables the fleet entirely: no registry is
-  # constructed, boot recovery is skipped, elpis.fleet.* throws a teachable
-  # error, and the system prompt tells the agent to do the work itself.
-  # enabled: true
-
-  # Per-path cap: legacy runners and simultaneous scoped-actor completions each
-  # enforce this bound independently.
+# Native bounded workers. Disabled until the fixed-template worker runtime and
+# token-bound broker are deliberately enabled.
+workers:
+  enabled: false
   max_concurrent: 4
-
-  # Native scoped-actor broker. OFF by default and loopback-only by default.
-  # It exposes token-bound completion, Mind-subtree, and mailbox routes; callers
-  # cannot choose their session, model, Mind root, actor identity, or direction.
-  # Bind beyond loopback only behind an explicit host firewall/NetworkPolicy.
-  actor_server:
+  # Loopback-only by default. This server exposes token-bound completion, Mind,
+  # and mailbox routes; callers cannot choose another model, Mind root, worker
+  # identity, or mailbox direction.
+  server:
     enabled: false
     host: 127.0.0.1
     port: 8790
-
-  # --- endpoint (all optional) ------------------------------------------------
-  # Every key below is a pure OVERRIDE: leave it unset and the harness passes the
-  # Claude Agent SDK nothing at all, so a fleet session uses the SDK's own
-  # endpoint, credentials, model aliases, and effort levels. Set them to point
-  # the fleet at a custom Anthropic-compatible endpoint. These are separate from
-  # llm.* — the harness's own brain-LLM credentials are NEVER shared with a
-  # fleet session (see docs/fleet.md#isolation-rules).
-  # NOTE base_url is the API ROOT with NO /v1 — the Claude CLI appends
-  # /v1/messages itself. This is the OPPOSITE of llm.base_url above, which is an
-  # OpenAI-compatible client and does need its /v1. A trailing /v1 here gets
-  # stripped with a warning at boot rather than failing later as a confusing
-  # "that model may not exist or you may not have access to it".
-  # base_url: https://api.example.com     # -> ANTHROPIC_BASE_URL
-  # api_key: sk-fleet-...                 # -> ANTHROPIC_API_KEY
-  # auth_token: ...                       # -> ANTHROPIC_AUTH_TOKEN
-
-  # Model-alias overrides. Unset aliases keep the SDK's own alias table; the
-  # agent keeps saying 'opus'/'sonnet'/'haiku'/'fable' either way.
-  #
-  # Each alias takes either a bare model name, or a mapping that also pins the
-  # model's context window in tokens. With no `context`, the harness discovers
-  # it by probing <base_url>/models/info (the same route the harness's own
-  # brain LLM uses at boot) and passes the answer to the session as
-  # CLAUDE_CODE_MAX_CONTEXT_TOKENS. Setting `context` skips that probe — use it
-  # for endpoints that don't serve models/info, or to override what it reports.
-  # A probe failure is never fatal: the session just runs on the SDK's default.
-  # models:
-  #   opus:                               # mapping form: pin the window
-  #     name: my-big-model                # -> ANTHROPIC_DEFAULT_OPUS_MODEL
-  #     context: 262144                   # -> CLAUDE_CODE_MAX_CONTEXT_TOKENS
-  #   sonnet: my-mid-model                # shorthand: probe for the window
-  #   haiku: my-small-model
-  #   fable:
-  #     context: 200000                   # pin the window, keep the SDK's model
-
-  # Reasoning-effort levels this endpoint accepts. Defaults to the SDK's own
-  # set; narrow it (or rename it) for an endpoint that differs, or use [] for an
-  # endpoint with no effort parameter at all.
-  # efforts: [low, medium, high, xhigh, max]
-
-  # Default model for a spawned agent. null = don't send one; the SDK decides.
-  default_model: opus
-  # Default reasoning effort for a spawned agent. Must be a member of `efforts`.
-  # null = don't send one; the SDK decides.
-  default_effort: high               # low | medium | high | xhigh | max
-  # An idle runner exits gracefully after this long with no activity; the session
-  # stays revivable via elpis.fleet.send. Friendly durations accepted: a bare
-  # number is milliseconds; suffixes ms/s/m/h/d otherwise.
-  idle_timeout: 2h
-  # Deletes the on-disk session dir of DISMISSED sessions this long after
-  # dismissal. DB rows are kept forever.
-  reap_after: 14d
-  # Extra environment variables passed to every spawned agent.
-  env: {}
+  # One operator-owned PodTemplate. The caller cannot override its image,
+  # command, mounts, service account, resources, namespace, or security context.
+  kubernetes:
+    enabled: false
+    namespace: elpis-workers
+    template: elpis-worker
+    container: worker
+    broker_url: null
+    kubectl_path: kubectl
+    context: null
 
 # Provider subscription-usage tracker (Elpis Console rail widget + /usage
 # slash command). The provider is AUTO-DETECTED from llm.base_url (currently:

@@ -413,9 +413,10 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
   await done;
  // Let the wake-yielding run complete: it drains the queued ambient
  // into history + ambientUnseen, then parks without a second LLM call.
+ // Wait on the state invariant rather than a fixed count of internal awaits.
+  for (let i = 0; i < 20 && !agent.messagesForTest.some((m) => m.content.includes('chat in 1002')); i++) {
   await microtask();
-  await microtask();
-  await microtask();
+  }
 
   assert.equal(llm.calls, 1, 'the real-user turn ended naturally — no second call yet');
   assert.ok(agent.messagesForTest.some((m) => m.content.includes('chat in 1002')),

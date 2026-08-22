@@ -46,4 +46,4 @@ Never use a real transcript, credential, Discord identifier, private hostname, o
 
 ## Environment-sensitive failures
 
-The full suite may require provider credentials, a fleet login, Discord, Docker, or desktop services. Report those failures separately from deterministic regressions. Do not describe the whole suite as green when only the network-free portion passed.
+The full suite may require provider credentials, Discord, Docker, Kubernetes, or desktop services. Report those failures separately from deterministic regressions. Do not describe the whole suite as green when only the network-free portion passed.

@@ -12,8 +12,6 @@ import {
   configForLlmRole,
   loadConfigFile,
   parseDuration,
-  normalizeAnthropicBaseUrl,
-  SDK_EFFORT_LEVELS,
 } from "../src/config.js";
 import { noopLogger } from "../src/lib/log.js";
 
@@ -135,12 +133,12 @@ test("configFile: canonical provider/model registry resolves roles and projects 
   assert.equal(motor.llm.model, "openai/gpt-5.6-mini");
   assert.equal(motor.llm.reasoningEffort, "low");
   assert.equal(motor.llm.registry, c.llm.registry);
-  const fleetTarget = configForLlmRef(c, "openrouter/motor");
-  assert.equal(fleetTarget.llm.model, "openai/gpt-5.6-mini");
-  assert.equal(fleetTarget.llm.contextSize, 128000);
+  const workerTarget = configForLlmRef(c, "openrouter/motor");
+  assert.equal(workerTarget.llm.model, "openai/gpt-5.6-mini");
+  assert.equal(workerTarget.llm.contextSize, 128000);
   assert.throws(
     () => configForLlmRef(c, "openrouter/missing"),
-    /config: fleet model references unknown model/,
+    /config: worker model references unknown model/,
   );
 });
 
@@ -570,268 +568,93 @@ test("parseDuration accepts friendly forms and bare ms", () => {
   assert.throws(() => parseDuration("soon", "k", "f"), /duration/);
 });
 
-test("fleet config defaults", () => {
-  const c = loadConfigFile(fixture(MINIMAL_OK));
-  assert.equal(c.fleet.enabled, true);
-  assert.equal(c.fleet.maxConcurrent, 4);
-  assert.deepEqual(c.fleet.actorServer, {
+test("native workers default disabled with a loopback broker", () => {
+  const config = loadConfigFile(fixture(MINIMAL_OK));
+  assert.deepEqual(config.workers, {
     enabled: false,
-    host: "127.0.0.1",
-    port: 8790,
-  });
-  assert.equal(c.fleet.defaultModel, "opus");
-  assert.equal(c.fleet.defaultEffort, "high");
-  assert.equal(c.fleet.idleTimeoutMs, 7_200_000);
-  assert.equal(c.fleet.reapAfterMs, 14 * 86_400_000);
-  assert.deepEqual(c.fleet.env, {});
-});
-
-test("fleet actor server is explicit and validates its bind port", () => {
-  const c = loadConfigFile(
-    fixture(
-      `${MINIMAL_OK}\nfleet:\n  actor_server:\n    enabled: true\n    host: 10.42.0.1\n    port: 18890\n`,
-    ),
-  );
-  assert.deepEqual(c.fleet.actorServer, {
-    enabled: true,
-    host: "10.42.0.1",
-    port: 18890,
-  });
-  assert.throws(
-    () =>
-      loadConfigFile(
-        fixture(`${MINIMAL_OK}\nfleet:\n  actor_server:\n    port: 70000\n`),
-      ),
-    /actor_server\.port must be an integer from 1 to 65535/,
-  );
-});
-
-test("fleet.enabled: false parses (the fleet opt-out)", () => {
-  const c = loadConfigFile(
-    fixture(`${MINIMAL_OK}\nfleet:\n  enabled: false\n`),
-  );
-  assert.equal(c.fleet.enabled, false);
-});
-
-// ---------- fleet endpoint / aliases / effort levels ----------
-// Every knob below is optional and an un-set one hands the Claude Agent SDK
-// NOTHING — the SDK's own endpoint, credentials, alias table, and effort
-// levels apply. See docs/fleet.md#endpoint-model-aliases-and-effort-levels.
-
-const BARE = { name: null, context: null };
-
-test('fleet endpoint/alias/effort knobs default to "leave it to the SDK"', () => {
-  const c = loadConfigFile(fixture(MINIMAL_OK));
-  assert.deepEqual(c.fleet.endpoint, {
-    baseUrl: null,
-    apiKey: null,
-    authToken: null,
-  });
-  assert.deepEqual(c.fleet.models, {
-    opus: BARE,
-    sonnet: BARE,
-    haiku: BARE,
-    fable: BARE,
-  });
-  assert.deepEqual(c.fleet.efforts, ["low", "medium", "high", "xhigh", "max"]);
-});
-
-test("fleet.efforts defaults to exactly the SDK EffortLevel union", () => {
-  const c = loadConfigFile(fixture(MINIMAL_OK));
-  assert.deepEqual(c.fleet.efforts, SDK_EFFORT_LEVELS);
-});
-
-test("fleet endpoint + aliases are read off the config file", () => {
-  const body = `${MINIMAL_OK}\nfleet:\n  base_url: https://api.example.com\n  api_key: sk-fleet-1\n  auth_token: tok-1\n  models:\n    opus: big-1\n    haiku: small-1\n`;
-  const c = loadConfigFile(fixture(body));
-  assert.deepEqual(c.fleet.endpoint, {
-    baseUrl: "https://api.example.com",
-    apiKey: "sk-fleet-1",
-    authToken: "tok-1",
-  });
-  assert.deepEqual(c.fleet.models, {
-    opus: { name: "big-1", context: null },
-    sonnet: BARE,
-    haiku: { name: "small-1", context: null },
-    fable: BARE,
-  });
-});
-
-// ---------- fleet.base_url normalization ----------
-// ANTHROPIC_BASE_URL is the API ROOT; the CLI appends /v1/messages itself. The
-// adjacent llm.base_url requires its /v1, so pasting that spelling here is the
-// obvious mistake — and it fails as an opaque "model may not exist" three
-// layers down in a detached subprocess. Normalize it, loudly.
-
-test("fleet.base_url: a trailing version segment is stripped", () => {
-  const withV1 = loadConfigFile(
-    fixture(`${MINIMAL_OK}\nfleet:\n  base_url: https://api.example.com/v1\n`),
-  );
-  assert.equal(withV1.fleet.endpoint.baseUrl, "https://api.example.com");
-  const withSlash = loadConfigFile(
-    fixture(`${MINIMAL_OK}\nfleet:\n  base_url: https://api.example.com/v1/\n`),
-  );
-  assert.equal(withSlash.fleet.endpoint.baseUrl, "https://api.example.com");
-});
-
-test("fleet.base_url: a correct root is left exactly as written", () => {
-  const c = loadConfigFile(
-    fixture(`${MINIMAL_OK}\nfleet:\n  base_url: https://api.example.com\n`),
-  );
-  assert.equal(c.fleet.endpoint.baseUrl, "https://api.example.com");
-});
-
-test("fleet.base_url: a path prefix that is not a version segment survives", () => {
-  const c = loadConfigFile(
-    fixture(
-      `${MINIMAL_OK}\nfleet:\n  base_url: https://gw.example.com/anthropic\n`,
-    ),
-  );
-  assert.equal(c.fleet.endpoint.baseUrl, "https://gw.example.com/anthropic");
-});
-
-test("normalizeAnthropicBaseUrl: warns when it strips, stays quiet when it does not", () => {
-  const warns: string[] = [];
-  const spy = {
-    ...noopLogger,
-    warn: (...a: unknown[]) => {
-      warns.push(a.join(" "));
+    maxConcurrent: 4,
+    server: { enabled: false, host: "127.0.0.1", port: 8790 },
+    kubernetes: {
+      enabled: false,
+      namespace: "elpis-workers",
+      template: "elpis-worker",
+      container: "worker",
+      brokerUrl: null,
+      kubectlPath: "kubectl",
+      context: null,
     },
-  };
-  assert.equal(
-    normalizeAnthropicBaseUrl("https://x.test/v1", spy),
-    "https://x.test",
-  );
-  assert.equal(warns.length, 1);
-  assert.match(warns[0], /ANTHROPIC_BASE_URL is the API root/);
-  assert.match(warns[0], /llm\.base_url is different/);
-  assert.equal(
-    normalizeAnthropicBaseUrl("https://x.test", spy),
-    "https://x.test",
-  );
-  assert.equal(warns.length, 1, "no warning for an already-correct root");
-  assert.equal(normalizeAnthropicBaseUrl(null, spy), null);
+  });
 });
 
-// ---------- fleet.models: the two spellings ----------
-
-test("an alias accepts the mapping form with an explicit context window", () => {
-  const body = `${MINIMAL_OK}\nfleet:\n  models:\n    opus:\n      name: big-model\n      context: 262144\n    haiku: small-model\n`;
-  const c = loadConfigFile(fixture(body));
-  assert.deepEqual(c.fleet.models.opus, { name: "big-model", context: 262144 });
-  assert.deepEqual(
-    c.fleet.models.haiku,
-    { name: "small-model", context: null },
-    'the string shorthand still means "probe for the context"',
-  );
-});
-
-test("an alias may pin only the context, keeping the SDK's own alias target", () => {
-  const c = loadConfigFile(
+test("native worker server configuration is explicit and bounded", () => {
+  const config = loadConfigFile(
     fixture(
-      `${MINIMAL_OK}\nfleet:\n  models:\n    sonnet:\n      context: 200000\n`,
+      `${MINIMAL_OK}\nworkers:\n  enabled: true\n  max_concurrent: 8\n  server:\n    enabled: true\n    host: 10.42.0.1\n    port: 18890\n`,
     ),
   );
-  assert.deepEqual(c.fleet.models.sonnet, { name: null, context: 200000 });
-});
-
-test("an unknown key inside a fleet.models alias is a boot error", () => {
-  const body = `${MINIMAL_OK}\nfleet:\n  models:\n    opus:\n      name: big\n      window: 100\n`;
-  assert.throws(
-    () => loadConfigFile(fixture(body)),
-    /unknown key `fleet.models.opus.window`.*name.*context/s,
-  );
-});
-
-test("a non-positive or non-numeric alias context is a boot error", () => {
+  assert.deepEqual(config.workers, {
+    enabled: true,
+    maxConcurrent: 8,
+    server: { enabled: true, host: "10.42.0.1", port: 18890 },
+    kubernetes: {
+      enabled: false,
+      namespace: "elpis-workers",
+      template: "elpis-worker",
+      container: "worker",
+      brokerUrl: null,
+      kubectlPath: "kubectl",
+      context: null,
+    },
+  });
   assert.throws(
     () =>
-      loadConfigFile(
-        fixture(
-          `${MINIMAL_OK}\nfleet:\n  models:\n    opus:\n      context: 0\n`,
-        ),
-      ),
-    /must be a positive number of tokens/,
+      loadConfigFile(fixture(`${MINIMAL_OK}\nworkers:\n  max_concurrent: 0\n`)),
+    /workers\.max_concurrent must be an integer from 1 to 128/,
   );
   assert.throws(
     () =>
       loadConfigFile(
-        fixture(
-          `${MINIMAL_OK}\nfleet:\n  models:\n    opus:\n      context: big\n`,
-        ),
+        fixture(`${MINIMAL_OK}\nworkers:\n  server:\n    port: 70000\n`),
       ),
-    /fleet\.models\.opus\.context/,
+    /workers\.server\.port must be an integer from 1 to 65535/,
   );
 });
 
-test("an alias set to a list (not a name or mapping) is a boot error", () => {
+test("Kubernetes workers require a fixed brokered template configuration", () => {
+  const body = `${MINIMAL_OK}\nworkers:\n  enabled: true\n  server:\n    enabled: true\n  kubernetes:\n    enabled: true\n    namespace: bounded-workers\n    template: fixed-worker\n    container: worker\n    broker_url: https://worker-broker.example.com\n    context: bounded-context\n`;
+  const config = loadConfigFile(fixture(body));
+  assert.deepEqual(config.workers.kubernetes, {
+    enabled: true,
+    namespace: "bounded-workers",
+    template: "fixed-worker",
+    container: "worker",
+    brokerUrl: "https://worker-broker.example.com",
+    kubectlPath: "kubectl",
+    context: "bounded-context",
+  });
+  for (const invalid of [
+    `${MINIMAL_OK}\nworkers:\n  kubernetes:\n    enabled: true\n    broker_url: https://worker-broker.example.com\n`,
+    `${MINIMAL_OK}\nworkers:\n  enabled: true\n  kubernetes:\n    enabled: true\n    broker_url: https://worker-broker.example.com\n`,
+    `${MINIMAL_OK}\nworkers:\n  enabled: true\n  server:\n    enabled: true\n  kubernetes:\n    enabled: true\n`,
+    `${MINIMAL_OK}\nworkers:\n  enabled: true\n  server:\n    enabled: true\n  kubernetes:\n    enabled: true\n    broker_url: https://user:pass@worker-broker.example.com\n`,
+  ])
+    assert.throws(
+      () => loadConfigFile(fixture(invalid)),
+      /workers\.kubernetes/,
+    );
   assert.throws(
     () =>
       loadConfigFile(
-        fixture(`${MINIMAL_OK}\nfleet:\n  models:\n    opus: [a, b]\n`),
+        fixture(`${MINIMAL_OK}\nworkers:\n  kubernetes:\n    image: escape\n`),
       ),
-    /must be a model name or a mapping of \{ name, context \}/,
+    /unknown workers\.kubernetes key.*image/,
   );
 });
 
-test("an unknown fleet.models alias is a boot error naming the valid ones", () => {
-  const body = `${MINIMAL_OK}\nfleet:\n  models:\n    turbo: x\n`;
+test("legacy fleet configuration is rejected without an alias", () => {
   assert.throws(
-    () => loadConfigFile(fixture(body)),
-    /unknown fleet.models alias `turbo`.*opus, sonnet, haiku, fable/s,
-  );
-});
-
-test("fleet.efforts can narrow or rename the level set", () => {
-  const c = loadConfigFile(
-    fixture(
-      `${MINIMAL_OK}\nfleet:\n  efforts: [fast, deep]\n  default_effort: deep\n`,
-    ),
-  );
-  assert.deepEqual(c.fleet.efforts, ["fast", "deep"]);
-  assert.equal(c.fleet.defaultEffort, "deep");
-});
-
-test("fleet.default_effort must name a member of fleet.efforts", () => {
-  const body = `${MINIMAL_OK}\nfleet:\n  efforts: [low, high]\n  default_effort: xhigh\n`;
-  assert.throws(
-    () => loadConfigFile(fixture(body)),
-    /default_effort \(xhigh\).*\[low, high\]/s,
-  );
-});
-
-test("a narrowed fleet.efforts without high slides the unset default to the first level", () => {
-  const c = loadConfigFile(
-    fixture(`${MINIMAL_OK}\nfleet:\n  efforts: [fast, deep]\n`),
-  );
-  assert.equal(c.fleet.defaultEffort, "fast");
-});
-
-test("fleet.efforts: [] means no effort parameter — the unset default becomes null", () => {
-  const c = loadConfigFile(fixture(`${MINIMAL_OK}\nfleet:\n  efforts: []\n`));
-  assert.deepEqual(c.fleet.efforts, []);
-  assert.equal(c.fleet.defaultEffort, null);
-});
-
-test('explicit null default_model/default_effort mean "send neither to the SDK"', () => {
-  const c = loadConfigFile(
-    fixture(
-      `${MINIMAL_OK}\nfleet:\n  default_model: null\n  default_effort: null\n`,
-    ),
-  );
-  assert.equal(c.fleet.defaultModel, null);
-  assert.equal(c.fleet.defaultEffort, null);
-});
-
-test("fleet.efforts must be a list of non-empty strings", () => {
-  assert.throws(
-    () => loadConfigFile(fixture(`${MINIMAL_OK}\nfleet:\n  efforts: high\n`)),
-    /must be a list of strings/,
-  );
-  assert.throws(
-    () =>
-      loadConfigFile(fixture(`${MINIMAL_OK}\nfleet:\n  efforts: [high, 3]\n`)),
-    /efforts\[1\].*non-empty string/,
+    () => loadConfigFile(fixture(`${MINIMAL_OK}\nfleet:\n  enabled: false\n`)),
+    /legacy `fleet` configuration was removed.*`workers`/,
   );
 });
 

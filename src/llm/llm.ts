@@ -454,8 +454,8 @@ export interface RunTool {
       properties: {
         code: { type: "string"; description: string };
         detail: { type: "string"; description: string; maxLength: 120 };
-        sandbox: { type: "string"; description: string };
-        wake: {
+        sandbox?: { type: "string"; description: string };
+        wake?: {
           type: "object";
           description: string;
           properties: {
@@ -577,8 +577,9 @@ export const THINK_TOOL: ThinkTool = {
 
 export function activeModelTools(
   externalThinking: boolean,
+  runTool: RunTool = RUN_TOOL,
 ): Array<RunTool | ThinkTool> {
-  return externalThinking ? [RUN_TOOL, THINK_TOOL] : [RUN_TOOL];
+  return externalThinking ? [runTool, THINK_TOOL] : [runTool];
 }
 
 const EXTERNAL_THINKING_JUICE: Record<string, number> = {
@@ -828,6 +829,8 @@ export interface CompleteResult {
 export interface CompleteOptions {
   /** Force the first model-facing tool call of this outer user turn to `think`. */
   forceThink?: boolean;
+  /** Override the run schema for this bounded execution lane. */
+  runTool?: RunTool;
   /** Caller cancellation for the whole completion, including provider setup. */
   signal?: AbortSignal;
 }
@@ -1295,8 +1298,19 @@ export function createLLM(
 
   async function chatComplete(
     messages: ChatMessage[],
+    options: CompleteOptions = {},
   ): Promise<CompleteResult> {
-    return streamComplete(client, config, messages, hub);
+    return streamComplete(client, config, messages, hub, {
+      ...(options.runTool
+        ? {
+            tools: activeModelTools(
+              config.llm.externalThinking,
+              options.runTool,
+            ),
+          }
+        : {}),
+      signal: options.signal,
+    });
   }
 
   async function chatSummarize(
@@ -1408,7 +1422,7 @@ export function createLLM(
     },
     async complete(
       messages: ChatMessage[],
-      _options: CompleteOptions = {},
+      options: CompleteOptions = {},
     ): Promise<CompleteResult> {
       return routeCall(
         async () => {
@@ -1417,6 +1431,10 @@ export function createLLM(
             config,
             messages,
             hub,
+            {},
+            undefined,
+            options.signal,
+            options.runTool,
           );
           stampGeneration(result.message, {
             providerType: "openai-compatible",
@@ -1429,7 +1447,7 @@ export function createLLM(
           return result;
         },
         async () => {
-          const result = await chatComplete(messages);
+          const result = await chatComplete(messages, options);
           stampGeneration(result.message, {
             providerType: "openai-compatible",
             model: config.llm.model,
@@ -1459,10 +1477,10 @@ export function createLLM(
  *
  * The single implementation of that route's contract (`{ [model]: {
  * capabilities: { context_window } } }`) — `fetchContextWindow` below drives
- * it for the harness's own brain LLM, and the fleet registry drives it for a
- * fleet session's model. THROWS on a non-OK response or a missing/non-finite
+ * it for the harness's own brain LLM, and the worker completion broker drives it for a
+ * worker session's model. THROWS on a non-OK response or a missing/non-finite
  * `context_window`; each caller decides whether that is fatal (boot) or merely
- * a degrade-to-default (fleet).
+ * a degrade-to-default.
  */
 export async function fetchModelContextWindow(
   baseUrl: string,

@@ -103,11 +103,11 @@ test('live oracle episode keeps private state at 0700/0600 and the exact nested 
     const sessionDir = path.join(resolveDataLayout(work).sessions, 'discord', 'main');
     assert.ok(fs.readdirSync(sessionDir).some((name) => name.endsWith('.jsonl')));
     const runtimeConfig = parseYaml(fs.readFileSync(path.join(results, 'runtime-config.yaml'), 'utf8')) as {
-      paths: { data_directory: string }; console: { enabled: boolean }; fleet: { enabled: boolean };
+      paths: { data_directory: string }; console: { enabled: boolean }; workers: { enabled: boolean };
     };
     assert.equal(runtimeConfig.paths.data_directory, '/home/agent/data');
     assert.equal(runtimeConfig.console.enabled, false);
-    assert.equal(runtimeConfig.fleet.enabled, false);
+    assert.equal(runtimeConfig.workers.enabled, false);
     assert.ok(record.provenance);
     assert.match(record.provenance.configDigest, /^[a-f0-9]{64}$/);
     assert.equal(

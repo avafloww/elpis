@@ -524,7 +524,7 @@ export function createCodexOAuthLLM(
         tool_choice: options.forceThink
           ? { type: 'function', name: 'think' }
           : 'required',
-      }, responsesLite ? shapeCodexResponsesLiteRequest : undefined, options.signal);
+      }, responsesLite ? shapeCodexResponsesLiteRequest : undefined, options.signal, options.runTool);
       stampGeneration(result.message, {
         providerType: 'codex-oauth', model: config.llm.model,
         apiSurface: 'codex-responses', apiEndpoint: endpointAt(OPENAI_CODEX_BASE_URL, 'codex/responses'),

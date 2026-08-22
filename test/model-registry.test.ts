@@ -76,18 +76,18 @@ test("arbitrary model refs resolve without occupying a role", () => {
   const target = resolveLlmModelTarget(
     registry,
     "openrouter/motor",
-    "fleet model",
+    "worker model",
   );
   assert.equal(target.ref, "openrouter/motor");
   assert.equal(target.name, "openai/gpt-5.6-mini");
   assert.equal(target.provider, registry.providers.openrouter);
   assert.throws(
-    () => resolveLlmModelTarget(registry, "missing/motor", "fleet model"),
-    /fleet model references unknown provider/,
+    () => resolveLlmModelTarget(registry, "missing/motor", "worker model"),
+    /worker model references unknown provider/,
   );
   assert.throws(
-    () => resolveLlmModelTarget(registry, "openrouter/missing", "fleet model"),
-    /fleet model references unknown model/,
+    () => resolveLlmModelTarget(registry, "openrouter/missing", "worker model"),
+    /worker model references unknown model/,
   );
 });
 

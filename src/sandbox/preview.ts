@@ -4,20 +4,26 @@
 // live as `_`, return only a capped, type-aware summary the model can drill
 // into with more JS.
 
-import type { FleetDiff } from '../fleet/index.js';
-
 const TRUNC_SUFFIX = (n: number) =>
   `… [truncated; full value saved as _ — inspect with more JS, e.g. _.slice(0,5) / Object.keys(_) / _.length] [truncated +${n} bytes]`;
 
 /** Head/tail string split: take the first `headFrac` + last `tailFrac` of `s`
  * within `budget`. Returns the two parts so callers can format them
  * differently (string preview JSON-stringifies; sh-result uses a sep). */
-export function headTailParts(s: string, budget: number, headFrac: number, tailFrac: number): { head: string; tail: string } {
+export function headTailParts(
+  s: string,
+  budget: number,
+  headFrac: number,
+  tailFrac: number,
+): { head: string; tail: string } {
   const tailLen = Math.floor(budget * tailFrac);
   return {
-    head: Math.floor(budget * headFrac) > 0 ? s.slice(0, Math.floor(budget * headFrac)) : '',
+    head:
+      Math.floor(budget * headFrac) > 0
+        ? s.slice(0, Math.floor(budget * headFrac))
+        : "",
  // Guard zero tail: s.slice(-0) === s.slice(0) returns the WHOLE string.
-    tail: tailLen > 0 ? s.slice(-tailLen) : '',
+    tail: tailLen > 0 ? s.slice(-tailLen) : "",
   };
 }
 
@@ -27,17 +33,21 @@ export function headTailParts(s: string, budget: number, headFrac: number, tailF
  * bg registry's persisted-value preview and the settle-notice preview. */
 export function previewValue(v: unknown, max: number): string {
   let s: string;
-  if (typeof v === 'string') s = v;
+  if (typeof v === "string") s = v;
   else {
-    try { s = JSON.stringify(v) ?? String(v); } catch { s = String(v); }
+    try {
+      s = JSON.stringify(v) ?? String(v);
+    } catch {
+      s = String(v);
   }
-  return s.length > max ? s.slice(0, max) + '…' : s;
+  }
+  return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
 /** Byte-aware truncate with a `… [truncated +N more bytes]` suffix. */
 export function cap(str: string, maxBytes: number): string {
  // Encode incrementally would be ideal; here we cap by UTF-8 byte length.
-  const buf = Buffer.from(str, 'utf8');
+  const buf = Buffer.from(str, "utf8");
   if (buf.length <= maxBytes) return str;
  // Truncate buffer; back up over any partial multi-byte char.
   let cut = maxBytes;
@@ -49,14 +59,17 @@ export function cap(str: string, maxBytes: number): string {
     const need = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
     if (cut + need > maxBytes) cut -= 1;
   }
-  const kept = buf.subarray(0, cut).toString('utf8');
+  const kept = buf.subarray(0, cut).toString("utf8");
   const suffix = ` …[+${buf.length - cut} more bytes]`;
  // ensure final fits
   const out = kept + suffix;
-  if (Buffer.byteLength(out, 'utf8') <= maxBytes) return out;
+  if (Buffer.byteLength(out, "utf8") <= maxBytes) return out;
  // shrink kept to make room
   let shrink = cut;
-  while (shrink > 0 && Buffer.byteLength(kept.slice(0, --shrink) + suffix, 'utf8') > maxBytes) {
+  while (
+    shrink > 0 &&
+    Buffer.byteLength(kept.slice(0, --shrink) + suffix, "utf8") > maxBytes
+  ) {
  // decrement in loop
   }
   return kept.slice(0, shrink) + suffix;
@@ -69,17 +82,22 @@ export function cap(str: string, maxBytes: number): string {
  * that alone exceeds `maxBytes` can't honor a line boundary — falls back to
  * the plain byte-aware `cap` (with its own marker) in that case. */
 export function capLines(str: string, maxBytes: number): string {
-  const totalBytes = Buffer.byteLength(str, 'utf8');
+  const totalBytes = Buffer.byteLength(str, "utf8");
   if (totalBytes <= maxBytes) return str;
-  const lines = str.split('\n');
+  const lines = str.split("\n");
   const totalLines = lines.length;
-  let kept = '';
+  let kept = "";
   let shownLines = 0;
   for (let i = 0; i < lines.length; i++) {
-    const candidateKept = shownLines === 0 ? lines[i] : kept + '\n' + lines[i];
-    const remaining = totalBytes - Buffer.byteLength(candidateKept, 'utf8');
+    const candidateKept = shownLines === 0 ? lines[i] : kept + "\n" + lines[i];
+    const remaining = totalBytes - Buffer.byteLength(candidateKept, "utf8");
     const marker = `\n[showing first ${shownLines + 1} of ${totalLines} logged lines; +${remaining} more bytes — the values live in your variables, print a narrower slice]`;
-    if (Buffer.byteLength(candidateKept, 'utf8') + Buffer.byteLength(marker, 'utf8') > maxBytes) break;
+    if (
+      Buffer.byteLength(candidateKept, "utf8") +
+        Buffer.byteLength(marker, "utf8") >
+      maxBytes
+    )
+      break;
     kept = candidateKept;
     shownLines++;
   }
@@ -88,12 +106,15 @@ export function capLines(str: string, maxBytes: number): string {
  // honor, fall back to the byte-aware cap.
     return cap(str, maxBytes);
   }
-  const remaining = totalBytes - Buffer.byteLength(kept, 'utf8');
-  return kept + `\n[showing first ${shownLines} of ${totalLines} logged lines; +${remaining} more bytes — the values live in your variables, print a narrower slice]`;
+  const remaining = totalBytes - Buffer.byteLength(kept, "utf8");
+  return (
+    kept +
+    `\n[showing first ${shownLines} of ${totalLines} logged lines; +${remaining} more bytes — the values live in your variables, print a narrower slice]`
+  );
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (v === null || typeof v !== 'object') return false;
+  if (v === null || typeof v !== "object") return false;
   const proto = Object.getPrototypeOf(v);
  // proto === null → Object.create(null). Otherwise a plain object's prototype
  // is SOME realm's Object.prototype, whose own prototype is null — checking one
@@ -108,25 +129,32 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 function functionName(fn: (...a: unknown[]) => unknown): string {
-  return fn.name || 'anonymous';
+  return fn.name || "anonymous";
 }
 
 /** Per-call knobs for nested-value stringification. `strCap` bounds each nested
  * string before truncation; `maxDepth` bounds recursion. Defaults chosen so the
  * standard run-result preview shows real values (the old 60-char cap cut most
  * nested strings mid-word and cost the agent drill-in tool calls). */
-export interface StringifyOpts { strCap?: number; maxDepth?: number }
+export interface StringifyOpts {
+  strCap?: number;
+  maxDepth?: number;
+}
 const DEFAULT_STR_CAP = 200;
 const DEFAULT_MAX_DEPTH = 6;
 
-function tryStringify(v: unknown, budget: number, opts: StringifyOpts = {}): string {
+function tryStringify(
+  v: unknown,
+  budget: number,
+  opts: StringifyOpts = {},
+): string {
   const strCap = opts.strCap ?? DEFAULT_STR_CAP;
   const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
  // walk with a budget; bail early. handle cycles.
   const seen = new WeakSet<object>();
-  let out = '';
+  let out = "";
   let budgetLeft = budget;
-  const SEP = ', ';
+  const SEP = ", ";
   function push(s: string): boolean {
     if (budgetLeft <= 0) return false;
     if (out.length + s.length > budget) {
@@ -142,45 +170,52 @@ function tryStringify(v: unknown, budget: number, opts: StringifyOpts = {}): str
   function visit(v: unknown, depth: number): boolean {
     if (budgetLeft <= 0) return false;
     if (depth > maxDepth) {
-      return push('…');
+      return push("…");
     }
-    if (v === null) return push('null');
+    if (v === null) return push("null");
     const t = typeof v;
-    if (t === 'undefined') return push('undefined');
-    if (t === 'number' || t === 'boolean' || t === 'bigint') return push(String(v));
-    if (t === 'string') {
+    if (t === "undefined") return push("undefined");
+    if (t === "number" || t === "boolean" || t === "bigint")
+      return push(String(v));
+    if (t === "string") {
       const sv = v as string;
-      if (sv.length > strCap) return push(JSON.stringify(sv.slice(0, strCap - 3) + '…') + `(+${sv.length - (strCap - 3)} chars)`);
+      if (sv.length > strCap)
+        return push(
+          JSON.stringify(sv.slice(0, strCap - 3) + "…") +
+            `(+${sv.length - (strCap - 3)} chars)`,
+        );
       return push(JSON.stringify(sv));
     }
-    if (t === 'symbol') return push((v as symbol).toString());
-    if (t === 'function') {
+    if (t === "symbol") return push((v as symbol).toString());
+    if (t === "function") {
       const fn = v as (...a: unknown[]) => unknown;
       const name = functionName(fn);
  // arg count via Function.prototype.toString length-ish
       const len = (fn as { length?: number }).length ?? 0;
-      return push(`[Function: ${name}(${len} arg${len === 1 ? '' : 's'})]`);
+      return push(`[Function: ${name}(${len} arg${len === 1 ? "" : "s"})]`);
     }
-    if (t !== 'object') return push(`[${t}]`);
+    if (t !== "object") return push(`[${t}]`);
  // object
     const obj = v as object;
-    if (seen.has(obj)) return push('[Circular]');
+    if (seen.has(obj)) return push("[Circular]");
     seen.add(obj);
     try {
       if (Array.isArray(v)) {
-        if (!push('[')) return false;
+        if (!push("[")) return false;
         for (let i = 0; i < v.length; i++) {
           if (i > 0 && !push(SEP)) return false;
           if (!visit(v[i], depth + 1)) return false;
         }
-        return push(']');
+        return push("]");
       }
       if (v instanceof Error) {
         return push(`[Error: ${v.name}: ${v.message}]`);
       }
       if (v instanceof RegExp) return push(v.toString());
       if (v instanceof Date) {
-        return push(`[Date: ${isNaN(v.getTime()) ? 'Invalid' : v.toISOString()}]`);
+        return push(
+          `[Date: ${isNaN(v.getTime()) ? "Invalid" : v.toISOString()}]`,
+        );
       }
       if (v instanceof Map) {
         return push(`Map(${v.size})`);
@@ -189,18 +224,20 @@ function tryStringify(v: unknown, budget: number, opts: StringifyOpts = {}): str
         return push(`Set(${v.size})`);
       }
       if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
-        return push(`[${v.constructor?.name ?? 'TypedArray'}(${(v as { byteLength?: number }).byteLength ?? '?'} bytes)]`);
+        return push(
+          `[${v.constructor?.name ?? "TypedArray"}(${(v as { byteLength?: number }).byteLength ?? "?"} bytes)]`,
+        );
       }
  // plain object
       const keys = Object.keys(v as Record<string, unknown>);
-      if (!push('{')) return false;
+      if (!push("{")) return false;
       for (let i = 0; i < keys.length; i++) {
         const k = keys[i];
         if (i > 0 && !push(SEP)) return false;
         if (!push(`${k}: `)) return false;
         if (!visit((v as Record<string, unknown>)[k], depth + 1)) return false;
       }
-      return push('}');
+      return push("}");
     } finally {
       seen.delete(obj);
     }
@@ -223,99 +260,42 @@ function renderRawContainer(
   maxBytes: number,
   opts: StringifyOpts,
 ): string | null {
-  const isMultiline = (v: unknown): v is string => typeof v === 'string' && v.includes('\n');
+  const isMultiline = (v: unknown): v is string =>
+    typeof v === "string" && v.includes("\n");
   const multi = entries.filter((e) => isMultiline(e.value));
   if (multi.length === 0) return null;
   const parts: string[] = [header];
   for (const e of entries) {
-    if (!isMultiline(e.value)) parts.push(`${e.label}: ${tryStringify(e.value, 300, opts)}`);
+    if (!isMultiline(e.value))
+      parts.push(`${e.label}: ${tryStringify(e.value, 300, opts)}`);
   }
  // Divide the remaining byte budget evenly across the raw multiline values.
-  const usedBytes = Buffer.byteLength(parts.join('\n'), 'utf8');
-  const perValue = Math.max(200, Math.floor((maxBytes - usedBytes) / multi.length));
+  const usedBytes = Buffer.byteLength(parts.join("\n"), "utf8");
+  const perValue = Math.max(
+    200,
+    Math.floor((maxBytes - usedBytes) / multi.length),
+  );
   for (const e of entries) {
     if (!isMultiline(e.value)) continue;
     const s = e.value as string;
     parts.push(`${e.label}: string(${s.length} chars):`);
     parts.push(capLines(s, perValue));
   }
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
-/** Head/tail-cap a git-diff-shaped text block with a visible elision marker —
- * same shape as the top-level multiline-string case in `preview`, but
- * self-contained (no char-offset cursor; the caller doesn't have a stable `_`
- * to slice, since this is a nested field of a FleetDiff). */
-function capDiffText(s: string, budget: number): string {
-  if (Buffer.byteLength(s, 'utf8') <= budget) return s;
-  const { head, tail } = headTailParts(s, budget, 0.75, 0.15);
-  if (s.length - tail.length > head.length) {
-    return `${head}\n…[middle elided — full text in \`_\`]…\n${tail}`;
-  }
-  return cap(s, budget);
-}
-
-/** Render one worktree's stat block: header, file stat line, capped file list
- * (20 max, "… N more" beyond that), and — for a single-worktree diff only —
- * the raw committed/uncommitted text. `statOnly` (multi-worktree diffs) skips
- * the text bodies entirely; the caller adds a drill-in hint instead. */
-function renderFleetWorktreeBlock(
-  wt: FleetDiff['worktrees'][number],
-  opts: { statOnly: boolean; textBudget: number },
+export function preview(
+  value: unknown,
+  maxBytes: number,
+  opts: StringifyOpts = {},
 ): string {
-  const baseShort = (wt.base || '').slice(0, 9);
-  const branchPart = wt.branch ? `  [branch ${wt.branch}]` : '';
-  const lines: string[] = [
-    `== ${wt.name} (${wt.path}) vs ${baseShort}${branchPart}`,
-    `   ${wt.stat.files} files, +${wt.stat.insertions} −${wt.stat.deletions}`,
-  ];
-  const shown = wt.files.slice(0, 20);
-  for (const f of shown) {
-    lines.push(`   ${f.status} ${f.path} (+${f.insertions} −${f.deletions})`);
-  }
-  if (wt.files.length > shown.length) {
-    lines.push(`   … ${wt.files.length - shown.length} more`);
-  }
-  if (!opts.statOnly) {
-    if (wt.committed == null && wt.uncommitted == null && wt.stat.files > 0) {
- // The stat shows changes but no bodies were fetched (statOnly diff) — say
- // so rather than falsely reporting "(none)/(clean)".
-      lines.push('(not fetched — statOnly)');
-    } else {
-      lines.push('-- committed --');
-      lines.push(wt.committed ? capDiffText(wt.committed, opts.textBudget) : '(none)');
-      lines.push('-- uncommitted --');
-      lines.push(wt.uncommitted ? capDiffText(wt.uncommitted, opts.textBudget) : '(clean)');
-    }
-  }
-  return lines.join('\n');
-}
-
-/** Render an `elpis.fleet.diff()` result: a git-review-shaped stat block
- * instead of a JSON object dump — the entire point of the verb is a
- * human-quality diff read. Single worktree: full committed/uncommitted text
- * (head/tail-capped). Multiple worktrees: stat blocks only, plus a drill-in
- * hint (`{ worktree: name }` narrows to one). */
-function renderFleetDiff(v: FleetDiff, maxBytes: number): string {
-  const header = `fleet diff — ${v.session}${v.note ? ` — ${v.note}` : ''}`;
-  const multi = v.worktrees.length > 1;
-  const textBudget = multi ? 0 : Math.max(200, Math.floor(maxBytes / 2));
-  const blocks = v.worktrees.map((wt) => renderFleetWorktreeBlock(wt, { statOnly: multi, textBudget }));
-  const parts = [header, ...blocks];
-  if (multi) {
-    parts.push(`drill in: elpis.fleet.diff(ref, { worktree: '<name>' })`);
-  }
-  return parts.join('\n');
-}
-
-export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = {}): string {
   let out: string;
-  if (value === null) out = 'null';
-  else if (value === undefined) out = 'undefined';
+  if (value === null) out = "null";
+  else if (value === undefined) out = "undefined";
   else {
     const t = typeof value;
     switch (t) {
-      case 'string': {
+      case "string": {
         const sv = value as string;
  // MULTILINE strings render RAW — real newlines, no JSON escaping. The
  // most common completion value is file/command text (read, git diff),
@@ -324,11 +304,16 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
  // because `\\\\"` in the preview could be one, two, or three chars on
  // disk). Single-line strings keep JSON.stringify: the quotes make
  // boundaries/trailing-whitespace visible on short exact values.
-        const multiline = sv.includes('\n');
+        const multiline = sv.includes("\n");
  // head/tail scale with the budget so raising sandbox.preview_max_bytes
  // actually gives the model more of the string. Tail-biased toward the end,
  // where the verdict lives for build/test output.
-        const { head: headStr, tail: tailStr } = headTailParts(sv, maxBytes, 0.75, 0.15);
+        const { head: headStr, tail: tailStr } = headTailParts(
+          sv,
+          maxBytes,
+          0.75,
+          0.15,
+        );
  // Name the exact char offsets this split used, so `_.slice(headEnd,
  // tailStart)` reproduces the elided middle verbatim instead of a
  // generic "slice it for more" that leaves the agent guessing bounds.
@@ -351,28 +336,33 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
         }
         break;
       }
-      case 'number':
-      case 'boolean':
-      case 'bigint':
-      case 'symbol':
+      case "number":
+      case "boolean":
+      case "bigint":
+      case "symbol":
         out = String(value);
         break;
-      case 'function': {
+      case "function": {
         const fn = value as (...a: unknown[]) => unknown;
         const name = functionName(fn);
         const len = (fn as { length?: number }).length ?? 0;
-        out = `[Function: ${name}(${len} arg${len === 1 ? '' : 's'})]`;
+        out = `[Function: ${name}(${len} arg${len === 1 ? "" : "s"})]`;
         break;
       }
-      case 'object': {
+      case "object": {
         if (Array.isArray(value)) {
  // Multiline-string elements render RAW in a block layout (e.g.
  // [read(a), read(b)]); otherwise the inline summary below.
           const rawArr = renderRawContainer(
             value.map((v, i) => ({ label: `[${i}]`, value: v })),
-            `Array(${value.length}):`, maxBytes, opts,
+            `Array(${value.length}):`,
+            maxBytes,
+            opts,
           );
-          if (rawArr !== null) { out = rawArr; break; }
+          if (rawArr !== null) {
+            out = rawArr;
+            break;
+          }
           const halfBudget = Math.floor(maxBytes / 2);
           const els: string[] = [];
           let used = 0;
@@ -383,11 +373,11 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
             used += elStr.length + 2;
           }
           const shown = els.length;
-          out = `Array(${value.length}): [ ${els.join(', ')}${shown < value.length ? ', …' : ''} ]${shown < value.length ? ` (showing ${shown}/${value.length})` : ''}`;
+          out = `Array(${value.length}): [ ${els.join(", ")}${shown < value.length ? ", …" : ""} ]${shown < value.length ? ` (showing ${shown}/${value.length})` : ""}`;
           break;
         }
         if (value instanceof Promise) {
-          out = '[Promise]';
+          out = "[Promise]";
           break;
         }
         if (value instanceof Error) {
@@ -399,7 +389,7 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
           break;
         }
         if (value instanceof Date) {
-          out = `Date: ${isNaN(value.getTime()) ? 'Invalid' : value.toISOString()}`;
+          out = `Date: ${isNaN(value.getTime()) ? "Invalid" : value.toISOString()}`;
           break;
         }
         if (value instanceof URL) {
@@ -418,13 +408,19 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
  // Show a bounded hex head instead of "contents not dumped" — the old
  // opacity forced a `.toString('hex')` re-roundtrip every time the
  // agent needed to verify raw bytes.
-          const bytes = value instanceof ArrayBuffer
+          const bytes =
+            value instanceof ArrayBuffer
             ? new Uint8Array(value)
-            : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+              : new Uint8Array(
+                  value.buffer,
+                  value.byteOffset,
+                  value.byteLength,
+                );
           const shown = Math.min(bytes.length, 64);
-          let hex = '';
-          for (let i = 0; i < shown; i++) hex += (i ? ' ' : '') + bytes[i].toString(16).padStart(2, '0');
-          out = `${value.constructor?.name ?? 'TypedArray'}(${bytes.length} bytes)${shown > 0 ? ` hex: ${hex}` : ''}${shown < bytes.length ? ` … (+${bytes.length - shown} more — .toString('hex') / .subarray() for the rest)` : ''}`;
+          let hex = "";
+          for (let i = 0; i < shown; i++)
+            hex += (i ? " " : "") + bytes[i].toString(16).padStart(2, "0");
+          out = `${value.constructor?.name ?? "TypedArray"}(${bytes.length} bytes)${shown > 0 ? ` hex: ${hex}` : ""}${shown < bytes.length ? ` … (+${bytes.length - shown} more — .toString('hex') / .subarray() for the rest)` : ""}`;
           break;
         }
  // plain object
@@ -435,23 +431,38 @@ export function preview(value: unknown, maxBytes: number, opts: StringifyOpts = 
  // console.log boilerplate. Render code/signal first, then stderr
  // (~25% of budget), then stdout with the remainder (tail-biased —
  // the end of build/test output is where the verdict lives).
-          if (keys.length === 4 && 'stdout' in value && 'stderr' in value
-              && 'code' in value && 'signal' in value
-              && typeof (value as Record<string, unknown>).stdout === 'string'
-              && typeof (value as Record<string, unknown>).stderr === 'string') {
+          if (
+            keys.length === 4 &&
+            "stdout" in value &&
+            "stderr" in value &&
+            "code" in value &&
+            "signal" in value &&
+            typeof (value as Record<string, unknown>).stdout === "string" &&
+            typeof (value as Record<string, unknown>).stderr === "string"
+          ) {
             const v = value as Record<string, string>;
             const code = v.code;
             const signal = v.signal;
             const stderrBudget = Math.floor(maxBytes * 0.25);
             const stdoutBudget = Math.max(0, maxBytes - 200 - stderrBudget);
-            const stderrStr = v.stderr ? cap(v.stderr, stderrBudget) : '(empty)';
+            const stderrStr = v.stderr
+              ? cap(v.stderr, stderrBudget)
+              : "(empty)";
  // stdout tail-biased
             let stdoutStr: string;
             if (v.stdout.length <= stdoutBudget) {
               stdoutStr = v.stdout;
             } else {
-              const { head: headPart, tail: tailPart } = headTailParts(v.stdout, stdoutBudget, 0.3, 0.7);
-              stdoutStr = (headPart ? headPart + '\n…[truncated]…\n' : '…[truncated]…\n') + tailPart;
+              const { head: headPart, tail: tailPart } = headTailParts(
+                v.stdout,
+                stdoutBudget,
+                0.3,
+                0.7,
+              );
+              stdoutStr =
+                (headPart
+                  ? headPart + "\n…[truncated]…\n"
+                  : "…[truncated]…\n") + tailPart;
             }
             out = `sh{ code: ${code}, signal: ${JSON.stringify(signal)} }
 --- stderr ---
@@ -460,50 +471,59 @@ ${stderrStr}
 ${stdoutStr}`;
             break;
           }
- // Special-case the FleetDiff shape (elpis.fleet.diff result) so a
- // review read gets a git-review-shaped stat block instead of a JSON
- // dump of nested worktree objects.
-          if (typeof (value as Record<string, unknown>).session === 'string'
-              && Array.isArray((value as Record<string, unknown>).worktrees)
-              && typeof (value as Record<string, unknown>).ok === 'boolean') {
-            out = renderFleetDiff(value as unknown as FleetDiff, maxBytes);
-            break;
-          }
  // Special-case the channel.send result shape so the `note`
  // (the harness's end-of-send instruction) is rendered in full
  // regardless of the nested-string cap — a truncated note cut the
  // instruction mid-sentence and the model sent duplicate messages.
-          if (keys.length === 3 && 'ok' in value && 'channelId' in value && 'note' in value
-              && (value as Record<string, unknown>).ok === true) {
+          if (
+            keys.length === 3 &&
+            "ok" in value &&
+            "channelId" in value &&
+            "note" in value &&
+            (value as Record<string, unknown>).ok === true
+          ) {
             const v = value as Record<string, unknown>;
             out = `Object{3 keys: ok, channelId, note} { ok: true, channelId: ${JSON.stringify(v.channelId)}, note: ${JSON.stringify(v.note)} }`;
             break;
           }
-          const keySummary = keys.length > 20
-            ? keys.slice(0, 20).join(', ') + `, … +${keys.length - 20}`
-            : keys.join(', ');
+          const keySummary =
+            keys.length > 20
+              ? keys.slice(0, 20).join(", ") + `, … +${keys.length - 20}`
+              : keys.join(", ");
  // Direct multiline-string values render RAW in a block layout (e.g.
  // { file1: read(a), file2: read(b) }) so several reads/diffs in one
  // run stay readable; otherwise the inline summary below.
           const rawObj = renderRawContainer(
-            keys.map((k) => ({ label: k, value: (value as Record<string, unknown>)[k] })),
-            `Object{${keys.length} keys: ${keySummary}}`, maxBytes, opts,
+            keys.map((k) => ({
+              label: k,
+              value: (value as Record<string, unknown>)[k],
+            })),
+            `Object{${keys.length} keys: ${keySummary}}`,
+            maxBytes,
+            opts,
           );
-          if (rawObj !== null) { out = rawObj; break; }
+          if (rawObj !== null) {
+            out = rawObj;
+            break;
+          }
           const halfBudget = Math.floor(maxBytes / 2);
           const previewEntries: string[] = [];
           let used = 0;
           for (const k of keys.slice(0, 24)) {
-            const v = tryStringify((value as Record<string, unknown>)[k], 300, opts);
+            const v = tryStringify(
+              (value as Record<string, unknown>)[k],
+              300,
+              opts,
+            );
             if (used + v.length + 6 > halfBudget) break;
             previewEntries.push(`${k}: ${v}`);
             used += v.length + 4;
           }
-          out = `Object{${keys.length} keys: ${keySummary}} { ${previewEntries.join(', ')} }`;
+          out = `Object{${keys.length} keys: ${keySummary}} { ${previewEntries.join(", ")} }`;
           break;
         }
  // unknown object class
-        out = `[${value.constructor?.name ?? 'Object'}] ${tryStringify(value, maxBytes / 2, opts)}`;
+        out = `[${value.constructor?.name ?? "Object"}] ${tryStringify(value, maxBytes / 2, opts)}`;
         break;
       }
       default:
@@ -511,10 +531,10 @@ ${stdoutStr}`;
     }
   }
  // final hard cap
-  if (Buffer.byteLength(out, 'utf8') > maxBytes) {
+  if (Buffer.byteLength(out, "utf8") > maxBytes) {
     out = cap(out, maxBytes);
-    if (!out.includes('[truncated')) {
-      out += '\n' + TRUNC_SUFFIX(0);
+    if (!out.includes("[truncated")) {
+      out += "\n" + TRUNC_SUFFIX(0);
     }
   }
   return out;

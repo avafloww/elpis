@@ -1,7 +1,6 @@
 import type { InboundMessage } from "./agent.js";
 import type { BgRegistry } from "./sandbox/bg.js";
 import type { SshRegistry } from "./sandbox/ssh.js";
-import type { FleetHandle } from "./fleet/index.js";
 import type {
   ChatMessage,
   StandaloneCompleteOptions,
@@ -16,6 +15,8 @@ import type {
   RuntimeProfile,
 } from "./builtin-modules.js";
 import type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
+import type { WorkerSession } from "./worker/spawn.js";
+import type { WorkerMailboxMessage } from "./worker/mailbox.js";
 
 export type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
 
@@ -70,7 +71,7 @@ export interface SandboxLateProcessError {
 
 export interface SandboxDeps {
   /** Capability surface. Full preserves the host-local control room; core is the fresh ephemeral allowlist. */
-  surface?: "full" | "core";
+  surface?: "full" | "core" | "worker";
   /** Structural subset of `Config` — the groups the sandbox actually reads. */
   config: {
     sandbox: {
@@ -90,13 +91,6 @@ export interface SandboxDeps {
       enabled: import("./builtin-modules.js").BuiltinModuleId[] | null;
       disabled: import("./builtin-modules.js").BuiltinModuleId[];
     };
-    /** `efforts` — the elpis.fleet.run() effort guard validates against
-     * the configured level set before it ever reaches the registry. Optional:
-     * a harness wired without a fleet section falls back to the Agent SDK's
-     * own levels (SDK_EFFORT_LEVELS). `enabled: false` marks the fleet as
-     * deliberately disabled by config, so the not-wired error can say so
-     * instead of implying a wiring bug. */
-    fleet?: { efforts: string[]; enabled?: boolean };
     paths: {
       harnessRoot: string;
       dataDirectory: string;
@@ -189,6 +183,17 @@ export interface SandboxDeps {
   ) => Promise<StandaloneCompleteResult>;
   /** Durable dependency-aware work graph exposed as elpis.mind. */
   mind?: MindService;
+  /** Resident-only supervision over fixed-template bounded workers. */
+  worker?: {
+    start(mindId: unknown, options?: unknown): Promise<WorkerSession>;
+    send(ref: string, text: string): Promise<WorkerMailboxMessage>;
+    list(): Promise<WorkerSession[]>;
+    status(ref: string): Promise<{
+      session: WorkerSession;
+      messages: WorkerMailboxMessage[];
+    }>;
+    dismiss(ref: string): Promise<WorkerSession>;
+  };
   /** Bound Mind item for a persistent sandbox. Omitted in unbound control rooms. */
   mindDefaultId?: MindId;
   /** Persistent task scheduler. Used by schedule()/unschedule() globals. */
@@ -235,8 +240,6 @@ export interface SandboxDeps {
   ) => void;
   /** A callback owned by a completed run fired later from a leaked async resource. */
   onLateProcessError?: (event: SandboxLateProcessError) => void;
-  /** Fleet registry (elpis.fleet.*): spawn/manage detached sub-agent runners. */
-  fleet?: FleetHandle;
   /** The killswitch's self-mute path : backs
    * channel(id).mute(reason). SELF-MUTE ONLY — there is no release or deafen
    * member on the sandbox handle; that asymmetry is deliberate (Agent.moderateChannel

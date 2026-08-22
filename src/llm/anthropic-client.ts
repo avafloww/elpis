@@ -40,8 +40,10 @@ import {
   computeCharsSent,
   sanitizeAssistantMessage,
   type ChatMessage,
+  type CompleteOptions,
   type CompleteResult,
   type LLMUsage,
+  type RunTool,
   type LLM,
   type AnthropicThinkingBlock,
   type StandaloneCompleteOptions,
@@ -218,11 +220,13 @@ export function translate(messages: ChatMessage[]): { system: TextBlock[]; wire:
 /** The `run` tool in Anthropic's `{name, description, input_schema}` shape.
  * Derived lazily: llm.ts ⇄ anthropic-client.ts import each other, so reading
  * RUN_TOOL at this module's load time could hit the TDZ (matches responses.ts). */
-function anthropicRunTool(): { name: string; description: string; input_schema: unknown } {
+function anthropicRunTool(
+  runTool: RunTool = RUN_TOOL,
+): { name: string; description: string; input_schema: unknown } {
   return {
-    name: RUN_TOOL.function.name,
-    description: RUN_TOOL.function.description,
-    input_schema: RUN_TOOL.function.parameters,
+    name: runTool.function.name,
+    description: runTool.function.description,
+    input_schema: runTool.function.parameters,
   };
 }
 
@@ -299,7 +303,7 @@ async function anthropicComplete(
   store: OAuthStore,
   messages: ChatMessage[],
   hub: ConsoleHub | undefined,
-  options: { toolFree?: boolean; signal?: AbortSignal } = {},
+  options: { toolFree?: boolean; signal?: AbortSignal; runTool?: RunTool } = {},
 ): Promise<CompleteResult> {
   try {
       try { hub?.streamStart(); } catch { /* observer only */ }
@@ -313,7 +317,7 @@ async function anthropicComplete(
         system,
         messages: wire,
         ...(options.toolFree ? {} : {
-          tools: [anthropicRunTool()],
+          tools: [anthropicRunTool(options.runTool)],
           tool_choice: { type: 'auto', disable_parallel_tool_use: true },
         }),
         thinking: anthropicThinkingParam(),
@@ -493,8 +497,14 @@ export function createAnthropicOAuthLLM(
         ...(isolated.llm.reasoningEffort ? { reasoningEffort: isolated.llm.reasoningEffort } : {}),
       };
     },
-    async complete(messages: ChatMessage[]): Promise<CompleteResult> {
-      const result = await anthropicComplete(config, store, messages, hub);
+    async complete(
+      messages: ChatMessage[],
+      options: CompleteOptions = {},
+    ): Promise<CompleteResult> {
+      const result = await anthropicComplete(config, store, messages, hub, {
+        signal: options.signal,
+        runTool: options.runTool,
+      });
       stampGeneration(result.message, {
         providerType: 'anthropic-oauth', model: config.llm.model,
         apiSurface: 'anthropic-messages', apiEndpoint: endpointAt(config.llm.baseUrl, 'v1/messages'),

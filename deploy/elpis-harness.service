@@ -28,13 +28,10 @@ ExecStart=<NODE_BIN> <HARNESS_ROOT>/dist/index.js
 Restart=on-failure
 RestartSec=2
 
-# KillMode=process is LOAD-BEARING for fleet-runner survival. Fleet runners are
-# spawned detached (their own process group) precisely so they outlive a harness
-# restart — docs/fleet.md's "a harness restart just drops the socket; the runner
-# keeps running" invariant depends on it. The systemd DEFAULT (control-group)
-# would SIGTERM the whole cgroup on stop/restart, killing every detached runner
-# with the harness and regressing that invariant. Do not drop this line when
-# reprovisioning the unit.
+# Restart-durable background jobs run in detached process groups and are
+# recovered from their persisted records after a harness restart. The systemd
+# default (control-group) would kill those jobs with the harness, so keep the
+# service process-only stop boundary.
 KillMode=process
 
 [Install]

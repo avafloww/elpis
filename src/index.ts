@@ -84,11 +84,11 @@ import { ConsoleHub, type MetaInfo } from "./console/hub.js";
 import { createConsoleServer, type ConsoleServer } from "./console/server.js";
 import { createArchivedReader } from "./console/history.js";
 import { createMcpEndpoint } from "./mcp/server.js";
-import { createFleet } from "./fleet/index.js";
 import {
-  startScopedActorServer,
-  type ScopedActorServerRuntime,
-} from "./fleet/actor-runtime.js";
+  startScopedWorkerServer,
+  type ScopedWorkerServerRuntime,
+} from "./worker/runtime.js";
+import { startWorkerSupervisor } from "./worker/supervisor.js";
 import { createUsageTracker } from "./llm/usage-tracker.js";
 import { spawnText } from "./lib/proc.js";
 import { migrateDataLayout } from "./store/data-layout.js";
@@ -112,7 +112,7 @@ export interface ElpisRuntime {
   modules: BuiltinModuleRegistry;
   profile: RuntimeProfile;
   llms: LlmRoleClients;
-  actorServer: ScopedActorServerRuntime | null;
+  workerServer: ScopedWorkerServerRuntime | null;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -323,31 +323,10 @@ export async function createElpisRuntime(
     onItemStateChanged: (id, status, archived) =>
       sandboxManager?.handleMindStateChange(id, status, archived),
   });
-  // Fleet registry: spawn/manage detached sub-agent runners. `notify` mirrors
-  // the bgRegistry.onAbandoned closure below — `agent` isn't assigned until
-  // after sandbox construction, but this closure only runs later (a runner
-  // notice arriving after boot), by which point `agent` is defined.
-  // fleet.enabled: false skips construction entirely (console.enabled idiom) —
-  // SandboxDeps.fleet is optional, so elpis.fleet.* verbs throw teachably and
-  // the prompt swaps its elpis.fleet section for a "not available" note.
-  const fleet = config.fleet.enabled
-    ? createFleet({
-        db,
-        dataDirectory: config.paths.dataDirectory,
-        harnessRoot: config.paths.harnessRoot,
-        fleet: config.fleet,
-        logger: config.logger,
-        notify: (text) => agent.notifyFleet(text),
-        agentName: () => readAgentName(config.paths.soulPath),
-      })
-    : undefined;
-  if (!fleet)
-    config.logger.info(
-      "fleet disabled by config (fleet.enabled: false) — no registry constructed",
-    );
   const inboundRef: { current: InboundMessage | null } = { current: null };
   let llm!: LLM;
   let llms!: LlmRoleClients;
+  let workerSupervisor: SandboxDeps["worker"];
   //: the TTL reaper delivers an abandon notice through the same path as
   // settle notices. `agent` is defined below; the closure is only invoked at
   // runtime (reaper fires ≥60s in), long after `agent` is assigned.
@@ -417,7 +396,6 @@ export async function createElpisRuntime(
     },
     bg: bgRegistry,
     ssh: sshRegistry,
-    fleet,
     flushTranscripts: () => agent.flushTranscripts(),
     // Typing pauses during elpis.sleep/wait: a sleep is the agent
     // choosing to wait, so the indicator should not show through it.
@@ -457,6 +435,9 @@ export async function createElpisRuntime(
     // Persistent task scheduler exposed to schedule/unschedule/tasks globals.
     scheduler,
     mind,
+    get worker() {
+      return workerSupervisor;
+    },
     // Self-set transient state: read fresh every turn, write from sandbox.
     // Killswitch self-mute: the sandbox can only ever mute itself —
     // moderateChannel's actor is hardcoded 'self' here, never 'operator'.
@@ -478,13 +459,21 @@ export async function createElpisRuntime(
     create: adapters.createLLM ?? createLLM,
   });
   llm = llms.main;
-  const actorServer = await startScopedActorServer({
+  const workerServer = await startScopedWorkerServer({
     db,
     config,
     mind,
     logger: config.logger,
     create: adapters.createLLM,
   });
+  const workerRuntime = await startWorkerSupervisor({
+    db,
+    config,
+    mind,
+    mailbox: workerServer?.mailbox ?? null,
+    logger: config.logger,
+  });
+  workerSupervisor = workerRuntime?.api;
   const density = createDensityModel(db, config.llm.model, config.logger);
   const memoryLimits = effectiveMemoryLimits(
     config.memory.consolidationThresholdTokens,
@@ -554,6 +543,7 @@ export async function createElpisRuntime(
     extensionPrompt: extensions.prompt,
     modules,
     profile,
+    workersAvailable: () => workerSupervisor !== undefined,
     setCurrentInbound: (msg: InboundMessage | null) => {
       inboundRef.current = msg;
     },
@@ -689,12 +679,6 @@ export async function createElpisRuntime(
   // work remains Scheduler-owned. Legacy heartbeat config is accepted for
   // rollback compatibility but no fixed heartbeat timer is started.
 
-  // Recover any fleet runners left live/dead from a prior boot (probe pids →
-  // reconnect-and-replay OR file-replay-then-mark-dead). Absent when the fleet
-  // is disabled by config — a runner left over from an enabled boot keeps
-  // running detached but is not reconnected until the fleet is re-enabled.
-  fleet?.recover();
-
   // Start the persistent task scheduler.
   scheduler.start();
 
@@ -771,12 +755,7 @@ export async function createElpisRuntime(
       /* non-fatal */
     }
     try {
-      actorServer?.stop();
-    } catch {
-      /* non-fatal */
-    }
-    try {
-      fleet?.dispose();
+      workerServer?.stop();
     } catch {
       /* non-fatal */
     }
@@ -843,7 +822,7 @@ export async function createElpisRuntime(
     modules,
     profile,
     llms,
-    actorServer,
+    workerServer,
   };
 }
 

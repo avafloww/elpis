@@ -127,7 +127,7 @@ test("migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test("migration through v18 creates shared Mind identity, fleet actors, mailbox, ledger, cold notices, and retirement deadlines", () => {
+test("migration through v19 preserves fleet history and creates native worker state", () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (
@@ -140,6 +140,8 @@ test("migration through v18 creates shared Mind identity, fleet actors, mailbox,
   assert.ok(!tables.includes("sandbox_aliases"));
   assert.ok(tables.includes("mind_id_migration_map"));
   assert.ok(tables.includes("fleet_mailbox_messages"));
+  assert.ok(tables.includes("worker_sessions"));
+  assert.ok(tables.includes("worker_mailbox_messages"));
   const triggers = (
     db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as {
       name: string;
@@ -164,7 +166,7 @@ test("migration through v18 creates shared Mind identity, fleet actors, mailbox,
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    18,
+    19,
   );
   assert.deepEqual(
     (
@@ -180,6 +182,7 @@ test("migration through v18 creates shared Mind identity, fleet actors, mailbox,
       { component: "core", name: "0016-mind-elm-identities" },
       { component: "core", name: "0017-fleet-actor-sessions" },
       { component: "core", name: "0018-fleet-actor-mailbox" },
+      { component: "core", name: "0019-native-workers" },
     ],
   );
   db.close();
@@ -240,7 +243,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    18,
+    19,
   );
   assert.deepEqual(
     (
@@ -256,6 +259,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
       "0016-mind-elm-identities",
       "0017-fleet-actor-sessions",
       "0018-fleet-actor-mailbox",
+      "0019-native-workers",
     ],
   );
   runMigrations(db);
@@ -287,12 +291,12 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
         )
         .get() as { n: number }
     ).n,
-    5,
+    6,
   );
   db.close();
 });
 
-test("migration v16→v18 preserves legacy fleet sessions and adds an empty mailbox", () => {
+test("migration v16→v19 preserves legacy fleet sessions and creates empty worker state", () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   db.prepare(
@@ -327,7 +331,7 @@ test("migration v16→v18 preserves legacy fleet sessions and adds an empty mail
   const version = (
     reopened.prepare("PRAGMA user_version").get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 18);
+  assert.equal(version, 19);
   assert.equal(
     (
       reopened

@@ -24,7 +24,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -424,6 +424,51 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE UNIQUE INDEX fleet_mailbox_actor_finish_idx
           ON fleet_mailbox_messages(session_id)
           WHERE direction = 'actor_to_dispatcher' AND kind = 'finish';
+      `,
+    },
+    {
+      name: "0019-native-workers",
+      sql: `
+        CREATE TABLE worker_sessions (
+          id                   TEXT PRIMARY KEY,
+          slug                 TEXT NOT NULL UNIQUE CHECK (length(slug) BETWEEN 1 AND 80),
+          status               TEXT NOT NULL CHECK (status IN ('spawning','running','idle','finished','failed','dismissed')),
+          model_ref            TEXT NOT NULL,
+          mind_id              TEXT NOT NULL REFERENCES mind_items(id),
+          runtime              TEXT NOT NULL CHECK (runtime IN ('trusted','kubernetes')),
+          control_token_digest TEXT NOT NULL UNIQUE CHECK (length(control_token_digest) = 64),
+          pod_name             TEXT,
+          pod_uid              TEXT,
+          workspace_ref        TEXT,
+          created_at           INTEGER NOT NULL,
+          updated_at           INTEGER NOT NULL,
+          last_error           TEXT
+        );
+        CREATE UNIQUE INDEX worker_sessions_active_mind_idx
+          ON worker_sessions(mind_id)
+          WHERE status IN ('spawning','running','idle');
+        CREATE INDEX worker_sessions_status_idx
+          ON worker_sessions(status, created_at);
+
+        CREATE TABLE worker_mailbox_messages (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id      TEXT NOT NULL REFERENCES worker_sessions(id) ON DELETE CASCADE,
+          direction       TEXT NOT NULL CHECK (direction IN ('dispatcher_to_worker', 'worker_to_dispatcher')),
+          kind            TEXT NOT NULL CHECK (kind IN ('message', 'finish')),
+          message_key     TEXT NOT NULL CHECK (length(message_key) BETWEEN 1 AND 80),
+          sender          TEXT NOT NULL CHECK (length(sender) BETWEEN 1 AND 80),
+          body            TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 100000),
+          created_at      INTEGER NOT NULL,
+          acknowledged_at INTEGER,
+          CHECK (direction = 'worker_to_dispatcher' OR kind = 'message'),
+          UNIQUE (session_id, direction, message_key)
+        );
+        CREATE INDEX worker_mailbox_pending_idx
+          ON worker_mailbox_messages(session_id, direction, id)
+          WHERE acknowledged_at IS NULL;
+        CREATE UNIQUE INDEX worker_mailbox_finish_idx
+          ON worker_mailbox_messages(session_id)
+          WHERE direction = 'worker_to_dispatcher' AND kind = 'finish';
       `,
     },
   ]);

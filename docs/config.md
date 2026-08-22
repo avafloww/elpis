@@ -12,7 +12,7 @@ The example file is the exhaustive annotated reference. This document explains t
 ## `llm`
 
 | Key | Purpose |
-| --- | --- |
+| --------------------------- | ----------------------------------------------------------------------- |
 | `provider_type` | `openai-compatible`, `anthropic-oauth`, or `codex-oauth` |
 | `api_key` | required only for `openai-compatible` |
 | `base_url` | provider endpoint; defaults are provider-specific |
@@ -93,7 +93,7 @@ The console defaults to `127.0.0.1:8787`. Keep it loopback-only and put an authe
 
 ## `modules`
 
-Built-in optional modules are `kagi`, `bsky`, `browser`, `computer`, `motor`, and `fleet`. Configure exactly one policy:
+Built-in optional modules are `kagi`, `bsky`, `browser`, `computer`, and `motor`. Configure exactly one policy:
 
 - `enabled: [...]` is an allowlist; `enabled: []` requests none;
 - `disabled: [...]` is a denylist; `disabled: []` requests all;
@@ -105,13 +105,13 @@ Supplying both keys, naming an unknown module, or repeating an ID is a boot erro
 - **unavailable**: selected but missing credentials, dependencies, or runtime support; enumerable with precise rejecting stubs, but omitted from the prompt;
 - **active**: real API plus prompt documentation.
 
-`motor` requires an active `computer`; `fleet` also requires `fleet.enabled`. The official restricted image makes the desktop/browser/motor/fleet stack unavailable.
+`motor` requires an active `computer`. The official restricted image makes the desktop/browser/motor stack unavailable.
 
 ## Optional integration settings
 
 - `kagi.api_key` supplies search and page-extraction credentials.
 - `bluesky` supplies AT Protocol credentials and service configuration.
-- `fleet` configures optional coding-worker sessions, model aliases, effort values, and lifecycle limits.
+- `workers` enables native Mind-rooted workers, sets the global concurrency cap, and configures the token-bound broker. Model choice uses canonical `llm.providers` references.
 
 ## `paths`
 
@@ -132,3 +132,7 @@ Do not write `$HOME` expecting shell expansion; use an absolute path, a relative
 ## Validation
 
 Invalid provider combinations, malformed IDs, duplicate guild slugs, duplicate channel membership, unsupported tiers, invalid timezones, and unsafe OAuth endpoint overrides fail at boot with a path-specific error. Elpis does not silently guess around malformed security-relevant configuration.
+
+## Workers
+
+`workers` is disabled by default. `workers.server` exposes token-bound completion, Mind, and mailbox routes. Production spawning additionally requires `workers.kubernetes.enabled`, a credential-free `broker_url` origin reachable from worker Pods, and one operator-owned `PodTemplate` selected by fixed namespace/name/container configuration. Enabling Kubernetes workers without `workers.enabled`, the worker server, or a broker URL is a boot-time configuration error. Callers can choose only a canonical Mind ID and optional configured `provider/model` reference; no Pod field is part of the agent API. See [workers.md](workers.md) and `config.example.yaml`.

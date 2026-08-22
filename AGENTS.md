@@ -18,7 +18,7 @@ Before editing a subsystem, read its area document:
 | Discord | `docs/architecture.md`, `docs/config.md` | `src/discord/` |
 | Console | `docs/console.md` | `src/console/` |
 | Mind | `docs/mind.md` | `src/store/mind.ts` |
-| Fleet | `docs/fleet.md` | `src/fleet/` |
+| Workers | `docs/workers.md` | `src/worker/`, `src/kernel/` |
 | Providers | provider-specific docs | `src/llm/` |
 
 ## Vocabulary and neutrality

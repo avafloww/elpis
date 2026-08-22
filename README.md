@@ -29,7 +29,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 | Mind | Dependency-aware projects, tasks, ideas, questions, comments, tags, and reminders |
 | Coding-agent MCP | Opt-in authenticated adapter over Mind plus task-bound correspondence with the resident agent |
 | Browser / computer | Stateful Playwright sessions and a persistent Linux desktop |
-| Fleet | Optional bounded coding-worker sessions |
+| Workers | Mind-rooted bounded worker episodes |
 
 ## Requirements
 
@@ -129,7 +129,7 @@ Read [`AGENTS.md`](AGENTS.md) before changing load-bearing loop, persistence, co
 - [`docs/extensions.md`](docs/extensions.md) — trusted data-directory APIs and prompt blocks
 - [`docs/console.md`](docs/console.md) — web console
 - [`docs/mind.md`](docs/mind.md) — work graph
-- [`docs/fleet.md`](docs/fleet.md) — optional coding workers
+- [`docs/workers.md`](docs/workers.md) — native Mind-rooted workers
 - [`docs/testing.md`](docs/testing.md) — test strategy
 - [`SECURITY.md`](SECURITY.md) — threat model and vulnerability reporting
 

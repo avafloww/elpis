@@ -8,7 +8,7 @@ export interface RuntimeProfile {
   readonly source: 'sentinel' | 'environment' | 'normal';
 }
 
-export const BUILTIN_MODULE_IDS = ['kagi', 'bsky', 'browser', 'computer', 'motor', 'fleet'] as const;
+export const BUILTIN_MODULE_IDS = ['kagi', 'bsky', 'browser', 'computer', 'motor'] as const;
 export type BuiltinModuleId = (typeof BUILTIN_MODULE_IDS)[number];
 
 export type BuiltinModuleState = 'disabled' | 'unavailable' | 'active';
@@ -66,8 +66,6 @@ export function resolveBuiltinModules(config: Config, profile: RuntimeProfile = 
     status('browser', ['browser'], hostGuiAvailable, 'browser is selected but unavailable in the restricted runtime profile'),
     status('computer', ['computer'], hostGuiAvailable, 'computer is selected but unavailable in the restricted runtime profile'),
     status('motor', ['motor'], computerActive, 'motor is selected but requires an active computer module'),
-    status('fleet', ['fleet'], config.fleet?.enabled !== false && !profile.restricted,
-      profile.restricted ? 'fleet is selected but unavailable in the restricted runtime profile' : 'fleet is selected but disabled by fleet.enabled: false'),
   ];
   const frozen = Object.freeze(statuses.map((entry) => Object.freeze({ ...entry, keys: Object.freeze([...entry.keys]) })));
   const find = (id: BuiltinModuleId) => frozen.find((entry) => entry.id === id);

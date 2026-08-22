@@ -10,11 +10,11 @@ Elpis is one long-lived Node.js process hosting one agent, one ordered conversat
 2. creates the data directory, migrates known legacy state into `elpis-data/`, and opens `elpis-data/elpis.db`;
 3. ensures `SOUL.md` and `MEMORY.md` exist;
 4. restores the newest transcript with opaque-replay provenance checks;
-5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional fleet, console, and Discord adapter;
+5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, and Discord adapter;
 6. starts the agent loop;
 7. delivers restart or optional harness-update notices through the same inbound queue.
 
-A failure in a required persistence or configuration component is a boot failure. Optional surfaces such as the console and fleet degrade independently where their contracts permit it.
+A failure in a required persistence or configuration component is a boot failure. Optional surfaces such as the console and worker broker degrade independently where their contracts permit it.
 
 ## Runtime flow
 
@@ -69,7 +69,7 @@ The loop is sequential. New messages can queue while work is active, but a secon
 | `src/discord/discord.ts` | Discord gateway, ingestion, commands, attachments, reactions |
 | `src/console/` | HTTP/WebSocket console and archived-history reader |
 | `src/store/` | SQLite and file-backed durable state |
-| `src/fleet/` | optional bounded coding-worker sessions |
+| `src/kernel/`, `src/worker/` | shared agent kernel and bounded Mind-rooted workers |
 
 ## Identity and names
 
@@ -92,7 +92,7 @@ Elpis uses distinct stores for distinct kinds of continuity:
 
 - **Markdown and files:** identity, memory, people, open questions, self-authored notes.
 - **JSONL transcripts:** complete ordered message history and provider working-state envelopes.
-- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, density estimates, fleet, and Mind.
+- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, density estimates, native worker sessions/mailbox, historical fleet rows, and Mind.
 - **process memory:** the active message list and persistent JavaScript bindings.
 
 See [`persistence.md`](persistence.md).
@@ -120,7 +120,7 @@ The same agent loop receives:
 - periodic heartbeats;
 - due scheduler tasks and Mind reminders;
 - background-job progress and completion;
-- fleet completion;
+- token-bound worker completion;
 - restart and compaction notices.
 
 Synthetic wakes do not masquerade as person-authored input. The turn records whether fresh person input occurred so policies such as external thinking can distinguish them.

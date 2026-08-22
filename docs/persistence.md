@@ -22,7 +22,6 @@ DATA_DIRECTORY/
     ├── elpis.db
     ├── sessions/
     ├── bg/
-    ├── fleet/
     ├── motor/
     ├── browser/
     ├── computer/
@@ -42,7 +41,7 @@ Before opening SQLite, transcripts, extensions, subprocess registries, or browse
 
 Migration is conflict-first: if both an old and new known path exist, startup fails before moving anything. Elpis never merges two stores or guesses which is authoritative. Unknown root paths remain untouched.
 
-Before moving SQLite, Elpis runs `PRAGMA quick_check`, checkpoints and truncates WAL, and collapses the legacy database to `journal_mode=DELETE`. A busy WAL or another open SQLite user blocks migration rather than risking a torn database. Surviving fleet or browser processes that still reference process-coupled legacy paths also block migration with a stop-and-restart error.
+Before moving SQLite, Elpis runs `PRAGMA quick_check`, checkpoints and truncates WAL, and collapses the legacy database to `journal_mode=DELETE`. A busy WAL or another open SQLite user blocks migration rather than risking a torn database. Surviving browser processes that still reference process-coupled legacy paths also block migration with a stop-and-restart error.
 
 Moves are same-filesystem atomic renames recorded in `elpis-data/layout-migration.json`. The journal makes a partially completed migration resumable after a crash. Absolute paths retained in background-job and motor-trace records are rewritten to the new roots. A completed stable boot does not churn the journal.
 
@@ -76,7 +75,7 @@ The consolidation prompt treats the data directory as the inhabitant's private r
 - feedback and message localization;
 - scheduled tasks;
 - OAuth credentials;
-- fleet sessions and worktrees;
+- native worker sessions and mailbox messages (with published `fleet_*` rows retained as inert migration history);
 - token-density estimates;
 - Mind items, dependencies, tags, comments, events, and reminders;
 - immutable local sandbox executor identity, permanent Mind↔sandbox registrations, alias tombstones, and lifecycle/run counters.

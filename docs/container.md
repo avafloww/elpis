@@ -2,7 +2,7 @@
 
 The official container is published as `ghcr.io/avafloww/elpis:latest`. It is a deliberately narrower deployment profile than the dedicated-host installer.
 
-The image runs as uid/gid `10001`, keeps the harness and dependencies root-owned under `/opt/elpis`, and carries a root-owned `/etc/elpis/restricted` sentinel. That sentinel wins over environment configuration: the sandbox omits `elpis.sudo`, `elpis.restart`, and `elpis.deploy`, and the prompt does not claim host ownership or self-deployment authority. The inhabitant still gets Bash and a practical non-root workbench (`git`, SSH, `curl`, `wget`, `jq`, Python with pip/venv, ripgrep, `file`, `less`, and `procps`). The image does not include a desktop, browser runtime, or coding-agent fleet.
+The image runs as uid/gid `10001`, keeps the harness and dependencies root-owned under `/opt/elpis`, and carries a root-owned `/etc/elpis/restricted` sentinel. That sentinel wins over environment configuration: the sandbox omits `elpis.sudo`, `elpis.restart`, and `elpis.deploy`, and the prompt does not claim host ownership or self-deployment authority. The inhabitant still gets Bash and a practical non-root workbench (`git`, SSH, `curl`, `wget`, `jq`, Python with pip/venv, ripgrep, `file`, `less`, and `procps`). The image does not include a desktop or browser runtime. It is also the fixed restricted body used by native workers.
 
 ## Prepare data
 
@@ -24,7 +24,7 @@ modules:
   enabled: [kagi, bsky]
 ```
 
-A selected integration without credentials remains deliberately discoverable through a precise rejecting stub, but is omitted from the system prompt. An integration outside the allowlist is absent from the sandbox. `browser`, `computer`, `motor`, and `fleet` are unavailable in the official restricted image even if selected.
+A selected integration without credentials remains deliberately discoverable through a precise rejecting stub, but is omitted from the system prompt. An integration outside the allowlist is absent from the sandbox. `browser`, `computer`, and `motor` are unavailable in the official restricted image even if selected. Native worker services are token-bound and configured separately from built-in modules.
 
 ## Run
 

@@ -1,5 +1,5 @@
 // proc.ts — tiny shared child-process helpers. One home for the spawn-collect
-// idiom and the process-group teardown that bg jobs, fleet runners, and the
+// idiom and the process-group teardown that bg jobs, worker episodes, and the
 // heartbeat digest all need — the copies had already started to drift (EPERM
 // handling) before they were consolidated here.
 

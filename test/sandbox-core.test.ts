@@ -7,7 +7,7 @@ import { createSandbox } from "../src/sandbox/index.js";
 import { makeConfig } from "./helpers.js";
 import type { SandboxDeps } from "../src/types.js";
 
-function deps(surface: "core" | "full"): SandboxDeps {
+function deps(surface: "core" | "full" | "worker"): SandboxDeps {
   const dataDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), `sandbox-${surface}-`),
   );
@@ -25,6 +25,18 @@ function deps(surface: "core" | "full"): SandboxDeps {
     logbuf: [],
   } as unknown as SandboxDeps;
 }
+
+const WORKER_KEYS = [
+  "edit",
+  "fill",
+  "git",
+  "preview",
+  "read",
+  "sh",
+  "sleep",
+  "timeout",
+  "wait",
+];
 
 const CORE_KEYS = [
   "channel",
@@ -94,6 +106,49 @@ test("sandbox failures distinguish preparse from uncaught runtime errors", async
   );
   assert.equal(caught.ok, true);
   assert.match(caught.preview ?? "", /"kept"/);
+});
+
+test("worker sandbox exposes workspace powers without resident capabilities", async () => {
+  const sandbox = createSandbox(deps("worker"));
+  const keys = await sandbox.run("Object.keys(elpis).sort()");
+  assert.equal(keys.ok, true);
+  assert.match(keys.preview ?? "", new RegExp(WORKER_KEYS.join(".*")));
+  assert.equal(
+    (await sandbox.run("Object.keys(elpis).length")).preview,
+    String(WORKER_KEYS.length),
+  );
+  const absent = await sandbox.run(`({
+    channel: typeof elpis.channel,
+    memory: typeof elpis.memory,
+    mind: typeof elpis.mind,
+    schedule: typeof elpis.schedule,
+    restart: typeof elpis.restart,
+    deploy: typeof elpis.deploy,
+    worker: typeof elpis.worker,
+    sudo: typeof elpis.sudo,
+    bg: typeof elpis.bg,
+    ssh: typeof elpis.ssh,
+  })`);
+  for (const name of [
+    "channel",
+    "memory",
+    "mind",
+    "schedule",
+    "restart",
+    "deploy",
+    "worker",
+    "sudo",
+    "bg",
+    "ssh",
+  ]) {
+    assert.match(absent.preview ?? "", new RegExp(`${name}: "undefined"`));
+  }
+  assert.match((await sandbox.run("typeof fs")).preview ?? "", /"object"/);
+  assert.match((await sandbox.run("typeof process")).preview ?? "", /"object"/);
+  assert.equal((await sandbox.run("6 * 7")).savedAs, "_");
+  assert.equal((await sandbox.run("_")).preview, "42");
+  const shell = await sandbox.run('(await elpis.sh("printf worker")).stdout');
+  assert.match(shell.preview ?? "", /worker/);
 });
 
 test("full sandbox retains compatibility last-value state", async () => {
