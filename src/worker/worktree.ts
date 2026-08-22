@@ -20,8 +20,10 @@ function bounded(value: Buffer): string {
 }
 
 function emptyDirectory(directory: string): void {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  fs.chmodSync(directory, 0o700);
+  if (!fs.existsSync(directory))
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (!fs.statSync(directory).isDirectory())
+    throw new Error("worker workspace must be a directory");
   if (fs.readdirSync(directory).length !== 0)
     throw new Error("worker workspace must be empty before source checkout");
 }

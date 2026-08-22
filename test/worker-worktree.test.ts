@@ -62,9 +62,11 @@ test("worker checkout and patch export are deterministic, binary-capable, and ap
   const f = sourceFixture();
   const workspace = path.join(f.root, "workspace");
   const scratch = path.join(f.root, "scratch");
+  fs.mkdirSync(workspace, { mode: 0o750 });
   fs.mkdirSync(scratch);
   try {
     await checkoutWorkerSource(f.source, workspace, scratch);
+    assert.equal(fs.statSync(workspace).mode & 0o777, 0o750);
     assert.equal(
       fs.readFileSync(path.join(workspace, "src", "value.ts"), "utf8"),
       "export const value = 1;\n",
