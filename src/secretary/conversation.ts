@@ -528,6 +528,10 @@ export class SecretaryConversationBroker {
 
   pull(token: string): SecretaryConversationPullReply {
     const binding = this.binding(token);
+    const session = this.db
+      .prepare("SELECT status FROM secretary_sessions WHERE id = ?")
+      .get(binding.sessionId) as { status: unknown } | undefined;
+    if (session?.status === "starting") return { binding, turn: null };
     const claim = this.store.claim(binding.sessionId);
     return {
       binding,

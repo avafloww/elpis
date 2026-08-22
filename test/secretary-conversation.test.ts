@@ -17,7 +17,7 @@ import type { MindId } from "../src/store/mind-id.js";
 
 const ROOT = "elm-000000a1" as MindId;
 
-function fixture() {
+function fixture(ready = true) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
   runMigrations(db);
@@ -38,10 +38,12 @@ function fixture() {
     },
   });
   const created = sessions.create(ROOT, "resident/secretary-v1");
-  const session = sessions.ready(created.session.id, {
-    podName: "secretary-pod",
-    podUid: "uid-1",
-  });
+  const session = ready
+    ? sessions.ready(created.session.id, {
+        podName: "secretary-pod",
+        podUid: "uid-1",
+      })
+    : created.session;
   const conversations = new SecretaryConversationStore({
     db,
     now: () => now++,
@@ -78,6 +80,20 @@ test("turn ids are canonical and enqueue permits only one active turn", () => {
     (error: unknown) =>
       error instanceof SecretaryConversationError && error.code === "conflict",
   );
+  f.db.close();
+});
+
+test("starting session pulls an empty queue until ready instead of exiting", () => {
+  const f = fixture(false);
+  const starting = f.broker.pull(f.token);
+  assert.equal(starting.binding.sessionId, f.session.id);
+  assert.equal(starting.turn, null);
+  f.sessions.ready(f.session.id, {
+    podName: "secretary-pod",
+    podUid: "uid-1",
+  });
+  const turn = f.conversations.enqueue(f.session.id, user("after ready"));
+  assert.equal(f.broker.pull(f.token).turn?.id, turn.id);
   f.db.close();
 });
 
