@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 21;
+const SCHEMA_VERSION = 22;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -512,6 +512,64 @@ export function runMigrations(db: DatabaseSync): void {
         );
         CREATE INDEX worker_workspace_artifacts_session_idx
           ON worker_workspace_artifacts(session_id, id);
+      `,
+    },
+    {
+      name: "0022-secretary-sessions",
+      sql: `
+        CREATE TABLE secretary_sessions (
+          id                   TEXT PRIMARY KEY
+            CHECK (
+              length(id) = 26
+              AND substr(id, 1, 4) = 'sec-'
+              AND substr(id, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          root_mind_id         TEXT NOT NULL REFERENCES mind_items(id) ON DELETE RESTRICT,
+          status               TEXT NOT NULL CHECK (status IN ('starting','ready','closed','failed')),
+          model_ref            TEXT NOT NULL
+            CHECK (
+              length(model_ref) >= 3
+              AND model_ref = lower(model_ref)
+              AND model_ref NOT GLOB '*[^a-z0-9._/-]*'
+              AND instr(model_ref, '/') > 1
+              AND instr(substr(model_ref, instr(model_ref, '/') + 1), '/') = 0
+              AND substr(model_ref, 1, 1) GLOB '[a-z0-9]'
+              AND substr(model_ref, instr(model_ref, '/') + 1, 1) GLOB '[a-z0-9]'
+            ),
+          runtime              TEXT NOT NULL CHECK (runtime = 'kubernetes'),
+          control_token_digest TEXT NOT NULL UNIQUE
+            CHECK (
+              length(control_token_digest) = 64
+              AND control_token_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+          pod_name             TEXT CHECK (pod_name IS NULL OR length(pod_name) BETWEEN 1 AND 253),
+          pod_uid              TEXT CHECK (pod_uid IS NULL OR length(pod_uid) BETWEEN 1 AND 128),
+          created_at           INTEGER NOT NULL,
+          updated_at           INTEGER NOT NULL CHECK (updated_at >= created_at),
+          last_error           TEXT
+        );
+        CREATE UNIQUE INDEX secretary_sessions_active_root_idx
+          ON secretary_sessions(root_mind_id)
+          WHERE status IN ('starting','ready');
+        CREATE INDEX secretary_sessions_status_idx
+          ON secretary_sessions(status, created_at);
+
+        CREATE TRIGGER secretary_sessions_identity_no_update
+        BEFORE UPDATE OF id, root_mind_id, model_ref, runtime, control_token_digest
+        ON secretary_sessions
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary session identity and scope are immutable');
+        END;
+        CREATE TRIGGER secretary_sessions_status_transition_guard
+        BEFORE UPDATE OF status ON secretary_sessions
+        WHEN NEW.status != OLD.status
+          AND NOT (
+            (OLD.status = 'starting' AND NEW.status IN ('ready','closed','failed'))
+            OR (OLD.status = 'ready' AND NEW.status IN ('closed','failed'))
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid secretary session status transition');
+        END;
       `,
     },
   ]);

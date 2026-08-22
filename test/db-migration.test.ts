@@ -127,7 +127,7 @@ test("migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test("migration through v21 preserves fleet history and creates native worker state", () => {
+test("migration through v22 preserves fleet history and creates native worker state", () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (
@@ -166,7 +166,7 @@ test("migration through v21 preserves fleet history and creates native worker st
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    21,
+    22,
   );
   assert.deepEqual(
     (
@@ -185,6 +185,7 @@ test("migration through v21 preserves fleet history and creates native worker st
       { component: "core", name: "0019-native-workers" },
       { component: "core", name: "0020-mind-proposal-status" },
       { component: "core", name: "0021-worker-workspace-custody" },
+      { component: "core", name: "0022-secretary-sessions" },
     ],
   );
   db.close();
@@ -245,7 +246,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number })
       .user_version,
-    21,
+    22,
   );
   assert.deepEqual(
     (
@@ -264,6 +265,7 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
       "0019-native-workers",
       "0020-mind-proposal-status",
       "0021-worker-workspace-custody",
+      "0022-secretary-sessions",
     ],
   );
   runMigrations(db);
@@ -295,12 +297,12 @@ test("migration v12→v15 adds cold notices and backfills retirement deadlines",
         )
         .get() as { n: number }
     ).n,
-    8,
+    9,
   );
   db.close();
 });
 
-test("migration v16→v21 preserves legacy fleet sessions and creates empty worker state", () => {
+test("migration v16→v22 preserves legacy fleet sessions and creates empty worker state", () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   db.prepare(
@@ -335,7 +337,7 @@ test("migration v16→v21 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare("PRAGMA user_version").get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 21);
+  assert.equal(version, 22);
   assert.equal(
     (
       reopened
