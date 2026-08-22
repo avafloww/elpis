@@ -523,7 +523,7 @@ export function createCodexOAuthLLM(
         parallel_tool_calls: false,
         tool_choice: options.forceThink
           ? { type: 'function', name: 'think' }
-          : 'required',
+          : options.toolChoice ?? 'required',
       }, responsesLite ? shapeCodexResponsesLiteRequest : undefined, options.signal, options.runTool);
       stampGeneration(result.message, {
         providerType: 'codex-oauth', model: config.llm.model,

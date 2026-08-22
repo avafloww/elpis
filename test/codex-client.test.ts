@@ -335,7 +335,7 @@ test('completeStandalone uses its lane key for authenticated transport and reque
   );
 });
 
-test('Codex LLM always streams, requires run, sends no output cap, and rotates cache identity on reset', async () => {
+test('Codex LLM defaults to required tools, permits auto, and rotates cache identity on reset', async () => {
   const { store } = fakeStore();
   const config = codexConfig('stub');
   const llm = createCodexOAuthLLM(config, store);
@@ -362,7 +362,8 @@ test('Codex LLM always streams, requires run, sends no output cap, and rotates c
   assert.equal('max_output_tokens' in bodies[0], false);
   assert.equal(typeof firstKey, 'string');
   llm.resetSession?.();
-  await llm.complete([{ role: 'user', content: 'two' }]);
+  await llm.complete([{ role: 'user', content: 'two' }], { toolChoice: 'auto' });
+  assert.equal(bodies[1].tool_choice, 'auto');
   assert.notEqual(bodies[1].prompt_cache_key, firstKey);
 });
 

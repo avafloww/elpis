@@ -303,7 +303,12 @@ async function anthropicComplete(
   store: OAuthStore,
   messages: ChatMessage[],
   hub: ConsoleHub | undefined,
-  options: { toolFree?: boolean; signal?: AbortSignal; runTool?: RunTool } = {},
+  options: {
+    toolFree?: boolean;
+    signal?: AbortSignal;
+    runTool?: RunTool;
+    toolChoice?: "required" | "auto";
+  } = {},
 ): Promise<CompleteResult> {
   try {
       try { hub?.streamStart(); } catch { /* observer only */ }
@@ -318,7 +323,10 @@ async function anthropicComplete(
         messages: wire,
         ...(options.toolFree ? {} : {
           tools: [anthropicRunTool(options.runTool)],
-          tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+          tool_choice: {
+            type: options.toolChoice === 'required' ? 'any' : 'auto',
+            disable_parallel_tool_use: true,
+          },
         }),
         thinking: anthropicThinkingParam(),
         stream: true,
@@ -504,6 +512,7 @@ export function createAnthropicOAuthLLM(
       const result = await anthropicComplete(config, store, messages, hub, {
         signal: options.signal,
         runTool: options.runTool,
+        toolChoice: options.toolChoice,
       });
       stampGeneration(result.message, {
         providerType: 'anthropic-oauth', model: config.llm.model,

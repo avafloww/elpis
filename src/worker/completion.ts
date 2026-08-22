@@ -281,6 +281,7 @@ export class WorkerCompletionBroker {
         result: await cached.llm.complete(messages, {
           signal,
           runTool: WORKER_RUN_TOOL,
+          toolChoice: "auto",
         }),
       };
     } finally {

@@ -831,6 +831,8 @@ export interface CompleteOptions {
   forceThink?: boolean;
   /** Override the run schema for this bounded execution lane. */
   runTool?: RunTool;
+  /** Override whether a model-facing tool call is required. Provider defaults remain unchanged when omitted. */
+  toolChoice?: "required" | "auto";
   /** Caller cancellation for the whole completion, including provider setup. */
   signal?: AbortSignal;
 }
@@ -1307,6 +1309,9 @@ export function createLLM(
               config.llm.externalThinking,
               options.runTool,
             ),
+            ...(options.toolChoice !== undefined
+              ? { toolChoice: options.toolChoice }
+              : {}),
           }
         : {}),
       signal: options.signal,
@@ -1431,7 +1436,9 @@ export function createLLM(
             config,
             messages,
             hub,
-            {},
+            options.toolChoice !== undefined
+              ? { tool_choice: options.toolChoice }
+              : {},
             undefined,
             options.signal,
             options.runTool,

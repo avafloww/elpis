@@ -154,6 +154,7 @@ test("completion token binds model, Mind, worker provenance, and one cached nati
   assert.deepEqual(created, ["wire-worker"]);
   assert.deepEqual(requests[0], [{ role: "user", content: "work" }]);
   assert.equal(completeOptions[0]?.runTool, WORKER_RUN_TOOL);
+  assert.equal(completeOptions[0]?.toolChoice, "auto");
   assert.deepEqual(
     Object.keys(WORKER_RUN_TOOL.function.parameters.properties),
     ["code", "detail"],
