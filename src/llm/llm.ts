@@ -506,7 +506,7 @@ export const RUN_TOOL: RunTool = {
         wake: {
           type: "object",
           description:
-            "Yield after success and wake once later. Prefer auto whenever timing is uncertain; use after/at only for a concrete intended time. Explicit waits must be positive and at most 1h; longer exact waits belong in Scheduler.",
+            "Yield after success and wake once later. Omit wake while actionable work remains; auto is a yield, not a continuation mechanism. Once genuinely yielding, prefer auto whenever timing is uncertain; use after/at only for a concrete intended time. Explicit waits must be positive and at most 1h; longer exact waits belong in Scheduler.",
           properties: {
             after: {
               anyOf: [{ type: "string" }, { type: "number" }],
