@@ -145,7 +145,24 @@ test("scoped worker server owns completion, Mind, mailbox, and clean stop", asyn
     "content-type": "application/json",
   };
 
-  let response = await fetch(`${base}/v1/complete`, {
+  let response = await fetch(`${base}/v1/secretary/complete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      protocol: 1,
+      messages: [{ role: "user", content: "work" }],
+    }),
+  });
+  assert.equal(response.status, 404);
+
+  response = await fetch(`${base}/v1/secretary/mind`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: "get" }),
+  });
+  assert.equal(response.status, 404);
+
+  response = await fetch(`${base}/v1/complete`, {
     method: "POST",
     headers,
     body: JSON.stringify({

@@ -89,6 +89,10 @@ import {
   type ScopedWorkerServerRuntime,
 } from "./worker/runtime.js";
 import { startWorkerSupervisor } from "./worker/supervisor.js";
+import {
+  startSecretarySupervisor,
+  type SecretarySupervisorRuntime,
+} from "./secretary/supervisor.js";
 import { createUsageTracker } from "./llm/usage-tracker.js";
 import { spawnText } from "./lib/proc.js";
 import { migrateDataLayout } from "./store/data-layout.js";
@@ -112,6 +116,7 @@ export interface ElpisRuntime {
   modules: BuiltinModuleRegistry;
   profile: RuntimeProfile;
   llms: LlmRoleClients;
+  secretary: SecretarySupervisorRuntime | null;
   workerServer: ScopedWorkerServerRuntime | null;
 }
 
@@ -461,12 +466,21 @@ export async function createElpisRuntime(
     create: adapters.createLLM ?? createLLM,
   });
   llm = llms.main;
+  const secretaryRuntime = await startSecretarySupervisor({
+    db,
+    config,
+    mind,
+    logger: config.logger,
+    create: adapters.createLLM,
+  });
   const workerServer = await startScopedWorkerServer({
     db,
     config,
     mind,
     logger: config.logger,
     create: adapters.createLLM,
+    secretaryCompletion: secretaryRuntime?.completion,
+    secretaryMind: secretaryRuntime?.mind,
   });
   const workerRuntime = await startWorkerSupervisor({
     db,
@@ -825,6 +839,7 @@ export async function createElpisRuntime(
     modules,
     profile,
     llms,
+    secretary: secretaryRuntime,
     workerServer,
   };
 }
