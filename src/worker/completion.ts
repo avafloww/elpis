@@ -72,7 +72,10 @@ function cloneOpaque(value: unknown, label: string): unknown {
   return JSON.parse(encoded);
 }
 
-export function parseWorkerMessages(value: unknown): ChatMessage[] {
+export function parseWorkerMessages(
+  value: unknown,
+  allowedToolNames: ReadonlySet<string> = new Set(["run", "think"]),
+): ChatMessage[] {
   let encoded: string;
   try {
     encoded = JSON.stringify(value);
@@ -185,7 +188,7 @@ export function parseWorkerMessages(value: unknown): ChatMessage[] {
             func.name,
             `messages[${index}].tool_calls[${callIndex}].function.name`,
           )!;
-          if (name !== "run" && name !== "think") {
+          if (!allowedToolNames.has(name)) {
             throw new WorkerCompletionError(
               "unsupported",
               `worker tool ${JSON.stringify(name)} is not supported`,

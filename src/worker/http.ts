@@ -1,6 +1,16 @@
 import * as http from "node:http";
 import type { Logger } from "../lib/log.js";
 import {
+  SecretaryCompletionError,
+  type SecretaryCompletionReply,
+} from "../secretary/completion.js";
+import { SecretaryMindError } from "../secretary/mind.js";
+import {
+  SecretaryMindRequestError,
+  dispatchSecretaryMindRequest,
+  type SecretaryMindService,
+} from "../secretary/mind-request.js";
+import {
   WorkerCompletionError,
   type WorkerCompletionReply,
 } from "./completion.js";
@@ -33,9 +43,19 @@ export interface WorkerCompletionService {
   ): Promise<WorkerCompletionReply>;
 }
 
+export interface SecretaryCompletionService {
+  complete(
+    token: string,
+    messages: unknown,
+    signal?: AbortSignal,
+  ): Promise<SecretaryCompletionReply>;
+}
+
 export interface WorkerCompletionHttpOptions {
   broker: WorkerCompletionService;
   mind?: WorkerMindService;
+  secretaryCompletion?: SecretaryCompletionService;
+  secretaryMind?: SecretaryMindService;
   mailbox?: WorkerMailboxService;
   workspace?: WorkerWorkspaceService;
   host: string;
@@ -104,6 +124,35 @@ function statusFor(error: WorkerCompletionError): number {
   }
 }
 
+function statusForSecretaryCompletion(error: SecretaryCompletionError): number {
+  switch (error.code) {
+    case "unauthorized":
+      return 401;
+    case "invalid_request":
+      return 400;
+    case "unsupported":
+      return 422;
+    case "busy":
+    case "binding_changed":
+      return 409;
+    case "capacity":
+      return 429;
+  }
+}
+
+function statusForSecretaryMind(error: SecretaryMindError): number {
+  switch (error.code) {
+    case "unauthorized":
+      return 401;
+    case "outside_scope":
+      return 403;
+    case "not_found":
+      return 404;
+    case "too_large":
+      return 413;
+  }
+}
+
 function statusForMind(error: WorkerMindError): number {
   switch (error.code) {
     case "unauthorized":
@@ -160,11 +209,15 @@ export function createWorkerCompletionHttpServer(
     const mindRequest = req.url === "/v1/mind";
     const mailboxRequest = req.url === "/v1/mailbox";
     const workspaceRequest = req.url === "/v1/workspace";
+    const secretaryCompletionRequest = req.url === "/v1/secretary/complete";
+    const secretaryMindRequest = req.url === "/v1/secretary/mind";
     if (
       req.url !== "/v1/complete" &&
       !mindRequest &&
       !mailboxRequest &&
-      !workspaceRequest
+      !workspaceRequest &&
+      !secretaryCompletionRequest &&
+      !secretaryMindRequest
     ) {
       json(res, 404, { error: "not found" });
       return;
@@ -172,7 +225,9 @@ export function createWorkerCompletionHttpServer(
     if (
       (mindRequest && !options.mind) ||
       (mailboxRequest && !options.mailbox) ||
-      (workspaceRequest && !options.workspace)
+      (workspaceRequest && !options.workspace) ||
+      (secretaryCompletionRequest && !options.secretaryCompletion) ||
+      (secretaryMindRequest && !options.secretaryMind)
     ) {
       json(res, 404, { error: "not found" });
       return;
@@ -184,7 +239,12 @@ export function createWorkerCompletionHttpServer(
     }
     const token = bearer(req);
     if (!token) {
-      json(res, 401, { error: "worker session is unavailable" });
+      json(res, 401, {
+        error:
+          secretaryCompletionRequest || secretaryMindRequest
+            ? "secretary session is unavailable"
+            : "worker session is unavailable",
+      });
       return;
     }
     const controller = new AbortController();
@@ -200,6 +260,14 @@ export function createWorkerCompletionHttpServer(
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw new HttpInputError(400, "request must be an object");
       const input = body as Record<string, unknown>;
+      if (secretaryMindRequest) {
+        json(
+          res,
+          200,
+          dispatchSecretaryMindRequest(options.secretaryMind!, token, input),
+        );
+        return;
+      }
       if (mindRequest) {
         json(res, 200, dispatchWorkerMindRequest(options.mind!, token, input));
         return;
@@ -230,16 +298,27 @@ export function createWorkerCompletionHttpServer(
           400,
           `unknown request field ${JSON.stringify(unknown[0])}`,
         );
-      const reply = await options.broker.complete(
-        token,
-        input.messages,
-        controller.signal,
-      );
+      const reply = await (secretaryCompletionRequest
+        ? options.secretaryCompletion!
+        : options.broker
+      ).complete(token, input.messages, controller.signal);
       json(res, 200, { protocol: 1, ...reply });
     } catch (error) {
       if (res.writableEnded || res.destroyed) return;
       if (error instanceof HttpInputError) {
         json(res, error.status, { error: error.message });
+      } else if (error instanceof SecretaryMindRequestError) {
+        json(res, 400, { error: error.message, code: "invalid_request" });
+      } else if (error instanceof SecretaryMindError) {
+        json(res, statusForSecretaryMind(error), {
+          error: error.message,
+          code: error.code,
+        });
+      } else if (error instanceof SecretaryCompletionError) {
+        json(res, statusForSecretaryCompletion(error), {
+          error: error.message,
+          code: error.code,
+        });
       } else if (
         error instanceof WorkerMindRequestError ||
         error instanceof WorkerMailboxRequestError ||
@@ -264,6 +343,14 @@ export function createWorkerCompletionHttpServer(
       } else if (error instanceof WorkerCompletionError) {
         json(res, statusFor(error), { error: error.message, code: error.code });
       } else {
+        if (secretaryCompletionRequest || secretaryMindRequest) {
+          const operation = secretaryMindRequest ? "Mind" : "completion";
+          options.logger.error(`secretary ${operation} request failed`, error);
+          json(res, 502, {
+            error: `secretary ${operation} request failed`,
+          });
+          return;
+        }
         const operation = mindRequest
           ? "Mind"
           : mailboxRequest
