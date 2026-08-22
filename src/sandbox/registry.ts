@@ -177,6 +177,10 @@ export class SandboxRegistry {
         .get(mindId) as
         { status: string; archived_at: number | null } | undefined;
       if (!mind) throw new Error(`sandbox registry: no Mind item ${mindId}`);
+      if (mind.status === "proposal")
+        throw new Error(
+          `sandbox registry: Mind ${mindId} is a proposal and cannot receive a persistent sandbox`,
+        );
       const existing = this.db
         .prepare(`${SELECT_REGISTRATION} WHERE id = ?`)
         .get(mindId) as SandboxRow | undefined;
@@ -213,6 +217,10 @@ export class SandboxRegistry {
       const mind = this.db
         .prepare("SELECT status, archived_at FROM mind_items WHERE id = ?")
         .get(current.mindId) as { status: string; archived_at: number | null };
+      if (mind.status === "proposal")
+        throw new Error(
+          `sandbox registry: Mind ${current.mindId} is a proposal and cannot resume a persistent sandbox`,
+        );
       if (
         !current.retireRequested &&
         (mind.status === "done" ||

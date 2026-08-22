@@ -1305,7 +1305,7 @@
     const title = el('input', { class: 'ep-field' }); title.value = source.title || ''; title.required = true; title.maxLength = 240;
     const body = el('textarea', { class: 'ep-field' }); body.value = source.body || '';
     const kind = selectControl([['task','task'],['project','project'],['idea','idea'],['question','question'],['reminder','reminder']], source.kind || 'task');
-    const status = selectControl([['inbox','inbox'],['open','open'],['in_progress','in progress'],['waiting','waiting'],['done','done'],['cancelled','cancelled']], source.status || 'open');
+    const status = selectControl([['proposal','proposal'],['inbox','inbox'],['open','open'],['in_progress','in progress'],['waiting','waiting'],['done','done'],['cancelled','cancelled']], source.status || 'open');
     const priority = selectControl([['0','none'],['1','low'],['2','normal'],['3','high'],['4','urgent']], String(source.priority ?? 2));
     const due = el('input', { class: 'ep-field' }); due.type = 'datetime-local'; due.value = toLocalInput(source.dueAt);
     const tags = el('input', { class: 'ep-field' }); tags.value = (source.tags || []).join(', '); tags.placeholder = 'harness, writing';

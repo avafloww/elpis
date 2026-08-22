@@ -4,6 +4,7 @@ import type { ScheduledTask } from "./scheduler.js";
 import { isMindId, newMindId, resolveMindRef, type MindId } from "./mind-id.js";
 
 export const MIND_STATUSES = [
+  "proposal",
   "inbox",
   "open",
   "in_progress",
@@ -249,6 +250,18 @@ function assertStatus(value: unknown): asserts value is MindStatus {
     throw new Error(
       `mind: invalid status ${JSON.stringify(value)} (expected ${MIND_STATUSES.join("|")})`,
     );
+}
+
+function assertStatusTransition(current: MindStatus, next: MindStatus): void {
+  if (current === "proposal") {
+    if (!["proposal", "inbox", "open", "cancelled"].includes(next))
+      throw new Error(
+        `mind: proposal items can transition only to inbox, open, or cancelled (got ${next})`,
+      );
+    return;
+  }
+  if (next === "proposal")
+    throw new Error("mind: normal items cannot transition to proposal");
 }
 
 function assertKind(value: unknown): asserts value is MindKind {
@@ -583,6 +596,12 @@ export class MindStore {
     if (parentId != null) this.requireId(parentId);
     const dependsOn = uniq(opts.dependsOn ?? []);
     for (const id of dependsOn) this.requireId(id);
+    if (status === "proposal" && dueAt != null)
+      throw new Error("mind: proposal items cannot have a due date");
+    if (status === "proposal" && dependsOn.length > 0)
+      throw new Error(
+        "mind: proposal items cannot have readiness dependencies",
+      );
     const tags = uniq((opts.tags ?? []).map(normalizeTag));
     const now = Date.now();
     const id = this.transaction(() => {
@@ -890,6 +909,7 @@ export class MindStore {
           `mind: item #${id} is a ${String(item.kind)}, not an executable task`,
         );
       if (
+        status === "proposal" ||
         status === "done" ||
         status === "cancelled" ||
         status === "waiting" ||
@@ -1253,6 +1273,7 @@ export class MindStore {
     }
     if (patch.status !== undefined) {
       assertStatus(patch.status);
+      assertStatusTransition(current.status, patch.status);
       sets.push("status = ?");
       values.push(patch.status);
       changed.status = patch.status;
@@ -1267,6 +1288,9 @@ export class MindStore {
       changed.priority = patch.priority;
     }
     if (patch.dueAt !== undefined) {
+      const resultingStatus = patch.status ?? current.status;
+      if (resultingStatus === "proposal" && patch.dueAt != null)
+        throw new Error("mind: proposal items cannot have a due date");
       if (
         patch.dueAt != null &&
         (!Number.isFinite(patch.dueAt) || patch.dueAt <= 0)
@@ -1402,6 +1426,15 @@ export class MindStore {
     actor: string,
     at: number,
   ): void {
+    const proposal = this.db
+      .prepare(
+        "SELECT id FROM mind_items WHERE id IN (?, ?) AND status = 'proposal' LIMIT 1",
+      )
+      .get(id, dependsOnId);
+    if (proposal)
+      throw new Error(
+        "mind: proposal items cannot have readiness dependencies",
+      );
     if (id === dependsOnId)
       throw new Error("mind: an item cannot depend on itself");
     const cycle = this.db
@@ -1683,6 +1716,12 @@ export class MindStore {
     channelId: string | null,
     createdBy: string,
   ): MindReminder {
+    const item = this.db
+      .prepare("SELECT status FROM mind_items WHERE id = ?")
+      .get(itemId) as { status: MindStatus } | undefined;
+    if (!item) throw new Error(`mind: no item #${itemId}`);
+    if (item.status === "proposal")
+      throw new Error("mind: proposal items cannot have reminders");
     const at = Date.now();
     const r = this.db
       .prepare(
@@ -2014,6 +2053,8 @@ export class MindService {
   ): MindReminder {
     const item = this.store.get(itemId);
     if (!item) throw new Error(`mind: no item #${itemId}`);
+    if (item.status === "proposal")
+      throw new Error("mind: proposal items cannot have reminders");
     if (!Number.isFinite(fireAt) || fireAt <= Date.now())
       throw new Error("mind: reminder time must be a future epoch-ms");
     const task = this.deps.scheduler.create({

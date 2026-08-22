@@ -142,6 +142,11 @@ function validateMind(mind: MindService, value: unknown): MindDetail {
     throw new WorkerSpawnError("not_found", "Mind item is unavailable");
   if (item.archivedAt !== null || CLOSED_MIND.has(item.status))
     throw new WorkerSpawnError("unavailable", "Mind item is closed");
+  if (item.status === "proposal")
+    throw new WorkerSpawnError(
+      "blocked",
+      "Mind proposal is not committed work",
+    );
   if (
     item.status === "inbox" ||
     item.status === "waiting" ||

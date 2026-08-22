@@ -15,6 +15,7 @@ import {
   migrateMindIds,
   MIND_ID_MIGRATION_CHECKSUM,
 } from "./mind-id-migration.js";
+import { MIND_PROPOSAL_STATUS_MIGRATION } from "./mind-proposal-migration.js";
 
 export type Database = DatabaseSync;
 
@@ -24,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -471,6 +472,7 @@ export function runMigrations(db: DatabaseSync): void {
           WHERE direction = 'worker_to_dispatcher' AND kind = 'finish';
       `,
     },
+    MIND_PROPOSAL_STATUS_MIGRATION,
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

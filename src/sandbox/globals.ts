@@ -1513,7 +1513,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       body?: string;
       kind?: "task" | "project" | "idea" | "question" | "reminder";
       status?:
-        "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
+        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
       priority?: number;
       parentId?: number | string | null;
       dueAt?: unknown;
@@ -1544,7 +1544,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     get: (ref: number | string) => requireMind().get(parseMindId(ref)),
     list: (filter?: {
       statuses?: Array<
-        "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled"
+        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled"
       >;
       kinds?: Array<"task" | "project" | "idea" | "question" | "reminder">;
       tag?: string;
@@ -1586,7 +1586,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         body?: string;
         kind?: "task" | "project" | "idea" | "question" | "reminder";
         status?:
-          "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
+          "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
         priority?: number;
         parentId?: number | string | null;
         dueAt?: unknown;
@@ -1618,7 +1618,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     status: (
       ref: number | string,
       status:
-        "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
+        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
       actor?: string,
     ) =>
       requireMind().setStatus(parseMindId(ref), status, actor ?? mindActor()),
@@ -1701,7 +1701,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     ) => requireMind().update(boundMindId(), patch, actor ?? mindActor()),
     status: (
       status:
-        "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
+        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
       actor?: string,
     ) => requireMind().setStatus(boundMindId(), status, actor ?? mindActor()),
     done: (comment?: string, actor?: string) => {

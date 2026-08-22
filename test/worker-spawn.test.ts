@@ -153,6 +153,17 @@ test("closed, blocked, unknown-model, disabled, and capacity failures are pre-ef
     () => f.broker.start(blocked.id),
     (e: unknown) => e instanceof WorkerSpawnError && e.code === "blocked",
   );
+  const proposal = f.mind.create({
+    title: "proposed work",
+    status: "proposal",
+  });
+  await assert.rejects(
+    () => f.broker.start(proposal.id),
+    (e: unknown) =>
+      e instanceof WorkerSpawnError &&
+      e.code === "blocked" &&
+      /not committed work/.test(e.message),
+  );
   await assert.rejects(
     () => f.broker.start(f.item.id, { modelRef: "missing/model" }),
     (e: unknown) =>
