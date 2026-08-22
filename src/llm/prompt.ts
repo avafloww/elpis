@@ -222,8 +222,7 @@ Flush transcripts then spawn a detached systemctl restart of the harness.
 Returns a note; this is your last turn before reboot. Prefer it over raw \`systemctl\`.
 
 ### \`elpis.deploy(reason?, opts?)\`
-Executes \`npm run build\` within the harness, then restart ONLY if the build
-succeeded (returns the compiler errors and does NOT restart otherwise). Use this whenever you change harness source.
+Executes \`npm run build\` within the harness, validates the exact live config with the freshly built parser, then restarts ONLY if both succeeded. Build or config errors are returned and the running harness is not restarted. Use this whenever you change harness source.
 It refuses to deploy a dirty or unpushed tree — commit + push first, or pass \`{ allowDirty: true }\` to
 override. After the reboot you get a \`[restart complete]\` message in the room you deployed
 from — that's your cue to verify the change actually works, or continue your work.`;

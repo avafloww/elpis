@@ -1193,7 +1193,19 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         stdout: res.stdout.slice(-2000),
       };
     }
-    return triggerRestart(reason, "built and restarting");
+    const configCheck = await shImpl(
+      'node --input-type=module -e "import { loadConfigFile } from \'./dist/config.js\'; loadConfigFile();"',
+      { cwd: root, timeout: 30_000 },
+    );
+    if (configCheck.code !== 0) {
+      return {
+        ok: false,
+        note: "live config preflight FAILED against the freshly built harness — not restarting (the running harness is unchanged). Fix the config/code mismatch and elpis.deploy() again.",
+        stderr: configCheck.stderr.slice(-4000),
+        stdout: configCheck.stdout.slice(-2000),
+      };
+    }
+    return triggerRestart(reason, "built, config-checked, and restarting");
   };
   if (!profile.restricted) e.deploy = deploy;
 

@@ -848,6 +848,41 @@ test('deploy: refuses to build/restart a dirty tree unless allowDirty', async ()
   assert.match(r.preview ?? '', /deploy aborted: uncommitted changes/);
 });
 
+test('deploy: a successful build still refuses restart when the fresh dist rejects live config', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-deploy-config-'));
+  fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'memory.md'), '# mem\n');
+  fs.writeFileSync(path.join(dir, 'config.yaml'), 'legacy: true\n');
+  fs.writeFileSync(
+    path.join(dir, 'package.json'),
+    JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+  );
+  fs.writeFileSync(
+    path.join(dir, 'dist', 'config.js'),
+    'export function loadConfigFile() { throw new Error("live config rejected"); }\n',
+  );
+  const sb = createSandbox({
+    config: { sandbox: { syncTimeoutMs: 3000, asyncDeadlineMs: 8000, previewMaxBytes: 4096, logMaxBytes: 4096 }, kagi: { apiKey: null }, paths: { harnessRoot: dir, dataDirectory: dir } },
+    memory: { read: () => '', append: () => {}, overwrite: () => {} },
+    logbuf: [],
+  });
+  execSync('git init && git config user.name "Test" && git config user.email "test@example.com" && git add . && git commit -m init', { cwd: dir });
+
+  const previous = process.env.ELPIS_CONFIG;
+  process.env.ELPIS_CONFIG = path.join(dir, 'config.yaml');
+  try {
+    const r = await sb.run('await elpis.deploy("must not restart")');
+    assert.equal(r.ok, true, String(r.error));
+    assert.match(r.preview ?? '', /live config preflight FAILED/);
+    assert.match(r.preview ?? '', /running harness is unchanged/);
+    assert.match(r.preview ?? '', /live config rejected/);
+  } finally {
+    if (previous === undefined) delete process.env.ELPIS_CONFIG;
+    else process.env.ELPIS_CONFIG = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('grep: finds matches in a path, returns raw file:line hits', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-grep-'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\nNEEDLE here\nomega\n');
