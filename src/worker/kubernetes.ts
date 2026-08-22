@@ -362,11 +362,17 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
       case "Failed": {
         const terminated =
           pod.status?.containerStatuses?.[0]?.state?.terminated;
-        const detail =
-          terminated?.reason ?? `exit ${terminated?.exitCode ?? "unknown"}`;
+        const reason = terminated?.reason ?? "unknown reason";
+        const exit = Number.isInteger(terminated?.exitCode)
+          ? `, exit ${terminated.exitCode}`
+          : "";
+        const message =
+          typeof terminated?.message === "string" && terminated.message.trim()
+            ? `: ${terminated.message.trim().slice(0, 500)}`
+            : "";
         return {
           state: "failed",
-          error: `worker Pod failed: ${detail}`,
+          error: `worker Pod failed: ${reason}${exit}${message}`,
           receipt,
         };
       }
@@ -383,10 +389,8 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
     const names = this.names(session.id);
     await this.run([
       "delete",
-      "pod",
-      names.pod,
-      "secret",
-      names.secret,
+      `pod/${names.pod}`,
+      `secret/${names.secret}`,
       "--ignore-not-found=true",
       "--wait=false",
     ]);

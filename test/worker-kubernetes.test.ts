@@ -266,16 +266,36 @@ test("inspect is phase and UID aware, while cleanup uses exact names without sel
       workspaceRef: "pod/workers/elpis-worker-a1b2c3d4",
     },
   });
+  f.replies.push({
+    code: 0,
+    stdout: JSON.stringify({
+      metadata: { name: "elpis-worker-a1b2c3d4", uid: "uid-1" },
+      status: {
+        phase: "Failed",
+        containerStatuses: [
+          { state: { terminated: { reason: "Error", exitCode: 17, message: "boom" } } },
+        ],
+      },
+    }),
+    stderr: "",
+  });
+  assert.deepEqual(await f.runtime.inspect(session()), {
+    state: "failed",
+    error: "worker Pod failed: Error, exit 17: boom",
+    receipt: {
+      podName: "elpis-worker-a1b2c3d4",
+      podUid: "uid-1",
+      workspaceRef: "pod/workers/elpis-worker-a1b2c3d4",
+    },
+  });
   f.replies.push({ code: 0, stdout: "", stderr: "" });
   assert.deepEqual(await f.runtime.inspect(session()), { state: "missing" });
   await f.runtime.cleanup(session());
   const args = f.calls.at(-1)!.args;
-  assert.deepEqual(args.slice(-7), [
+  assert.deepEqual(args.slice(-5), [
     "delete",
-    "pod",
-    "elpis-worker-a1b2c3d4",
-    "secret",
-    "elpis-worker-a1b2c3d4",
+    "pod/elpis-worker-a1b2c3d4",
+    "secret/elpis-worker-a1b2c3d4",
     "--ignore-not-found=true",
     "--wait=false",
   ]);
