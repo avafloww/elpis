@@ -4,7 +4,7 @@ export const LLM_PROVIDER_TYPES = [
   "codex-oauth",
 ] as const;
 export type LlmProviderType = (typeof LLM_PROVIDER_TYPES)[number];
-export type LlmRole = "main" | "classifier" | "motor";
+export type LlmRole = "main" | "classifier" | "motor" | "secretary";
 
 export interface LlmModelDefinition {
   name: string;
@@ -27,7 +27,12 @@ export interface LlmProviderDefinition {
 
 export interface LlmRegistryInput {
   providers: Record<string, LlmProviderDefinition>;
-  roles: { main: string; classifier: string; motor: string | null };
+  roles: {
+    main: string;
+    classifier: string;
+    motor: string | null;
+    secretary?: string | null;
+  };
 }
 
 export interface ResolvedLlmTarget extends LlmModelDefinition {
@@ -39,11 +44,12 @@ export interface ResolvedLlmTarget extends LlmModelDefinition {
 
 export interface LlmModelRegistry {
   providers: Record<string, LlmProviderDefinition>;
-  roles: LlmRegistryInput["roles"];
+  roles: LlmRegistryInput["roles"] & { secretary: string | null };
   targets: {
     main: ResolvedLlmTarget;
     classifier: ResolvedLlmTarget;
     motor: ResolvedLlmTarget | null;
+    secretary: ResolvedLlmTarget | null;
   };
 }
 
@@ -198,6 +204,7 @@ export function legacyLlmModelRegistry(
         main: ref,
         classifier: ref,
         motor: opts.motorEnabled ? ref : null,
+        secretary: null,
       },
     },
     { requireMotor: opts.motorEnabled },
@@ -217,9 +224,9 @@ export function createLlmModelRegistry(
   }
   const resolve = (
     role: LlmRole,
-    ref: string | null,
+    ref: string | null | undefined,
   ): ResolvedLlmTarget | null =>
-    ref === null
+    ref == null
       ? null
       : resolveLlmModelTarget(
           { providers: input.providers },
@@ -235,11 +242,12 @@ export function createLlmModelRegistry(
     );
   return {
     providers: input.providers,
-    roles: input.roles,
+    roles: { ...input.roles, secretary: input.roles.secretary ?? null },
     targets: {
       main: resolve("main", input.roles.main)!,
       classifier: resolve("classifier", input.roles.classifier)!,
       motor: resolve("motor", input.roles.motor),
+      secretary: resolve("secretary", input.roles.secretary),
     },
   };
 }

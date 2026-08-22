@@ -20,6 +20,7 @@ function roleConfig(): Config {
       main: { name: 'wire-main', contextSize: 100_000, reasoningEffort: 'high', reasoningSummary: null, reasoningContext: null },
       classifier: { name: 'wire-classifier', contextSize: 20_000, reasoningEffort: 'low', reasoningSummary: null, reasoningContext: null },
       motor: { name: 'wire-motor', contextSize: 30_000, reasoningEffort: 'medium', reasoningSummary: null, reasoningContext: null },
+      secretary: { name: 'wire-secretary', contextSize: 40_000, reasoningEffort: 'medium', reasoningSummary: null, reasoningContext: null },
     },
   };
   config.llm.registry = createLlmModelRegistry({
@@ -58,6 +59,35 @@ test('role clients are independently constructed from resolved role targets', ()
   assert.notEqual(clients.main, clients.motor);
 });
 
+test('configured secretary is independently constructed and requestable', async () => {
+  const config = roleConfig();
+  config.llm.registry = createLlmModelRegistry({
+    providers: config.llm.registry.providers,
+    roles: { main: 'p/main', classifier: 'p/classifier', motor: 'p/motor', secretary: 'p/secretary' },
+  });
+  const models: string[] = [];
+  const clients = createLlmRoleClients(config, {
+    motorActive: false,
+    create(projected) {
+      models.push(projected.llm.model);
+      return fakeLlm(projected.llm.model);
+    },
+  });
+  assert.deepEqual(models, ['wire-main', 'wire-classifier', 'wire-secretary']);
+  const result = {
+    content: 'notes',
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    toolCalls: [],
+    model: 'wire-secretary', providerType: 'openai-compatible' as const,
+    apiSurface: 'responses' as const, apiEndpoint: 'https://example.test/v1/responses',
+  };
+  clients.secretary!.completeStandalone = async () => result;
+  assert.equal(
+    await completeStandaloneForRole(clients, 'secretary', [{ role: 'user', content: 'organize' }]),
+    result,
+  );
+});
+
 test('inactive motor is not resolved or constructed', () => {
   const config = roleConfig();
   config.llm.registry = createLlmModelRegistry({
@@ -74,6 +104,11 @@ test('inactive motor is not resolved or constructed', () => {
   });
   assert.deepEqual(models, ['wire-main', 'wire-classifier']);
   assert.equal(clients.motor, null);
+  assert.equal(clients.secretary, null);
+  assert.throws(
+    () => completeStandaloneForRole(clients, 'secretary', []),
+    /llm\.roles\.secretary is not configured/,
+  );
 });
 test('standalone role dispatch never sends motor work through classifier', async () => {
   const calls: string[] = [];
@@ -88,7 +123,7 @@ test('standalone role dispatch never sends motor work through classifier', async
   classifier.completeStandalone = async () => { calls.push('classifier'); throw new Error('classifier must not receive motor tools'); };
   const motor = fakeLlm('motor');
   motor.completeStandalone = async () => { calls.push('motor'); return result; };
-  const llms = { main: fakeLlm('main'), classifier, motor };
+  const llms = { main: fakeLlm('main'), classifier, motor, secretary: null };
 
   assert.equal(await completeStandaloneForRole(llms, 'motor', [{ role: 'user', content: 'move' }]), result);
   assert.deepEqual(calls, ['motor']);

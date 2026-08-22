@@ -25,6 +25,8 @@ The example file is the exhaustive annotated reference. This document explains t
 
 `anthropic-oauth` and `codex-oauth` use credentials stored in `elpis-data/elpis.db`; run `npm run oauth-login` after configuring the provider. See the provider-specific docs.
 
+The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor` and `secretary` are optional. A configured `secretary` resolves through the same provider-local model registry and remains unused until the Kubernetes-only secretary runtime is enabled.
+
 ## `operator`
 
 `operator.name`, optional pronouns, and `discord_id` describe and authorize the human administrator. The name is display metadata; the Discord ID gates operator-only commands.

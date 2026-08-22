@@ -70,10 +70,15 @@ llm:
           name: openai/gpt-5.6-mini
           context_size: 128000
           reasoning_effort: low
+        secretary:
+          name: openai/gpt-5.6-secretary
+          context_size: 64000
+          reasoning_effort: medium
   roles:
     main: openrouter/sol
     classifier: openrouter/sol
     motor: openrouter/motor
+    secretary: openrouter/secretary
 discord:
   bot_token: ${TOKEN}
   guilds:
@@ -139,6 +144,33 @@ test("configFile: canonical provider/model registry resolves roles and projects 
   assert.throws(
     () => configForLlmRef(c, "openrouter/missing"),
     /config: worker model references unknown model/,
+  );
+});
+
+test("configFile: optional secretary role resolves and fails closed when absent", () => {
+  const configured = loadConfigFile(fixture(CANONICAL_OK));
+  assert.equal(configured.llm.registry.targets.secretary?.name, "openai/gpt-5.6-secretary");
+  assert.equal(configForLlmRole(configured, "secretary").llm.model, "openai/gpt-5.6-secretary");
+
+  const absent = loadConfigFile(
+    fixture(CANONICAL_OK.replace("    secretary: openrouter/secretary\n", "")),
+  );
+  assert.equal(absent.llm.registry.roles.secretary, null);
+  assert.equal(absent.llm.registry.targets.secretary, null);
+  assert.throws(
+    () => configForLlmRole(absent, "secretary"),
+    /llm\.roles\.secretary is not configured/,
+  );
+});
+
+test("configFile: canonical roles reject unknown keys", () => {
+  const unknown = CANONICAL_OK.replace(
+    "    secretary: openrouter/secretary",
+    "    secretary: openrouter/secretary\n    scribe: openrouter/secretary",
+  );
+  assert.throws(
+    () => loadConfigFile(fixture(unknown)),
+    /unknown llm\.roles key\(s\): scribe/,
   );
 });
 

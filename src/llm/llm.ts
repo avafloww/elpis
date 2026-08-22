@@ -1167,6 +1167,7 @@ export interface LlmRoleClients {
   main: LLM;
   classifier: LLM;
   motor: LLM | null;
+  secretary: LLM | null;
 }
 
 export function createLlmRoleClients(
@@ -1188,6 +1189,9 @@ export function createLlmRoleClients(
     ),
     motor: options.motorActive
       ? create(configForLlmRole(config, "motor"), undefined, options.db)
+      : null,
+    secretary: config.llm.registry.targets.secretary
+      ? create(configForLlmRole(config, "secretary"), undefined, options.db)
       : null,
   };
 }

@@ -997,7 +997,11 @@ function parseLlmConfig(
   }
   const rolesRaw = rawMap(at(tree, "llm.roles"), "llm.roles", file);
   const unknownRoles = Object.keys(rolesRaw).filter(
-    (key) => key !== "main" && key !== "classifier" && key !== "motor",
+    (key) =>
+      key !== "main" &&
+      key !== "classifier" &&
+      key !== "motor" &&
+      key !== "secretary",
   );
   if (unknownRoles.length)
     throw new Error(
@@ -1015,6 +1019,7 @@ function parseLlmConfig(
         true,
       )!,
       motor: rawString(rolesRaw, "motor", "llm.roles.motor", file),
+      secretary: rawString(rolesRaw, "secretary", "llm.roles.secretary", file),
     },
   });
   return projectLlmRegistry(registry, completionReserveTokens, "canonical");

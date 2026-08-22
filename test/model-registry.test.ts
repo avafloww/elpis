@@ -34,6 +34,13 @@ function input(): LlmRegistryInput {
             reasoningSummary: null,
             reasoningContext: null,
           },
+          secretary: {
+            name: "openai/gpt-5.6-secretary",
+            contextSize: 64_000,
+            reasoningEffort: "medium",
+            reasoningSummary: null,
+            reasoningContext: null,
+          },
         },
       },
     },
@@ -41,6 +48,7 @@ function input(): LlmRegistryInput {
       main: "openrouter/sol",
       classifier: "openrouter/sol",
       motor: "openrouter/motor",
+      secretary: "openrouter/secretary",
     },
   };
 }
@@ -69,6 +77,11 @@ test("registry resolves main, classifier, and motor without requiring distinct r
   assert.equal(registry.targets.classifier.ref, registry.targets.main.ref);
   assert.equal(registry.targets.motor?.name, "openai/gpt-5.6-mini");
   assert.equal(registry.targets.motor?.provider, registry.providers.openrouter);
+  assert.equal(registry.targets.secretary?.name, "openai/gpt-5.6-secretary");
+  assert.equal(
+    registry.targets.secretary?.provider,
+    registry.providers.openrouter,
+  );
 });
 
 test("arbitrary model refs resolve without occupying a role", () => {
@@ -89,6 +102,14 @@ test("arbitrary model refs resolve without occupying a role", () => {
     () => resolveLlmModelTarget(registry, "openrouter/missing", "worker model"),
     /worker model references unknown model/,
   );
+});
+
+test("secretary role is optional", () => {
+  const value = input();
+  delete value.roles.secretary;
+  const registry = createLlmModelRegistry(value);
+  assert.equal(registry.roles.secretary, null);
+  assert.equal(registry.targets.secretary, null);
 });
 
 test("motor role is required only when the motor module is active", () => {

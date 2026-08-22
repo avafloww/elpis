@@ -149,11 +149,13 @@ export function formatSandboxLateProcessErrorNotice(
 
 export function completeStandaloneForRole(
   llms: LlmRoleClients,
-  role: "classifier" | "motor",
+  role: "classifier" | "motor" | "secretary",
   messages: ChatMessage[],
   opts?: StandaloneCompleteOptions,
 ): Promise<StandaloneCompleteResult> {
   const client = llms[role];
+  if (role === "secretary" && !client)
+    throw new Error("config: llm.roles.secretary is not configured");
   if (!client?.completeStandalone)
     throw new Error(
       `configured ${role} role has no isolated standalone completion path`,
