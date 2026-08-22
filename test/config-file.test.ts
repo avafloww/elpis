@@ -731,6 +731,56 @@ test("legacy fleet configuration is rejected without an alias", () => {
   );
 });
 
+test("secretary defaults disabled and enabling requires the bounded Kubernetes broker", () => {
+  const absent = loadConfigFile(fixture(MINIMAL_OK));
+  assert.deepEqual(absent.secretary, {
+    enabled: false,
+    maxConcurrent: 1,
+    kubernetes: {
+      namespace: "elpis-residence",
+      template: "elpis-secretary",
+      container: "secretary",
+      brokerUrl: null,
+      kubectlPath: "kubectl",
+      context: null,
+    },
+  });
+
+  const configured = loadConfigFile(
+    fixture(
+      `${CANONICAL_OK}\nworkers:\n  server:\n    enabled: true\nsecretary:\n  enabled: true\n  max_concurrent: 2\n  kubernetes:\n    namespace: bounded-residence\n    template: fixed-secretary\n    container: secretary\n    broker_url: https://secretary-broker.example.com\n    context: residence-context\n`,
+    ),
+  );
+  assert.deepEqual(configured.secretary, {
+    enabled: true,
+    maxConcurrent: 2,
+    kubernetes: {
+      namespace: "bounded-residence",
+      template: "fixed-secretary",
+      container: "secretary",
+      brokerUrl: "https://secretary-broker.example.com",
+      kubectlPath: "kubectl",
+      context: "residence-context",
+    },
+  });
+
+  for (const invalid of [
+    `${CANONICAL_OK}\nsecretary:\n  enabled: true\n  kubernetes:\n    broker_url: https://secretary-broker.example.com\n`,
+    `${CANONICAL_OK.replace("    secretary: openrouter/secretary\n", "")}\nworkers:\n  server:\n    enabled: true\nsecretary:\n  enabled: true\n  kubernetes:\n    broker_url: https://secretary-broker.example.com\n`,
+    `${CANONICAL_OK}\nworkers:\n  server:\n    enabled: true\nsecretary:\n  enabled: true\n`,
+    `${CANONICAL_OK}\nworkers:\n  server:\n    enabled: true\nsecretary:\n  enabled: true\n  kubernetes:\n    broker_url: https://user:pass@secretary-broker.example.com\n`,
+    `${CANONICAL_OK}\nsecretary:\n  max_concurrent: 0\n`,
+  ])
+    assert.throws(() => loadConfigFile(fixture(invalid)), /secretary/);
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${CANONICAL_OK}\nsecretary:\n  kubernetes:\n    image: escape\n`),
+      ),
+    /unknown secretary\.kubernetes key.*image/,
+  );
+});
+
 // ---------- usage_tracker section (optional; whole section omittable) ----------
 
 test("usage_tracker: defaults when the section is absent", () => {

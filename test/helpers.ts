@@ -137,6 +137,18 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     },
     kagi: { apiKey: null },
     bluesky: null,
+    secretary: {
+      enabled: false,
+      maxConcurrent: 1,
+      kubernetes: {
+        namespace: "elpis-residence",
+        template: "elpis-secretary",
+        container: "secretary",
+        brokerUrl: null,
+        kubectlPath: "kubectl",
+        context: null,
+      },
+    },
     workers: {
       enabled: false,
       maxConcurrent: 1,

@@ -242,6 +242,19 @@ workers:
     kubectl_path: kubectl
     context: null
 
+# Kubernetes-only residence secretary. The shared scoped listener must be
+# enabled above; the secretary Pod receives only its token-bound broker URL.
+secretary:
+  enabled: false
+  max_concurrent: 1
+  kubernetes:
+    namespace: elpis-residence
+    template: elpis-secretary
+    container: secretary
+    broker_url: null
+    kubectl_path: kubectl
+    context: null
+
 # Provider subscription-usage tracker (Elpis Console rail widget + /usage
 # slash command). The provider is AUTO-DETECTED from llm.base_url (currently:
 # Kimi, when base_url is api.kimi.com/coding/*) and reuses llm.api_key — no

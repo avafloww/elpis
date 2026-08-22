@@ -154,6 +154,19 @@ export interface Config {
     /** app password (not the account password) */
     appPassword: string;
   } | null;
+  secretary: {
+    /** Residence secretary is absent unless the Kubernetes-only runtime is enabled. */
+    enabled: boolean;
+    maxConcurrent: number;
+    kubernetes: {
+      namespace: string;
+      template: string;
+      container: string;
+      brokerUrl: string | null;
+      kubectlPath: string;
+      context: string | null;
+    };
+  };
   workers: {
     /** Native workers are opt-in until a fixed-template spawn broker is configured. */
     enabled: boolean;
@@ -1122,11 +1135,12 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   if (at(tree, "fleet") !== undefined) {
     throw new Error(
       `${f}: legacy \`fleet\` configuration was removed; use the native \`workers\` section`,
-  );
+    );
   }
 
+  const llm = parseLlmConfig(tree, f, logger);
   return {
-    llm: parseLlmConfig(tree, f, logger),
+    llm,
     operator: (() => {
       const name = optStr(tree, "operator.name", f) ?? "operator";
       if (!name.trim())
@@ -1483,7 +1497,123 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           );
       }
       return { enabled, maxConcurrent, server, workspace, kubernetes };
-      })(),
+    })(),
+    secretary: (() => {
+      const raw = at(tree, "secretary");
+      if (
+        raw !== undefined &&
+        (!raw || typeof raw !== "object" || Array.isArray(raw))
+      )
+        throw new Error(`${f}: secretary must be a mapping`);
+      const mapping = (raw ?? {}) as Record<string, unknown>;
+      const unknown = Object.keys(mapping).filter(
+        (key) => !["enabled", "max_concurrent", "kubernetes"].includes(key),
+      );
+      if (unknown.length)
+        throw new Error(`${f}: unknown secretary key(s): ${unknown.join(", ")}`);
+      const kubernetesRaw = at(tree, "secretary.kubernetes");
+      if (
+        kubernetesRaw !== undefined &&
+        (!kubernetesRaw ||
+          typeof kubernetesRaw !== "object" ||
+          Array.isArray(kubernetesRaw))
+      )
+        throw new Error(`${f}: secretary.kubernetes must be a mapping`);
+      const kubernetesMapping = (kubernetesRaw ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const kubernetesUnknown = Object.keys(kubernetesMapping).filter(
+        (key) =>
+          ![
+            "namespace",
+            "template",
+            "container",
+            "broker_url",
+            "kubectl_path",
+            "context",
+          ].includes(key),
+      );
+      if (kubernetesUnknown.length)
+        throw new Error(
+          `${f}: unknown secretary.kubernetes key(s): ${kubernetesUnknown.join(", ")}`,
+        );
+      const enabled = boolOr(tree, "secretary.enabled", false, f);
+      const maxConcurrent = numOr(tree, "secretary.max_concurrent", 1, f);
+      if (
+        !Number.isInteger(maxConcurrent) ||
+        maxConcurrent < 1 ||
+        maxConcurrent > 32
+      )
+        throw new Error(
+          `${f}: secretary.max_concurrent must be an integer from 1 to 32`,
+        );
+      const kubernetes = {
+        namespace:
+          optStr(tree, "secretary.kubernetes.namespace", f) ??
+          "elpis-residence",
+        template:
+          optStr(tree, "secretary.kubernetes.template", f) ??
+          "elpis-secretary",
+        container:
+          optStr(tree, "secretary.kubernetes.container", f) ?? "secretary",
+        brokerUrl: optStr(tree, "secretary.kubernetes.broker_url", f),
+        kubectlPath:
+          optStr(tree, "secretary.kubernetes.kubectl_path", f) ?? "kubectl",
+        context: optStr(tree, "secretary.kubernetes.context", f),
+      };
+      const dnsLabel = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
+      for (const [key, value] of [
+        ["namespace", kubernetes.namespace],
+        ["template", kubernetes.template],
+        ["container", kubernetes.container],
+      ] as const)
+        if (!dnsLabel.test(value) || value.length > 63)
+          throw new Error(
+            `${f}: secretary.kubernetes.${key} must be a Kubernetes DNS label`,
+          );
+      if (!kubernetes.kubectlPath)
+        throw new Error(
+          `${f}: secretary.kubernetes.kubectl_path must not be empty`,
+        );
+      if (kubernetes.brokerUrl !== null) {
+        let broker: URL;
+        try {
+          broker = new URL(kubernetes.brokerUrl);
+        } catch {
+          throw new Error(
+            `${f}: secretary.kubernetes.broker_url must be an absolute http(s) origin`,
+          );
+        }
+        if (
+          (broker.protocol !== "http:" && broker.protocol !== "https:") ||
+          broker.username ||
+          broker.password ||
+          broker.search ||
+          broker.hash ||
+          (broker.pathname !== "/" && broker.pathname !== "")
+        )
+          throw new Error(
+            `${f}: secretary.kubernetes.broker_url must be a credential-free http(s) origin`,
+          );
+        kubernetes.brokerUrl = broker.origin;
+      }
+      if (enabled) {
+        if (!llm.registry.roles.secretary)
+          throw new Error(
+            `${f}: secretary.enabled requires llm.roles.secretary`,
+          );
+        if (!boolOr(tree, "workers.server.enabled", false, f))
+          throw new Error(
+            `${f}: secretary.enabled requires workers.server.enabled`,
+          );
+        if (!kubernetes.brokerUrl)
+          throw new Error(
+            `${f}: secretary.enabled requires secretary.kubernetes.broker_url`,
+          );
+      }
+      return { enabled, maxConcurrent, kubernetes };
+    })(),
     usageTracker: {
       enabled: boolOr(tree, "usage_tracker.enabled", true, f),
       pollIntervalMs: numOr(tree, "usage_tracker.poll_interval_ms", 300000, f),
