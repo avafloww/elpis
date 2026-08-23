@@ -147,6 +147,32 @@
       </div>
       <!-- mind: durable dependency-aware work graph -->
       <div class="ep-mind" id="mind" hidden>
+        <div class="ep-ops" id="ops">
+          <div class="ep-ops-head">
+            <span class="ep-ops-title">unfinished operations</span>
+            <span class="ep-ops-note">real fixed-template backends · rough controls</span>
+            <span class="ep-spacer"></span>
+            <button class="ep-mind-mini" id="ops-refresh" type="button">↻ refresh</button>
+          </div>
+          <div class="ep-ops-grid">
+            <section class="ep-op-lane" aria-labelledby="worker-lane-title">
+              <div class="ep-op-head"><strong id="worker-lane-title">workers</strong><span id="worker-op-status">loading…</span></div>
+              <div class="ep-op-start">
+                <input class="ep-field" id="worker-root" placeholder="selected elm-* Mind id" aria-label="Worker Mind root">
+                <button class="ep-mind-mini" id="worker-start" type="button">start</button>
+              </div>
+              <div class="ep-op-sessions" id="worker-sessions"></div>
+            </section>
+            <section class="ep-op-lane" aria-labelledby="secretary-lane-title">
+              <div class="ep-op-head"><strong id="secretary-lane-title">secretary</strong><span id="secretary-op-status">loading…</span></div>
+              <div class="ep-op-start">
+                <input class="ep-field" id="secretary-root" placeholder="selected elm-* Mind root" aria-label="Secretary Mind root">
+                <button class="ep-mind-mini" id="secretary-start" type="button">start</button>
+              </div>
+              <div class="ep-op-sessions" id="secretary-sessions"></div>
+            </section>
+          </div>
+        </div>
         <div class="ep-mind-stats" id="mind-stats"></div>
         <div class="ep-mind-workspace">
           <div class="scroll ep-mind-list" id="mind-list"></div>

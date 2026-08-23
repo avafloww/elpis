@@ -899,7 +899,7 @@
     clearTimeout(ctxRefreshTimer);
     ctxRefreshTimer = null;
     if (inCtx) requestContext();
-    else if (inMind) requestMindSnapshot();
+    else if (inMind) { requestMindSnapshot(); requestControls(); }
     else threadFollow.afterGrowth();
   }
   $('stream-toggle').onclick = () => setView('stream');
@@ -1127,6 +1127,153 @@
   function mindTags(value) { return (value || '').split(',').map((x) => x.trim()).filter(Boolean); }
   function mindIds(value) { return (value || '').split(',').map((x) => x.trim()).filter(Boolean); }
 
+  const controlState = {
+    req: 0,
+    worker: { available: null, sessions: [], details: new Map(), error: '' },
+    secretary: { available: null, sessions: [], error: '' },
+  };
+
+  function controlSend(lane, op, payload = {}) {
+    if (!(ws && ws.readyState === 1)) { setControlStatus(lane, 'socket unavailable', true); return 0; }
+    const reqId = ++controlState.req;
+    ws.send(JSON.stringify({ t: 'control', lane, op, reqId, ...payload }));
+    setControlStatus(lane, `${op}…`);
+    return reqId;
+  }
+
+  function requestControls() {
+    controlSend('worker', 'snapshot');
+    controlSend('secretary', 'snapshot');
+  }
+
+  function setControlStatus(lane, text, bad = false) {
+    const node = $(`${lane}-op-status`);
+    node.textContent = text || '';
+    node.style.color = bad ? 'var(--rose)' : '';
+  }
+
+  function applyControlSnapshot(lane, payload) {
+    const state = controlState[lane];
+    const value = payload || { available: false, sessions: [], error: 'unavailable' };
+    state.available = value.available !== false;
+    state.sessions = Array.isArray(value.sessions) ? value.sessions : [];
+    state.error = value.error || '';
+    setControlStatus(lane, state.error || (state.available ? `${state.sessions.length} session${state.sessions.length === 1 ? '' : 's'}` : 'unavailable'), !state.available);
+    renderControls();
+  }
+
+  function controlRoot(lane) {
+    const input = $(`${lane}-root`);
+    return input.value.trim() || mindState.selectedId || '';
+  }
+
+  function opButton(text, handler, danger = false) {
+    const button = el('button', { class: `ep-mind-mini${danger ? ' danger' : ''}`, text });
+    button.type = 'button';
+    button.onclick = handler;
+    return button;
+  }
+
+  function opFacts(values) {
+    const row = el('div', { class: 'ep-op-facts' });
+    for (const [label, value] of values) if (value != null && value !== '') row.appendChild(el('span', { text: `${label} ${value}` }));
+    return row;
+  }
+
+  function workerSessionCard(session) {
+    const id = session.id || session.worker || session.slug || '';
+    const ref = session.worker || session.slug || id;
+    const detail = controlState.worker.details.get(id) || controlState.worker.details.get(ref);
+    const card = el('article', { class: 'ep-op-card' });
+    card.appendChild(el('div', { class: 'ep-op-card-head' }, [
+      el('strong', { text: session.worker || session.slug || id || 'worker' }),
+      el('span', { class: 'ep-op-state', text: session.status || 'unknown' }),
+    ]));
+    card.appendChild(opFacts([['mind', session.mindId], ['model', session.modelRef], ['session', id]]));
+    const actions = el('div', { class: 'ep-op-actions' });
+    actions.appendChild(opButton('inspect', () => controlSend('worker', 'status', { ref })));
+    if (session.status === 'running' || session.status === 'spawning' || session.status === 'idle') actions.appendChild(opButton('dismiss', () => {
+      if (window.confirm(`Dismiss ${session.worker || id}?`)) controlSend('worker', 'dismiss', { ref });
+    }, true));
+    card.appendChild(actions);
+    if (session.status === 'running' || session.status === 'idle') {
+      const input = el('input', { class: 'ep-field', placeholder: 'message worker…', maxLength: 32768 });
+      const send = opButton('send', () => { const text = input.value.trim(); if (text) controlSend('worker', 'send', { ref, text }); });
+      card.appendChild(el('div', { class: 'ep-op-compose' }, [input, send]));
+    }
+    if (detail) {
+      const messages = Array.isArray(detail.messages) ? detail.messages : [];
+      const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
+      if (messages.length) card.appendChild(el('pre', { class: 'ep-op-detail', text: messages.map((m) => m.body || m.text || JSON.stringify(m)).join('\n\n') }));
+      if (artifacts.length) card.appendChild(el('div', { class: 'ep-op-receipts' }, artifacts.map((a) => el('div', { text: `${a.key || a.name || 'artifact'} · ${a.sizeBytes ?? a.size ?? a.bytes ?? '?'} bytes · ${a.sha256 || a.digest || 'no digest'}` }))));
+    }
+    return card;
+  }
+
+  function secretarySessionCard(session) {
+    const id = session.id || '';
+    const turns = Array.isArray(session.turns) ? session.turns : [];
+    const card = el('article', { class: 'ep-op-card' });
+    card.appendChild(el('div', { class: 'ep-op-card-head' }, [
+      el('strong', { text: id || 'secretary session' }),
+      el('span', { class: 'ep-op-state', text: session.status || 'unknown' }),
+    ]));
+    card.appendChild(opFacts([['root', session.rootMindId], ['model', session.modelRef], ['turns', turns.length]]));
+    if (session.status === 'ready') {
+      const input = el('textarea', { class: 'ep-field ep-op-prompt', placeholder: 'ask this exact Mind-root secretary…', maxLength: 32768, rows: 2 });
+      const send = opButton('enqueue', () => { const content = input.value.trim(); if (content) controlSend('secretary', 'enqueue', { sessionId: id, content }); });
+      card.appendChild(el('div', { class: 'ep-op-compose' }, [input, send]));
+    }
+    if (session.status === 'ready' || session.status === 'starting') card.appendChild(el('div', { class: 'ep-op-actions' }, [opButton('close + revoke', () => {
+      if (window.confirm(`Close and revoke ${id}?`)) controlSend('secretary', 'close', { sessionId: id });
+    }, true)]));
+    if (turns.length) {
+      const history = el('div', { class: 'ep-op-turns' });
+      for (const turn of turns) {
+        const request = turn.request && typeof turn.request.content === 'string' ? turn.request.content : '';
+        const response = turn.response && typeof turn.response.content === 'string' ? turn.response.content : '';
+        history.appendChild(el('div', { class: 'ep-op-turn' }, [
+          opFacts([['#', turn.sequence], ['status', turn.status]]),
+          request ? el('div', { class: 'ep-op-turn-text', text: `you · ${request}` }) : null,
+          response ? el('div', { class: 'ep-op-turn-text answer', text: `secretary · ${response}` }) : null,
+          turn.lastError ? el('div', { class: 'ep-op-error', text: turn.lastError }) : null,
+        ]));
+      }
+      card.appendChild(history);
+    }
+    return card;
+  }
+
+  function renderControls() {
+    const workerBox = $('worker-sessions'); workerBox.innerHTML = '';
+    const secretaryBox = $('secretary-sessions'); secretaryBox.innerHTML = '';
+    if (controlState.worker.available === false) workerBox.appendChild(el('div', { class: 'ep-op-empty', text: controlState.worker.error || 'worker backend unavailable' }));
+    else if (!controlState.worker.sessions.length) workerBox.appendChild(el('div', { class: 'ep-op-empty', text: controlState.worker.available == null ? 'loading…' : 'no worker sessions' }));
+    else for (const session of controlState.worker.sessions) workerBox.appendChild(workerSessionCard(session));
+    if (controlState.secretary.available === false) secretaryBox.appendChild(el('div', { class: 'ep-op-empty', text: controlState.secretary.error || 'secretary backend unavailable' }));
+    else if (!controlState.secretary.sessions.length) secretaryBox.appendChild(el('div', { class: 'ep-op-empty', text: controlState.secretary.available == null ? 'loading…' : 'no secretary sessions' }));
+    else for (const session of controlState.secretary.sessions) secretaryBox.appendChild(secretarySessionCard(session));
+  }
+
+  function applyControlResult(message) {
+    const lane = message.lane;
+    if (lane !== 'worker' && lane !== 'secretary') return;
+    if (!message.ok) { setControlStatus(lane, message.error || 'operation failed', true); return; }
+    if (message.op === 'snapshot') { applyControlSnapshot(lane, message.result); return; }
+    if (lane === 'worker' && message.op === 'status' && message.result) {
+      const key = message.result.session?.id || message.result.session?.worker || '';
+      if (key) controlState.worker.details.set(key, message.result);
+      setControlStatus(lane, 'status refreshed'); renderControls(); return;
+    }
+    setControlStatus(lane, `${message.op} accepted`);
+    controlSend(lane, 'snapshot');
+  }
+
+  $('ops-refresh').onclick = requestControls;
+  $('worker-start').onclick = () => { const mindId = controlRoot('worker'); if (mindId) controlSend('worker', 'start', { mindId }); else setControlStatus('worker', 'select or enter an elm-* Mind id', true); };
+  $('secretary-start').onclick = () => { const rootMindId = controlRoot('secretary'); if (rootMindId) controlSend('secretary', 'start', { rootMindId }); else setControlStatus('secretary', 'select or enter an elm-* Mind root', true); };
+  renderControls();
+
   function applyMindSnapshot(snapshot) {
     if (!snapshot) return;
     mindState.available = snapshot.available !== false;
@@ -1222,7 +1369,11 @@
       card.setAttribute('role', 'button');
       card.setAttribute('aria-label', `Open item #${item.id}: ${item.title}`);
       card.tabIndex = 0;
-      card.onclick = () => { mindState.mode = 'view'; mindState.selectedId = item.id; renderMindList(); requestMindDetail(item.id); };
+      card.onclick = () => {
+        mindState.mode = 'view'; mindState.selectedId = item.id;
+        $('worker-root').value = item.id; $('secretary-root').value = item.id;
+        renderMindList(); requestMindDetail(item.id);
+      };
       card.onkeydown = (event) => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); card.click(); }
       };
@@ -1534,8 +1685,13 @@
  // a reconnect while the explorer is open re-fetches the (possibly
  // changed) context window
         if (m.mind) applyMindSnapshot(m.mind);
+        if (m.workers) applyControlSnapshot('worker', m.workers);
+        if (m.secretary) applyControlSnapshot('secretary', m.secretary);
         if (state.view === 'context') requestContext();
-        else if (state.view === 'mind' && !m.mind) requestMindSnapshot();
+        else if (state.view === 'mind') {
+          if (!m.mind) requestMindSnapshot();
+          if (!m.workers || !m.secretary) requestControls();
+        }
         break;
       case 'message':
  // an assistant/tool message ends the live streaming bubble
@@ -1568,6 +1724,7 @@
       case 'mindSnapshot': applyMindSnapshot(m); break;
       case 'mindDetail': applyMindDetail(m); break;
       case 'mindResult': applyMindResult(m); break;
+      case 'controlResult': applyControlResult(m); break;
       case 'context':
  // drop stale responses — only the latest request paints the pane
         if (m.reqId === ctxReqSeq) { ctxData = m.context || null; renderContext(); }

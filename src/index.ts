@@ -630,6 +630,10 @@ export async function createElpisRuntime(
       moderate: (channelId, action, reason) =>
         agent.moderateChannel(channelId, action, "operator", reason),
       mind,
+      worker: workerRuntime?.api ?? null,
+      secretary: secretaryRuntime
+        ? { broker: secretaryRuntime.broker, conversation: secretaryRuntime.conversation }
+        : null,
       chat: ({ nonce, content }) => {
         agent.enqueue({
           id: `console-${nonce}`,

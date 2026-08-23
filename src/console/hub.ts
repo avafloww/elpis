@@ -27,6 +27,12 @@ import type { LogLevel } from '../lib/log.js';
 import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
 import type { CacheInfo } from '../llm/cache-stats.js';
 import { parseMindId, type MindKind, type MindService, type MindStatus } from '../store/mind.js';
+import { isMindId } from '../store/mind-id.js';
+import { parseLlmModelRef } from '../llm/model-registry.js';
+import type { SandboxDeps } from '../types.js';
+import type { SecretarySpawnBroker } from '../secretary/spawn.js';
+import type { SecretaryConversationStore } from '../secretary/conversation.js';
+import { isSecretarySessionId } from '../secretary/session.js';
 
 /** A room (Discord channel or the reserved #internal), as the agent reports
  * it — everything except the rail's accent color, which is pure presentation
@@ -148,6 +154,21 @@ export interface StreamEntry {
   count?: number;
 }
 
+/** The worker authority deliberately exposed to the console. Artifact-file reads
+ * are excluded at the type boundary as well as from the frame dispatcher. */
+export type ConsoleWorkerControl = Pick<
+  NonNullable<SandboxDeps['worker']>,
+  'start' | 'send' | 'list' | 'status' | 'dismiss'
+>;
+
+/** Secretary control stays split across the real spawn broker and durable
+ * conversation store. In particular, the console never receives a session
+ * control token. */
+export interface ConsoleSecretaryControl {
+  broker: Pick<SecretarySpawnBroker, 'list' | 'start' | 'close'>;
+  conversation: Pick<SecretaryConversationStore, 'list' | 'enqueue'>;
+}
+
 /** Accessors the hub reads on demand (wired by index.ts from the live agent). */
 export interface HubSources {
   usage: () => UsageInfo;
@@ -174,6 +195,10 @@ export interface HubSources {
   mind?: MindService;
   /** Enqueue operator-authored console speech into the one agent history. */
   chat?: (input: { nonce: string; content: string }) => { ok: boolean; note: string };
+  /** Fixed, typed resident worker authority; null/absent means unavailable. */
+  worker?: ConsoleWorkerControl | null;
+  /** Fixed secretary spawn + durable-conversation authority. */
+  secretary?: ConsoleSecretaryControl | null;
 }
 
 /** Minimal shape of a connected client the hub talks to (a ws.WebSocket). */
@@ -386,8 +411,7 @@ export class ConsoleHub {
     this.clients.delete(client);
   }
 
-  /** Handle a client→server frame: backfill requests, or the ONE write op
- * (`moderate`, ). */
+  /** Handle a client→server frame on the one multiplexed console socket. */
   handleClientMessage(client: HubClient, raw: string): void {
     let m: any;
     try { m = JSON.parse(raw); } catch { return; }
@@ -397,6 +421,109 @@ export class ConsoleHub {
     if (m.t === 'context') this.sendContext(client, m);
     if (m.t === 'mind') this.handleMind(client, m);
     if (m.t === 'chat') this.handleChat(client, m);
+    if (m.t === 'control') void this.handleControl(client, m);
+  }
+
+  /** Dispatch one request-correlated control frame. This method owns every
+   * await and catches every rejection so a runtime failure cannot escape the
+   * WebSocket message callback as an unhandled rejection. */
+  private async handleControl(client: HubClient, m: Record<string, unknown>): Promise<void> {
+    const reqId = Number.isSafeInteger(m.reqId) && Number(m.reqId) >= 0 ? Number(m.reqId) : 0;
+    const op = typeof m.op === 'string' ? m.op.slice(0, 64) : '';
+    const lane = m.lane === 'worker' || m.lane === 'secretary' ? m.lane : null;
+    if (!lane) {
+      this.safeSend(client, { t: 'controlResult', lane: 'worker', reqId, op, ok: false, error: 'invalid control lane' });
+      return;
+    }
+    const reply = (ok: boolean, value: unknown): void => {
+      this.safeSend(client, ok
+        ? { t: 'controlResult', lane, reqId, op, ok: true, result: value }
+        : { t: 'controlResult', lane, reqId, op, ok: false, error: boundedControlError(value) });
+    };
+    if (!Number.isSafeInteger(m.reqId) || Number(m.reqId) < 0) { reply(false, 'reqId must be a non-negative safe integer'); return; }
+    if (typeof m.op !== 'string' || m.op.length < 1 || m.op.length > 64) { reply(false, 'op must contain 1 to 64 characters'); return; }
+    try {
+      if (lane === 'worker') reply(true, await this.runWorkerControl(op, m));
+      else reply(true, await this.runSecretaryControl(op, m));
+    } catch (error) {
+      reply(false, error);
+    }
+  }
+
+  private async runWorkerControl(op: string, m: Record<string, unknown>): Promise<unknown> {
+    if (op === 'snapshot' || op === 'list') return this.workerSnapshot();
+    if (op !== 'status' && op !== 'start' && op !== 'send' && op !== 'dismiss')
+      throw new Error(`unknown worker operation ${JSON.stringify(op)}`);
+    const worker = this.sources?.worker;
+    if (!worker) throw new Error('worker control unavailable');
+    if (op === 'status') return publicWorkerStatus(await worker.status(controlWorkerRef(m.ref)));
+    if (op === 'start') {
+      if (!isMindId(m.mindId)) throw new Error('mindId must be an exact canonical elm- identity');
+      let options: { modelRef: string } | undefined;
+      if (m.modelRef !== undefined) {
+        if (typeof m.modelRef !== 'string' || m.modelRef.length > 256) throw new Error('modelRef must be a canonical configured model reference');
+        parseLlmModelRef(m.modelRef, 'worker model ref');
+        options = { modelRef: m.modelRef };
+      }
+      return publicWorkerSession(options
+        ? await worker.start(m.mindId, options)
+        : await worker.start(m.mindId));
+    }
+    if (op === 'send') {
+      const text = boundedControlText(m.content ?? m.text, 'content');
+      return publicWorkerMessage(await worker.send(controlWorkerRef(m.ref), text));
+    }
+    return publicWorkerSession(await worker.dismiss(controlWorkerRef(m.ref)));
+  }
+
+  private async workerSnapshot(): Promise<Record<string, unknown>> {
+    const worker = this.sources?.worker;
+    if (!worker) return { available: false, sessions: [] };
+    try {
+      const listed = await worker.list();
+      const active = listed.filter((session) => session.status === 'spawning' || session.status === 'running' || session.status === 'idle');
+      const inactive = listed.filter((session) => session.status !== 'spawning' && session.status !== 'running' && session.status !== 'idle');
+      const sessions = [...active, ...inactive].slice(0, CONTROL_SESSION_LIMIT);
+      return { available: true, sessions: sessions.map(publicWorkerSession) };
+    } catch (error) {
+      return { available: false, sessions: [], error: boundedControlError(error) };
+    }
+  }
+
+  private async runSecretaryControl(op: string, m: Record<string, unknown>): Promise<unknown> {
+    if (op === 'snapshot' || op === 'list') return this.secretarySnapshot();
+    if (op !== 'start' && op !== 'enqueue' && op !== 'close')
+      throw new Error(`unknown secretary operation ${JSON.stringify(op)}`);
+    const secretary = this.sources?.secretary;
+    if (!secretary) throw new Error('secretary control unavailable');
+    if (op === 'start') {
+      if (!isMindId(m.rootMindId)) throw new Error('rootMindId must be an exact canonical elm- identity');
+      return publicSecretarySession(await secretary.broker.start(m.rootMindId));
+    }
+    if (op === 'enqueue') {
+      const sessionId = controlSecretaryId(m.sessionId);
+      const content = boundedControlText(m.content, 'content');
+      return publicSecretaryTurn(await secretary.conversation.enqueue(sessionId, { role: 'user', content }));
+    }
+    return publicSecretarySession(await secretary.broker.close(controlSecretaryId(m.sessionId)));
+  }
+
+  private async secretarySnapshot(): Promise<Record<string, unknown>> {
+    const secretary = this.sources?.secretary;
+    if (!secretary) return { available: false, sessions: [] };
+    try {
+      const listed = await secretary.broker.list();
+      const active = listed.filter((session) => session.status === 'starting' || session.status === 'ready');
+      const inactive = listed.filter((session) => session.status !== 'starting' && session.status !== 'ready');
+      const selected = [...active, ...inactive].slice(0, CONTROL_SESSION_LIMIT);
+      const sessions = await Promise.all(selected.map(async (session) => ({
+        ...publicSecretarySession(session),
+        turns: (await secretary.conversation.list(session.id)).slice(-CONTROL_TURN_LIMIT).map(publicSecretaryTurn),
+      })));
+      return { available: true, sessions };
+    } catch (error) {
+      return { available: false, sessions: [], error: boundedControlError(error) };
+    }
   }
 
   private handleChat(client: HubClient, m: { nonce?: unknown; content?: unknown }): void {
@@ -566,6 +693,7 @@ export class ConsoleHub {
     const messages = this.mirror.slice(start);
     let meta: MetaInfo | null = null;
     try { meta = this.sources ? await this.sources.meta() : null; } catch { meta = null; }
+    const [workers, secretary] = await Promise.all([this.workerSnapshot(), this.secretarySnapshot()]);
     this.safeSend(client, {
       t: 'snapshot',
       usage: this.sources?.usage() ?? null,
@@ -584,6 +712,8 @@ export class ConsoleHub {
       hasMore: start > 0 || this.archivedAny(),
       logs: this.logs,
       mind: this.sources?.mind ? this.mindSnapshotPayload() : null,
+      workers,
+      secretary,
     });
   }
 
@@ -644,6 +774,92 @@ export class ConsoleHub {
   private safeSend(client: HubClient, payload: unknown): void {
     try { client.send(JSON.stringify(payload)); } catch { this.clients.delete(client); }
   }
+}
+
+const CONTROL_TEXT_BYTES = 32_768;
+const CONTROL_PREVIEW_BYTES = 8_192;
+const CONTROL_SESSION_LIMIT = 10;
+const CONTROL_TURN_LIMIT = 4;
+const CONTROL_MESSAGE_LIMIT = 20;
+const WORKER_REF_RE = /^(?:worker:)?[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function boundedControlError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return (message || 'control operation failed').slice(0, 1000);
+}
+
+function boundedControlText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be non-empty text`);
+  if (Buffer.byteLength(value, 'utf8') > CONTROL_TEXT_BYTES) throw new Error(`${label} exceeds 32 KiB`);
+  return value;
+}
+
+function boundedControlPreview(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= CONTROL_PREVIEW_BYTES) return value;
+  let end = CONTROL_PREVIEW_BYTES;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return `${bytes.subarray(0, end).toString('utf8')}\n… [truncated for console]`;
+}
+
+function controlWorkerRef(value: unknown): string {
+  if (typeof value !== 'string' || !WORKER_REF_RE.test(value)) throw new Error('ref must be a bounded worker identity');
+  return value;
+}
+
+function controlSecretaryId(value: unknown): string {
+  if (!isSecretarySessionId(value)) throw new Error('sessionId must be an exact canonical sec- identity');
+  return value;
+}
+
+function picked(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('runtime returned an invalid control result');
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of keys) if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key];
+  return result;
+}
+
+const WORKER_SESSION_FIELDS = [
+  'id', 'slug', 'worker', 'status', 'modelRef', 'mindId', 'runtime',
+  'sourceRevision', 'sourceSha256', 'sourceBytes', 'createdAt', 'updatedAt', 'lastError',
+] as const;
+function publicWorkerSession(value: unknown): Record<string, unknown> { return picked(value, WORKER_SESSION_FIELDS); }
+function publicWorkerMessage(value: unknown): Record<string, unknown> {
+  const message = picked(value, ['id', 'sessionId', 'direction', 'kind', 'messageKey', 'sender', 'body', 'createdAt', 'acknowledgedAt']);
+  if (message.body !== undefined) message.body = boundedControlPreview(message.body);
+  return message;
+}
+function publicWorkerArtifact(value: unknown): Record<string, unknown> {
+  // relativePath/localPath are intentionally absent: this lane exposes receipts, not files.
+  return picked(value, ['id', 'sessionId', 'key', 'kind', 'sourceSha256', 'sha256', 'sizeBytes', 'createdAt']);
+}
+function publicWorkerStatus(value: unknown): Record<string, unknown> {
+  const status = picked(value, ['session', 'messages', 'artifacts']);
+  if (!Array.isArray(status.messages) || !Array.isArray(status.artifacts)) throw new Error('worker status returned invalid collections');
+  return {
+    session: publicWorkerSession(status.session),
+    messages: status.messages.slice(-CONTROL_MESSAGE_LIMIT).map(publicWorkerMessage),
+    artifacts: status.artifacts.slice(-CONTROL_MESSAGE_LIMIT).map(publicWorkerArtifact),
+  };
+}
+
+const SECRETARY_SESSION_FIELDS = [
+  'id', 'rootMindId', 'status', 'modelRef', 'runtime', 'createdAt', 'updatedAt', 'lastError',
+] as const;
+function publicSecretarySession(value: unknown): Record<string, unknown> { return picked(value, SECRETARY_SESSION_FIELDS); }
+function publicSecretaryTurn(value: unknown): Record<string, unknown> {
+  const turn = picked(value, ['id', 'sessionId', 'sequence', 'status', 'request', 'response', 'createdAt', 'updatedAt', 'claimedAt', 'completedAt', 'lastError']);
+  if (turn.request !== undefined) {
+    turn.request = picked(turn.request, ['role', 'content']);
+    (turn.request as Record<string, unknown>).content = boundedControlPreview((turn.request as Record<string, unknown>).content);
+  }
+  if (turn.response !== undefined && turn.response !== null) {
+    turn.response = picked(turn.response, ['role', 'content']);
+    (turn.response as Record<string, unknown>).content = boundedControlPreview((turn.response as Record<string, unknown>).content);
+  }
+  return turn;
 }
 
 const SUMMARY_PREFIX = '=== Summary of earlier conversation';
