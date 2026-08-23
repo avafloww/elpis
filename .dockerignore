@@ -2,9 +2,12 @@
 !package.json
 !package-lock.json
 !tsconfig.json
+!tsconfig.console.json
 !src/
 !src/**
 !bench/
 !bench/**
+!scripts/
+!scripts/build-console.mjs
 !deploy/
 !deploy/container-entrypoint.sh
