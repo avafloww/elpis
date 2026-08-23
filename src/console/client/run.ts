@@ -1,5 +1,5 @@
-import type { JsonObject } from './types';
-import { object, text } from './types';
+import type { JsonObject } from './types.js';
+import { object, text } from './types.js';
 
 export function runAttribution(value: unknown): string {
   const run = object(value);

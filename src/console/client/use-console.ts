@@ -10,8 +10,8 @@ import type {
   ServerFrame,
   StreamEntry,
   ViewName,
-} from './types';
-import { array, number, object, text } from './types';
+} from './types.js';
+import { array, number, object, text } from './types.js';
 
 const EMPTY_CONTROL: ControlSnapshot = { available: false, sessions: [] };
 

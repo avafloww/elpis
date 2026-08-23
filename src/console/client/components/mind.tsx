@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'preact/hooks';
-import type { ConsoleActions } from '../use-console';
-import type { ConsoleState, MindItem } from '../types';
-import { copy, Empty, Markdown, relative, Status } from './common';
+import type { ConsoleActions } from '../use-console.js';
+import type { ConsoleState, MindItem } from '../types.js';
+import { copy, Empty, Markdown, relative, Status } from './common.js';
 
 const GROUPS: Array<{
   key: string;

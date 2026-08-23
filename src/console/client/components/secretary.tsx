@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'preact/hooks';
-import type { ConsoleActions } from '../use-console';
-import type { ConsoleState, JsonObject } from '../types';
-import { array, object, text } from '../types';
-import { Empty, Markdown, relative, Status } from './common';
+import type { ConsoleActions } from '../use-console.js';
+import type { ConsoleState, JsonObject } from '../types.js';
+import { array, object, text } from '../types.js';
+import { Empty, Markdown, relative, Status } from './common.js';
 
 function sessionId(session: JsonObject): string {
   return text(session.id) || text(session.sessionId);

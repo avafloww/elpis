@@ -1,14 +1,14 @@
 import { render } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
-import { ContextView } from './components/context';
-import { MindView } from './components/mind';
-import { SecretaryView } from './components/secretary';
-import { ThreadView } from './components/thread';
-import { WorkersView } from './components/workers';
-import { clock } from './components/common';
-import type { JsonObject, MindItem, ViewName } from './types';
-import { number, text } from './types';
-import { useConsole } from './use-console';
+import { ContextView } from './components/context.js';
+import { MindView } from './components/mind.js';
+import { SecretaryView } from './components/secretary.js';
+import { ThreadView } from './components/thread.js';
+import { WorkersView } from './components/workers.js';
+import { clock } from './components/common.js';
+import type { JsonObject, MindItem, ViewName } from './types.js';
+import { number, text } from './types.js';
+import { useConsole } from './use-console.js';
 import './styles.css';
 
 const NAV: Array<{ view: ViewName; glyph: string; label: string }> = [

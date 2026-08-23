@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import type { ConsoleActions } from '../use-console';
-import type { ConsoleState, StreamEntry } from '../types';
-import { clock, Markdown } from './common';
-import { isNearBottom, preservePrependScrollTop } from '../scroll';
-import { attachmentsOf, attachmentUrl, utterance } from '../envelope';
-import { runAttribution, splitRunResult } from '../run';
+import type { ConsoleActions } from '../use-console.js';
+import type { ConsoleState, StreamEntry } from '../types.js';
+import { clock, Markdown } from './common.js';
+import { isNearBottom, preservePrependScrollTop } from '../scroll.js';
+import { attachmentsOf, attachmentUrl, utterance } from '../envelope.js';
+import { runAttribution, splitRunResult } from '../run.js';
 
 function roomMatches(entry: StreamEntry, room: string): boolean {
   if (room === 'all' || entry.channel === room) return true;

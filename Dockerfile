@@ -2,7 +2,8 @@ FROM node:24-trixie-slim AS build
 WORKDIR /opt/elpis
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.console.json ./
+COPY scripts/build-console.mjs ./scripts/build-console.mjs
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --legacy-peer-deps
 

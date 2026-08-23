@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'preact/hooks';
-import type { ConsoleActions } from '../use-console';
-import type { ConsoleState, JsonObject } from '../types';
-import { array, object, text } from '../types';
-import { copy, Empty } from './common';
+import type { ConsoleActions } from '../use-console.js';
+import type { ConsoleState, JsonObject } from '../types.js';
+import { array, object, text } from '../types.js';
+import { copy, Empty } from './common.js';
 
 function ContextCard({
   message,

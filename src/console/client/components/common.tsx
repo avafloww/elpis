@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact';
-import { markdown, plain } from '../markdown';
+import { markdown, plain } from '../markdown.js';
 
 export function relative(value: unknown): string {
   const time =
