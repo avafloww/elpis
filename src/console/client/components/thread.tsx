@@ -268,6 +268,17 @@ export function editDiffPreview(
   return output;
 }
 
+export function operationDisplayTarget(target: string): string {
+  const normalized = target.replaceAll('\\', '/');
+  const repositoryMarker = '/elpis-harness/';
+  const repositoryIndex = normalized.lastIndexOf(repositoryMarker);
+  if (repositoryIndex >= 0)
+    return normalized.slice(repositoryIndex + repositoryMarker.length);
+  if (!normalized.startsWith('/')) return normalized;
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : normalized;
+}
+
 function OperationCard({
   operation,
   result,
@@ -298,7 +309,7 @@ function OperationCard({
     <div class={`operation-card operation-${operation.kind}`}>
       <header>
         <span class='surface-label'>{labels[operation.kind]}</span>
-        <strong>{operation.target}</strong>
+        <strong>{operationDisplayTarget(operation.target)}</strong>
         <span class='surface-spacer' />
         {operation.kind === 'edit' && diff.length ? (
           <span class='operation-counts'>

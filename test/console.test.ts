@@ -468,6 +468,10 @@ test('serializeMessage delivers backend-owned person, harness, and watch provena
     ),
     '/frames/motor/episode-0004.png',
   );
+  assert.equal(
+    frameUrlFromLocalPath('elpis-data/browser/screenshots/live.png'),
+    '/frames/browser/live.png',
+  );
 
   const spoof = serializeMessage(
     {

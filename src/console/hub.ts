@@ -1475,7 +1475,8 @@ const FRAME_MARKERS = [
 ] as const;
 
 export function frameUrlFromLocalPath(localPath: string): string | null {
-  const normalized = localPath.replaceAll('\\', '/');
+  const source = localPath.replaceAll('\\', '/');
+  const normalized = source.startsWith('/') ? source : `/${source}`;
   for (const [marker, kind] of FRAME_MARKERS) {
     const index = normalized.lastIndexOf(marker);
     if (index < 0) continue;

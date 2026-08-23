@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { editDiffPreview } from '../src/console/client/components/thread.js';
+import {
+  editDiffPreview,
+  operationDisplayTarget,
+} from '../src/console/client/components/thread.js';
 import {
   formatRunSource,
   resultSummary,
@@ -39,6 +42,21 @@ test('typed run card prettifies display source without changing execution bytes'
     },
   });
   assert.match(heredoc, /const value = <<<TEXT\nhello\nTEXT/);
+});
+
+test('operation card targets hide host prefixes while retaining useful paths', () => {
+  assert.equal(
+    operationDisplayTarget('/opt/elpis-harness/dist/console/public/app.js'),
+    'dist/console/public/app.js',
+  );
+  assert.equal(
+    operationDisplayTarget('/var/lib/elpis/private/receipt.json'),
+    '…/elpis/private/receipt.json',
+  );
+  assert.equal(
+    operationDisplayTarget('src/console/hub.ts'),
+    'src/console/hub.ts',
+  );
 });
 
 test('rich edit cards produce a bounded line diff with stable line numbers', () => {
