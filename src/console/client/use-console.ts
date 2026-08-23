@@ -15,13 +15,19 @@ import { array, number, object, text } from './types.js';
 
 const EMPTY_CONTROL: ControlSnapshot = { available: false, sessions: [] };
 
+function initialView(): ViewName {
+  if (typeof localStorage === 'undefined') return 'thread';
+  const stored = localStorage.getItem('elpis-view') ?? '';
+  return ['thread', 'context', 'mind', 'workers', 'secretary', 'logs'].includes(
+    stored,
+  )
+    ? (stored as ViewName)
+    : 'thread';
+}
+
 const initialState: ConsoleState = {
   connection: 'connecting',
-  view: (['thread', 'context', 'mind', 'workers', 'secretary', 'logs'].includes(
-    localStorage.getItem('elpis-view') ?? '',
-  )
-    ? localStorage.getItem('elpis-view')
-    : 'thread') as ViewName,
+  view: initialView(),
   room: 'all',
   rooms: [],
   participants: 0,
@@ -69,6 +75,63 @@ function controlSnapshot(value: unknown): ControlSnapshot {
   };
 }
 
+export function workerDetailFromControl(value: unknown): JsonObject {
+  const result = object(value);
+  return {
+    ...object(result.session),
+    messages: array<JsonObject>(result.messages),
+    artifacts: array<JsonObject>(result.artifacts),
+  };
+}
+
+export function secretaryIdFromControl(value: unknown): string | null {
+  return text(object(value).id) || null;
+}
+
+export function upsertControlSession(
+  snapshot: ControlSnapshot,
+  value: unknown,
+): ControlSnapshot {
+  const incoming = object(value);
+  const id = text(incoming.id);
+  if (!id) return snapshot;
+  const previous = snapshot.sessions.find((session) => text(session.id) === id);
+  const merged = { ...previous, ...incoming };
+  return {
+    ...snapshot,
+    available: true,
+    sessions: [
+      merged,
+      ...snapshot.sessions.filter((session) => text(session.id) !== id),
+    ],
+  };
+}
+
+export function appendSecretaryTurn(
+  snapshot: ControlSnapshot,
+  value: unknown,
+): ControlSnapshot {
+  const turn = object(value);
+  const sessionId = text(turn.sessionId);
+  if (!sessionId) return snapshot;
+  return {
+    ...snapshot,
+    sessions: snapshot.sessions.map((session) =>
+      text(session.id) === sessionId
+        ? {
+            ...session,
+            turns: [...array<JsonObject>(session.turns), turn].slice(-20),
+          }
+        : session,
+    ),
+  };
+}
+
+function workerRefFromSession(value: unknown): string | null {
+  const session = object(value);
+  return text(session.worker, text(session.slug, text(session.id))) || null;
+}
+
 function mindSnapshot(state: ConsoleState, value: unknown): ConsoleState {
   const source = object(value);
   const items = array<MindItem>(source.items);
@@ -110,7 +173,13 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
       };
       if (frame.mind) next = mindSnapshot(next, frame.mind);
       const sessions = next.secretary.sessions;
-      if (!next.selectedSecretaryId && sessions.length)
+      const selectedStillPresent = sessions.some(
+        (session) => text(session.id) === next.selectedSecretaryId,
+      );
+      if (
+        (!next.selectedSecretaryId || !selectedStillPresent) &&
+        sessions.length
+      )
         next = { ...next, selectedSecretaryId: text(sessions[0].id) || null };
       return next;
     }
@@ -213,12 +282,80 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
           ...state,
           notice: text(frame.error, 'control operation failed'),
         };
-      if (frame.lane === 'worker' && frame.op === 'status')
-        return {
-          ...state,
-          workerDetail: object(frame.result),
-          notice: null,
-        } as ConsoleState;
+      if (frame.lane === 'worker') {
+        if (frame.op === 'status')
+          return {
+            ...state,
+            workerDetail: workerDetailFromControl(frame.result),
+            notice: null,
+          } as ConsoleState;
+        if (frame.op === 'start') {
+          const session = object(frame.result);
+          const ref = workerRefFromSession(session);
+          return {
+            ...state,
+            workers: upsertControlSession(state.workers, session),
+            selectedWorkerRef: ref ?? state.selectedWorkerRef,
+            workerDetail: {
+              ...session,
+              messages: [],
+              artifacts: [],
+            },
+            notice: null,
+          };
+        }
+        if (frame.op === 'send')
+          return {
+            ...state,
+            workerDetail: state.workerDetail
+              ? {
+                  ...state.workerDetail,
+                  messages: [
+                    ...array<JsonObject>(state.workerDetail.messages),
+                    object(frame.result),
+                  ].slice(-20),
+                }
+              : state.workerDetail,
+            notice: null,
+          };
+        if (frame.op === 'dismiss') {
+          const session = object(frame.result);
+          const detail = state.workerDetail;
+          return {
+            ...state,
+            workers: upsertControlSession(state.workers, session),
+            workerDetail:
+              detail && text(detail.id) === text(session.id)
+                ? { ...detail, ...session }
+                : detail,
+            notice: null,
+          };
+        }
+      }
+      if (frame.lane === 'secretary') {
+        if (frame.op === 'start') {
+          const session = object(frame.result);
+          return {
+            ...state,
+            secretary: upsertControlSession(state.secretary, session),
+            selectedSecretaryId:
+              secretaryIdFromControl(session) ?? state.selectedSecretaryId,
+            notice: null,
+          };
+        }
+        if (frame.op === 'enqueue')
+          return {
+            ...state,
+            secretary: appendSecretaryTurn(state.secretary, frame.result),
+            notice: null,
+          };
+        if (frame.op === 'close')
+          return {
+            ...state,
+            secretary: upsertControlSession(state.secretary, frame.result),
+            notice: null,
+          };
+      }
       return { ...state, notice: null };
     }
     default:

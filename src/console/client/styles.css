@@ -909,6 +909,116 @@ pre {
   font-size: 9.5px;
 }
 
+.operation-card {
+  overflow: hidden;
+  border: 1px solid rgba(168, 146, 214, 0.24);
+  border-radius: 11px;
+  background: var(--bg-card);
+}
+.operation-card > header,
+.operation-card > footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px;
+}
+.operation-card > header {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-header);
+}
+.operation-card > header .surface-label {
+  color: var(--violet);
+}
+.operation-edit > header .surface-label,
+.operation-file > header .surface-label {
+  color: var(--teal);
+}
+.operation-shell > header .surface-label,
+.operation-git > header .surface-label {
+  color: var(--green);
+}
+.operation-computer > header .surface-label {
+  color: var(--amber);
+}
+.operation-card > header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.operation-counts,
+.operation-state {
+  flex: none;
+  color: var(--soft);
+  font-size: 10px;
+}
+.operation-counts {
+  color: var(--teal);
+}
+.operation-diff,
+.operation-output {
+  max-height: min(320px, 38vh);
+  margin: 0;
+  overflow: auto;
+  padding: 8px 0;
+  background: var(--bg-code);
+  color: var(--mono-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.operation-diff > span {
+  display: grid;
+  grid-template-columns: 18px 42px minmax(0, 1fr);
+  min-width: max-content;
+  padding: 1px 12px 1px 8px;
+}
+.operation-diff i,
+.operation-diff b {
+  color: var(--faint);
+  font-style: normal;
+  font-weight: 400;
+  text-align: right;
+}
+.operation-diff code {
+  padding-left: 12px;
+  white-space: pre;
+}
+.operation-diff .diff-add {
+  background: rgba(143, 184, 154, 0.08);
+}
+.operation-diff .diff-add i,
+.operation-diff .diff-add code {
+  color: var(--green);
+}
+.operation-diff .diff-remove {
+  background: rgba(217, 143, 140, 0.07);
+}
+.operation-diff .diff-remove i,
+.operation-diff .diff-remove code {
+  color: var(--red);
+}
+.operation-output {
+  padding: 11px 13px;
+  white-space: pre-wrap;
+}
+.operation-card > footer {
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 9.5px;
+}
+.operation-card > footer code {
+  color: var(--muted);
+}
+.operation-card > footer > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wake-card {
   display: flex;
   align-items: center;
@@ -1094,6 +1204,15 @@ pre {
   font-size: 9.5px;
   text-align: center;
 }
+.desktop-surface a {
+  flex: none;
+}
+img.desktop-frame {
+  display: block;
+  padding: 0;
+  object-fit: contain;
+  background-image: none;
+}
 .desktop-surface > div > div:last-child {
   min-width: 0;
   display: flex;
@@ -1161,6 +1280,73 @@ pre {
   color: var(--teal);
   font-size: 10.5px;
   text-decoration: none;
+}
+
+.internal-event {
+  overflow: hidden;
+  border: 1px solid rgba(130, 179, 186, 0.22);
+  border-radius: 10px;
+  background: rgba(130, 179, 186, 0.045);
+}
+.internal-event summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  list-style: none;
+  cursor: pointer;
+}
+.internal-event summary::-webkit-details-marker {
+  display: none;
+}
+.internal-event summary > span:first-child {
+  color: var(--teal);
+  font-size: 9px;
+}
+.internal-event summary strong {
+  color: var(--teal);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.internal-event summary code,
+.internal-event summary time {
+  color: var(--muted);
+  font-size: 10px;
+}
+.internal-event > div {
+  border-top: 1px solid var(--line);
+}
+.internal-event > div > span {
+  display: block;
+  overflow: hidden;
+  padding: 9px 12px;
+  color: var(--soft);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.internal-event pre {
+  max-height: min(280px, 34vh);
+  margin: 0;
+  overflow: auto;
+  padding: 11px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-code);
+  color: var(--mono-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.internal-event-background {
+  border-color: rgba(217, 178, 79, 0.24);
+  background: rgba(217, 178, 79, 0.04);
+}
+.internal-event-background summary strong,
+.internal-event-background summary > span:first-child {
+  color: var(--amber);
 }
 
 .thread-divider {
@@ -2090,12 +2276,45 @@ pre {
 }
 
 .log-rail {
+  position: relative;
   height: 38px;
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--bg-log);
   border-top: 1px solid var(--line);
+}
+
+.log-resizer {
+  position: absolute;
+  z-index: 4;
+  top: -5px;
+  left: 0;
+  width: 100%;
+  height: 10px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.log-resizer::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: calc(50% - 28px);
+  width: 56px;
+  height: 2px;
+  border-radius: 99px;
+  background: rgba(130, 179, 186, 0.24);
+}
+.log-resizer:hover::after,
+.log-resizer:focus-visible::after,
+.resizing-logs .log-resizer::after {
+  background: var(--teal);
+}
+.resizing-logs {
+  user-select: none;
 }
 
 .log-rail.log-rail-open {
@@ -2120,10 +2339,13 @@ pre {
 }
 
 .log-rail header time {
+  flex: none;
   color: #5f6b78;
   font:
     400 10.5px 'IBM Plex Mono',
     monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .log-rail header code {
@@ -2161,9 +2383,11 @@ pre {
 }
 
 .log-line time {
-  width: 54px;
+  width: 62px;
   flex: none;
   color: #5f6b78;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .log-line span {

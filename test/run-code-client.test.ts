@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { editDiffPreview } from '../src/console/client/components/thread.js';
 import {
+  formatRunSource,
   resultSummary,
   splitRunResult,
   wakePresentation,
@@ -12,21 +14,41 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
 
-test('typed run card preserves source exactly without a browser formatter runtime', () => {
+test('typed run card prettifies display source without changing execution bytes', async () => {
   const source = fs.readFileSync(
     path.join(root, 'src/console/client/components/thread.tsx'),
     'utf8',
   );
-  const packageSource = fs.readFileSync(
-    path.join(root, 'package.json'),
-    'utf8',
-  );
-  assert.match(source, /<HighlightedCode value=\{call\.code\} \/>/);
+  assert.match(source, /<FormattedCode call=\{call\} \/>/);
   assert.doesNotMatch(source, /runAttribution|run-attribution/);
-  assert.doesNotMatch(
-    source + packageSource,
-    /formatSource|ElpisRunCode|prettierPlugins|run-code\.js|prettier\.umd|prism\.js/,
-  );
+  const raw = "const x={a:1,b:[2,3]};await elpis.read('x')";
+  const formatted = await formatRunSource({ code: raw });
+  assert.equal(raw, "const x={a:1,b:[2,3]};await elpis.read('x')");
+  assert.match(formatted, /const x = \{ a: 1, b: \[2, 3\] \};/);
+  assert.match(formatted, /await elpis\.read\('x'\)/);
+  const heredoc = await formatRunSource({
+    code: 'const value = <<<TEXT\nhello\nTEXT',
+    display: {
+      code: 'const value = "__ELPIS_HEREDOC_0__"',
+      heredocs: [
+        {
+          token: '__ELPIS_HEREDOC_0__',
+          source: '<<<TEXT\nhello\nTEXT',
+        },
+      ],
+    },
+  });
+  assert.match(heredoc, /const value = <<<TEXT\nhello\nTEXT/);
+});
+
+test('rich edit cards produce a bounded line diff with stable line numbers', () => {
+  assert.deepEqual(editDiffPreview('a\nb\nc', 'a\nB\nC\nc'), [
+    { kind: 'same', number: 1, text: 'a' },
+    { kind: 'remove', number: 2, text: 'b' },
+    { kind: 'add', number: 2, text: 'B' },
+    { kind: 'add', number: 3, text: 'C' },
+    { kind: 'same', number: 4, text: 'c' },
+  ]);
 });
 
 test('typed run result parser separates value and console without rewriting either', () => {

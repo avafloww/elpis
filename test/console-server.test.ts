@@ -24,6 +24,7 @@ import {
   createConsoleServer,
   isAllowedOrigin,
   resolveAttachmentPath,
+  resolveFramePath,
 } from '../src/console/server.js';
 import { ConsoleHub } from '../src/console/hub.js';
 import { makeConfig } from './helpers.js';
@@ -65,6 +66,27 @@ test('resolveAttachmentPath: rejects traversal out of the attachment root', () =
   );
   // Empty remainder resolves to the root itself, not a file under it.
   assert.equal(resolveAttachmentPath('/attachments/'), null);
+});
+
+test('resolveFramePath confines image routes to canonical console frame roots', () => {
+  assert.equal(
+    resolveFramePath('/frames/computer/desktop.png', '/tmp/unn'),
+    '/tmp/unn/elpis-data/computer/screenshots/desktop.png',
+  );
+  assert.equal(
+    resolveFramePath('/frames/browser/nested/page.webp', '/tmp/unn'),
+    '/tmp/unn/elpis-data/browser/screenshots/nested/page.webp',
+  );
+  assert.equal(
+    resolveFramePath('/frames/computer/../secret.png', '/tmp/unn'),
+    null,
+  );
+  assert.equal(
+    resolveFramePath('/frames/motor/episode.png', '/tmp/unn'),
+    '/tmp/unn/elpis-data/motor/episodes/episode.png',
+  );
+  assert.equal(resolveFramePath('/frames/motor/trace.json', '/tmp/unn'), null);
+  assert.equal(resolveFramePath('/frames/unknown/frame.png', '/tmp/unn'), null);
 });
 
 test('static console server declares PWA asset MIME types', () => {
@@ -167,6 +189,42 @@ test('/attachments/ route: serves a downloaded attachment, 404s a missing one, 4
 
   const traversal = await fetch(`${base}/attachments/..%2F..%2Fetc%2Fpasswd`);
   assert.equal(traversal.status, 403);
+});
+
+test('/frames/ route serves only bounded canonical images and rejects symlink escape', async (t) => {
+  const port = await freePort();
+  const dataDirectory = fs.mkdtempSync('/tmp/elpis-frame-test-');
+  const config = makeConfig({
+    console: { enabled: true, port, host: '127.0.0.1' },
+  });
+  config.paths.dataDirectory = dataDirectory;
+  const root = path.join(dataDirectory, 'elpis-data/computer/screenshots');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'desktop.png'),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
+  fs.symlinkSync('/etc/passwd', path.join(root, 'escape.png'));
+  const server = createConsoleServer(config, new ConsoleHub([]));
+  await server.start();
+  t.after(() => {
+    server.stop();
+    fs.rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const frame = await fetch(`${base}/frames/computer/desktop.png`);
+  assert.equal(frame.status, 200);
+  assert.equal(frame.headers.get('content-type'), 'image/png');
+  assert.equal((await frame.arrayBuffer()).byteLength, 4);
+  assert.equal(
+    (await fetch(`${base}/frames/computer/missing.png`)).status,
+    404,
+  );
+  assert.equal((await fetch(`${base}/frames/computer/escape.png`)).status, 404);
+  assert.equal(
+    (await fetch(`${base}/frames/computer/..%2F..%2Fsecret.png`)).status,
+    403,
+  );
 });
 
 test("console websocket Origin guard: rejects a foreign origin, accepts the console's own origin and an absent origin", async (t) => {

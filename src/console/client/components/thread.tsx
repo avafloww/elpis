@@ -11,6 +11,7 @@ import type { ConsoleState, StreamEntry } from '../types.js';
 import { object, text } from '../types.js';
 import { attachmentsOf, attachmentUrl, utterance } from '../envelope.js';
 import {
+  formatRunSource,
   resultSummary,
   splitRunResult,
   statementCount,
@@ -29,7 +30,7 @@ function cleanTag(value: string): string {
 }
 
 function displayName(entry: StreamEntry, fallback: string): string {
-  const author = entry.author?.trim();
+  const author = entry.displayName?.trim() || entry.author?.trim();
   if (!author) return cleanTag(fallback);
   if (/^\d{12,}$/.test(author))
     return entry.channel === 'console' ? 'console' : 'person';
@@ -160,6 +161,25 @@ function HighlightedCode({ value }: { value: string }) {
   );
 }
 
+function FormattedCode({
+  call,
+}: {
+  call: NonNullable<StreamEntry['toolCalls']>[number];
+}) {
+  const [value, setValue] = useState(call.code);
+  useEffect(() => {
+    let current = true;
+    setValue(call.code);
+    void formatRunSource(call).then((formatted) => {
+      if (current) setValue(formatted);
+    });
+    return () => {
+      current = false;
+    };
+  }, [call.code, call.display]);
+  return <HighlightedCode value={value} />;
+}
+
 function CodeCard({
   call,
   result,
@@ -189,7 +209,7 @@ function CodeCard({
       </button>
       {open ? (
         <pre class='code-body'>
-          <HighlightedCode value={call.code} />
+          <FormattedCode call={call} />
         </pre>
       ) : null}
       <div class='code-result'>
@@ -197,6 +217,121 @@ function CodeCard({
         <strong>{result ? resultSummary(result.content) : 'running…'}</strong>
         <code title={call.id}>{call.id}</code>
       </div>
+    </div>
+  );
+}
+
+export interface DiffPreviewLine {
+  kind: 'same' | 'add' | 'remove';
+  number: number | null;
+  text: string;
+}
+
+export function editDiffPreview(
+  before: string,
+  after: string,
+  maxChanged = 80,
+): DiffPreviewLine[] {
+  const left = before.split('\n');
+  const right = after.split('\n');
+  let prefix = 0;
+  while (
+    prefix < left.length &&
+    prefix < right.length &&
+    left[prefix] === right[prefix]
+  )
+    prefix++;
+  let suffix = 0;
+  while (
+    suffix < left.length - prefix &&
+    suffix < right.length - prefix &&
+    left[left.length - 1 - suffix] === right[right.length - 1 - suffix]
+  )
+    suffix++;
+  const output: DiffPreviewLine[] = [];
+  for (let i = Math.max(0, prefix - 2); i < prefix; i++)
+    output.push({ kind: 'same', number: i + 1, text: left[i] ?? '' });
+  const removed = left.slice(prefix, left.length - suffix).slice(0, maxChanged);
+  const added = right.slice(prefix, right.length - suffix).slice(0, maxChanged);
+  removed.forEach((text, index) =>
+    output.push({ kind: 'remove', number: prefix + index + 1, text }),
+  );
+  added.forEach((text, index) =>
+    output.push({ kind: 'add', number: prefix + index + 1, text }),
+  );
+  for (
+    let i = right.length - suffix;
+    i < Math.min(right.length, right.length - suffix + 2);
+    i++
+  )
+    output.push({ kind: 'same', number: i + 1, text: right[i] ?? '' });
+  return output;
+}
+
+function OperationCard({
+  operation,
+  result,
+}: {
+  operation: NonNullable<
+    NonNullable<StreamEntry['toolCalls']>[number]['operations']
+  >[number];
+  result?: StreamEntry;
+}) {
+  const outcome = result ? splitRunResult(result.content) : null;
+  const labels = {
+    edit: 'edited file',
+    mind: 'mind operation',
+    shell: 'shell',
+    file: 'file operation',
+    git: 'git operation',
+    computer: 'desktop operation',
+  } as const;
+  const diff =
+    operation.kind === 'edit' &&
+    operation.before !== undefined &&
+    operation.after !== undefined
+      ? editDiffPreview(operation.before, operation.after)
+      : [];
+  const added = diff.filter((line) => line.kind === 'add').length;
+  const removed = diff.filter((line) => line.kind === 'remove').length;
+  return (
+    <div class={`operation-card operation-${operation.kind}`}>
+      <header>
+        <span class='surface-label'>{labels[operation.kind]}</span>
+        <strong>{operation.target}</strong>
+        <span class='surface-spacer' />
+        {operation.kind === 'edit' && diff.length ? (
+          <span class='operation-counts'>
+            +{added} −{removed}
+          </span>
+        ) : (
+          <span class='operation-state'>
+            {result ? (outcome?.ok ? 'completed' : 'failed') : 'running'}
+          </span>
+        )}
+      </header>
+      {diff.length ? (
+        <pre class='operation-diff'>
+          {diff.map((line, index) => (
+            <span class={`diff-${line.kind}`} key={index}>
+              <i>
+                {line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}
+              </i>
+              <b>{line.number ?? ''}</b>
+              <code>{line.text}</code>
+            </span>
+          ))}
+        </pre>
+      ) : operation.kind === 'shell' && outcome?.console ? (
+        <pre class='operation-output'>{outcome.console}</pre>
+      ) : null}
+      <footer>
+        <code>{operation.name}</code>
+        <span class='surface-spacer' />
+        <span>
+          {result ? resultSummary(result.content, 100) : 'awaiting result'}
+        </span>
+      </footer>
     </div>
   );
 }
@@ -301,15 +436,58 @@ function WatchSurface({ entry }: { entry: StreamEntry }) {
         <span>{clock(entry.ts)}</span>
       </header>
       <div>
-        <div class='desktop-frame'>watch frame delivered</div>
+        {entry.frameUrl ? (
+          <a href={entry.frameUrl} target='_blank' rel='noreferrer'>
+            <img
+              class='desktop-frame'
+              src={entry.frameUrl}
+              alt={summary || 'post-action desktop frame'}
+              loading='lazy'
+            />
+          </a>
+        ) : (
+          <div class='desktop-frame'>frame unavailable</div>
+        )}
         <div>
-          <code>computer.look()</code>
-          <span>Window</span>
-          <strong>Elpis console</strong>
-          <p>The frame was delivered through the private watch channel.</p>
+          <code>computer / motor</code>
+          <span>captured</span>
+          <strong>post-action desktop frame</strong>
+          <p>
+            The harness delivered this bounded frame with the event receipt.
+          </p>
         </div>
       </div>
     </div>
+  );
+}
+
+function InternalEventCard({ entry }: { entry: StreamEntry }) {
+  const labels = {
+    harness: 'harness event',
+    background: 'background completion',
+    restart: 'restart receipt',
+    memory: 'memory context',
+  } as const;
+  const kind =
+    entry.eventKind === 'person' || entry.eventKind === 'watch'
+      ? 'harness'
+      : (entry.eventKind ?? 'harness');
+  const body = utterance(entry.content);
+  const preview = body.split('\n', 1)[0] || labels[kind];
+  return (
+    <details class={`internal-event internal-event-${kind}`}>
+      <summary>
+        <span>◆</span>
+        <strong>{labels[kind]}</strong>
+        <code>{entry.displayName || 'harness'}</code>
+        <span class='surface-spacer' />
+        <time>{clock(entry.ts)}</time>
+      </summary>
+      <div>
+        <span>{preview}</span>
+        <pre>{body}</pre>
+      </div>
+    </details>
   );
 }
 
@@ -373,9 +551,10 @@ function Entry({
   if (person)
     return (
       <Item entry={entry} room={room}>
-        {entry.author === 'harness' &&
-        /^\[watch\]/i.test(utterance(entry.content)) ? (
+        {entry.eventKind === 'watch' ? (
           <WatchSurface entry={entry} />
+        ) : entry.eventKind && entry.eventKind !== 'person' ? (
+          <InternalEventCard entry={entry} />
         ) : (
           <PersonMessage entry={entry} />
         )}
@@ -395,6 +574,13 @@ function Entry({
         return (
           <div class='tool-sequence' key={call.id}>
             <CodeCard call={call} result={result} startedAt={entry.ts} />
+            {(call.operations ?? []).map((operation, index) => (
+              <OperationCard
+                key={`${operation.name}-${index}`}
+                operation={operation}
+                result={result}
+              />
+            ))}
             {result ? <BackgroundCard entry={result} /> : null}
             {(result?.sends ?? []).map((send, index) => (
               <SendCard

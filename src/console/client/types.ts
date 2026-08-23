@@ -40,8 +40,27 @@ export interface StreamEntry {
   content: string;
   reasoning_content?: string;
   author?: string;
+  eventKind?:
+    'person' | 'harness' | 'watch' | 'background' | 'restart' | 'memory';
+  displayName?: string;
+  frameUrl?: string;
   ts?: number | null;
-  toolCalls?: Array<{ id: string; code: string; detail?: string }>;
+  toolCalls?: Array<{
+    id: string;
+    code: string;
+    detail?: string;
+    display?: {
+      code: string;
+      heredocs: Array<{ token: string; source: string }>;
+    };
+    operations?: Array<{
+      kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
+      name: string;
+      target: string;
+      before?: string;
+      after?: string;
+    }>;
+  }>;
   tool_call_id?: string;
   sends?: Array<{ channel: string; text: string }>;
   run?: JsonObject;

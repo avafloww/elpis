@@ -22,6 +22,7 @@
 import type { ChatMessage } from '../llm/llm.js';
 import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import { parseEnvelope } from '../lib/envelope.js';
+import { blankLiterals } from '../lib/jslex.js';
 import {
   protectDisplayHeredocs,
   type DisplayHeredoc,
@@ -161,13 +162,20 @@ export interface StreamEntry {
     code: string;
     detail?: string;
     display?: { code: string; heredocs: DisplayHeredoc[] };
+    operations?: SandboxOperation[];
   }[];
   tool_call_id?: string;
   /** Harness-only run attribution for the private operator console. */
   run?: RunMessageMetadata;
   sends?: { channel: string; text: string }[];
-  /** Author + display fields parsed from a user envelope, when present. */
+  /** Author parsed from a user envelope, when present. */
   author?: string;
+  /** Backend-owned provenance for user-role entries; the client does not infer it. */
+  eventKind?:
+    'person' | 'harness' | 'watch' | 'background' | 'restart' | 'memory';
+  displayName?: string;
+  /** Same-origin, image-only console route; never a local filesystem path. */
+  frameUrl?: string;
   /** Epoch ms; live entries are stamped now, historical ones parsed from the
    * envelope `(ISO)` header when available, else null. */
   ts: number | null;
@@ -177,6 +185,14 @@ export interface StreamEntry {
   rewritten?: number;
   /** Yield-nudge dividers carry the consecutive nudge count. */
   count?: number;
+}
+
+export interface SandboxOperation {
+  kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
+  name: string;
+  target: string;
+  before?: string;
+  after?: string;
 }
 
 /** The worker authority deliberately exposed to the console. Artifact-file reads
@@ -1301,6 +1317,224 @@ function publicSecretaryTurn(value: unknown): Record<string, unknown> {
 const SUMMARY_PREFIX = '=== Summary of earlier conversation';
 const NOTICE_MARK = '[harness: context compacted';
 
+const OPERATION_VALUE_MAX = 20_000;
+const OPERATION_TOTAL_VALUE_MAX = 120_000;
+
+function splitCallArguments(
+  source: string,
+  blanked: string,
+  openParen: number,
+): string[] {
+  const values: string[] = [];
+  let start = openParen + 1;
+  let round = 1;
+  let square = 0;
+  let curly = 0;
+  for (let i = start; i < blanked.length; i++) {
+    const char = blanked[i];
+    if (char === '(') round++;
+    else if (char === ')') {
+      if (round === 1 && square === 0 && curly === 0) {
+        const value = source.slice(start, i).trim();
+        if (value || values.length) values.push(value);
+        return values;
+      }
+      round--;
+    } else if (char === '[') square++;
+    else if (char === ']') square--;
+    else if (char === '{') curly++;
+    else if (char === '}') curly--;
+    else if (char === ',' && round === 1 && square === 0 && curly === 0) {
+      values.push(source.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  return values;
+}
+
+function heredocBody(source: string): string {
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  return lines.length >= 2 ? lines.slice(1, -1).join('\n') : source;
+}
+
+function operationArgument(
+  source: string | undefined,
+  heredocs: Map<string, string>,
+): { value: string; literal: boolean } {
+  const raw = source?.trim() ?? '';
+  const quote = raw[0];
+  if ((quote === '"' || quote === "'") && raw.at(-1) === quote) {
+    const inner = raw.slice(1, -1);
+    const heredoc = heredocs.get(inner);
+    if (heredoc !== undefined)
+      return { value: heredoc.slice(0, OPERATION_VALUE_MAX), literal: true };
+    if (quote === '"') {
+      try {
+        return {
+          value: String(JSON.parse(raw)).slice(0, OPERATION_VALUE_MAX),
+          literal: true,
+        };
+      } catch {
+        // Fall back to the source spelling below.
+      }
+    }
+    return {
+      value: inner
+        .replaceAll("\\'", "'")
+        .replaceAll('\\n', '\n')
+        .replaceAll('\\t', '\t')
+        .replaceAll('\\\\', '\\')
+        .slice(0, OPERATION_VALUE_MAX),
+      literal: true,
+    };
+  }
+  if (quote === '`' && raw.at(-1) === '`' && !raw.includes('${'))
+    return {
+      value: raw.slice(1, -1).slice(0, OPERATION_VALUE_MAX),
+      literal: true,
+    };
+  return {
+    value: raw.replace(/\s+/g, ' ').slice(0, 180) || '—',
+    literal: false,
+  };
+}
+
+function operationKind(name: string): SandboxOperation['kind'] | null {
+  if (name === 'elpis.edit') return 'edit';
+  if (name.startsWith('elpis.mind.')) return 'mind';
+  if (name === 'elpis.sh' || name === 'elpis.sudo') return 'shell';
+  if (name.startsWith('elpis.git.')) return 'git';
+  if (
+    name === 'elpis.read' ||
+    name === 'elpis.grep' ||
+    name.startsWith('fs.read') ||
+    name.startsWith('fs.write') ||
+    name.startsWith('fs.promises.read') ||
+    name.startsWith('fs.promises.write')
+  )
+    return 'file';
+  if (
+    name.startsWith('elpis.computer.') ||
+    name.startsWith('elpis.motor.') ||
+    name.startsWith('elpis.browser.')
+  )
+    return 'computer';
+  return null;
+}
+
+export function extractSandboxOperations(
+  code: string,
+  display?: { code: string; heredocs: DisplayHeredoc[] },
+): SandboxOperation[] {
+  const source = display?.code ?? code;
+  const blanked = blankLiterals(source);
+  const heredocs = new Map(
+    (display?.heredocs ?? []).map((value) => [
+      value.token,
+      heredocBody(value.source),
+    ]),
+  );
+  const operations: SandboxOperation[] = [];
+  let valueBudget = OPERATION_TOTAL_VALUE_MAX;
+  const calls = /\b(?:elpis|fs)(?:\.[A-Za-z_$][\w$]*)+\s*\(/g;
+  for (const match of blanked.matchAll(calls)) {
+    const spelling = match[0] ?? '';
+    const name = spelling.slice(0, spelling.lastIndexOf('(')).trim();
+    const kind = operationKind(name);
+    if (!kind || match.index === undefined) continue;
+    const openParen = match.index + spelling.lastIndexOf('(');
+    const args = splitCallArguments(source, blanked, openParen);
+    const target = operationArgument(args[0], heredocs);
+    const operation: SandboxOperation = { kind, name, target: target.value };
+    if (kind === 'edit') {
+      const before = operationArgument(args[1], heredocs);
+      const after = operationArgument(args[2], heredocs);
+      if (before.literal && after.literal && valueBudget >= 2) {
+        const beforeBudget = Math.floor(valueBudget / 2);
+        operation.before = before.value.slice(0, beforeBudget);
+        valueBudget -= operation.before.length;
+        operation.after = after.value.slice(0, valueBudget);
+        valueBudget -= operation.after.length;
+      }
+    }
+    operations.push(operation);
+    if (operations.length >= 40) break;
+  }
+  return operations;
+}
+
+type UserEventPresentation = Pick<
+  StreamEntry,
+  'eventKind' | 'displayName' | 'frameUrl'
+>;
+
+const FRAME_MARKERS = [
+  ['/elpis-data/computer/screenshots/', 'computer'],
+  ['/elpis-data/browser/screenshots/', 'browser'],
+  ['/elpis-data/motor/episodes/', 'motor'],
+] as const;
+
+export function frameUrlFromLocalPath(localPath: string): string | null {
+  const normalized = localPath.replaceAll('\\', '/');
+  for (const [marker, kind] of FRAME_MARKERS) {
+    const index = normalized.lastIndexOf(marker);
+    if (index < 0) continue;
+    const parts = normalized
+      .slice(index + marker.length)
+      .split('/')
+      .filter(Boolean);
+    if (
+      parts.length === 0 ||
+      parts.some((part) => part === '.' || part === '..') ||
+      !/\.(?:png|jpe?g|gif|webp)$/i.test(parts.at(-1) ?? '')
+    )
+      return null;
+    return `/frames/${kind}/${parts.map(encodeURIComponent).join('/')}`;
+  }
+  return null;
+}
+
+function watchFrameUrl(content: string): string | null {
+  for (const match of content.matchAll(
+    /^attachment#\d+: .* \(image\/[^,]+, \d+ bytes\) -> (.*?)(?: \(inlined below\))?$/gm,
+  )) {
+    const url = frameUrlFromLocalPath(match[1] ?? '');
+    if (url) return url;
+  }
+  return null;
+}
+
+export function userEventPresentation(
+  msg: Pick<ChatMessage, 'channel' | 'content'>,
+  author: string | null,
+): UserEventPresentation {
+  const content = msg.content ?? '';
+  const opening = content.match(/^<incoming-message([^>]*)>/)?.[1] ?? '';
+  const envelopeChannel =
+    opening.match(/\s+channel="([^"]*)"/)?.[1] ?? msg.channel ?? 'internal';
+  const noGuild = !/\s+guild="/.test(opening);
+  const reservedHarness = author === 'harness' && noGuild;
+  if (reservedHarness && envelopeChannel === 'watch') {
+    const frameUrl = watchFrameUrl(content);
+    return {
+      eventKind: 'watch',
+      displayName: 'harness',
+      ...(frameUrl ? { frameUrl } : {}),
+    };
+  }
+  if (reservedHarness) return { eventKind: 'harness', displayName: 'harness' };
+  if (author) return { eventKind: 'person', displayName: author };
+  if ((msg.channel ?? 'internal') !== 'internal')
+    return { eventKind: 'person', displayName: 'unknown' };
+  if (/^\[bg\b/i.test(content))
+    return { eventKind: 'background', displayName: 'background job' };
+  if (/^\[restart complete\]/i.test(content))
+    return { eventKind: 'restart', displayName: 'harness' };
+  if (/^\[person-memory\b/i.test(content))
+    return { eventKind: 'memory', displayName: 'memory' };
+  return { eventKind: 'harness', displayName: 'harness' };
+}
+
 /** Serialize one ChatMessage into a StreamEntry with a fixed id + timestamp.
  * Shared by the live mirror and the on-disk archived reader (history.ts). */
 export function serializeMessage(
@@ -1340,11 +1574,13 @@ export function serializeMessage(
           !protectedCode.error && protectedCode.heredocs.length > 0
             ? { code: protectedCode.code, heredocs: protectedCode.heredocs }
             : undefined;
+        const operations = extractSandboxOperations(code, display);
         runCalls.push({
           id: tc.id,
           code,
           ...(detail ? { detail } : {}),
           ...(display ? { display } : {}),
+          ...(operations.length ? { operations } : {}),
         });
       }
     }
@@ -1358,6 +1594,7 @@ export function serializeMessage(
   if (msg.role === 'user') {
     const parsed = parseEnvelope(msg.content);
     if (parsed.author) entry.author = parsed.author;
+    Object.assign(entry, userEventPresentation(msg, parsed.author));
     if (ts === null && parsed.ts !== null) entry.ts = parsed.ts;
   }
   return entry;

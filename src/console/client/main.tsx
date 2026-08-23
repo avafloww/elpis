@@ -1,5 +1,5 @@
 import { render } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { clock, statusLabel, statusTone } from './components/common.js';
 import { ContextView } from './components/context.js';
 import { MindView } from './components/mind.js';
@@ -8,6 +8,7 @@ import { ThreadView } from './components/thread.js';
 import { WorkersView } from './components/workers.js';
 import type { ConsoleActions } from './use-console.js';
 import type { ConsoleState, JsonObject, MindItem, ViewName } from './types.js';
+import { clampLogRailHeight } from './scroll.js';
 import { number, text } from './types.js';
 import { useConsole } from './use-console.js';
 import './styles.css';
@@ -363,6 +364,18 @@ function ThreadComposer({
   );
 }
 
+const LOG_RAIL_KEY = 'ep-logdock-h';
+
+function savedLogRailHeight(): number {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined')
+    return 208;
+  const stored = Number.parseInt(localStorage.getItem(LOG_RAIL_KEY) ?? '', 10);
+  return clampLogRailHeight(
+    Number.isFinite(stored) ? stored : 208,
+    window.innerHeight,
+  );
+}
+
 function LogRail({
   state,
   open,
@@ -375,23 +388,117 @@ function LogRail({
   full?: boolean;
 }) {
   const latest = state.logs.at(-1);
+  const [height, setHeight] = useState(savedLogRailHeight);
+  const heightRef = useRef(height);
+  const drag = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
+  const applyHeight = (value: number): number => {
+    const next = clampLogRailHeight(value, window.innerHeight);
+    heightRef.current = next;
+    setHeight(next);
+    return next;
+  };
+  const persistHeight = (value: number): void => {
+    try {
+      localStorage.setItem(LOG_RAIL_KEY, String(value));
+    } catch {
+      // Storage can be blocked without disabling the rail.
+    }
+  };
+  const stopResize = (target: HTMLDivElement, pointerId: number): void => {
+    if (drag.current?.pointerId !== pointerId) return;
+    if (target.hasPointerCapture(pointerId))
+      target.releasePointerCapture(pointerId);
+    drag.current = null;
+    document.body.classList.remove('resizing-logs');
+    persistHeight(heightRef.current);
+  };
+  useEffect(() => {
+    if (full) return;
+    const reClamp = (): void => {
+      const next = applyHeight(heightRef.current);
+      persistHeight(next);
+    };
+    window.addEventListener('resize', reClamp);
+    return () => {
+      window.removeEventListener('resize', reClamp);
+      document.body.classList.remove('resizing-logs');
+    };
+  }, [full]);
   return (
     <section
       class={`log-rail ${open ? 'log-rail-open' : ''} ${full ? 'log-view-full' : ''}`}
+      style={!full && open ? { height: `${height}px` } : undefined}
     >
       {!full ? (
-        <header>
-          <span>Logs</span>
-          <time>{latest ? clock(latest.ts) : ''}</time>
-          <code>
-            {latest
-              ? text(latest.msg, text(latest.message))
-              : 'no recent log lines'}
-          </code>
-          <button onClick={() => setOpen(!open)}>
-            {open ? 'hide' : 'show'}
-          </button>
-        </header>
+        <>
+          <div
+            class='log-resizer'
+            role='separator'
+            aria-label='Resize logs'
+            aria-orientation='horizontal'
+            aria-valuemin={96}
+            aria-valuemax={clampLogRailHeight(
+              Number.MAX_SAFE_INTEGER,
+              window.innerHeight,
+            )}
+            aria-valuenow={open ? height : 96}
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              if (!open) {
+                applyHeight(96);
+                setOpen(true);
+              }
+              const startHeight = open ? heightRef.current : 96;
+              drag.current = {
+                pointerId: event.pointerId,
+                startY: event.clientY,
+                startHeight,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+              document.body.classList.add('resizing-logs');
+            }}
+            onPointerMove={(event) => {
+              const current = drag.current;
+              if (!current || current.pointerId !== event.pointerId) return;
+              applyHeight(current.startHeight + current.startY - event.clientY);
+            }}
+            onPointerUp={(event) =>
+              stopResize(event.currentTarget, event.pointerId)
+            }
+            onPointerCancel={(event) =>
+              stopResize(event.currentTarget, event.pointerId)
+            }
+            onDblClick={() => persistHeight(applyHeight(208))}
+            onKeyDown={(event) => {
+              let next: number | null = null;
+              if (event.key === 'ArrowUp') next = heightRef.current + 16;
+              if (event.key === 'ArrowDown') next = heightRef.current - 16;
+              if (event.key === 'Home') next = 96;
+              if (event.key === 'End') next = Number.MAX_SAFE_INTEGER;
+              if (next === null) return;
+              event.preventDefault();
+              if (!open) setOpen(true);
+              persistHeight(applyHeight(next));
+            }}
+          />
+          <header>
+            <span>Logs</span>
+            <time>{latest ? clock(latest.ts) : ''}</time>
+            <code>
+              {latest
+                ? text(latest.msg, text(latest.message))
+                : 'no recent log lines'}
+            </code>
+            <button onClick={() => setOpen(!open)}>
+              {open ? 'hide' : 'show'}
+            </button>
+          </header>
+        </>
       ) : null}
       {open || full ? (
         <div class='log-lines'>

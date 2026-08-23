@@ -18,6 +18,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from '../config.js';
 import type { ConsoleHub, HubClient } from './hub.js';
 import type { McpHttpEndpoint } from '../mcp/server.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 import { ATTACHMENT_DIR } from '../types.js';
 
 export interface ConsoleServer {
@@ -69,6 +70,50 @@ export function resolveAttachmentPath(reqPath: string): string | null {
   );
   if (!resolved.startsWith(ATTACHMENT_DIR + path.sep)) return null;
   return resolved;
+}
+
+type FrameRequest = { file: string; root: string };
+const FRAME_MAX_BYTES = 25 * 1024 * 1024;
+
+function resolveFrameRequest(
+  reqPath: string,
+  dataDirectory: string,
+): FrameRequest | null {
+  const match = reqPath.match(/^\/frames\/(computer|browser|motor)\/(.+)$/);
+  if (!match) return null;
+  const layout = resolveDataLayout(dataDirectory);
+  const roots = {
+    computer: path.join(layout.computer, 'screenshots'),
+    browser: path.join(layout.browser, 'screenshots'),
+    motor: path.join(layout.motor, 'episodes'),
+  } as const;
+  const root = roots[match[1] as keyof typeof roots];
+  const file = path.normalize(path.join(root, match[2] ?? ''));
+  if (!file.startsWith(root + path.sep)) return null;
+  if (!/\.(?:png|jpe?g|gif|webp)$/i.test(file)) return null;
+  return { file, root };
+}
+
+export function resolveFramePath(
+  reqPath: string,
+  dataDirectory: string,
+): string | null {
+  return resolveFrameRequest(reqPath, dataDirectory)?.file ?? null;
+}
+
+async function readFrame(request: FrameRequest): Promise<Buffer | null> {
+  try {
+    const [realRoot, realFile] = await Promise.all([
+      fs.promises.realpath(request.root),
+      fs.promises.realpath(request.file),
+    ]);
+    if (!realFile.startsWith(realRoot + path.sep)) return null;
+    const stat = await fs.promises.stat(realFile);
+    if (!stat.isFile() || stat.size > FRAME_MAX_BYTES) return null;
+    return await fs.promises.readFile(realFile);
+  } catch {
+    return null;
+  }
 }
 
 /** Wrap a ws.WebSocket as the minimal HubClient the hub talks to. */
@@ -132,6 +177,29 @@ export function createConsoleServer(
         return;
       }
       void mcp.handle(req, res);
+      return;
+    }
+    const frame = resolveFrameRequest(reqPath, config.paths.dataDirectory);
+    if (reqPath.startsWith('/frames/')) {
+      if (!frame) {
+        res.writeHead(403);
+        res.end('forbidden');
+        return;
+      }
+      void readFrame(frame).then((data) => {
+        if (!data) {
+          res.writeHead(404);
+          res.end('not found');
+          return;
+        }
+        const ext = path.extname(frame.file).toLowerCase();
+        res.writeHead(200, {
+          'content-type':
+            ATTACHMENT_CONTENT_TYPES[ext] ?? 'application/octet-stream',
+          'cache-control': 'private, max-age=3600',
+        });
+        res.end(data);
+      });
       return;
     }
     // Downloaded inbound Discord attachments (read-only) — lets the SPA render

@@ -82,3 +82,69 @@ export function executionLabel(value: JsonObject | undefined): string {
   const execution = object(value?.execution);
   return text(execution.alias, text(execution.kind));
 }
+
+const MAX_FORMAT_CHARS = 250_000;
+
+type RunDisplay = {
+  code: string;
+  heredocs: Array<{ token: string; source: string }>;
+};
+
+type RunCodeInput = {
+  code: string;
+  display?: RunDisplay;
+};
+
+export function restoreRunHeredocs(
+  input: string,
+  heredocs: RunDisplay['heredocs'],
+): string {
+  let code = input;
+  for (const heredoc of heredocs) {
+    const doubleQuoted = JSON.stringify(heredoc.token);
+    const singleQuoted = `'${heredoc.token}'`;
+    if (code.includes(doubleQuoted))
+      code = code.replace(doubleQuoted, () => heredoc.source);
+    else if (code.includes(singleQuoted))
+      code = code.replace(singleQuoted, () => heredoc.source);
+    else return input;
+  }
+  return code;
+}
+
+export async function formatRunSource(call: RunCodeInput): Promise<string> {
+  const raw = call.code;
+  if (!raw || raw.length > MAX_FORMAT_CHARS) return raw;
+  const input = call.display?.code ?? raw;
+  const heredocs = call.display?.heredocs ?? [];
+  const [standalone, babelModule, estreeModule, typescriptModule] =
+    await Promise.all([
+      import('prettier/standalone'),
+      import('prettier/plugins/babel'),
+      import('prettier/plugins/estree'),
+      import('prettier/plugins/typescript'),
+    ]);
+  for (const parser of ['babel', 'typescript'] as const) {
+    try {
+      const syntax =
+        parser === 'babel' ? babelModule.default : typescriptModule.default;
+      let formatted = (
+        await standalone.format(input, {
+          parser,
+          plugins: [syntax, estreeModule.default],
+          printWidth: 100,
+          tabWidth: 2,
+          singleQuote: true,
+          semi: true,
+          trailingComma: 'all',
+        })
+      ).trimEnd();
+      if (!raw.trimEnd().endsWith(';') && formatted.endsWith(';'))
+        formatted = formatted.slice(0, -1);
+      return restoreRunHeredocs(formatted, heredocs);
+    } catch {
+      continue;
+    }
+  }
+  return raw;
+}

@@ -32,21 +32,34 @@ function workerTitle(session: JsonObject, state: ConsoleState): string {
   );
 }
 
-function workerEntries(messages: JsonObject[]): StreamEntry[] {
-  return messages.map((message, index) => ({
-    id: Number(message.id ?? index),
-    kind: text(message.kind, 'message'),
-    role: text(
-      message.role,
-      text(message.actor, 'assistant').startsWith('worker:')
-        ? 'assistant'
-        : 'user',
-    ),
-    channel: 'worker',
-    content: text(message.body, text(message.content, JSON.stringify(message))),
-    author: text(message.actor),
-    ts: Number(message.createdAt ?? message.ts ?? 0),
-  }));
+export function workerEntries(
+  messages: JsonObject[],
+  worker: string,
+): StreamEntry[] {
+  return messages.map((message, index) => {
+    const sender = text(message.sender, text(message.actor));
+    const direction = text(message.direction);
+    const workerAuthored =
+      direction === 'worker_to_dispatcher' ||
+      sender === 'worker' ||
+      sender.startsWith('worker:');
+    return {
+      id: Number(message.id ?? index),
+      kind: text(message.kind, 'message'),
+      role: text(message.role, workerAuthored ? 'assistant' : 'user'),
+      channel: 'worker',
+      content: text(
+        message.body,
+        text(message.content, JSON.stringify(message)),
+      ),
+      author: workerAuthored
+        ? sender === 'worker'
+          ? worker
+          : sender || worker
+        : sender,
+      ts: Number(message.createdAt ?? message.ts ?? 0),
+    };
+  });
 }
 
 function WorkerDetail({
@@ -125,7 +138,7 @@ function WorkerDetail({
         <section class='worker-section'>
           <div class='section-label'>Thread</div>
           <ThreadStream
-            entries={workerEntries(messages)}
+            entries={workerEntries(messages, ref || 'worker')}
             room='all'
             agent={ref || 'worker'}
           />

@@ -4,6 +4,14 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { turnMessages } from '../src/console/client/components/secretary.js';
+import { workerEntries } from '../src/console/client/components/workers.js';
+import { clampLogRailHeight } from '../src/console/client/scroll.js';
+import {
+  appendSecretaryTurn,
+  secretaryIdFromControl,
+  upsertControlSession,
+  workerDetailFromControl,
+} from '../src/console/client/use-console.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -45,6 +53,132 @@ test('build uses exact Preact and esbuild seam while retired vanilla files stay 
       false,
       file,
     );
+});
+
+test('desktop log rail restores bounded persisted resize and fixed timestamps', () => {
+  assert.equal(clampLogRailHeight(40, 800), 96);
+  assert.equal(clampLogRailHeight(208, 800), 208);
+  assert.equal(clampLogRailHeight(9999, 800), 560);
+  const main = read('src/console/client/main.tsx');
+  const styles = read('src/console/client/styles.css');
+  assert.match(main, /LOG_RAIL_KEY = 'ep-logdock-h'/);
+  assert.match(main, /role='separator'/);
+  assert.match(main, /setPointerCapture/);
+  assert.match(main, /ArrowUp/);
+  assert.match(styles, /\.log-line time[\s\S]*white-space: nowrap/);
+});
+
+test('control projections preserve worker identity and select a started Secretary session', () => {
+  assert.deepEqual(
+    workerDetailFromControl({
+      session: {
+        id: 'wrk-1',
+        slug: 'quiet-fox',
+        worker: 'worker:quiet-fox',
+        status: 'failed',
+        mindId: 'elm-example',
+      },
+      messages: [
+        {
+          id: 7,
+          direction: 'worker_to_dispatcher',
+          sender: 'worker',
+          body: 'done',
+          createdAt: 8,
+        },
+      ],
+      artifacts: [{ key: 'workspace.patch.gz' }],
+    }),
+    {
+      id: 'wrk-1',
+      slug: 'quiet-fox',
+      worker: 'worker:quiet-fox',
+      status: 'failed',
+      mindId: 'elm-example',
+      messages: [
+        {
+          id: 7,
+          direction: 'worker_to_dispatcher',
+          sender: 'worker',
+          body: 'done',
+          createdAt: 8,
+        },
+      ],
+      artifacts: [{ key: 'workspace.patch.gz' }],
+    },
+  );
+  assert.deepEqual(
+    workerEntries(
+      [
+        {
+          id: 7,
+          direction: 'worker_to_dispatcher',
+          sender: 'worker',
+          body: 'done',
+          createdAt: 8,
+        },
+      ],
+      'worker:quiet-fox',
+    ),
+    [
+      {
+        id: 7,
+        kind: 'message',
+        role: 'assistant',
+        channel: 'worker',
+        content: 'done',
+        author: 'worker:quiet-fox',
+        ts: 8,
+      },
+    ],
+  );
+  assert.equal(
+    secretaryIdFromControl({ id: 'sec-test-session' }),
+    'sec-test-session',
+  );
+  assert.equal(secretaryIdFromControl({ status: 'failed' }), null);
+});
+
+test('successful control receipts upsert sessions and append Secretary turns immediately', () => {
+  const snapshot = {
+    available: true,
+    sessions: [
+      { id: 'sec-old', status: 'failed', turns: [{ id: 'turn-old' }] },
+    ],
+  };
+  assert.deepEqual(
+    upsertControlSession(snapshot, { id: 'sec-new', status: 'ready' }),
+    {
+      available: true,
+      sessions: [
+        { id: 'sec-new', status: 'ready' },
+        { id: 'sec-old', status: 'failed', turns: [{ id: 'turn-old' }] },
+      ],
+    },
+  );
+  assert.deepEqual(
+    upsertControlSession(snapshot, { id: 'sec-old', status: 'closed' }),
+    {
+      available: true,
+      sessions: [
+        { id: 'sec-old', status: 'closed', turns: [{ id: 'turn-old' }] },
+      ],
+    },
+  );
+  assert.deepEqual(
+    appendSecretaryTurn(snapshot, {
+      id: 'turn-new',
+      sessionId: 'sec-old',
+      status: 'queued',
+    }).sessions[0].turns,
+    [
+      { id: 'turn-old' },
+      { id: 'turn-new', sessionId: 'sec-old', status: 'queued' },
+    ],
+  );
+  const source = read('src/console/client/use-console.ts');
+  for (const op of ['start', 'send', 'dismiss', 'enqueue', 'close'])
+    assert.match(source, new RegExp(`frame\\.op === '${op}'`));
 });
 
 test('secretary turn renderer preserves ordinary request and response wire records', () => {

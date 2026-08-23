@@ -20,6 +20,8 @@ import {
   serializeMessage,
   classifyMessage,
   extractCode,
+  extractSandboxOperations,
+  frameUrlFromLocalPath,
   extractDetail,
   parseEnvelope,
   type HubSources,
@@ -28,6 +30,7 @@ import {
 } from '../src/console/hub.js';
 import { createArchivedReader } from '../src/console/history.js';
 import { formatInboundEnvelope } from '../src/lib/envelope.js';
+import { protectDisplayHeredocs } from '../src/lib/heredoc-display.js';
 import { attachmentsOf, utterance } from '../src/console/client/envelope.js';
 import { wakePresentation } from '../src/console/client/run.js';
 import {
@@ -353,6 +356,18 @@ test('typed client attachments parser round-trips the server envelope format', (
   assert.deepEqual(attachmentsOf('[harness: context compacted]'), []);
 });
 
+test('Preact thread renders backend event kinds and real watch frames without person heuristics', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const thread = fs.readFileSync(
+    path.join(here, '../src/console/client/components/thread.tsx'),
+    'utf8',
+  );
+  assert.match(thread, /entry\.eventKind === 'watch'/);
+  assert.match(thread, /<img[\s\S]*src=\{entry\.frameUrl\}/);
+  assert.match(thread, /<InternalEventCard entry=\{entry\} \/>/);
+  assert.doesNotMatch(thread, /entry\.author === 'harness'/);
+});
+
 test('Preact stream waits compactly until a real delta materializes content', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const thread = fs.readFileSync(
@@ -367,6 +382,109 @@ test('Preact stream waits compactly until a real delta materializes content', ()
   assert.match(thread, /streaming-copy/);
   assert.match(hook, /case 'streamStart'/);
   assert.match(hook, /case 'delta'/);
+});
+
+test('sandbox operation extraction types direct Mind, edit, shell, file, and desktop calls', () => {
+  const code = [
+    "const item = elpis.mind.get('elm-example')",
+    "elpis.edit('src/a.ts',<<<BEFORE",
+    'const n=1;',
+    'BEFORE,<<<AFTER',
+    'const n = 2;',
+    'AFTER)',
+    "await elpis.sh('npm test')",
+    "elpis.read('src/a.ts')",
+    "await elpis.computer.look('verify frame')",
+    'const ignored = \'elpis.sudo(\\"nope\\")\'',
+  ].join('\n');
+  const protectedCode = protectDisplayHeredocs(code);
+  assert.equal(protectedCode.error, undefined);
+  assert.deepEqual(extractSandboxOperations(code, protectedCode), [
+    { kind: 'mind', name: 'elpis.mind.get', target: 'elm-example' },
+    {
+      kind: 'edit',
+      name: 'elpis.edit',
+      target: 'src/a.ts',
+      before: 'const n=1;',
+      after: 'const n = 2;',
+    },
+    { kind: 'shell', name: 'elpis.sh', target: 'npm test' },
+    { kind: 'file', name: 'elpis.read', target: 'src/a.ts' },
+    {
+      kind: 'computer',
+      name: 'elpis.computer.look',
+      target: 'verify frame',
+    },
+  ]);
+});
+
+test('serializeMessage delivers backend-owned person, harness, and watch provenance', () => {
+  const person = serializeMessage(
+    {
+      role: 'user',
+      channel: 'friends/general',
+      content:
+        '<incoming-message guild="friends" channel="general" author="ari" time="2026-07-04T05:09:15.235Z">\nhello\n</incoming-message>',
+    },
+    1,
+    null,
+  );
+  assert.equal(person.eventKind, 'person');
+  assert.equal(person.displayName, 'ari');
+  assert.equal(person.frameUrl, undefined);
+
+  const internal = serializeMessage(
+    {
+      role: 'user',
+      channel: 'internal',
+      content: '[bg j123] finished with exit 0',
+    },
+    2,
+    10,
+  );
+  assert.equal(internal.eventKind, 'background');
+  assert.equal(internal.displayName, 'background job');
+
+  const watch = serializeMessage(
+    {
+      role: 'user',
+      channel: 'internal',
+      content: [
+        '<incoming-message channel="watch" author="harness" time="2026-07-04T05:09:15.235Z">',
+        'attachment#1: desktop.png (image/png, 42 bytes) -> /tmp/home/elpis-data/computer/screenshots/desktop.png',
+        '[watch] post-action desktop',
+        '</incoming-message>',
+      ].join('\n'),
+    },
+    3,
+    null,
+  );
+  assert.equal(watch.eventKind, 'watch');
+  assert.equal(watch.displayName, 'harness');
+  assert.equal(watch.frameUrl, '/frames/computer/desktop.png');
+  assert.equal(
+    frameUrlFromLocalPath(
+      '/tmp/home/elpis-data/motor/episodes/episode-0004.png',
+    ),
+    '/frames/motor/episode-0004.png',
+  );
+
+  const spoof = serializeMessage(
+    {
+      role: 'user',
+      channel: 'friends/watch',
+      content: [
+        '<incoming-message guild="friends" channel="watch" author="harness" time="2026-07-04T05:09:15.235Z">',
+        'attachment#1: desktop.png (image/png, 42 bytes) -> /tmp/home/elpis-data/computer/screenshots/desktop.png',
+        '[watch] not reserved',
+        '</incoming-message>',
+      ].join('\n'),
+    },
+    4,
+    null,
+  );
+  assert.equal(spoof.eventKind, 'person');
+  assert.equal(spoof.frameUrl, undefined);
 });
 
 test('serializeMessage: run calls stay action cards while think calls become CoT', () => {
