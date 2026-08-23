@@ -43,13 +43,21 @@ export interface GuildIndex {
   bySlug: Map<string, GuildConfig>;
 }
 
-function policyFor(guild: GuildConfig, channelId: string, tier: ChannelMode, source: 'channel' | 'default'): ChannelPolicy {
+function policyFor(
+  guild: GuildConfig,
+  channelId: string,
+  tier: ChannelMode,
+  source: 'channel' | 'default',
+): ChannelPolicy {
   const guildAllows = guild.allowSend !== false;
-  const localAllows = source === 'channel'
-    ? guild.channelAllowSend?.[channelId] !== false
-    : guild.defaultAllowSend === true;
+  const localAllows =
+    source === 'channel'
+      ? guild.channelAllowSend?.[channelId] !== false
+      : guild.defaultAllowSend === true;
   return {
-    guild, tier, source,
+    guild,
+    tier,
+    source,
     allowSend: guildAllows && localAllows,
     sendDeniedBy: !guildAllows ? 'guild' : localAllows ? null : source,
   };
@@ -62,17 +70,25 @@ export function buildGuildIndex(guilds: GuildConfig[]): GuildIndex {
   for (const g of guilds) {
     byGuildId.set(g.id, g);
     bySlug.set(g.slug, g);
-    for (const [cid, tier] of Object.entries(g.channels)) byChannel.set(cid, policyFor(g, cid, tier, 'channel'));
+    for (const [cid, tier] of Object.entries(g.channels))
+      byChannel.set(cid, policyFor(g, cid, tier, 'channel'));
   }
   return { byChannel, byGuildId, bySlug };
 }
 
-export function resolveChannelPolicy(guildId: string | null | undefined, channelId: string, index: GuildIndex): ChannelPolicy | null {
+export function resolveChannelPolicy(
+  guildId: string | null | undefined,
+  channelId: string,
+  index: GuildIndex,
+): ChannelPolicy | null {
   const explicit = index.byChannel.get(channelId);
-  if (explicit) return guildId && explicit.guild.id !== guildId ? null : explicit;
+  if (explicit)
+    return guildId && explicit.guild.id !== guildId ? null : explicit;
   if (!guildId) return null;
   const guild = index.byGuildId.get(guildId);
-  return guild ? policyFor(guild, channelId, guild.defaultTier ?? 'drop', 'default') : null;
+  return guild
+    ? policyFor(guild, channelId, guild.defaultTier ?? 'drop', 'default')
+    : null;
 }
 
 export interface WakeInput {
@@ -84,19 +100,24 @@ export interface WakeInput {
 }
 export type MuteLookup = (channelId: string) => MuteType | null;
 
-export function classifyInbound(input: WakeInput, index: GuildIndex, muteType: MuteLookup): WakeClass {
+export function classifyInbound(
+  input: WakeInput,
+  index: GuildIndex,
+  muteType: MuteLookup,
+): WakeClass {
   const policy = resolveChannelPolicy(input.guildId, input.channelId, index);
   if (!policy || policy.tier === 'drop') return 'drop';
   const mute = muteType(input.channelId);
   if (mute === 'deafen') return 'drop';
-  if (input.authorIsBot) return 'ambient';      // agents never wake immediately (§6)
-  const addressed = policy.tier === 'direct' || input.mentionsMe || input.replyToMe;
- // mute = silent-but-listening: a DIRECT address still wakes (the agent can choose
- // not to reply, but must be able to hear a ping); ambient chatter does not.
- // Only deafen drops ingest. ( — the old blanket
- // `if (mute) return 'ambient'` made mute behave as deafen-lite.)
+  if (input.authorIsBot) return 'ambient'; // agents never wake immediately (§6)
+  const addressed =
+    policy.tier === 'direct' || input.mentionsMe || input.replyToMe;
+  // mute = silent-but-listening: a DIRECT address still wakes (the agent can choose
+  // not to reply, but must be able to hear a ping); ambient chatter does not.
+  // Only deafen drops ingest. ( — the old blanket
+  // `if (mute) return 'ambient'` made mute behave as deafen-lite.)
   if (addressed) return 'wake';
-  return 'ambient';                             // social/quiet, or muted-non-addressed
+  return 'ambient'; // social/quiet, or muted-non-addressed
 }
 
 // Keyed by timezone (the host timezone's slot key is '' since guild.timezone
@@ -109,7 +130,9 @@ function hourMinuteFormatter(timezone: string | null): Intl.DateTimeFormat {
   let fmt = hourMinuteFormatters.get(key);
   if (!fmt) {
     fmt = new Intl.DateTimeFormat('en-GB', {
-      hour: '2-digit', minute: '2-digit', hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
       ...(timezone ? { timeZone: timezone } : {}),
     });
     hourMinuteFormatters.set(key, fmt);
@@ -127,9 +150,20 @@ export function inQuietHours(guild: GuildConfig, now: Date): boolean {
 }
 
 /** Would an ambient message in this channel count toward firing the tick, right now? */
-export function countsForTick(channelId: string, index: GuildIndex, muteType: MuteLookup, now: Date, guildId?: string | null): boolean {
-  const policy = resolveChannelPolicy(guildId ?? index.byChannel.get(channelId)?.guild.id, channelId, index);
-  if (!policy || policy.tier === 'drop' || policy.tier === 'quiet') return false;
+export function countsForTick(
+  channelId: string,
+  index: GuildIndex,
+  muteType: MuteLookup,
+  now: Date,
+  guildId?: string | null,
+): boolean {
+  const policy = resolveChannelPolicy(
+    guildId ?? index.byChannel.get(channelId)?.guild.id,
+    channelId,
+    index,
+  );
+  if (!policy || policy.tier === 'drop' || policy.tier === 'quiet')
+    return false;
   if (muteType(channelId) !== null) return false;
   if (inQuietHours(policy.guild, now)) return false;
   return true;

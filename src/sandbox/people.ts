@@ -19,14 +19,25 @@ export function slugifyName(name: string): string {
 /** True when some existing people/*.md file already claims `discord:<authorId>`
  * in its frontmatter ids. Used by memory.person to avoid stamping the inbound
  * author's id onto a second file. */
-export function authorHasPeopleFile(peopleDir: string, authorId: string): boolean {
+export function authorHasPeopleFile(
+  peopleDir: string,
+  authorId: string,
+): boolean {
   const needle = `discord:${authorId}`;
   let entries: string[];
-  try { entries = fs.readdirSync(peopleDir); } catch { return false; }
+  try {
+    entries = fs.readdirSync(peopleDir);
+  } catch {
+    return false;
+  }
   for (const name of entries) {
     if (!name.endsWith('.md')) continue;
     let raw: string;
-    try { raw = fs.readFileSync(path.join(peopleDir, name), 'utf8'); } catch { continue; }
+    try {
+      raw = fs.readFileSync(path.join(peopleDir, name), 'utf8');
+    } catch {
+      continue;
+    }
     const ids = parseFrontmatter(raw)?.frontmatter.ids;
     if (Array.isArray(ids) && ids.includes(needle)) return true;
   }

@@ -1,14 +1,14 @@
 // index.ts — entry: load config, ensure data dir, fetch context window,
 // prime context from the most recent transcript, start Discord + agent.
 
-import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   configForLlmRole,
   loadConfigFile,
   ensureDataDirectory,
   type Config,
-} from "./config.js";
+} from './config.js';
 import {
   fetchContextWindow,
   createLLM,
@@ -18,84 +18,84 @@ import {
   type LlmRoleClients,
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
-} from "./llm/llm.js";
-import { createMemory, ensureFile, type MemoryHooks } from "./store/memory.js";
+} from './llm/llm.js';
+import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
 import {
   MemoryConsolidator,
   effectiveMemoryLimits,
-} from "./store/memory-consolidator.js";
-import { createSandbox } from "./sandbox/index.js";
+} from './store/memory-consolidator.js';
+import { createSandbox } from './sandbox/index.js';
 import {
   createSandboxManager,
   type SandboxManager,
-} from "./sandbox/manager.js";
-import { createSandboxRegistry } from "./sandbox/registry.js";
-import { createContextTracker } from "./llm/context-tracker.js";
-import { createDensityModel } from "./llm/density.js";
-import { createCompactor } from "./llm/compactor.js";
+} from './sandbox/manager.js';
+import { createSandboxRegistry } from './sandbox/registry.js';
+import { createContextTracker } from './llm/context-tracker.js';
+import { createDensityModel } from './llm/density.js';
+import { createCompactor } from './llm/compactor.js';
 import {
   createTranscriptStore,
   loadMostRecentMain,
   MAIN_TRANSCRIPT_ID,
-} from "./store/sessions.js";
-import { replayIdentityForConfig } from "./llm/provenance.js";
+} from './store/sessions.js';
+import { replayIdentityForConfig } from './llm/provenance.js';
 import {
   Agent,
   computeEffectiveTrigger,
   type InboundMessage,
-} from "./agent.js";
-import { createDiscord } from "./discord/discord.js";
-import { createEmoteRegistry } from "./discord/emotes.js";
+} from './agent.js';
+import { createDiscord } from './discord/discord.js';
+import { createEmoteRegistry } from './discord/emotes.js';
 import {
   CONSOLE_CHANNEL_ID,
   INTERNAL_CHANNEL_ID,
   type SandboxDeps,
   type SandboxLateProcessError,
-} from "./types.js";
-import { createBgRegistry } from "./sandbox/bg.js";
-import { createSshRegistry } from "./sandbox/ssh.js";
+} from './types.js';
+import { createBgRegistry } from './sandbox/bg.js';
+import { createSshRegistry } from './sandbox/ssh.js';
 import {
   createRunLogger,
   routeRunProcessError,
   runScope,
-} from "./sandbox/globals.js";
-import { consumeResumeMarker } from "./store/resume.js";
+} from './sandbox/globals.js';
+import { consumeResumeMarker } from './store/resume.js';
 import {
   readUnseenChangelogs,
   formatChangelogNotice,
   markChangelogsSeen,
-} from "./store/changelog.js";
-import { createChannelDirectory } from "./store/channels.js";
-import { createMuteStore } from "./store/mutes.js";
-import { openDatabase } from "./store/db.js";
-import { Scheduler } from "./store/scheduler.js";
-import { MindService } from "./store/mind.js";
-import { createFeedbackStore } from "./store/feedback.js";
-import { loadExtensions } from "./extensions.js";
+} from './store/changelog.js';
+import { createChannelDirectory } from './store/channels.js';
+import { createMuteStore } from './store/mutes.js';
+import { openDatabase } from './store/db.js';
+import { Scheduler } from './store/scheduler.js';
+import { MindService } from './store/mind.js';
+import { createFeedbackStore } from './store/feedback.js';
+import { loadExtensions } from './extensions.js';
 import {
   detectRuntimeProfile,
   resolveBuiltinModules,
   type BuiltinModuleRegistry,
   type RuntimeProfile,
-} from "./builtin-modules.js";
-import { readAgentName } from "./store/soul.js";
-import { setLogSink } from "./lib/log.js";
-import { ConsoleHub, type MetaInfo } from "./console/hub.js";
-import { createConsoleServer, type ConsoleServer } from "./console/server.js";
-import { createArchivedReader } from "./console/history.js";
-import { createMcpEndpoint } from "./mcp/server.js";
+} from './builtin-modules.js';
+import { readAgentName } from './store/soul.js';
+import { setLogSink } from './lib/log.js';
+import { ConsoleHub, type MetaInfo } from './console/hub.js';
+import { createConsoleServer, type ConsoleServer } from './console/server.js';
+import { createArchivedReader } from './console/history.js';
+import { createMcpEndpoint } from './mcp/server.js';
 import {
   startScopedWorkerServer,
   type ScopedWorkerServerRuntime,
-} from "./worker/runtime.js";
-import { startWorkerSupervisor } from "./worker/supervisor.js";
+} from './worker/runtime.js';
+import { startWorkerSupervisor } from './worker/supervisor.js';
 import {
   startSecretarySupervisor,
   type SecretarySupervisorRuntime,
-} from "./secretary/supervisor.js";
-import { createUsageTracker } from "./llm/usage-tracker.js";
-import { spawnText } from "./lib/proc.js";
-import { migrateDataLayout } from "./store/data-layout.js";
+} from './secretary/supervisor.js';
+import { createUsageTracker } from './llm/usage-tracker.js';
+import { spawnText } from './lib/proc.js';
+import { migrateDataLayout } from './store/data-layout.js';
 
 export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
@@ -131,7 +131,7 @@ export function isUnannouncedRestart(
 
 /** One-line summary for an unhandled process-level error notice. */
 export function formatProcessErrorNotice(
-  kind: "unhandledRejection" | "uncaughtException",
+  kind: 'unhandledRejection' | 'uncaughtException',
   err: unknown,
 ): string {
   const msg = err instanceof Error ? err.stack || err.message : String(err);
@@ -146,21 +146,21 @@ export function formatSandboxLateProcessErrorNotice(
       ? event.error.stack || event.error.message
       : String(event.error);
   const owner = event.alias
-    ? ` alias=${event.alias} generation=${event.generation ?? "unknown"}`
-    : "";
-  const run = event.runId ? ` run=${event.runId}` : "";
+    ? ` alias=${event.alias} generation=${event.generation ?? 'unknown'}`
+    : '';
+  const run = event.runId ? ` run=${event.runId}` : '';
   return `[sandbox late ${event.kind}${owner}${run}] ${msg.slice(0, 1500)}`;
 }
 
 export function completeStandaloneForRole(
   llms: LlmRoleClients,
-  role: "classifier" | "motor" | "secretary",
+  role: 'classifier' | 'motor' | 'secretary',
   messages: ChatMessage[],
   opts?: StandaloneCompleteOptions,
 ): Promise<StandaloneCompleteResult> {
   const client = llms[role];
-  if (role === "secretary" && !client)
-    throw new Error("config: llm.roles.secretary is not configured");
+  if (role === 'secretary' && !client)
+    throw new Error('config: llm.roles.secretary is not configured');
   if (!client?.completeStandalone)
     throw new Error(
       `configured ${role} role has no isolated standalone completion path`,
@@ -174,9 +174,9 @@ export async function createElpisRuntime(
   const config = (adapters.loadConfigFile ?? loadConfigFile)();
   const profile = detectRuntimeProfile();
   const modules = resolveBuiltinModules(config, profile);
-  if (modules.isActive("motor") && !config.llm.registry.targets.motor) {
+  if (modules.isActive('motor') && !config.llm.registry.targets.motor) {
     throw new Error(
-      "config: llm.roles.motor is required while the motor module is active",
+      'config: llm.roles.motor is required while the motor module is active',
     );
   }
   ensureDataDirectory(config.paths.dataDirectory);
@@ -185,7 +185,7 @@ export async function createElpisRuntime(
   });
   const dataLayout = migration.layout;
   if (migration.gitignoreRepaired)
-    config.logger.warn("repaired elpis-data/.gitignore");
+    config.logger.warn('repaired elpis-data/.gitignore');
 
   // The agent's structured-data store (channels + feedback signal). Opened once
   // and shared; a failure here is a boot problem (channels depend on it), so it
@@ -198,22 +198,22 @@ export async function createElpisRuntime(
   // the agent's name comes from — the harness never hardcodes one.
   ensureFile(
     config.paths.soulPath,
-    "---\nname: Agent\n---\n\n# Soul\n\nWrite your identity here.\n",
+    '---\nname: Agent\n---\n\n# Soul\n\nWrite your identity here.\n',
   );
-  ensureFile(config.paths.memoryPath, "# Agent Memory\n");
+  ensureFile(config.paths.memoryPath, '# Agent Memory\n');
 
   const log = (...a: unknown[]) => config.logger.info(...a);
   log(
-    `runtime profile: ${profile.restricted ? `restricted (${profile.source})` : "normal"}`,
+    `runtime profile: ${profile.restricted ? `restricted (${profile.source})` : 'normal'}`,
   );
   log(
-    `built-in modules: ${modules.statuses.map((status) => `${status.id}=${status.state}`).join(", ")}`,
+    `built-in modules: ${modules.statuses.map((status) => `${status.id}=${status.state}`).join(', ')}`,
   );
 
   // The sandbox cwd is the DATA_DIRECTORY so relative file writes (./SOUL.md,
   // ./notes.txt, ...) land in the agent's brain by default.
   process.chdir(config.paths.dataDirectory);
-  log("sandbox cwd:", config.paths.dataDirectory);
+  log('sandbox cwd:', config.paths.dataDirectory);
   const extensionLogbuf: string[] = [];
   const extensions = await (adapters.loadExtensions ?? loadExtensions)({
     dataDirectory: config.paths.dataDirectory,
@@ -222,8 +222,8 @@ export async function createElpisRuntime(
     database: db,
     runLog: createRunLogger(extensionLogbuf),
     log: (level, ...args) => {
-      if (level === "warn") config.logger.warn(...args);
-      else if (level === "error") config.logger.error(...args);
+      if (level === 'warn') config.logger.warn(...args);
+      else if (level === 'error') config.logger.error(...args);
       else config.logger.info(...args);
     },
   });
@@ -237,7 +237,7 @@ export async function createElpisRuntime(
   // transcript and prime the one history from it; returns null on first boot
   // (no sessions/main stream yet — the cutover from per-channel files is clean).
   const sessionsRoot = dataLayout.sessions;
-  log("fetching context window for", config.llm.model, "...");
+  log('fetching context window for', config.llm.model, '...');
   const [maxContextTokens, initialTranscript] = await Promise.all([
     (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
     (async () =>
@@ -245,12 +245,12 @@ export async function createElpisRuntime(
         opaqueReplayIdentity: replayIdentityForConfig(config),
       }))(),
   ]);
-  log("context window:", maxContextTokens, "tokens");
+  log('context window:', maxContextTokens, 'tokens');
   const initialMessages = initialTranscript?.messages ?? [];
   if (initialMessages.length > 0) {
     log(`loaded prior transcript: ${initialMessages.length} messages`);
   } else {
-    log("no prior transcript found — fresh context");
+    log('no prior transcript found — fresh context');
   }
 
   // Operator console (Elpis Console): a read-only observer over the one history.
@@ -284,7 +284,7 @@ export async function createElpisRuntime(
   const activeMutes = mutes.all();
   if (activeMutes.length > 0) {
     log(
-      `killswitch active: ${activeMutes.map((m) => `${m.channelId}=${m.type}(${m.setBy})`).join(", ")}`,
+      `killswitch active: ${activeMutes.map((m) => `${m.channelId}=${m.type}(${m.setBy})`).join(', ')}`,
     );
   }
   // Out-of-band feedback capture over the shared DB (👍/👎 on the bot's messages).
@@ -309,16 +309,16 @@ export async function createElpisRuntime(
       agent.enqueue({
         id: `schedule-${task.id}-${Date.now()}`,
         channelId: task.channelId ?? INTERNAL_CHANNEL_ID,
-        channelName: "scheduler",
-        author: "scheduler",
-        authorId: "scheduler",
+        channelName: 'scheduler',
+        author: 'scheduler',
+        authorId: 'scheduler',
         content: `[scheduled task] ${task.name}\n\n${task.payload}`,
         createdAt: new Date().toISOString(),
         replyTo: null,
         forwarded: null,
         mentions: [],
         attachments: [],
-        kind: "scheduler",
+        kind: 'scheduler',
       });
     },
   });
@@ -333,20 +333,20 @@ export async function createElpisRuntime(
   const inboundRef: { current: InboundMessage | null } = { current: null };
   let llm!: LLM;
   let llms!: LlmRoleClients;
-  let workerSupervisor: SandboxDeps["worker"];
+  let workerSupervisor: SandboxDeps['worker'];
   //: the TTL reaper delivers an abandon notice through the same path as
   // settle notices. `agent` is defined below; the closure is only invoked at
   // runtime (reaper fires ≥60s in), long after `agent` is assigned.
   const bgRegistry = createBgRegistry(config.paths.dataDirectory, {
     onAbandoned: (id, value) =>
-      agent.notifyFutureSettled(id, value, true, { label: "abandoned" }),
+      agent.notifyFutureSettled(id, value, true, { label: 'abandoned' }),
     onJobStillRunning: (job, tail) => {
       const elapsed = Math.max(0, Date.now() - job.startedAt);
-      const command = (job.cmd ?? "").replace(/\s+/g, " ").slice(0, 240);
+      const command = (job.cmd ?? '').replace(/\s+/g, ' ').slice(0, 240);
       agent.notifyBackgroundJob(
         job.id,
-        "still running",
-        `elapsed ${Math.round(elapsed / 1000)}s · next check ${job.nudgeAt ? new Date(job.nudgeAt).toISOString() : "automatic"}\ncommand: ${command}\n--- tail ---\n${tail || "(empty)"}`,
+        'still running',
+        `elapsed ${Math.round(elapsed / 1000)}s · next check ${job.nudgeAt ? new Date(job.nudgeAt).toISOString() : 'automatic'}\ncommand: ${command}\n--- tail ---\n${tail || '(empty)'}`,
         job.originChannelId,
       );
     },
@@ -356,12 +356,12 @@ export async function createElpisRuntime(
         (job.finishedAt ?? Date.now()) - job.startedAt,
       );
       const outcome = job.cancelled
-        ? "cancelled"
-        : `exit=${job.exitCode ?? "unknown"} signal=${job.signal ?? "none"}`;
+        ? 'cancelled'
+        : `exit=${job.exitCode ?? 'unknown'} signal=${job.signal ?? 'none'}`;
       agent.notifyBackgroundJob(
         job.id,
-        "finished",
-        `${outcome} · duration ${Math.round(elapsed / 1000)}s\n--- tail ---\n${tail || "(empty)"}`,
+        'finished',
+        `${outcome} · duration ${Math.round(elapsed / 1000)}s\n--- tail ---\n${tail || '(empty)'}`,
         job.originChannelId,
       );
     },
@@ -384,8 +384,8 @@ export async function createElpisRuntime(
   });
   const sandboxDeps: SandboxDeps = {
     config,
-    replayIdentity: modules.isActive("motor")
-      ? replayIdentityForConfig(configForLlmRole(config, "motor"))
+    replayIdentity: modules.isActive('motor')
+      ? replayIdentityForConfig(configForLlmRole(config, 'motor'))
       : null,
     memory,
     extensions,
@@ -394,7 +394,7 @@ export async function createElpisRuntime(
     send: async (
       channelId: string,
       content: string,
-      opts?: { files?: import("./types.js").OutboundAttachment[] },
+      opts?: { files?: import('./types.js').OutboundAttachment[] },
     ) => agent.send(channelId, content, opts),
     logbuf: extensionLogbuf,
     agentName: () => readAgentName(config.paths.soulPath),
@@ -414,7 +414,7 @@ export async function createElpisRuntime(
     listChannelsWithNames: () => agent.knownChannels(),
     resolveChannel: (ref: string) => agent.resolveChannelRef(ref),
     channelName: (id: string) =>
-      id === CONSOLE_CHANNEL_ID ? "console" : (channels.get(id) ?? null),
+      id === CONSOLE_CHANNEL_ID ? 'console' : (channels.get(id) ?? null),
     channelLabel: (id: string) => agent.qualifiedChannelLabel(id),
     // A5: when a detached future settles, deliver a synthetic [bg <id> settled]
     // message into the one history and wake the loop.
@@ -436,9 +436,9 @@ export async function createElpisRuntime(
     watch: (paths: string[], note: string, channelId?: string | null) =>
       agent.enqueueWatch(paths, note, channelId),
     completeStandalone: (messages, opts) =>
-      completeStandaloneForRole(llms, "classifier", messages, opts),
+      completeStandaloneForRole(llms, 'classifier', messages, opts),
     motorCompleteStandalone: (messages, opts) =>
-      completeStandaloneForRole(llms, "motor", messages, opts),
+      completeStandaloneForRole(llms, 'motor', messages, opts),
     // Persistent task scheduler exposed to schedule/unschedule/tasks globals.
     scheduler,
     mind,
@@ -449,7 +449,7 @@ export async function createElpisRuntime(
     // Killswitch self-mute: the sandbox can only ever mute itself —
     // moderateChannel's actor is hardcoded 'self' here, never 'operator'.
     moderate: (channelId: string, reason?: string) =>
-      agent.moderateChannel(channelId, "mute", "self", reason),
+      agent.moderateChannel(channelId, 'mute', 'self', reason),
   };
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
@@ -462,7 +462,7 @@ export async function createElpisRuntime(
   llms = createLlmRoleClients(config, {
     hub,
     db,
-    motorActive: modules.isActive("motor"),
+    motorActive: modules.isActive('motor'),
     create: adapters.createLLM ?? createLLM,
   });
   llm = llms.main;
@@ -588,7 +588,7 @@ export async function createElpisRuntime(
 
   // start the agent driver loop (does not block — it runs forever)
   void agent.loop().catch((e) => {
-    log("agent loop crashed:", e);
+    log('agent loop crashed:', e);
     process.exit(1);
   });
 
@@ -608,9 +608,9 @@ export async function createElpisRuntime(
   // setInterval it never tears down.
   agent.setTyping(discord.typing, discord.stopTyping);
   await discord.start();
-  const botTag = discord.client.user?.tag ?? "unknown";
+  const botTag = discord.client.user?.tag ?? 'unknown';
   log(
-    `bot online: ${botTag} | guilds: ${config.discord.guilds.map((g) => `${g.slug}(${Object.keys(g.channels).length}ch)`).join(", ")} | ctx: ${maxContextTokens}`,
+    `bot online: ${botTag} | guilds: ${config.discord.guilds.map((g) => `${g.slug}(${Object.keys(g.channels).length}ch)`).join(', ')} | ctx: ${maxContextTokens}`,
   );
 
   // Wire + start the operator console once the agent + Discord are live so its
@@ -619,7 +619,7 @@ export async function createElpisRuntime(
   if (hub) {
     const archived = createArchivedReader(sessionsRoot);
     const gitText = (args: string[]): Promise<string> =>
-      spawnText("git", ["-C", config.paths.harnessRoot, ...args]);
+      spawnText('git', ['-C', config.paths.harnessRoot, ...args]);
     hub.attach({
       usage: () => agent.usageSnapshot(),
       rooms: () => agent.roomsSnapshot(),
@@ -628,37 +628,40 @@ export async function createElpisRuntime(
       context: () => agent.contextSnapshot(),
       archived: (beforeId, limit) => archived.read(beforeId, limit),
       moderate: (channelId, action, reason) =>
-        agent.moderateChannel(channelId, action, "operator", reason),
+        agent.moderateChannel(channelId, action, 'operator', reason),
       mind,
       worker: workerRuntime?.api ?? null,
       secretary: secretaryRuntime
-        ? { broker: secretaryRuntime.broker, conversation: secretaryRuntime.conversation }
+        ? {
+            broker: secretaryRuntime.broker,
+            conversation: secretaryRuntime.conversation,
+          }
         : null,
       chat: ({ nonce, content }) => {
         agent.enqueue({
           id: `console-${nonce}`,
           channelId: CONSOLE_CHANNEL_ID,
-          channelName: "console",
+          channelName: 'console',
           author: config.operator.name,
-          authorId: config.operator.discordId ?? "operator",
+          authorId: config.operator.discordId ?? 'operator',
           content,
           createdAt: new Date().toISOString(),
           replyTo: null,
           forwarded: null,
           mentions: [],
           attachments: [],
-          wakeClass: "wake",
-          kind: "discord",
+          wakeClass: 'wake',
+          kind: 'discord',
         });
-        return { ok: true, note: "message accepted" };
+        return { ok: true, note: 'message accepted' };
       },
       meta: async (): Promise<MetaInfo> => {
         const [hash, dirty] = await Promise.all([
-          gitText(["rev-parse", "--short", "HEAD"]),
-          gitText(["status", "--porcelain"]),
+          gitText(['rev-parse', '--short', 'HEAD']),
+          gitText(['status', '--porcelain']),
         ]);
         return {
-          gitHash: hash.trim() || "unknown",
+          gitHash: hash.trim() || 'unknown',
           treeClean: dirty.trim().length === 0,
           uptimeMs: Math.round(process.uptime() * 1000),
           model: config.llm.model,
@@ -674,7 +677,7 @@ export async function createElpisRuntime(
             agent.enqueue({
               id: `mcp-${commentId}-${Date.now()}`,
               channelId: INTERNAL_CHANNEL_ID,
-              channelName: "mcp",
+              channelName: 'mcp',
               author: actor,
               authorId: actor,
               bot: true,
@@ -687,8 +690,8 @@ export async function createElpisRuntime(
               forwarded: null,
               mentions: [],
               attachments: [],
-              wakeClass: "wake",
-              kind: "harness",
+              wakeClass: 'wake',
+              kind: 'harness',
             });
           },
         })
@@ -715,7 +718,7 @@ export async function createElpisRuntime(
   const resume = consumeResumeMarker(config.paths.dataDirectory);
   if (resume) {
     log(
-      "resume-after-restart: delivering [restart complete] to the one history",
+      'resume-after-restart: delivering [restart complete] to the one history',
     );
     agent.notifyResumeAfterRestart(resume);
   }
@@ -731,10 +734,10 @@ export async function createElpisRuntime(
     )
   ) {
     log(
-      "unannounced-restart: delivering [sandbox reset] notice to the one history",
+      'unannounced-restart: delivering [sandbox reset] notice to the one history',
     );
     agent.notifyHarnessChangelog(
-      "[harness restarted — the sandbox was reset; any top-level const/let variables you set are gone (this was NOT a compaction). Re-establish anything you need.]",
+      '[harness restarted — the sandbox was reset; any top-level const/let variables you set are gone (this was NOT a compaction). Re-establish anything you need.]',
     );
   }
 
@@ -752,7 +755,7 @@ export async function createElpisRuntime(
     );
     if (unseen.length > 0) {
       log(
-        `harness-changelog: delivering ${unseen.length} unseen entr${unseen.length === 1 ? "y" : "ies"} to the one history`,
+        `harness-changelog: delivering ${unseen.length} unseen entr${unseen.length === 1 ? 'y' : 'ies'} to the one history`,
       );
       agent.notifyHarnessChangelog(formatChangelogNotice(unseen), () =>
         markChangelogsSeen(config.paths.dataDirectory, unseen),
@@ -805,8 +808,8 @@ export async function createElpisRuntime(
     }
     process.exit(0);
   };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   // Process-level crash guards (a): an unhandled rejection or
   // uncaught exception used to bring the whole process down with no notice
@@ -814,7 +817,7 @@ export async function createElpisRuntime(
   // channel via the public send path, then keep running. Never process.exit
   // here; the whole point is surviving instead of crashing silently.
   function reportProcessError(
-    kind: "unhandledRejection" | "uncaughtException",
+    kind: 'unhandledRejection' | 'uncaughtException',
     err: unknown,
   ): void {
     if (routeRunProcessError(kind, err)) return;
@@ -827,11 +830,11 @@ export async function createElpisRuntime(
       });
     }
   }
-  process.on("unhandledRejection", (reason) =>
-    reportProcessError("unhandledRejection", reason),
+  process.on('unhandledRejection', (reason) =>
+    reportProcessError('unhandledRejection', reason),
   );
-  process.on("uncaughtException", (err) =>
-    reportProcessError("uncaughtException", err),
+  process.on('uncaughtException', (err) =>
+    reportProcessError('uncaughtException', err),
   );
 
   return {
@@ -859,7 +862,7 @@ const isEntryPoint =
   import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isEntryPoint) {
   createElpisRuntime().catch((e) => {
-    console.error("[harness] fatal:", e);
+    console.error('[harness] fatal:', e);
     process.exit(1);
   });
 }

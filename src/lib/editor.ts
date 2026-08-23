@@ -49,9 +49,13 @@ export function replace(
   if (oldStr === newStr) {
     throw new Error('edit: newString must differ from oldString');
   }
- // Every match offset in the ORIGINAL source (non-overlapping).
+  // Every match offset in the ORIGINAL source (non-overlapping).
   const offsets: number[] = [];
-  for (let i = source.indexOf(oldStr); i >= 0; i = source.indexOf(oldStr, i + oldStr.length)) {
+  for (
+    let i = source.indexOf(oldStr);
+    i >= 0;
+    i = source.indexOf(oldStr, i + oldStr.length)
+  ) {
     offsets.push(i);
   }
   if (offsets.length === 0) {
@@ -61,21 +65,25 @@ export function replace(
     const lines = offsets.map((o) => lineNumberAt(source, o));
     throw new Error(
       `edit: oldString is not unique — ${offsets.length} occurrences (lines ${formatLineList(lines)}). ` +
-      `Include more surrounding text to make it unique, or pass { replaceAll: true }.`,
+        `Include more surrounding text to make it unique, or pass { replaceAll: true }.`,
     );
   }
   const targets = opts.all ? offsets : [offsets[0]];
- // Build the diff hunks against the ORIGINAL source (line numbers stay valid).
+  // Build the diff hunks against the ORIGINAL source (line numbers stay valid).
   const hunks: EditHunk[] = targets.map((off) => {
     const lineStart = startOfLine(source, off);
     const spanEnd = off + oldStr.length;
     let lineEnd = spanEnd;
     while (lineEnd < source.length && source[lineEnd] !== '\n') lineEnd++;
     const removed = source.slice(lineStart, lineEnd).split('\n');
-    const inserted = (source.slice(lineStart, off) + newStr + source.slice(spanEnd, lineEnd)).split('\n');
+    const inserted = (
+      source.slice(lineStart, off) +
+      newStr +
+      source.slice(spanEnd, lineEnd)
+    ).split('\n');
     return { from: lineNumberAt(source, lineStart), removed, inserted };
   });
- // Apply right-to-left so an earlier splice never shifts a later offset.
+  // Apply right-to-left so an earlier splice never shifts a later offset.
   let out = source;
   for (const off of [...targets].sort((a, b) => b - a)) {
     out = out.slice(0, off) + newStr + out.slice(off + oldStr.length);
@@ -100,11 +108,17 @@ export function nearMiss(source: string, oldStr: string): string {
   let bestScore = Infinity;
   for (let i = 0; i < lines.length; i++) {
     const d = levenshtein(lines[i].trim(), probe, bestScore);
-    if (d < bestScore) { bestScore = d; best = i; }
+    if (d < bestScore) {
+      bestScore = d;
+      best = i;
+    }
   }
   const span = Math.max(1, needleLines.length);
   const from = Math.max(0, best - 2);
-  const to = Math.min(lines.length - 1, Math.min(best + span - 1 + 2, from + 11));
+  const to = Math.min(
+    lines.length - 1,
+    Math.min(best + span - 1 + 2, from + 11),
+  );
   const rows = [`closest match near line ${best + 1}:`];
   for (let i = from; i <= to; i++) {
     rows.push(`${String(i + 1).padStart(4)}: ${lines[i]}`);
@@ -134,7 +148,9 @@ function levenshtein(a: string, b: string, max = Infinity): number {
       if (curr[j] < rowMin) rowMin = curr[j];
     }
     if (rowMin > max) return rowMin;
-    const tmp = prev; prev = curr; curr = tmp;
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
   }
   return prev[n];
 }

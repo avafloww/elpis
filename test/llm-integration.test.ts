@@ -16,7 +16,10 @@ import { loadConfigFile, defaultConfigPath } from '../src/config.js';
 import { createLLM } from '../src/llm/llm.js';
 import { createMemory, ensureFile } from '../src/store/memory.js';
 import { createSandbox } from '../src/sandbox/index.js';
-import { createContextTracker, type ContextTracker } from '../src/llm/context-tracker.js';
+import {
+  createContextTracker,
+  type ContextTracker,
+} from '../src/llm/context-tracker.js';
 import { createCompactor } from '../src/llm/compactor.js';
 import { createTranscriptStore } from '../src/store/sessions.js';
 import { openDatabase } from '../src/store/db.js';
@@ -48,18 +51,19 @@ function buildAgent(): AgentHarness {
   ensureFile(soulPath, '# Soul\n');
   const memory = createMemory(memoryPath);
   const sent: { channelId: string; text: string }[] = [];
-  const { promise: replyPromise, resolve: resolveReply } = Promise.withResolvers<string>();
- // Wire the sandbox's elpis.channel.send to the same handler the agent uses, so
- // the model's elpis.channel('test').send("...") routes to `sent` + resolves
- // replyPromise. V1: elpis.channel needs an explicit target.
+  const { promise: replyPromise, resolve: resolveReply } =
+    Promise.withResolvers<string>();
+  // Wire the sandbox's elpis.channel.send to the same handler the agent uses, so
+  // the model's elpis.channel('test').send("...") routes to `sent` + resolves
+  // replyPromise. V1: elpis.channel needs an explicit target.
   const sendHandler = async (channelId: string, text: string) => {
     sent.push({ channelId, text });
     resolveReply(sent.map((s) => s.text).join('\n'));
   };
- // Natural turn-end content is internal monologue (not sent to Discord). The
- // model may or may not call elpis.channel.send. onIdle fires when the loop
- // reaches the wake-gate (turn done) — if send wasn't called, resolve from
- // the last assistant message in history (the model's internal monologue).
+  // Natural turn-end content is internal monologue (not sent to Discord). The
+  // model may or may not call elpis.channel.send. onIdle fires when the loop
+  // reaches the wake-gate (turn done) — if send wasn't called, resolve from
+  // the last assistant message in history (the model's internal monologue).
   let agent: Agent;
   const onIdle = () => {
     if (sent.length === 0) {
@@ -68,12 +72,24 @@ function buildAgent(): AgentHarness {
       resolveReply(last?.content ?? '');
     }
   };
-  const sandbox = createSandbox({ config, memory, logbuf: [], send: sendHandler });
- // The anthropic-oauth provider reads its credential from agent.db, so this
- // live test needs the real handle — otherwise createLLM throws and the whole
- // integration suite fails purely because the operator switched provider.
-  const llm = createLLM(config, undefined, openDatabase(config.paths.dataDirectory));
-  const tracker = createContextTracker(100000, config.llm.completionReserveTokens);
+  const sandbox = createSandbox({
+    config,
+    memory,
+    logbuf: [],
+    send: sendHandler,
+  });
+  // The anthropic-oauth provider reads its credential from agent.db, so this
+  // live test needs the real handle — otherwise createLLM throws and the whole
+  // integration suite fails purely because the operator switched provider.
+  const llm = createLLM(
+    config,
+    undefined,
+    openDatabase(config.paths.dataDirectory),
+  );
+  const tracker = createContextTracker(
+    100000,
+    config.llm.completionReserveTokens,
+  );
   const compactor = createCompactor(llm, tracker);
   const transcript = createTranscriptStore(tmpDir);
   agent = new Agent({
@@ -90,36 +106,45 @@ function buildAgent(): AgentHarness {
   return { agent, sent, tracker, replyPromise };
 }
 
-test('integration: computation prompt triggers run tool call and references result', { skip: NO_NETWORK || NO_CONFIG }, async () => {
-  const { agent, replyPromise } = buildAgent();
-  agent.enqueue({
-    channelId: 'test',
-    channelName: 'test',
-    author: 'tester',
-    content: 'What is 17 * 23? Use your sandbox to compute it exactly, then tell me the answer.',
-  });
-  void agent.loop();
-  const reply = await replyPromise;
-  assert.ok(reply.length > 0, 'agent should have sent a reply');
- // 17*23 = 391 — the model computed it via the run tool
-  assert.match(reply, /391/);
-  agent.stop();
-});
+test(
+  'integration: computation prompt triggers run tool call and references result',
+  { skip: NO_NETWORK || NO_CONFIG },
+  async () => {
+    const { agent, replyPromise } = buildAgent();
+    agent.enqueue({
+      channelId: 'test',
+      channelName: 'test',
+      author: 'tester',
+      content:
+        'What is 17 * 23? Use your sandbox to compute it exactly, then tell me the answer.',
+    });
+    void agent.loop();
+    const reply = await replyPromise;
+    assert.ok(reply.length > 0, 'agent should have sent a reply');
+    // 17*23 = 391 — the model computed it via the run tool
+    assert.match(reply, /391/);
+    agent.stop();
+  },
+);
 
-test('integration: multi-step task chains run calls without iteration cap', { skip: NO_NETWORK || NO_CONFIG }, async () => {
-  const { agent, replyPromise } = buildAgent();
-  agent.enqueue({
-    channelId: 'test2',
-    channelName: 'test2',
-    author: 'tester',
-    content:
-      'In your sandbox: define a function `fib(n)` that returns the nth Fibonacci number, ' +
-      'then compute fib(10) and tell me the result.',
-  });
-  void agent.loop();
-  const reply = await replyPromise;
-  assert.ok(reply.length > 0, 'agent should have sent a reply');
- // fib(10) = 55
-  assert.match(reply, /55/);
-  agent.stop();
-});
+test(
+  'integration: multi-step task chains run calls without iteration cap',
+  { skip: NO_NETWORK || NO_CONFIG },
+  async () => {
+    const { agent, replyPromise } = buildAgent();
+    agent.enqueue({
+      channelId: 'test2',
+      channelName: 'test2',
+      author: 'tester',
+      content:
+        'In your sandbox: define a function `fib(n)` that returns the nth Fibonacci number, ' +
+        'then compute fib(10) and tell me the result.',
+    });
+    void agent.loop();
+    const reply = await replyPromise;
+    assert.ok(reply.length > 0, 'agent should have sent a reply');
+    // fib(10) = 55
+    assert.match(reply, /55/);
+    agent.stop();
+  },
+);

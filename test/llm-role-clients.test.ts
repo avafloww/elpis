@@ -17,10 +17,34 @@ function roleConfig(): Config {
     streamIdleTimeoutMs: 1_000,
     callTimeoutMs: 2_000,
     models: {
-      main: { name: 'wire-main', contextSize: 100_000, reasoningEffort: 'high', reasoningSummary: null, reasoningContext: null },
-      classifier: { name: 'wire-classifier', contextSize: 20_000, reasoningEffort: 'low', reasoningSummary: null, reasoningContext: null },
-      motor: { name: 'wire-motor', contextSize: 30_000, reasoningEffort: 'medium', reasoningSummary: null, reasoningContext: null },
-      secretary: { name: 'wire-secretary', contextSize: 40_000, reasoningEffort: 'medium', reasoningSummary: null, reasoningContext: null },
+      main: {
+        name: 'wire-main',
+        contextSize: 100_000,
+        reasoningEffort: 'high',
+        reasoningSummary: null,
+        reasoningContext: null,
+      },
+      classifier: {
+        name: 'wire-classifier',
+        contextSize: 20_000,
+        reasoningEffort: 'low',
+        reasoningSummary: null,
+        reasoningContext: null,
+      },
+      motor: {
+        name: 'wire-motor',
+        contextSize: 30_000,
+        reasoningEffort: 'medium',
+        reasoningSummary: null,
+        reasoningContext: null,
+      },
+      secretary: {
+        name: 'wire-secretary',
+        contextSize: 40_000,
+        reasoningEffort: 'medium',
+        reasoningSummary: null,
+        reasoningContext: null,
+      },
     },
   };
   config.llm.registry = createLlmModelRegistry({
@@ -34,9 +58,20 @@ function roleConfig(): Config {
 function fakeLlm(model: string): LLM {
   return {
     model,
-    runTool: { type: 'function', function: { name: 'run', description: '', parameters: { type: 'object' } } },
-    async complete() { throw new Error('not called'); },
-    async summarize() { throw new Error('not called'); },
+    runTool: {
+      type: 'function',
+      function: {
+        name: 'run',
+        description: '',
+        parameters: { type: 'object' },
+      },
+    },
+    async complete() {
+      throw new Error('not called');
+    },
+    async summarize() {
+      throw new Error('not called');
+    },
   };
 }
 
@@ -51,7 +86,10 @@ test('role clients are independently constructed from resolved role targets', ()
       return fakeLlm(config.llm.model);
     },
   });
-  assert.deepEqual(calls.map((call) => call.model), ['wire-main', 'wire-classifier', 'wire-motor']);
+  assert.deepEqual(
+    calls.map((call) => call.model),
+    ['wire-main', 'wire-classifier', 'wire-motor'],
+  );
   assert.equal(calls[0].hub, hub);
   assert.equal(calls[1].hub, undefined);
   assert.equal(calls[2].hub, undefined);
@@ -63,7 +101,12 @@ test('configured secretary is independently constructed and requestable', async 
   const config = roleConfig();
   config.llm.registry = createLlmModelRegistry({
     providers: config.llm.registry.providers,
-    roles: { main: 'p/main', classifier: 'p/classifier', motor: 'p/motor', secretary: 'p/secretary' },
+    roles: {
+      main: 'p/main',
+      classifier: 'p/classifier',
+      motor: 'p/motor',
+      secretary: 'p/secretary',
+    },
   });
   const models: string[] = [];
   const clients = createLlmRoleClients(config, {
@@ -78,12 +121,16 @@ test('configured secretary is independently constructed and requestable', async 
     content: 'notes',
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     toolCalls: [],
-    model: 'wire-secretary', providerType: 'openai-compatible' as const,
-    apiSurface: 'responses' as const, apiEndpoint: 'https://example.test/v1/responses',
+    model: 'wire-secretary',
+    providerType: 'openai-compatible' as const,
+    apiSurface: 'responses' as const,
+    apiEndpoint: 'https://example.test/v1/responses',
   };
   clients.secretary!.completeStandalone = async () => result;
   assert.equal(
-    await completeStandaloneForRole(clients, 'secretary', [{ role: 'user', content: 'organize' }]),
+    await completeStandaloneForRole(clients, 'secretary', [
+      { role: 'user', content: 'organize' },
+    ]),
     result,
   );
 });
@@ -115,16 +162,38 @@ test('standalone role dispatch never sends motor work through classifier', async
   const result = {
     content: '',
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-    toolCalls: [{ id: 'motor-call', type: 'function' as const, function: { name: 'click', arguments: '{"element":"safe","x":1,"y":1}' } }],
-    model: 'motor-model', providerType: 'openai-compatible' as const,
-    apiSurface: 'chat-completions' as const, apiEndpoint: 'http://motor/v1/chat/completions',
+    toolCalls: [
+      {
+        id: 'motor-call',
+        type: 'function' as const,
+        function: {
+          name: 'click',
+          arguments: '{"element":"safe","x":1,"y":1}',
+        },
+      },
+    ],
+    model: 'motor-model',
+    providerType: 'openai-compatible' as const,
+    apiSurface: 'chat-completions' as const,
+    apiEndpoint: 'http://motor/v1/chat/completions',
   };
   const classifier = fakeLlm('classifier');
-  classifier.completeStandalone = async () => { calls.push('classifier'); throw new Error('classifier must not receive motor tools'); };
+  classifier.completeStandalone = async () => {
+    calls.push('classifier');
+    throw new Error('classifier must not receive motor tools');
+  };
   const motor = fakeLlm('motor');
-  motor.completeStandalone = async () => { calls.push('motor'); return result; };
+  motor.completeStandalone = async () => {
+    calls.push('motor');
+    return result;
+  };
   const llms = { main: fakeLlm('main'), classifier, motor, secretary: null };
 
-  assert.equal(await completeStandaloneForRole(llms, 'motor', [{ role: 'user', content: 'move' }]), result);
+  assert.equal(
+    await completeStandaloneForRole(llms, 'motor', [
+      { role: 'user', content: 'move' },
+    ]),
+    result,
+  );
   assert.deepEqual(calls, ['motor']);
 });

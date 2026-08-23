@@ -18,9 +18,15 @@ export interface PluralKitIdentity {
   authorId: string;
 }
 
-type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
 
-export function pluralKitIdentity(info: PluralKitMessage, fallbackAuthor: string): PluralKitIdentity {
+export function pluralKitIdentity(
+  info: PluralKitMessage,
+  fallbackAuthor: string,
+): PluralKitIdentity {
   const displayName = info.member?.display_name?.trim();
   const memberName = info.member?.name?.trim();
   return {
@@ -42,25 +48,37 @@ export class PluralKitResolver {
     private readonly originalHoldMs = 2500,
   ) {}
 
-  async resolve(messageId: string, holdForOriginal = false): Promise<PluralKitMessage | null> {
+  async resolve(
+    messageId: string,
+    holdForOriginal = false,
+  ): Promise<PluralKitMessage | null> {
     const cached = this.cache.get(messageId);
     if (cached) return cached;
 
     if (holdForOriginal && this.originalHoldMs > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, this.originalHoldMs));
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, this.originalHoldMs),
+      );
       const afterHold = this.cache.get(messageId);
       if (afterHold) return afterHold;
     }
 
-    const res = await this.fetcher(`${this.baseUrl}/messages/${encodeURIComponent(messageId)}`, {
-      headers: { 'User-Agent': 'elpis/0.1' },
-      signal: AbortSignal.timeout(PLURALKIT_REQUEST_TIMEOUT_MS),
-    });
+    const res = await this.fetcher(
+      `${this.baseUrl}/messages/${encodeURIComponent(messageId)}`,
+      {
+        headers: { 'User-Agent': 'elpis/0.1' },
+        signal: AbortSignal.timeout(PLURALKIT_REQUEST_TIMEOUT_MS),
+      },
+    );
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const raw = await res.json() as Partial<PluralKitMessage>;
-    if (typeof raw.id !== 'string' || typeof raw.original !== 'string' || typeof raw.sender !== 'string') {
+    const raw = (await res.json()) as Partial<PluralKitMessage>;
+    if (
+      typeof raw.id !== 'string' ||
+      typeof raw.original !== 'string' ||
+      typeof raw.sender !== 'string'
+    ) {
       throw new Error('response omitted id/original/sender');
     }
     const info = raw as PluralKitMessage;

@@ -14,7 +14,10 @@ import { blankLiterals } from '../lib/jslex.js';
 const OPENERS: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
 const CLOSERS: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
 
-interface Frame { ch: string; line: number }
+interface Frame {
+  ch: string;
+  line: number;
+}
 
 /** Scan literal-blanked source for bracket imbalance. Returns a human sentence
  * or null. Uses blankLiterals so braces inside strings/templates/comments and
@@ -25,8 +28,14 @@ export function delimiterProblem(code: string): string | null {
   let line = 1;
   for (let i = 0; i < blanked.length; i++) {
     const ch = blanked[i];
-    if (ch === '\n') { line++; continue; }
-    if (OPENERS[ch]) { stack.push({ ch, line }); continue; }
+    if (ch === '\n') {
+      line++;
+      continue;
+    }
+    if (OPENERS[ch]) {
+      stack.push({ ch, line });
+      continue;
+    }
     if (CLOSERS[ch]) {
       const top = stack.pop();
       if (!top) return `a stray \`${ch}\` on line ${line} closes nothing.`;
@@ -37,7 +46,8 @@ export function delimiterProblem(code: string): string | null {
   }
   if (stack.length > 0) {
     const f = stack[stack.length - 1];
-    const plural = stack.length > 1 ? ` (${stack.length} unclosed in total)` : '';
+    const plural =
+      stack.length > 1 ? ` (${stack.length} unclosed in total)` : '';
     return `reached the end of the program with an unclosed \`${f.ch}\` opened on line ${f.line}${plural} — the closing \`${OPENERS[f.ch]}\` is missing.`;
   }
   return null;
@@ -57,7 +67,7 @@ function nestedBacktickAt(code: string, error: string): number | null {
   if (line === undefined) return null;
   const near = line.slice(Math.max(0, col - 2), col + 2);
   if (!near.includes('`')) return null;
- // Two or more backticks on the line means a template was already open.
+  // Two or more backticks on the line means a template was already open.
   const count = (line.match(/`/g) ?? []).length;
   return count >= 2 ? lineNo : null;
 }
@@ -67,7 +77,11 @@ function nestedBacktickAt(code: string, error: string): number | null {
  * source acorn actually parsed (so positions and literal-blanking line up);
  * `rawCode` is what the agent typed, used only for heredoc/TS shape checks.
  */
-export function parseFailureHints(code: string, rawCode: string, error: string): string[] {
+export function parseFailureHints(
+  code: string,
+  rawCode: string,
+  error: string,
+): string[] {
   const hints: string[] = [];
   const hasHeredoc = /<<</.test(rawCode);
 
@@ -87,10 +101,19 @@ export function parseFailureHints(code: string, rawCode: string, error: string):
     );
   }
 
-  if (!hasHeredoc && /\b(as\s+(any|const|unknown|object|string|number|boolean)|:\s*\w+(\[\])?\s*[=,)]|interface\s+\w+|satisfies\s|<\s*\w+\s*>)/.test(rawCode)) {
-    hints.push('This looks like TypeScript syntax (`as` casts, type annotations, `interface`). The sandbox runs PLAIN JavaScript — remove all type syntax.');
+  if (
+    !hasHeredoc &&
+    /\b(as\s+(any|const|unknown|object|string|number|boolean)|:\s*\w+(\[\])?\s*[=,)]|interface\s+\w+|satisfies\s|<\s*\w+\s*>)/.test(
+      rawCode,
+    )
+  ) {
+    hints.push(
+      'This looks like TypeScript syntax (`as` casts, type annotations, `interface`). The sandbox runs PLAIN JavaScript — remove all type syntax.',
+    );
   } else if (hasHeredoc && hints.length === 0) {
-    hints.push('A `<<<TAG` heredoc is present. The opener must be `<<<TAG` (bare identifier, no quotes/dashes) followed by a newline; the terminator begins with the exact `TAG`, and everything after it on that physical line is preserved as JavaScript (`TAG,{ other });`, `TAG.trimEnd()`, or `TAG,<<<NEXT`). Body is verbatim — real newlines, no escapes.');
+    hints.push(
+      'A `<<<TAG` heredoc is present. The opener must be `<<<TAG` (bare identifier, no quotes/dashes) followed by a newline; the terminator begins with the exact `TAG`, and everything after it on that physical line is preserved as JavaScript (`TAG,{ other });`, `TAG.trimEnd()`, or `TAG,<<<NEXT`). Body is verbatim — real newlines, no escapes.',
+    );
   }
 
   return hints;

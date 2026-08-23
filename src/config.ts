@@ -1,14 +1,14 @@
-import * as path from "node:path";
-import * as url from "node:url";
-import * as fs from "node:fs";
-import { parse as parseYaml, YAMLParseError } from "yaml";
+import * as path from 'node:path';
+import * as url from 'node:url';
+import * as fs from 'node:fs';
+import { parse as parseYaml, YAMLParseError } from 'yaml';
 import {
   createLogger,
   parseLogLevel,
   type LogLevel,
   type Logger,
-} from "./lib/log.js";
-import { BUILTIN_MODULE_IDS, type BuiltinModuleId } from "./builtin-modules.js";
+} from './lib/log.js';
+import { BUILTIN_MODULE_IDS, type BuiltinModuleId } from './builtin-modules.js';
 import {
   createLlmModelRegistry,
   legacyLlmModelRegistry,
@@ -19,12 +19,12 @@ import {
   type LlmProviderType,
   type LlmRole,
   type ResolvedLlmTarget,
-} from "./llm/model-registry.js";
+} from './llm/model-registry.js';
 
 /** A channel's wake tier — how eagerly the agent responds in it. Later tasks
  * (the wake classifier) consume this; only parses and carries it. */
-export type ChannelTier = "direct" | "social" | "quiet";
-export type ChannelMode = "drop" | ChannelTier;
+export type ChannelTier = 'direct' | 'social' | 'quiet';
+export type ChannelMode = 'drop' | ChannelTier;
 
 /** One entry in `discord.guilds`. Explicit channels override the guild's
  * receive/send defaults; omitted fields preserve the historical allowlist. */
@@ -53,7 +53,7 @@ export interface GuildConfig {
 export interface LlmConfig extends LegacyLlmDefinition {
   completionReserveTokens: number;
   registry: LlmModelRegistry;
-  registrySource: "canonical" | "legacy";
+  registrySource: 'canonical' | 'legacy';
 }
 
 export interface Config {
@@ -228,13 +228,13 @@ export interface Config {
  * parsed (command registration will then surface a clear error).
  */
 function appIdFromToken(token: string): string {
-  const first = token.split(".")[0];
-  if (!first) return "";
+  const first = token.split('.')[0];
+  if (!first) return '';
   try {
-    const decoded = Buffer.from(first, "base64").toString("utf8");
-    return /^\d+$/.test(decoded) ? decoded : "";
+    const decoded = Buffer.from(first, 'base64').toString('utf8');
+    return /^\d+$/.test(decoded) ? decoded : '';
   } catch {
-    return "";
+    return '';
   }
 }
 
@@ -244,7 +244,7 @@ function appIdFromToken(token: string): string {
 function resolveHarnessRoot(): string {
   const here = url.fileURLToPath(import.meta.url);
   // dist/config.js → ../ ; src/config.ts → ../
-  return path.resolve(path.dirname(here), "..");
+  return path.resolve(path.dirname(here), '..');
 }
 
 /** Ensure the inhabitant data root exists. Harness-owned state is scaffolded
@@ -270,7 +270,7 @@ type YamlTree = Record<string, unknown>;
  * operator configuration on a writable mounted volume. */
 export function defaultConfigPath(): string {
   return (
-    process.env.ELPIS_CONFIG || path.join(resolveHarnessRoot(), "config.yaml")
+    process.env.ELPIS_CONFIG || path.join(resolveHarnessRoot(), 'config.yaml')
   );
 }
 
@@ -278,8 +278,8 @@ export function defaultConfigPath(): string {
  * missing segment (a missing group reads the same as a missing leaf). */
 function at(tree: YamlTree, dotted: string): unknown {
   let cur: unknown = tree;
-  for (const part of dotted.split(".")) {
-    if (cur === null || typeof cur !== "object") return undefined;
+  for (const part of dotted.split('.')) {
+    if (cur === null || typeof cur !== 'object') return undefined;
     cur = (cur as Record<string, unknown>)[part];
   }
   return cur;
@@ -295,12 +295,12 @@ function reqStr(tree: YamlTree, dotted: string, file: string): string {
       `${file}: missing required key \`${dotted}\` (expected a non-empty string)`,
     );
   }
-  if (typeof v !== "string") {
+  if (typeof v !== 'string') {
     throw new Error(
-      `${file}: key \`${dotted}\` must be a non-empty string (got ${Array.isArray(v) ? "a list" : typeof v})`,
+      `${file}: key \`${dotted}\` must be a non-empty string (got ${Array.isArray(v) ? 'a list' : typeof v})`,
     );
   }
-  if (v === "") {
+  if (v === '') {
     throw new Error(
       `${file}: key \`${dotted}\` is empty (expected a non-empty string)`,
     );
@@ -311,8 +311,8 @@ function reqStr(tree: YamlTree, dotted: string, file: string): string {
 /** An optional string: absent, null, or empty all read as null. */
 function optStr(tree: YamlTree, dotted: string, file: string): string | null {
   const v = at(tree, dotted);
-  if (v === undefined || v === null || v === "") return null;
-  if (typeof v !== "string") {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v !== 'string') {
     throw new Error(`${file}: key \`${dotted}\` must be a string or null`);
   }
   return v;
@@ -326,7 +326,7 @@ function numOr(
 ): number {
   const v = at(tree, dotted);
   if (v === undefined || v === null) return fallback;
-  if (typeof v !== "number" || !Number.isFinite(v)) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
     throw new Error(`${file}: key \`${dotted}\` must be a finite number`);
   }
   return v;
@@ -336,7 +336,7 @@ function numOr(
 function optNum(tree: YamlTree, dotted: string, file: string): number | null {
   const v = at(tree, dotted);
   if (v === undefined || v === null) return null;
-  if (typeof v !== "number" || !Number.isFinite(v)) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
     throw new Error(
       `${file}: key \`${dotted}\` must be a finite number or null`,
     );
@@ -345,8 +345,8 @@ function optNum(tree: YamlTree, dotted: string, file: string): number | null {
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
-const TIER_VALUES = ["direct", "social", "quiet"] as const;
-const CHANNEL_MODE_VALUES = ["drop", ...TIER_VALUES] as const;
+const TIER_VALUES = ['direct', 'social', 'quiet'] as const;
+const CHANNEL_MODE_VALUES = ['drop', ...TIER_VALUES] as const;
 
 /** Parse `quiet_hours: "HHMM-HHMM"` into minutes-since-midnight. Wraparound
  * (start > end) is legal — the consumer handles it. Absent/null = none. */
@@ -356,7 +356,7 @@ function parseQuietHours(
   f: string,
 ): { start: number; end: number } | null {
   if (raw === undefined || raw === null) return null;
-  if (typeof raw !== "string" || !/^\d{4}-\d{4}$/.test(raw)) {
+  if (typeof raw !== 'string' || !/^\d{4}-\d{4}$/.test(raw)) {
     throw new Error(
       `${f}: guild '${slug}' \`quiet_hours\` must be "HHMM-HHMM" (e.g. "2300-0900"), got ${JSON.stringify(raw)}`,
     );
@@ -370,13 +370,13 @@ function parseQuietHours(
       );
     return h * 60 + m;
   };
-  const [a, b] = raw.split("-");
+  const [a, b] = raw.split('-');
   return { start: toMin(a), end: toMin(b) };
 }
 
 function validTimezone(tz: string): boolean {
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
     return true;
   } catch {
     return false;
@@ -386,7 +386,7 @@ function validTimezone(tz: string): boolean {
 /** Parse `discord.guilds`: a non-empty list with safe receive/send defaults and
  * optional explicit channel overrides. Every malformed policy is a boot error. */
 function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
-  const raw = at(tree, "discord.guilds");
+  const raw = at(tree, 'discord.guilds');
   if (raw === undefined || raw === null) {
     throw new Error(
       `${f}: missing required key \`discord.guilds\` (a non-empty list of guild entries)`,
@@ -400,15 +400,15 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     seenSlugs = new Set<string>(),
     seenChannels = new Set<string>();
   for (const entry of raw) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error(
         `${f}: each \`discord.guilds\` entry must be a map with id/slug/channels`,
       );
     }
     const g = entry as Record<string, unknown>;
-    const defaultTier = g.default_tier === undefined ? "drop" : g.default_tier;
+    const defaultTier = g.default_tier === undefined ? 'drop' : g.default_tier;
     if (
-      typeof defaultTier !== "string" ||
+      typeof defaultTier !== 'string' ||
       !CHANNEL_MODE_VALUES.includes(defaultTier as ChannelMode)
     ) {
       throw new Error(
@@ -416,22 +416,22 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       );
     }
     const allowSend = g.allow_send === undefined ? true : g.allow_send;
-    if (typeof allowSend !== "boolean") {
+    if (typeof allowSend !== 'boolean') {
       throw new Error(
         `${f}: guild \`allow_send\` must be true or false (got ${JSON.stringify(allowSend)})`,
       );
     }
     const defaultAllowSend =
       g.default_allow_send === undefined ? false : g.default_allow_send;
-    if (typeof defaultAllowSend !== "boolean") {
+    if (typeof defaultAllowSend !== 'boolean') {
       throw new Error(
         `${f}: guild \`default_allow_send\` must be true or false (got ${JSON.stringify(defaultAllowSend)})`,
       );
     }
-    if (g.id === undefined || g.id === null || g.id === "") {
+    if (g.id === undefined || g.id === null || g.id === '') {
       throw new Error(`${f}: guild entry missing a non-empty string \`id\``);
     }
-    if (typeof g.id !== "string") {
+    if (typeof g.id !== 'string') {
       throw new Error(
         `${f}: guild \`id\` must be a quoted string (got ${typeof g.id}) — an unquoted Discord snowflake ` +
           `(e.g. \`id: 111111111111111118\`) is parsed by YAML as a number and loses precision; quote it (\`id: "111111111111111118"\`)`,
@@ -441,7 +441,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     if (seenIds.has(id))
       throw new Error(`${f}: duplicate guild id "${id}" in \`discord.guilds\``);
     seenIds.add(id);
-    const slug = typeof g.slug === "string" ? g.slug : "";
+    const slug = typeof g.slug === 'string' ? g.slug : '';
     if (!SLUG_RE.test(slug))
       throw new Error(
         `${f}: guild "${id}" \`slug\` must match ^[a-z0-9][a-z0-9-]*$ (got ${JSON.stringify(g.slug)})`,
@@ -458,7 +458,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     const chRaw = g.channels;
     if (
       chRaw !== undefined &&
-      (!chRaw || typeof chRaw !== "object" || Array.isArray(chRaw))
+      (!chRaw || typeof chRaw !== 'object' || Array.isArray(chRaw))
     ) {
       throw new Error(
         `${f}: guild '${slug}' \`channels\` must be a map of channel ids to modes or policy objects`,
@@ -467,7 +467,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     const channelEntries = Object.entries(
       (chRaw ?? {}) as Record<string, unknown>,
     );
-    if (channelEntries.length === 0 && defaultTier === "drop") {
+    if (channelEntries.length === 0 && defaultTier === 'drop') {
       throw new Error(
         `${f}: guild '${slug}' uses default_tier=drop and requires a non-empty \`channels\` map`,
       );
@@ -483,33 +483,33 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       let channelSend: unknown = true;
       if (
         rawPolicy &&
-        typeof rawPolicy === "object" &&
+        typeof rawPolicy === 'object' &&
         !Array.isArray(rawPolicy)
       ) {
         const obj = rawPolicy as Record<string, unknown>;
         const unknown = Object.keys(obj).filter(
-          (key) => key !== "tier" && key !== "allow_send",
+          (key) => key !== 'tier' && key !== 'allow_send',
         );
         if (unknown.length > 0)
           throw new Error(
-            `${f}: guild '${slug}' channel "${cid}" has unknown policy key(s): ${unknown.join(", ")}`,
+            `${f}: guild '${slug}' channel "${cid}" has unknown policy key(s): ${unknown.join(', ')}`,
           );
         tier = obj.tier;
         channelSend = obj.allow_send === undefined ? true : obj.allow_send;
       }
-      if (tier === "muted")
+      if (tier === 'muted')
         throw new Error(
           `${f}: guild '${slug}' channel "${cid}": tier \`muted\` has been renamed \`quiet\` ("mute" now refers to the killswitch)`,
         );
       if (
-        typeof tier !== "string" ||
+        typeof tier !== 'string' ||
         !CHANNEL_MODE_VALUES.includes(tier as ChannelMode)
       ) {
         throw new Error(
           `${f}: guild '${slug}' channel "${cid}" tier must be one of drop|direct|social|quiet (got ${JSON.stringify(tier)})`,
         );
       }
-      if (typeof channelSend !== "boolean") {
+      if (typeof channelSend !== 'boolean') {
         throw new Error(
           `${f}: guild '${slug}' channel "${cid}" \`allow_send\` must be true or false (got ${JSON.stringify(channelSend)})`,
         );
@@ -523,7 +523,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       channelAllowSend[cid] = channelSend;
     }
     const timezone =
-      typeof g.timezone === "string" && g.timezone !== "" ? g.timezone : null;
+      typeof g.timezone === 'string' && g.timezone !== '' ? g.timezone : null;
     const quietHours = parseQuietHours(g.quiet_hours, slug, f);
     if (quietHours && timezone && !validTimezone(timezone)) {
       throw new Error(
@@ -532,7 +532,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     }
     let slashCommands = false;
     if (g.slash_commands !== undefined && g.slash_commands !== null) {
-      if (typeof g.slash_commands !== "boolean") {
+      if (typeof g.slash_commands !== 'boolean') {
         throw new Error(
           `${f}: guild '${slug}' \`slash_commands\` must be true or false (got ${JSON.stringify(g.slash_commands)})`,
         );
@@ -541,7 +541,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     }
     let pluralKit = false;
     if (g.pluralkit !== undefined && g.pluralkit !== null) {
-      if (typeof g.pluralkit !== "boolean") {
+      if (typeof g.pluralkit !== 'boolean') {
         throw new Error(
           `${f}: guild '${slug}' \`pluralkit\` must be true or false (got ${JSON.stringify(g.pluralkit)})`,
         );
@@ -573,7 +573,7 @@ function boolOr(
 ): boolean {
   const v = at(tree, dotted);
   if (v === undefined || v === null) return fallback;
-  if (typeof v !== "boolean") {
+  if (typeof v !== 'boolean') {
     throw new Error(`${file}: key \`${dotted}\` must be true or false`);
   }
   return v;
@@ -591,7 +591,7 @@ function strListOr(
   if (!Array.isArray(v))
     throw new Error(`${file}: key \`${dotted}\` must be a list of strings`);
   return v.map((item, i) => {
-    if (typeof item !== "string" || item === "") {
+    if (typeof item !== 'string' || item === '') {
       throw new Error(
         `${file}: key \`${dotted}[${i}]\` must be a non-empty string`,
       );
@@ -605,9 +605,9 @@ function strListOr(
  * endpoint from receiving a high-value OAuth bearer token. */
 export function normalizeCodexBaseUrl(
   raw: string | null,
-  file = "config.yaml",
+  file = 'config.yaml',
 ): string {
-  const canonical = "https://chatgpt.com/backend-api";
+  const canonical = 'https://chatgpt.com/backend-api';
   if (raw === null) return canonical;
   let parsed: URL;
   try {
@@ -617,20 +617,20 @@ export function normalizeCodexBaseUrl(
       `${file}: llm.base_url must be ${canonical} for provider_type=codex-oauth`,
     );
   }
-  const path = parsed.pathname.replace(/\/+$/, "") || "/";
+  const path = parsed.pathname.replace(/\/+$/, '') || '/';
   if (
-    parsed.protocol !== "https:" ||
-    parsed.hostname !== "chatgpt.com" ||
-    parsed.port !== "" ||
-    parsed.username !== "" ||
-    parsed.password !== "" ||
-    parsed.search !== "" ||
-    parsed.hash !== "" ||
-    path !== "/backend-api"
+    parsed.protocol !== 'https:' ||
+    parsed.hostname !== 'chatgpt.com' ||
+    parsed.port !== '' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    path !== '/backend-api'
   ) {
     throw new Error(
       `${file}: llm.base_url must be exactly ${canonical} for provider_type=codex-oauth ` +
-        "(subscription tokens are never sent to custom endpoints)",
+        '(subscription tokens are never sent to custom endpoints)',
     );
   }
   return canonical;
@@ -641,7 +641,7 @@ function rawMap(
   key: string,
   file: string,
 ): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error(`${file}: key '${key}' must be a mapping`);
   return value as Record<string, unknown>;
 }
@@ -654,14 +654,14 @@ function rawString(
   required = false,
 ): string | null {
   const value = map[key];
-  if (value === undefined || value === null || value === "") {
+  if (value === undefined || value === null || value === '') {
     if (required)
       throw new Error(
         `${file}: missing required key '${dotted}' (expected a non-empty string)`,
       );
     return null;
   }
-  if (typeof value !== "string")
+  if (typeof value !== 'string')
     throw new Error(`${file}: key '${dotted}' must be a non-empty string`);
   return value;
 }
@@ -674,7 +674,7 @@ function rawNumber(
 ): number | null {
   const value = map[key];
   if (value === undefined || value === null) return null;
-  if (typeof value !== "number" || !Number.isFinite(value))
+  if (typeof value !== 'number' || !Number.isFinite(value))
     throw new Error(`${file}: key '${dotted}' must be a finite number or null`);
   return value;
 }
@@ -688,7 +688,7 @@ function rawBoolean(
 ): boolean {
   const value = map[key];
   if (value === undefined || value === null) return fallback;
-  if (typeof value !== "boolean")
+  if (typeof value !== 'boolean')
     throw new Error(`${file}: key '${dotted}' must be true or false`);
   return value;
 }
@@ -698,11 +698,11 @@ function providerType(
   dotted: string,
   file: string,
 ): LlmProviderType {
-  const type = value ?? "openai-compatible";
+  const type = value ?? 'openai-compatible';
   if (
-    type !== "openai-compatible" &&
-    type !== "anthropic-oauth" &&
-    type !== "codex-oauth"
+    type !== 'openai-compatible' &&
+    type !== 'anthropic-oauth' &&
+    type !== 'codex-oauth'
   ) {
     throw new Error(
       `${file}: '${dotted}' must be openai-compatible, anthropic-oauth, or codex-oauth`,
@@ -715,9 +715,9 @@ function apiSurface(
   value: string | null,
   dotted: string,
   file: string,
-): "auto" | "responses" | "chat" {
-  const api = value ?? "auto";
-  if (api !== "auto" && api !== "responses" && api !== "chat")
+): 'auto' | 'responses' | 'chat' {
+  const api = value ?? 'auto';
+  if (api !== 'auto' && api !== 'responses' && api !== 'chat')
     throw new Error(`${file}: '${dotted}' must be auto, responses, or chat`);
   return api;
 }
@@ -728,9 +728,9 @@ function providerBaseUrl(
   dotted: string,
   file: string,
 ): string {
-  if (type === "anthropic-oauth")
-    return configured ?? "https://api.anthropic.com";
-  if (type === "codex-oauth") return normalizeCodexBaseUrl(configured, file);
+  if (type === 'anthropic-oauth')
+    return configured ?? 'https://api.anthropic.com';
+  if (type === 'codex-oauth') return normalizeCodexBaseUrl(configured, file);
   if (!configured) throw new Error(`${file}: missing required key '${dotted}'`);
   return configured;
 }
@@ -738,7 +738,7 @@ function providerBaseUrl(
 function projectLlmRegistry(
   registry: LlmModelRegistry,
   completionReserveTokens: number,
-  source: "canonical" | "legacy",
+  source: 'canonical' | 'legacy',
 ): LlmConfig {
   const main = registry.targets.main;
   return {
@@ -787,7 +787,7 @@ export function configForLlmTarget(
 export function configForLlmRef(config: Config, ref: string): Config {
   return configForLlmTarget(
     config,
-    resolveLlmModelTarget(config.llm.registry, ref, "config: worker model"),
+    resolveLlmModelTarget(config.llm.registry, ref, 'config: worker model'),
   );
 }
 
@@ -804,178 +804,178 @@ function parseLlmConfig(
 ): LlmConfig {
   const completionReserveTokens = numOr(
     tree,
-    "llm.completion_reserve_tokens",
+    'llm.completion_reserve_tokens',
     8192,
     file,
   );
   const canonical =
-    at(tree, "llm.providers") !== undefined ||
-    at(tree, "llm.roles") !== undefined;
+    at(tree, 'llm.providers') !== undefined ||
+    at(tree, 'llm.roles') !== undefined;
   if (!canonical) {
     const type = providerType(
-      optStr(tree, "llm.provider_type", file),
-      "llm.provider_type",
+      optStr(tree, 'llm.provider_type', file),
+      'llm.provider_type',
       file,
     );
-    const oauth = type !== "openai-compatible";
-    const api = apiSurface(optStr(tree, "llm.api", file), "llm.api", file);
-    if (type === "codex-oauth" && api === "chat")
+    const oauth = type !== 'openai-compatible';
+    const api = apiSurface(optStr(tree, 'llm.api', file), 'llm.api', file);
+    if (type === 'codex-oauth' && api === 'chat')
       throw new Error(
         `${file}: llm.api=chat is not supported for provider_type=codex-oauth (Codex uses Responses)`,
       );
-    const configuredBaseUrl = optStr(tree, "llm.base_url", file);
-    const externalThinking = boolOr(tree, "llm.external_thinking", false, file);
-    if (externalThinking && type !== "codex-oauth")
+    const configuredBaseUrl = optStr(tree, 'llm.base_url', file);
+    const externalThinking = boolOr(tree, 'llm.external_thinking', false, file);
+    if (externalThinking && type !== 'codex-oauth')
       throw new Error(
         `${file}: llm.external_thinking currently requires llm.provider_type=codex-oauth`,
       );
     const legacy: LegacyLlmDefinition = {
       providerType: type,
       apiKey: oauth
-        ? (optStr(tree, "llm.api_key", file) ?? "")
-        : reqStr(tree, "llm.api_key", file),
-      baseUrl: providerBaseUrl(type, configuredBaseUrl, "llm.base_url", file),
-      model: reqStr(tree, "llm.model", file),
-      contextSize: optNum(tree, "llm.context_size", file),
-      reasoningEffort: optStr(tree, "llm.reasoning_effort", file) ?? "high",
+        ? (optStr(tree, 'llm.api_key', file) ?? '')
+        : reqStr(tree, 'llm.api_key', file),
+      baseUrl: providerBaseUrl(type, configuredBaseUrl, 'llm.base_url', file),
+      model: reqStr(tree, 'llm.model', file),
+      contextSize: optNum(tree, 'llm.context_size', file),
+      reasoningEffort: optStr(tree, 'llm.reasoning_effort', file) ?? 'high',
       externalThinking,
       streamIdleTimeoutMs: numOr(
         tree,
-        "llm.stream_idle_timeout_ms",
+        'llm.stream_idle_timeout_ms',
         externalThinking ? 60_000 : 180_000,
         file,
       ),
       callTimeoutMs: numOr(
         tree,
-        "llm.call_timeout_ms",
+        'llm.call_timeout_ms',
         externalThinking ? 120_000 : 1_200_000,
         file,
       ),
       api,
-      reasoningSummary: optStr(tree, "llm.reasoning_summary", file),
-      reasoningContext: optStr(tree, "llm.reasoning_context", file),
+      reasoningSummary: optStr(tree, 'llm.reasoning_summary', file),
+      reasoningContext: optStr(tree, 'llm.reasoning_context', file),
     };
     logger.warn(
-      "config: legacy flat llm keys are deprecated; migrate to llm.providers + llm.roles",
+      'config: legacy flat llm keys are deprecated; migrate to llm.providers + llm.roles',
     );
     return projectLlmRegistry(
       legacyLlmModelRegistry(legacy, { motorEnabled: true }),
       completionReserveTokens,
-      "legacy",
+      'legacy',
     );
   }
 
   const legacyKeys = [
-    "provider_type",
-    "api_key",
-    "base_url",
-    "model",
-    "context_size",
-    "reasoning_effort",
-    "external_thinking",
-    "stream_idle_timeout_ms",
-    "call_timeout_ms",
-    "api",
-    "reasoning_summary",
-    "reasoning_context",
+    'provider_type',
+    'api_key',
+    'base_url',
+    'model',
+    'context_size',
+    'reasoning_effort',
+    'external_thinking',
+    'stream_idle_timeout_ms',
+    'call_timeout_ms',
+    'api',
+    'reasoning_summary',
+    'reasoning_context',
   ];
   const mixed = legacyKeys.filter(
     (key) => at(tree, `llm.${key}`) !== undefined,
   );
   if (mixed.length > 0)
     throw new Error(
-      `${file}: canonical llm.providers/roles cannot be mixed with legacy llm keys: ${mixed.join(", ")}`,
+      `${file}: canonical llm.providers/roles cannot be mixed with legacy llm keys: ${mixed.join(', ')}`,
     );
-  const providersRaw = rawMap(at(tree, "llm.providers"), "llm.providers", file);
+  const providersRaw = rawMap(at(tree, 'llm.providers'), 'llm.providers', file);
   const providers: Record<string, LlmProviderDefinition> = {};
   for (const [providerId, value] of Object.entries(providersRaw)) {
     const dotted = `llm.providers.${providerId}`;
     const raw = rawMap(value, dotted, file);
     const allowed = new Set([
-      "provider_type",
-      "api_key",
-      "base_url",
-      "api",
-      "external_thinking",
-      "stream_idle_timeout_ms",
-      "call_timeout_ms",
-      "models",
+      'provider_type',
+      'api_key',
+      'base_url',
+      'api',
+      'external_thinking',
+      'stream_idle_timeout_ms',
+      'call_timeout_ms',
+      'models',
     ]);
     const unknown = Object.keys(raw).filter((key) => !allowed.has(key));
     if (unknown.length)
       throw new Error(
-        `${file}: unknown key(s) under '${dotted}': ${unknown.join(", ")}`,
+        `${file}: unknown key(s) under '${dotted}': ${unknown.join(', ')}`,
       );
     const type = providerType(
-      rawString(raw, "provider_type", `${dotted}.provider_type`, file),
+      rawString(raw, 'provider_type', `${dotted}.provider_type`, file),
       `${dotted}.provider_type`,
       file,
     );
     const api = apiSurface(
-      rawString(raw, "api", `${dotted}.api`, file),
+      rawString(raw, 'api', `${dotted}.api`, file),
       `${dotted}.api`,
       file,
     );
-    if (type === "codex-oauth" && api === "chat")
+    if (type === 'codex-oauth' && api === 'chat')
       throw new Error(
         `${file}: '${dotted}.api=chat' is not supported for codex-oauth`,
       );
     const externalThinking = rawBoolean(
       raw,
-      "external_thinking",
+      'external_thinking',
       `${dotted}.external_thinking`,
       file,
       false,
     );
     const configuredBaseUrl = rawString(
       raw,
-      "base_url",
+      'base_url',
       `${dotted}.base_url`,
       file,
     );
     const modelsRaw = rawMap(raw.models, `${dotted}.models`, file);
-    const models: LlmProviderDefinition["models"] = {};
+    const models: LlmProviderDefinition['models'] = {};
     for (const [modelId, modelValue] of Object.entries(modelsRaw)) {
       const modelDotted = `${dotted}.models.${modelId}`;
       const model = rawMap(modelValue, modelDotted, file);
       const modelAllowed = new Set([
-        "name",
-        "context_size",
-        "reasoning_effort",
-        "reasoning_summary",
-        "reasoning_context",
+        'name',
+        'context_size',
+        'reasoning_effort',
+        'reasoning_summary',
+        'reasoning_context',
       ]);
       const modelUnknown = Object.keys(model).filter(
         (key) => !modelAllowed.has(key),
       );
       if (modelUnknown.length)
         throw new Error(
-          `${file}: unknown key(s) under '${modelDotted}': ${modelUnknown.join(", ")}`,
+          `${file}: unknown key(s) under '${modelDotted}': ${modelUnknown.join(', ')}`,
         );
       models[modelId] = {
-        name: rawString(model, "name", `${modelDotted}.name`, file, true)!,
+        name: rawString(model, 'name', `${modelDotted}.name`, file, true)!,
         contextSize: rawNumber(
           model,
-          "context_size",
+          'context_size',
           `${modelDotted}.context_size`,
           file,
         ),
         reasoningEffort:
           rawString(
             model,
-            "reasoning_effort",
+            'reasoning_effort',
             `${modelDotted}.reasoning_effort`,
             file,
-          ) ?? "high",
+          ) ?? 'high',
         reasoningSummary: rawString(
           model,
-          "reasoning_summary",
+          'reasoning_summary',
           `${modelDotted}.reasoning_summary`,
           file,
         ),
         reasoningContext: rawString(
           model,
-          "reasoning_context",
+          'reasoning_context',
           `${modelDotted}.reasoning_context`,
           file,
         ),
@@ -984,9 +984,9 @@ function parseLlmConfig(
     providers[providerId] = {
       providerType: type,
       apiKey:
-        type === "openai-compatible"
-          ? rawString(raw, "api_key", `${dotted}.api_key`, file, true)!
-          : (rawString(raw, "api_key", `${dotted}.api_key`, file) ?? ""),
+        type === 'openai-compatible'
+          ? rawString(raw, 'api_key', `${dotted}.api_key`, file, true)!
+          : (rawString(raw, 'api_key', `${dotted}.api_key`, file) ?? ''),
       baseUrl: providerBaseUrl(
         type,
         configuredBaseUrl,
@@ -998,44 +998,44 @@ function parseLlmConfig(
       streamIdleTimeoutMs:
         rawNumber(
           raw,
-          "stream_idle_timeout_ms",
+          'stream_idle_timeout_ms',
           `${dotted}.stream_idle_timeout_ms`,
           file,
         ) ?? (externalThinking ? 60_000 : 180_000),
       callTimeoutMs:
-        rawNumber(raw, "call_timeout_ms", `${dotted}.call_timeout_ms`, file) ??
+        rawNumber(raw, 'call_timeout_ms', `${dotted}.call_timeout_ms`, file) ??
         (externalThinking ? 120_000 : 1_200_000),
       models,
     };
   }
-  const rolesRaw = rawMap(at(tree, "llm.roles"), "llm.roles", file);
+  const rolesRaw = rawMap(at(tree, 'llm.roles'), 'llm.roles', file);
   const unknownRoles = Object.keys(rolesRaw).filter(
     (key) =>
-      key !== "main" &&
-      key !== "classifier" &&
-      key !== "motor" &&
-      key !== "secretary",
+      key !== 'main' &&
+      key !== 'classifier' &&
+      key !== 'motor' &&
+      key !== 'secretary',
   );
   if (unknownRoles.length)
     throw new Error(
-      `${file}: unknown llm.roles key(s): ${unknownRoles.join(", ")}`,
+      `${file}: unknown llm.roles key(s): ${unknownRoles.join(', ')}`,
     );
   const registry = createLlmModelRegistry({
     providers,
     roles: {
-      main: rawString(rolesRaw, "main", "llm.roles.main", file, true)!,
+      main: rawString(rolesRaw, 'main', 'llm.roles.main', file, true)!,
       classifier: rawString(
         rolesRaw,
-        "classifier",
-        "llm.roles.classifier",
+        'classifier',
+        'llm.roles.classifier',
         file,
         true,
       )!,
-      motor: rawString(rolesRaw, "motor", "llm.roles.motor", file),
-      secretary: rawString(rolesRaw, "secretary", "llm.roles.secretary", file),
+      motor: rawString(rolesRaw, 'motor', 'llm.roles.motor', file),
+      secretary: rawString(rolesRaw, 'secretary', 'llm.roles.secretary', file),
     },
   });
-  return projectLlmRegistry(registry, completionReserveTokens, "canonical");
+  return projectLlmRegistry(registry, completionReserveTokens, 'canonical');
 }
 
 const DUR_UNITS: Record<string, number> = {
@@ -1054,8 +1054,8 @@ export function parseDuration(
   dotted: string,
   file: string,
 ): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
     const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/.exec(v.trim());
     if (m) return Math.round(parseFloat(m[1]) * DUR_UNITS[m[2]]);
   }
@@ -1085,7 +1085,7 @@ function durOr(
 export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   let raw: string;
   try {
-    raw = fs.readFileSync(filePath, "utf8");
+    raw = fs.readFileSync(filePath, 'utf8');
   } catch (e) {
     throw new Error(
       `Config file not readable: ${filePath} — ${e instanceof Error ? e.message : String(e)}. ` +
@@ -1100,39 +1100,39 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     const pos =
       e instanceof YAMLParseError && e.linePos?.[0]
         ? ` (line ${e.linePos[0].line}, column ${e.linePos[0].col})`
-        : "";
+        : '';
     throw new Error(
       `Config parse error in ${filePath}${pos}: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  if (typeof tree !== "object" || Array.isArray(tree)) {
+  if (typeof tree !== 'object' || Array.isArray(tree)) {
     throw new Error(
       `Config parse error in ${filePath}: top level must be a mapping`,
     );
   }
 
   const f = filePath;
-  const dataDirectory = path.resolve(reqStr(tree, "paths.data_directory", f));
+  const dataDirectory = path.resolve(reqStr(tree, 'paths.data_directory', f));
   const harnessRoot = resolveHarnessRoot();
-  const logLevel = parseLogLevel(optStr(tree, "log_level", f) ?? undefined);
+  const logLevel = parseLogLevel(optStr(tree, 'log_level', f) ?? undefined);
   const logger = createLogger(logLevel);
-  const botToken = reqStr(tree, "discord.bot_token", f);
+  const botToken = reqStr(tree, 'discord.bot_token', f);
 
   // Compaction thresholds: validate 0 < keep < trigger.
   const compactTriggerTokens = numOr(
     tree,
-    "compaction.trigger_tokens",
+    'compaction.trigger_tokens',
     180000,
     f,
   );
-  const compactKeepTokens = numOr(tree, "compaction.keep_tokens", 50000, f);
+  const compactKeepTokens = numOr(tree, 'compaction.keep_tokens', 50000, f);
   if (!(compactKeepTokens > 0 && compactKeepTokens < compactTriggerTokens)) {
     throw new Error(
       `${f}: compaction.keep_tokens (${compactKeepTokens}) must satisfy 0 < keep < compaction.trigger_tokens (${compactTriggerTokens})`,
     );
   }
 
-  if (at(tree, "fleet") !== undefined) {
+  if (at(tree, 'fleet') !== undefined) {
     throw new Error(
       `${f}: legacy \`fleet\` configuration was removed; use the native \`workers\` section`,
     );
@@ -1142,32 +1142,32 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   return {
     llm,
     operator: (() => {
-      const name = optStr(tree, "operator.name", f) ?? "operator";
+      const name = optStr(tree, 'operator.name', f) ?? 'operator';
       if (!name.trim())
         throw new Error(`${f}: key \`operator.name\` must not be empty`);
       return {
         name,
-        pronouns: optStr(tree, "operator.pronouns", f),
-        discordId: optStr(tree, "operator.discord_id", f),
+        pronouns: optStr(tree, 'operator.pronouns', f),
+        discordId: optStr(tree, 'operator.discord_id', f),
       };
     })(),
     discord: (() => {
-      if (at(tree, "discord.guild_id") !== undefined) {
+      if (at(tree, 'discord.guild_id') !== undefined) {
         throw new Error(
           `${f}: \`discord.guild_id\` has been replaced by the \`discord.guilds\` list — see config.example.yaml for the per-guild shape (id, slug, receive/send policy)`,
         );
       }
-      if (at(tree, "discord.owner_id") !== undefined) {
+      if (at(tree, 'discord.owner_id') !== undefined) {
         throw new Error(
           `${f}: \`discord.owner_id\` has been renamed \`operator.discord_id\``,
         );
       }
-      if (at(tree, "discord.operator_id") !== undefined) {
+      if (at(tree, 'discord.operator_id') !== undefined) {
         throw new Error(
           `${f}: \`discord.operator_id\` has been moved to \`operator.discord_id\``,
         );
       }
-      const ignoredUserIds = strListOr(tree, "discord.ignored_user_ids", [], f);
+      const ignoredUserIds = strListOr(tree, 'discord.ignored_user_ids', [], f);
       for (const [i, id] of ignoredUserIds.entries()) {
         if (!/^\d+$/.test(id))
           throw new Error(
@@ -1177,19 +1177,19 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       return {
         botToken,
         applicationId:
-          optStr(tree, "discord.application_id", f) ?? appIdFromToken(botToken),
-        errorChannelId: optStr(tree, "discord.error_channel_id", f),
+          optStr(tree, 'discord.application_id', f) ?? appIdFromToken(botToken),
+        errorChannelId: optStr(tree, 'discord.error_channel_id', f),
         ignoredUserIds: [...new Set(ignoredUserIds)],
         attachmentInlineMaxBytes: numOr(
           tree,
-          "discord.attachment_inline_max_bytes",
+          'discord.attachment_inline_max_bytes',
           32768,
           f,
         ),
-        ambientTickMs: numOr(tree, "discord.ambient_tick_ms", 600_000, f),
-        ambientAllowSend: boolOr(tree, "discord.ambient_allow_send", true, f),
-        emoteImages: boolOr(tree, "discord.emote_images", true, f),
-        emoteKeyframes: numOr(tree, "discord.emote_keyframes", 4, f),
+        ambientTickMs: numOr(tree, 'discord.ambient_tick_ms', 600_000, f),
+        ambientAllowSend: boolOr(tree, 'discord.ambient_allow_send', true, f),
+        emoteImages: boolOr(tree, 'discord.emote_images', true, f),
+        emoteKeyframes: numOr(tree, 'discord.emote_keyframes', 4, f),
         guilds: parseGuilds(tree, f),
       };
     })(),
@@ -1200,7 +1200,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
     memory: (() => {
       const consolidationThresholdTokens = numOr(
         tree,
-        "memory.consolidation_threshold_tokens",
+        'memory.consolidation_threshold_tokens',
         32_000,
         f,
       );
@@ -1213,7 +1213,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           : 24_000;
       const consolidationTargetTokens = numOr(
         tree,
-        "memory.consolidation_target_tokens",
+        'memory.consolidation_target_tokens',
         defaultTarget,
         f,
       );
@@ -1244,32 +1244,32 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       return { consolidationThresholdTokens, consolidationTargetTokens };
     })(),
     heartbeat: {
-      intervalMs: numOr(tree, "heartbeat.interval_ms", 60 * 60 * 1000, f),
+      intervalMs: numOr(tree, 'heartbeat.interval_ms', 60 * 60 * 1000, f),
       maxIntervalMs: numOr(
         tree,
-        "heartbeat.max_interval_ms",
+        'heartbeat.max_interval_ms',
         4 * 60 * 60 * 1000,
         f,
       ),
       reflectionMinMessages: numOr(
         tree,
-        "heartbeat.reflection_min_messages",
+        'heartbeat.reflection_min_messages',
         3,
         f,
       ),
       socialNudgeMs: numOr(
         tree,
-        "heartbeat.social_nudge_ms",
+        'heartbeat.social_nudge_ms',
         12 * 60 * 60 * 1000,
         f,
       ),
     },
     sandbox: {
-      syncTimeoutMs: numOr(tree, "sandbox.sync_timeout_ms", 15000, f),
-      asyncDeadlineMs: numOr(tree, "sandbox.async_deadline_ms", 120000, f),
+      syncTimeoutMs: numOr(tree, 'sandbox.sync_timeout_ms', 15000, f),
+      asyncDeadlineMs: numOr(tree, 'sandbox.async_deadline_ms', 120000, f),
       persistentRetirementGraceMs: (() => {
-        const currentKey = "sandbox.persistent_retirement_grace_ms";
-        const legacyKey = "sandbox.persistent_idle_gc_ms";
+        const currentKey = 'sandbox.persistent_retirement_grace_ms';
+        const legacyKey = 'sandbox.persistent_idle_gc_ms';
         const current = at(tree, currentKey);
         const legacy = at(tree, legacyKey);
         if (current !== undefined && legacy !== undefined) {
@@ -1283,24 +1283,24 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           throw new Error(`${f}: ${key} must be a non-negative integer`);
         return value;
       })(),
-      previewMaxBytes: numOr(tree, "sandbox.preview_max_bytes", 16384, f),
-      logMaxBytes: numOr(tree, "sandbox.log_max_bytes", 32768, f),
+      previewMaxBytes: numOr(tree, 'sandbox.preview_max_bytes', 16384, f),
+      logMaxBytes: numOr(tree, 'sandbox.log_max_bytes', 32768, f),
     },
     modules: (() => {
-      const enabledPresent = at(tree, "modules.enabled") !== undefined;
-      const disabledPresent = at(tree, "modules.disabled") !== undefined;
+      const enabledPresent = at(tree, 'modules.enabled') !== undefined;
+      const disabledPresent = at(tree, 'modules.disabled') !== undefined;
       if (enabledPresent && disabledPresent) {
         throw new Error(
           `${f}: \`modules.enabled\` and \`modules.disabled\` are mutually exclusive`,
         );
       }
-      const validate = (key: "enabled" | "disabled"): BuiltinModuleId[] => {
+      const validate = (key: 'enabled' | 'disabled'): BuiltinModuleId[] => {
         const values = strListOr(tree, `modules.${key}`, [], f);
         const seen = new Set<string>();
         return values.map((value, index) => {
           if (!(BUILTIN_MODULE_IDS as readonly string[]).includes(value)) {
             throw new Error(
-              `${f}: key \`modules.${key}[${index}]\` names unknown module '${value}' (expected one of: ${BUILTIN_MODULE_IDS.join(", ")})`,
+              `${f}: key \`modules.${key}[${index}]\` names unknown module '${value}' (expected one of: ${BUILTIN_MODULE_IDS.join(', ')})`,
             );
           }
           if (seen.has(value))
@@ -1312,76 +1312,82 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         });
       };
       return enabledPresent
-        ? { enabled: validate("enabled"), disabled: [] }
+        ? { enabled: validate('enabled'), disabled: [] }
         : {
             enabled: null,
-            disabled: disabledPresent ? validate("disabled") : [],
+            disabled: disabledPresent ? validate('disabled') : [],
           };
     })(),
     console: {
-      enabled: boolOr(tree, "console.enabled", true, f),
-      mcpEnabled: boolOr(tree, "console.mcp_enabled", false, f),
-      port: numOr(tree, "console.port", 8787, f),
-      host: optStr(tree, "console.host", f) ?? "127.0.0.1",
+      enabled: boolOr(tree, 'console.enabled', true, f),
+      mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, f),
+      port: numOr(tree, 'console.port', 8787, f),
+      host: optStr(tree, 'console.host', f) ?? '127.0.0.1',
     },
-    kagi: { apiKey: optStr(tree, "kagi.api_key", f) },
+    kagi: { apiKey: optStr(tree, 'kagi.api_key', f) },
     bluesky: (() => {
-      const id = optStr(tree, "bluesky.identifier", f);
-      const pw = optStr(tree, "bluesky.app_password", f);
+      const id = optStr(tree, 'bluesky.identifier', f);
+      const pw = optStr(tree, 'bluesky.app_password', f);
       if (!id || !pw) return null;
       return {
-        service: optStr(tree, "bluesky.service", f) ?? "https://bsky.social",
+        service: optStr(tree, 'bluesky.service', f) ?? 'https://bsky.social',
         identifier: id,
         appPassword: pw,
       };
     })(),
     workers: (() => {
-      const raw = at(tree, "workers");
+      const raw = at(tree, 'workers');
       if (
         raw !== undefined &&
-        (!raw || typeof raw !== "object" || Array.isArray(raw))
+        (!raw || typeof raw !== 'object' || Array.isArray(raw))
       )
         throw new Error(`${f}: workers must be a mapping`);
       const mapping = (raw ?? {}) as Record<string, unknown>;
       const unknown = Object.keys(mapping).filter(
         (key) =>
-          !["enabled", "max_concurrent", "server", "workspace", "kubernetes"].includes(key),
+          ![
+            'enabled',
+            'max_concurrent',
+            'server',
+            'workspace',
+            'kubernetes',
+          ].includes(key),
       );
       if (unknown.length)
-        throw new Error(`${f}: unknown workers key(s): ${unknown.join(", ")}`);
+        throw new Error(`${f}: unknown workers key(s): ${unknown.join(', ')}`);
       for (const [pathKey, allowed] of [
-        ["workers.server", ["enabled", "host", "port"]],
+        ['workers.server', ['enabled', 'host', 'port']],
         [
-          "workers.workspace",
-          ["source_root", "max_source_bytes", "max_artifact_bytes"],
+          'workers.workspace',
+          ['source_root', 'max_source_bytes', 'max_artifact_bytes'],
         ],
         [
-          "workers.kubernetes",
+          'workers.kubernetes',
           [
-            "enabled",
-            "namespace",
-            "template",
-            "container",
-            "broker_url",
-            "kubectl_path",
-            "context",
+            'enabled',
+            'namespace',
+            'template',
+            'container',
+            'broker_url',
+            'kubectl_path',
+            'context',
           ],
         ],
       ] as const) {
         const nested = at(tree, pathKey);
         if (nested === undefined) continue;
-        if (!nested || typeof nested !== "object" || Array.isArray(nested))
+        if (!nested || typeof nested !== 'object' || Array.isArray(nested))
           throw new Error(`${f}: ${pathKey} must be a mapping`);
         const nestedUnknown = Object.keys(nested).filter(
           (key) => !(allowed as readonly string[]).includes(key),
         );
         if (nestedUnknown.length)
           throw new Error(
-            `${f}: unknown ${pathKey} key(s): ${nestedUnknown.join(", ")}`,
+            `${f}: unknown ${pathKey} key(s): ${nestedUnknown.join(', ')}`,
           );
       }
-      const enabled = boolOr(tree, "workers.enabled", false, f);
-      const maxConcurrent = numOr(tree, "workers.max_concurrent", 4, f);
+      const enabled = boolOr(tree, 'workers.enabled', false, f);
+      const maxConcurrent = numOr(tree, 'workers.max_concurrent', 4, f);
       if (
         !Number.isInteger(maxConcurrent) ||
         maxConcurrent < 1 ||
@@ -1390,38 +1396,42 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         throw new Error(
           `${f}: workers.max_concurrent must be an integer from 1 to 128`,
         );
-      const port = numOr(tree, "workers.server.port", 8790, f);
-        if (!Number.isInteger(port) || port < 1 || port > 65_535)
-          throw new Error(
+      const port = numOr(tree, 'workers.server.port', 8790, f);
+      if (!Number.isInteger(port) || port < 1 || port > 65_535)
+        throw new Error(
           `${f}: workers.server.port must be an integer from 1 to 65535`,
-          );
+        );
       const server = {
-        enabled: boolOr(tree, "workers.server.enabled", false, f),
-        host: optStr(tree, "workers.server.host", f) ?? "127.0.0.1",
-          port,
-        };
-      const sourceRoot = optStr(tree, "workers.workspace.source_root", f);
+        enabled: boolOr(tree, 'workers.server.enabled', false, f),
+        host: optStr(tree, 'workers.server.host', f) ?? '127.0.0.1',
+        port,
+      };
+      const sourceRoot = optStr(tree, 'workers.workspace.source_root', f);
       if (sourceRoot !== null && !path.isAbsolute(sourceRoot))
         throw new Error(
           `${f}: workers.workspace.source_root must be an absolute path`,
         );
       const maxSourceBytes = numOr(
         tree,
-        "workers.workspace.max_source_bytes",
+        'workers.workspace.max_source_bytes',
         8 * 1024 * 1024,
         f,
       );
       const maxArtifactBytes = numOr(
         tree,
-        "workers.workspace.max_artifact_bytes",
+        'workers.workspace.max_artifact_bytes',
         8 * 1024 * 1024,
         f,
       );
       for (const [key, value] of [
-        ["max_source_bytes", maxSourceBytes],
-        ["max_artifact_bytes", maxArtifactBytes],
+        ['max_source_bytes', maxSourceBytes],
+        ['max_artifact_bytes', maxArtifactBytes],
       ] as const) {
-        if (!Number.isSafeInteger(value) || value < 1024 || value > 64 * 1024 * 1024)
+        if (
+          !Number.isSafeInteger(value) ||
+          value < 1024 ||
+          value > 64 * 1024 * 1024
+        )
           throw new Error(
             `${f}: workers.workspace.${key} must be an integer from 1024 to 67108864`,
           );
@@ -1429,33 +1439,33 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       const workspace = { sourceRoot, maxSourceBytes, maxArtifactBytes };
       const kubernetesEnabled = boolOr(
         tree,
-        "workers.kubernetes.enabled",
+        'workers.kubernetes.enabled',
         false,
         f,
       );
       const kubernetes = {
         enabled: kubernetesEnabled,
         namespace:
-          optStr(tree, "workers.kubernetes.namespace", f) ?? "elpis-workers",
+          optStr(tree, 'workers.kubernetes.namespace', f) ?? 'elpis-workers',
         template:
-          optStr(tree, "workers.kubernetes.template", f) ?? "elpis-worker",
-        container: optStr(tree, "workers.kubernetes.container", f) ?? "worker",
-        brokerUrl: optStr(tree, "workers.kubernetes.broker_url", f),
+          optStr(tree, 'workers.kubernetes.template', f) ?? 'elpis-worker',
+        container: optStr(tree, 'workers.kubernetes.container', f) ?? 'worker',
+        brokerUrl: optStr(tree, 'workers.kubernetes.broker_url', f),
         kubectlPath:
-          optStr(tree, "workers.kubernetes.kubectl_path", f) ?? "kubectl",
-        context: optStr(tree, "workers.kubernetes.context", f),
+          optStr(tree, 'workers.kubernetes.kubectl_path', f) ?? 'kubectl',
+        context: optStr(tree, 'workers.kubernetes.context', f),
       };
       const dnsLabel = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
       for (const [key, value] of [
-        ["namespace", kubernetes.namespace],
-        ["template", kubernetes.template],
-        ["container", kubernetes.container],
+        ['namespace', kubernetes.namespace],
+        ['template', kubernetes.template],
+        ['container', kubernetes.container],
       ] as const) {
         if (!dnsLabel.test(value) || value.length > 63)
-            throw new Error(
+          throw new Error(
             `${f}: workers.kubernetes.${key} must be a Kubernetes DNS label`,
-            );
-          }
+          );
+      }
       if (!kubernetes.kubectlPath)
         throw new Error(
           `${f}: workers.kubernetes.kubectl_path must not be empty`,
@@ -1470,12 +1480,12 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           );
         }
         if (
-          (broker.protocol !== "http:" && broker.protocol !== "https:") ||
+          (broker.protocol !== 'http:' && broker.protocol !== 'https:') ||
           broker.username ||
           broker.password ||
           broker.search ||
           broker.hash ||
-          (broker.pathname !== "/" && broker.pathname !== "")
+          (broker.pathname !== '/' && broker.pathname !== '')
         )
           throw new Error(
             `${f}: workers.kubernetes.broker_url must be a credential-free http(s) origin`,
@@ -1499,23 +1509,25 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       return { enabled, maxConcurrent, server, workspace, kubernetes };
     })(),
     secretary: (() => {
-      const raw = at(tree, "secretary");
+      const raw = at(tree, 'secretary');
       if (
         raw !== undefined &&
-        (!raw || typeof raw !== "object" || Array.isArray(raw))
+        (!raw || typeof raw !== 'object' || Array.isArray(raw))
       )
         throw new Error(`${f}: secretary must be a mapping`);
       const mapping = (raw ?? {}) as Record<string, unknown>;
       const unknown = Object.keys(mapping).filter(
-        (key) => !["enabled", "max_concurrent", "kubernetes"].includes(key),
+        (key) => !['enabled', 'max_concurrent', 'kubernetes'].includes(key),
       );
       if (unknown.length)
-        throw new Error(`${f}: unknown secretary key(s): ${unknown.join(", ")}`);
-      const kubernetesRaw = at(tree, "secretary.kubernetes");
+        throw new Error(
+          `${f}: unknown secretary key(s): ${unknown.join(', ')}`,
+        );
+      const kubernetesRaw = at(tree, 'secretary.kubernetes');
       if (
         kubernetesRaw !== undefined &&
         (!kubernetesRaw ||
-          typeof kubernetesRaw !== "object" ||
+          typeof kubernetesRaw !== 'object' ||
           Array.isArray(kubernetesRaw))
       )
         throw new Error(`${f}: secretary.kubernetes must be a mapping`);
@@ -1526,20 +1538,20 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       const kubernetesUnknown = Object.keys(kubernetesMapping).filter(
         (key) =>
           ![
-            "namespace",
-            "template",
-            "container",
-            "broker_url",
-            "kubectl_path",
-            "context",
+            'namespace',
+            'template',
+            'container',
+            'broker_url',
+            'kubectl_path',
+            'context',
           ].includes(key),
       );
       if (kubernetesUnknown.length)
         throw new Error(
-          `${f}: unknown secretary.kubernetes key(s): ${kubernetesUnknown.join(", ")}`,
+          `${f}: unknown secretary.kubernetes key(s): ${kubernetesUnknown.join(', ')}`,
         );
-      const enabled = boolOr(tree, "secretary.enabled", false, f);
-      const maxConcurrent = numOr(tree, "secretary.max_concurrent", 1, f);
+      const enabled = boolOr(tree, 'secretary.enabled', false, f);
+      const maxConcurrent = numOr(tree, 'secretary.max_concurrent', 1, f);
       if (
         !Number.isInteger(maxConcurrent) ||
         maxConcurrent < 1 ||
@@ -1550,23 +1562,22 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         );
       const kubernetes = {
         namespace:
-          optStr(tree, "secretary.kubernetes.namespace", f) ??
-          "elpis-residence",
+          optStr(tree, 'secretary.kubernetes.namespace', f) ??
+          'elpis-residence',
         template:
-          optStr(tree, "secretary.kubernetes.template", f) ??
-          "elpis-secretary",
+          optStr(tree, 'secretary.kubernetes.template', f) ?? 'elpis-secretary',
         container:
-          optStr(tree, "secretary.kubernetes.container", f) ?? "secretary",
-        brokerUrl: optStr(tree, "secretary.kubernetes.broker_url", f),
+          optStr(tree, 'secretary.kubernetes.container', f) ?? 'secretary',
+        brokerUrl: optStr(tree, 'secretary.kubernetes.broker_url', f),
         kubectlPath:
-          optStr(tree, "secretary.kubernetes.kubectl_path", f) ?? "kubectl",
-        context: optStr(tree, "secretary.kubernetes.context", f),
+          optStr(tree, 'secretary.kubernetes.kubectl_path', f) ?? 'kubectl',
+        context: optStr(tree, 'secretary.kubernetes.context', f),
       };
       const dnsLabel = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
       for (const [key, value] of [
-        ["namespace", kubernetes.namespace],
-        ["template", kubernetes.template],
-        ["container", kubernetes.container],
+        ['namespace', kubernetes.namespace],
+        ['template', kubernetes.template],
+        ['container', kubernetes.container],
       ] as const)
         if (!dnsLabel.test(value) || value.length > 63)
           throw new Error(
@@ -1586,12 +1597,12 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           );
         }
         if (
-          (broker.protocol !== "http:" && broker.protocol !== "https:") ||
+          (broker.protocol !== 'http:' && broker.protocol !== 'https:') ||
           broker.username ||
           broker.password ||
           broker.search ||
           broker.hash ||
-          (broker.pathname !== "/" && broker.pathname !== "")
+          (broker.pathname !== '/' && broker.pathname !== '')
         )
           throw new Error(
             `${f}: secretary.kubernetes.broker_url must be a credential-free http(s) origin`,
@@ -1603,7 +1614,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
           throw new Error(
             `${f}: secretary.enabled requires llm.roles.secretary`,
           );
-        if (!boolOr(tree, "workers.server.enabled", false, f))
+        if (!boolOr(tree, 'workers.server.enabled', false, f))
           throw new Error(
             `${f}: secretary.enabled requires workers.server.enabled`,
           );
@@ -1615,13 +1626,13 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
       return { enabled, maxConcurrent, kubernetes };
     })(),
     usageTracker: {
-      enabled: boolOr(tree, "usage_tracker.enabled", true, f),
-      pollIntervalMs: numOr(tree, "usage_tracker.poll_interval_ms", 300000, f),
+      enabled: boolOr(tree, 'usage_tracker.enabled', true, f),
+      pollIntervalMs: numOr(tree, 'usage_tracker.poll_interval_ms', 300000, f),
     },
     paths: {
       dataDirectory,
-      soulPath: path.join(dataDirectory, "SOUL.md"),
-      memoryPath: path.join(dataDirectory, "MEMORY.md"),
+      soulPath: path.join(dataDirectory, 'SOUL.md'),
+      memoryPath: path.join(dataDirectory, 'MEMORY.md'),
       harnessRoot,
     },
     logger,

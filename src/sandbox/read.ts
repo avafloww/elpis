@@ -16,7 +16,12 @@ function renderedByteLength(s: string): number {
 
 /** read()'s continuation marker: an explicit cursor telling the agent exactly
  * which call gets it the rest, instead of a silent head/tail elision. */
-function readContinuationMarker(p: string, from: number, shownTo: number, totalLines: number): string {
+function readContinuationMarker(
+  p: string,
+  from: number,
+  shownTo: number,
+  totalLines: number,
+): string {
   return `\n[showing lines ${from}–${shownTo} of ${totalLines} — continue: read('${p}', {from: ${shownTo + 1}})]`;
 }
 
@@ -37,30 +42,31 @@ export function formatRead(
 ): string {
   const lines = fileContent.split('\n');
   const totalLines = lines.length;
- // Compute `to` first, then clamp `from` to never exceed it — this kills BOTH
- // a from-past-EOF request and any explicitly-reversed {from, to} range, so no
- // reversed pair ever reaches the header/footer below.
+  // Compute `to` first, then clamp `from` to never exceed it — this kills BOTH
+  // a from-past-EOF request and any explicitly-reversed {from, to} range, so no
+  // reversed pair ever reaches the header/footer below.
   const to = Math.min(totalLines, opts.to ?? totalLines);
   const from = Math.max(1, Math.min(opts.from ?? 1, to));
   const numbered = opts.numbers !== false;
 
- // Numbered lines carry a plain 1-based line number for orientation and
- // transcript delineation. (Edits are string-match, not ref-addressed, so no
- // content hash is needed.)
+  // Numbered lines carry a plain 1-based line number for orientation and
+  // transcript delineation. (Edits are string-match, not ref-addressed, so no
+  // content hash is needed.)
   const renderLine = (lineNo: number): string => {
     const l = lines[lineNo - 1];
     return numbered ? `${String(lineNo).padStart(4)}: ${l}` : l;
   };
-  const header = (shownTo: number): string => `${p} (${totalLines} lines, showing ${from}-${shownTo})\n`;
+  const header = (shownTo: number): string =>
+    `${p} (${totalLines} lines, showing ${from}-${shownTo})\n`;
 
   const fullBody = [];
   for (let i = from; i <= to; i++) fullBody.push(renderLine(i));
   const fullText = header(to) + fullBody.join('\n');
 
- // Reserve headroom off the configured budget for preview's own wrapper
- // (the `string(N chars): ` prefix and its head/tail split's quote/escape
- // overhead) — without this, a render that just barely fits read's own
- // check can still get trimmed by preview's downstream hard cap.
+  // Reserve headroom off the configured budget for preview's own wrapper
+  // (the `string(N chars): ` prefix and its head/tail split's quote/escape
+  // overhead) — without this, a render that just barely fits read's own
+  // check can still get trimmed by preview's downstream hard cap.
   const reserve = Math.min(512, Math.max(64, Math.floor(maxBytes * 0.1)));
   const budget = Math.max(1, maxBytes - reserve);
 
@@ -68,23 +74,30 @@ export function formatRead(
     return fullText;
   }
 
- // Clamp to the last COMPLETE line (within the requested range) that fits
- // alongside the continuation marker for that exact cutoff.
+  // Clamp to the last COMPLETE line (within the requested range) that fits
+  // alongside the continuation marker for that exact cutoff.
   let shownTo = from - 1;
   let body = '';
   for (let i = from; i <= to; i++) {
     const candidateBody = body ? body + '\n' + renderLine(i) : renderLine(i);
-    const candidateText = header(i) + candidateBody + readContinuationMarker(p, from, i, totalLines);
+    const candidateText =
+      header(i) +
+      candidateBody +
+      readContinuationMarker(p, from, i, totalLines);
     if (renderedByteLength(candidateText) > budget) break;
     body = candidateBody;
     shownTo = i;
   }
- // Always show at least one line, even if it alone exceeds the reserved
- // headroom — an empty range is useless and the marker still tells the
- // agent how to get the rest.
+  // Always show at least one line, even if it alone exceeds the reserved
+  // headroom — an empty range is useless and the marker still tells the
+  // agent how to get the rest.
   if (shownTo < from) {
     shownTo = from;
     body = renderLine(from);
   }
-  return header(shownTo) + body + readContinuationMarker(p, from, shownTo, totalLines);
+  return (
+    header(shownTo) +
+    body +
+    readContinuationMarker(p, from, shownTo, totalLines)
+  );
 }

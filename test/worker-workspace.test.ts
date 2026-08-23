@@ -1,36 +1,36 @@
-import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import test from "node:test";
-import { createWorkerControlCredential } from "../src/worker/auth.js";
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import test from 'node:test';
+import { createWorkerControlCredential } from '../src/worker/auth.js';
 import {
   WorkerWorkspaceError,
   WorkerWorkspaceStore,
-} from "../src/worker/workspace.js";
-import { openDatabase } from "../src/store/db.js";
+} from '../src/worker/workspace.js';
+import { openDatabase } from '../src/store/db.js';
 
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "worker-workspace-"));
-  const sourceRoot = path.join(root, "source");
-  const storageRoot = path.join(root, "custody");
-  fs.mkdirSync(path.join(sourceRoot, "src"), { recursive: true });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-workspace-'));
+  const sourceRoot = path.join(root, 'source');
+  const storageRoot = path.join(root, 'custody');
+  fs.mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
   fs.writeFileSync(
-    path.join(sourceRoot, ".gitignore"),
-    "node_modules/\ndist/\n",
+    path.join(sourceRoot, '.gitignore'),
+    'node_modules/\ndist/\n',
   );
   fs.writeFileSync(
-    path.join(sourceRoot, "src", "value.ts"),
-    "export const value = 1;\n",
+    path.join(sourceRoot, 'src', 'value.ts'),
+    'export const value = 1;\n',
   );
-  execFileSync("git", ["init", "-q"], { cwd: sourceRoot });
-  execFileSync("git", ["config", "user.name", "fixture"], { cwd: sourceRoot });
-  execFileSync("git", ["config", "user.email", "fixture@example.invalid"], {
+  execFileSync('git', ['init', '-q'], { cwd: sourceRoot });
+  execFileSync('git', ['config', 'user.name', 'fixture'], { cwd: sourceRoot });
+  execFileSync('git', ['config', 'user.email', 'fixture@example.invalid'], {
     cwd: sourceRoot,
   });
-  execFileSync("git", ["add", "."], { cwd: sourceRoot });
-  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: sourceRoot });
+  execFileSync('git', ['add', '.'], { cwd: sourceRoot });
+  execFileSync('git', ['commit', '-qm', 'baseline'], { cwd: sourceRoot });
   const db = openDatabase(root);
   db.prepare(
     `INSERT INTO mind_items
@@ -63,10 +63,10 @@ function insertSession(
   ).run(tokenDigest, source.revision, source.sha256, source.sizeBytes);
 }
 
-test("workspace source export is exact, private, token-bound, and rejects dirty roots", async () => {
+test('workspace source export is exact, private, token-bound, and rejects dirty roots', async () => {
   const f = fixture();
   try {
-    const source = await f.store.prepareSource("wrk-a1b2c3d4");
+    const source = await f.store.prepareSource('wrk-a1b2c3d4');
     assert.ok(source);
     assert.match(source.revision, /^[0-9a-f]{40}$/);
     assert.match(source.sha256, /^[0-9a-f]{64}$/);
@@ -77,24 +77,24 @@ test("workspace source export is exact, private, token-bound, and rejects dirty 
     assert.equal(served?.sizeBytes, served?.data.length);
     const archive = path.join(
       f.storageRoot,
-      "sources",
-      "wrk-a1b2c3d4",
-      "source.tar.gz",
+      'sources',
+      'wrk-a1b2c3d4',
+      'source.tar.gz',
     );
     assert.equal(fs.statSync(archive).mode & 0o777, 0o600);
     assert.throws(
-      () => f.store.sourceForWorker("x".repeat(43)),
+      () => f.store.sourceForWorker('x'.repeat(43)),
       (error: unknown) =>
-        error instanceof WorkerWorkspaceError && error.code === "unauthorized",
+        error instanceof WorkerWorkspaceError && error.code === 'unauthorized',
     );
-    fs.writeFileSync(path.join(f.sourceRoot, "src", "value.ts"), "changed\n");
+    fs.writeFileSync(path.join(f.sourceRoot, 'src', 'value.ts'), 'changed\n');
     await assert.rejects(
-      () => f.store.prepareSource("wrk-b1b2c3d4"),
+      () => f.store.prepareSource('wrk-b1b2c3d4'),
       (error: unknown) =>
-        error instanceof WorkerWorkspaceError && error.code === "conflict",
+        error instanceof WorkerWorkspaceError && error.code === 'conflict',
     );
     assert.equal(
-      fs.existsSync(path.join(f.storageRoot, "sources", "wrk-b1b2c3d4")),
+      fs.existsSync(path.join(f.storageRoot, 'sources', 'wrk-b1b2c3d4')),
       false,
     );
   } finally {
@@ -103,62 +103,62 @@ test("workspace source export is exact, private, token-bound, and rejects dirty 
   }
 });
 
-test("artifact custody recomputes receipts, is idempotent, and exposes verified parent paths", async () => {
+test('artifact custody recomputes receipts, is idempotent, and exposes verified parent paths', async () => {
   const f = fixture();
   try {
-    const source = (await f.store.prepareSource("wrk-a1b2c3d4"))!;
+    const source = (await f.store.prepareSource('wrk-a1b2c3d4'))!;
     insertSession(f.db, f.credential.digest, source);
-    const data = Buffer.from("deterministic patch bytes");
+    const data = Buffer.from('deterministic patch bytes');
     const first = f.store.putArtifactForWorker({
       token: f.credential.token,
-      key: "workspace.patch.gz",
-      kind: "unified_patch_gzip",
+      key: 'workspace.patch.gz',
+      kind: 'unified_patch_gzip',
       sourceSha256: source.sha256,
       data,
     });
     const again = f.store.putArtifactForWorker({
       token: f.credential.token,
-      key: "workspace.patch.gz",
-      kind: "unified_patch_gzip",
+      key: 'workspace.patch.gz',
+      kind: 'unified_patch_gzip',
       sourceSha256: source.sha256,
       data,
       sha256: first.sha256,
     });
     assert.deepEqual(again, first);
-    assert.equal(f.store.listArtifacts("wrk-a1b2c3d4").length, 1);
-    const file = f.store.artifactFile("wrk-a1b2c3d4", "workspace.patch.gz");
+    assert.equal(f.store.listArtifacts('wrk-a1b2c3d4').length, 1);
+    const file = f.store.artifactFile('wrk-a1b2c3d4', 'workspace.patch.gz');
     assert.deepEqual(fs.readFileSync(file.localPath), data);
     assert.equal(fs.statSync(file.localPath).mode & 0o777, 0o600);
     assert.throws(
       () =>
         f.store.putArtifactForWorker({
           token: f.credential.token,
-          key: "workspace.patch.gz",
-          kind: "unified_patch_gzip",
+          key: 'workspace.patch.gz',
+          kind: 'unified_patch_gzip',
           sourceSha256: source.sha256,
-          data: Buffer.from("different"),
+          data: Buffer.from('different'),
         }),
       (error: unknown) =>
-        error instanceof WorkerWorkspaceError && error.code === "conflict",
+        error instanceof WorkerWorkspaceError && error.code === 'conflict',
     );
     assert.throws(
       () =>
         f.store.putArtifactForWorker({
           token: f.credential.token,
-          key: "../escape",
-          kind: "unified_patch_gzip",
+          key: '../escape',
+          kind: 'unified_patch_gzip',
           sourceSha256: source.sha256,
           data,
         }),
       (error: unknown) =>
         error instanceof WorkerWorkspaceError &&
-        error.code === "invalid_request",
+        error.code === 'invalid_request',
     );
-    fs.writeFileSync(file.localPath, "corrupt");
+    fs.writeFileSync(file.localPath, 'corrupt');
     assert.throws(
-      () => f.store.artifactFile("wrk-a1b2c3d4", "workspace.patch.gz"),
+      () => f.store.artifactFile('wrk-a1b2c3d4', 'workspace.patch.gz'),
       (error: unknown) =>
-        error instanceof WorkerWorkspaceError && error.code === "corrupt",
+        error instanceof WorkerWorkspaceError && error.code === 'corrupt',
     );
   } finally {
     f.db.close();

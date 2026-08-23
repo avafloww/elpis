@@ -1,4 +1,4 @@
-import type { ChatMessage } from "../llm/llm.js";
+import type { ChatMessage } from '../llm/llm.js';
 
 export interface KernelToolContext {
   callIndex: number;
@@ -7,12 +7,12 @@ export interface KernelToolContext {
 
 export interface KernelToolOutput {
   content: string;
-  sends?: ChatMessage["sends"];
-  run?: ChatMessage["run"];
+  sends?: ChatMessage['sends'];
+  run?: ChatMessage['run'];
 }
 
 export type KernelToolHandler = (
-  call: NonNullable<ChatMessage["tool_calls"]>[number],
+  call: NonNullable<ChatMessage['tool_calls']>[number],
   context: KernelToolContext,
 ) => Promise<KernelToolOutput>;
 
@@ -35,8 +35,8 @@ export async function applyKernelTurn(
   handle: KernelToolHandler,
   hooks: KernelTurnHooks,
 ): Promise<KernelTurnApplication> {
-  if (assistant.role !== "assistant") {
-    throw new Error("kernel turn requires an assistant message");
+  if (assistant.role !== 'assistant') {
+    throw new Error('kernel turn requires an assistant message');
   }
   await hooks.appendAssistant(assistant);
   const toolMessages = await dispatchKernelTools(
@@ -52,7 +52,7 @@ export async function applyKernelTurn(
 }
 
 export async function dispatchKernelTools(
-  assistant: Pick<ChatMessage, "tool_calls">,
+  assistant: Pick<ChatMessage, 'tool_calls'>,
   handle: KernelToolHandler,
   append: (
     message: ChatMessage,
@@ -66,7 +66,7 @@ export async function dispatchKernelTools(
     const context = { callIndex, callCount: calls.length };
     const output = await handle(call, context);
     const message: ChatMessage = {
-      role: "tool",
+      role: 'tool',
       tool_call_id: call.id,
       content: output.content,
       ...(output.sends ? { sends: output.sends } : {}),

@@ -13,10 +13,14 @@ export function spawnText(cmd: string, args: string[]): Promise<string> {
     try {
       const child = spawn(cmd, args);
       let out = '';
-      child.stdout?.on('data', (d: Buffer) => { out += d.toString('utf8'); });
+      child.stdout?.on('data', (d: Buffer) => {
+        out += d.toString('utf8');
+      });
       child.on('error', () => resolve(''));
       child.on('close', () => resolve(out));
-    } catch { resolve(''); }
+    } catch {
+      resolve('');
+    }
   });
 }
 
@@ -25,9 +29,23 @@ export function spawnText(cmd: string, args: string[]): Promise<string> {
  * as process-group leaders, so `-pid` reaches their whole tree. The escalation
  * timer is unref'd — it must never hold the harness open on shutdown. */
 export function killTree(pid: number): void {
-  try { process.kill(-pid, 'SIGTERM'); } catch { /* group may not exist */ }
-  try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-  setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 2000).unref();
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    /* group may not exist */
+  }
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    /* already gone */
+  }
+  setTimeout(() => {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+  }, 2000).unref();
 }
 
 /** True when `pid` is a live process. EPERM counts as alive: the signal-0 probe

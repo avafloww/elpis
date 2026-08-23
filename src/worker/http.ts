@@ -1,43 +1,43 @@
-import * as http from "node:http";
-import type { Logger } from "../lib/log.js";
-import { SecretaryConversationError } from "../secretary/conversation.js";
+import * as http from 'node:http';
+import type { Logger } from '../lib/log.js';
+import { SecretaryConversationError } from '../secretary/conversation.js';
 import {
   SecretaryConversationRequestError,
   dispatchSecretaryConversationRequest,
   type SecretaryConversationService,
-} from "../secretary/conversation-request.js";
+} from '../secretary/conversation-request.js';
 import {
   SecretaryCompletionError,
   type SecretaryCompletionReply,
-} from "../secretary/completion.js";
-import { SecretaryMindError } from "../secretary/mind.js";
+} from '../secretary/completion.js';
+import { SecretaryMindError } from '../secretary/mind.js';
 import {
   SecretaryMindRequestError,
   dispatchSecretaryMindRequest,
   type SecretaryMindService,
-} from "../secretary/mind-request.js";
+} from '../secretary/mind-request.js';
 import {
   WorkerCompletionError,
   type WorkerCompletionReply,
-} from "./completion.js";
-import { WorkerMailboxError } from "./mailbox.js";
+} from './completion.js';
+import { WorkerMailboxError } from './mailbox.js';
 import {
   WorkerMailboxRequestError,
   dispatchWorkerMailboxRequest,
   type WorkerMailboxService,
-} from "./mailbox-request.js";
-import { WorkerMindError } from "./mind.js";
+} from './mailbox-request.js';
+import { WorkerMindError } from './mind.js';
 import {
   WorkerMindRequestError,
   dispatchWorkerMindRequest,
   type WorkerMindService,
-} from "./mind-request.js";
-import { WorkerWorkspaceError } from "./workspace.js";
+} from './mind-request.js';
+import { WorkerWorkspaceError } from './workspace.js';
 import {
   WorkerWorkspaceRequestError,
   dispatchWorkerWorkspaceRequest,
   type WorkerWorkspaceService,
-} from "./workspace-request.js";
+} from './workspace-request.js';
 
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -75,9 +75,9 @@ export interface WorkerCompletionHttpOptions {
 function json(res: http.ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(body),
-    "cache-control": "no-store",
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
   });
   res.end(body);
 }
@@ -86,22 +86,22 @@ async function readBody(
   req: http.IncomingMessage,
   maxBytes: number,
 ): Promise<unknown> {
-  const declared = Number(req.headers["content-length"]);
+  const declared = Number(req.headers['content-length']);
   if (Number.isFinite(declared) && declared > maxBytes)
-    throw new HttpInputError(413, "request body is too large");
+    throw new HttpInputError(413, 'request body is too large');
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += bytes.length;
     if (size > maxBytes)
-      throw new HttpInputError(413, "request body is too large");
+      throw new HttpInputError(413, 'request body is too large');
     chunks.push(bytes);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new HttpInputError(400, "request body must be JSON");
+    throw new HttpInputError(400, 'request body must be JSON');
   }
 }
 
@@ -116,92 +116,92 @@ class HttpInputError extends Error {
 
 function statusFor(error: WorkerCompletionError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "invalid_request":
+    case 'invalid_request':
       return 400;
-    case "unsupported":
+    case 'unsupported':
       return 422;
-    case "busy":
+    case 'busy':
       return 409;
-    case "capacity":
+    case 'capacity':
       return 429;
-    case "binding_changed":
+    case 'binding_changed':
       return 409;
   }
 }
 
 function statusForSecretaryCompletion(error: SecretaryCompletionError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "invalid_request":
+    case 'invalid_request':
       return 400;
-    case "unsupported":
+    case 'unsupported':
       return 422;
-    case "busy":
-    case "binding_changed":
+    case 'busy':
+    case 'binding_changed':
       return 409;
-    case "capacity":
+    case 'capacity':
       return 429;
   }
 }
 
 function statusForSecretaryMind(error: SecretaryMindError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "invalid_request":
+    case 'invalid_request':
       return 400;
-    case "not_found":
+    case 'not_found':
       return 404;
-    case "too_large":
+    case 'too_large':
       return 413;
   }
 }
 
 function statusForMind(error: WorkerMindError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "outside_scope":
+    case 'outside_scope':
       return 403;
-    case "not_found":
+    case 'not_found':
       return 404;
   }
 }
 
 function statusForMailbox(error: WorkerMailboxError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "invalid_request":
+    case 'invalid_request':
       return 400;
-    case "not_found":
+    case 'not_found':
       return 404;
-    case "conflict":
+    case 'conflict':
       return 409;
   }
 }
 
 function statusForWorkspace(error: WorkerWorkspaceError): number {
   switch (error.code) {
-    case "unauthorized":
+    case 'unauthorized':
       return 401;
-    case "invalid_request":
+    case 'invalid_request':
       return 400;
-    case "unavailable":
+    case 'unavailable':
       return 404;
-    case "conflict":
+    case 'conflict':
       return 409;
-    case "corrupt":
+    case 'corrupt':
       return 502;
   }
 }
 
 function bearer(req: http.IncomingMessage): string | null {
   const value = req.headers.authorization;
-  if (typeof value !== "string") return null;
+  if (typeof value !== 'string') return null;
   const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(value);
   return match?.[1] ?? null;
 }
@@ -213,15 +213,15 @@ export function createWorkerCompletionHttpServer(
   const workspaceMaxBodyBytes =
     options.workspaceMaxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   return http.createServer(async (req, res) => {
-    const mindRequest = req.url === "/v1/mind";
-    const mailboxRequest = req.url === "/v1/mailbox";
-    const workspaceRequest = req.url === "/v1/workspace";
-    const secretaryCompletionRequest = req.url === "/v1/secretary/complete";
+    const mindRequest = req.url === '/v1/mind';
+    const mailboxRequest = req.url === '/v1/mailbox';
+    const workspaceRequest = req.url === '/v1/workspace';
+    const secretaryCompletionRequest = req.url === '/v1/secretary/complete';
     const secretaryConversationRequest =
-      req.url === "/v1/secretary/conversation";
-    const secretaryMindRequest = req.url === "/v1/secretary/mind";
+      req.url === '/v1/secretary/conversation';
+    const secretaryMindRequest = req.url === '/v1/secretary/mind';
     if (
-      req.url !== "/v1/complete" &&
+      req.url !== '/v1/complete' &&
       !mindRequest &&
       !mailboxRequest &&
       !workspaceRequest &&
@@ -229,7 +229,7 @@ export function createWorkerCompletionHttpServer(
       !secretaryConversationRequest &&
       !secretaryMindRequest
     ) {
-      json(res, 404, { error: "not found" });
+      json(res, 404, { error: 'not found' });
       return;
     }
     if (
@@ -240,12 +240,12 @@ export function createWorkerCompletionHttpServer(
       (secretaryConversationRequest && !options.secretaryConversation) ||
       (secretaryMindRequest && !options.secretaryMind)
     ) {
-      json(res, 404, { error: "not found" });
+      json(res, 404, { error: 'not found' });
       return;
     }
-    if (req.method !== "POST") {
-      res.setHeader("allow", "POST");
-      json(res, 405, { error: "method not allowed" });
+    if (req.method !== 'POST') {
+      res.setHeader('allow', 'POST');
+      json(res, 405, { error: 'method not allowed' });
       return;
     }
     const token = bearer(req);
@@ -255,14 +255,14 @@ export function createWorkerCompletionHttpServer(
           secretaryCompletionRequest ||
           secretaryConversationRequest ||
           secretaryMindRequest
-            ? "secretary session is unavailable"
-            : "worker session is unavailable",
+            ? 'secretary session is unavailable'
+            : 'worker session is unavailable',
       });
       return;
     }
     const controller = new AbortController();
-    req.once("aborted", () => controller.abort());
-    res.once("close", () => {
+    req.once('aborted', () => controller.abort());
+    res.once('close', () => {
       if (!res.writableEnded) controller.abort();
     });
     try {
@@ -270,8 +270,8 @@ export function createWorkerCompletionHttpServer(
         req,
         workspaceRequest ? workspaceMaxBodyBytes : maxBodyBytes,
       );
-      if (!body || typeof body !== "object" || Array.isArray(body))
-        throw new HttpInputError(400, "request must be an object");
+      if (!body || typeof body !== 'object' || Array.isArray(body))
+        throw new HttpInputError(400, 'request must be an object');
       const input = body as Record<string, unknown>;
       if (secretaryConversationRequest) {
         json(res, 200, {
@@ -313,9 +313,9 @@ export function createWorkerCompletionHttpServer(
         return;
       }
       if (input.protocol !== 1)
-        throw new HttpInputError(400, "protocol must equal 1");
+        throw new HttpInputError(400, 'protocol must equal 1');
       const unknown = Object.keys(input).filter(
-        (key) => key !== "protocol" && key !== "messages",
+        (key) => key !== 'protocol' && key !== 'messages',
       );
       if (unknown.length > 0)
         throw new HttpInputError(
@@ -333,19 +333,19 @@ export function createWorkerCompletionHttpServer(
       if (error instanceof HttpInputError) {
         json(res, error.status, { error: error.message });
       } else if (error instanceof SecretaryConversationRequestError) {
-        json(res, 400, { error: error.message, code: "invalid_request" });
+        json(res, 400, { error: error.message, code: 'invalid_request' });
       } else if (error instanceof SecretaryConversationError) {
         const status =
-          error.code === "unauthorized"
+          error.code === 'unauthorized'
             ? 401
-            : error.code === "invalid_request"
+            : error.code === 'invalid_request'
               ? 400
-              : error.code === "not_found"
+              : error.code === 'not_found'
                 ? 404
                 : 409;
         json(res, status, { error: error.message, code: error.code });
       } else if (error instanceof SecretaryMindRequestError) {
-        json(res, 400, { error: error.message, code: "invalid_request" });
+        json(res, 400, { error: error.message, code: 'invalid_request' });
       } else if (error instanceof SecretaryMindError) {
         json(res, statusForSecretaryMind(error), {
           error: error.message,
@@ -361,7 +361,7 @@ export function createWorkerCompletionHttpServer(
         error instanceof WorkerMailboxRequestError ||
         error instanceof WorkerWorkspaceRequestError
       ) {
-        json(res, 400, { error: error.message, code: "invalid_request" });
+        json(res, 400, { error: error.message, code: 'invalid_request' });
       } else if (error instanceof WorkerMindError) {
         json(res, statusForMind(error), {
           error: error.message,
@@ -386,10 +386,10 @@ export function createWorkerCompletionHttpServer(
           secretaryMindRequest
         ) {
           const operation = secretaryMindRequest
-            ? "Mind"
+            ? 'Mind'
             : secretaryConversationRequest
-              ? "conversation"
-              : "completion";
+              ? 'conversation'
+              : 'completion';
           options.logger.error(`secretary ${operation} request failed`, error);
           json(res, 502, {
             error: `secretary ${operation} request failed`,
@@ -397,18 +397,18 @@ export function createWorkerCompletionHttpServer(
           return;
         }
         const operation = mindRequest
-          ? "Mind"
+          ? 'Mind'
           : mailboxRequest
-            ? "mailbox"
+            ? 'mailbox'
             : workspaceRequest
-              ? "workspace"
-              : "completion";
+              ? 'workspace'
+              : 'completion';
         options.logger.error(`worker ${operation} request failed`, error);
         json(res, 502, {
           error:
             mindRequest || mailboxRequest || workspaceRequest
               ? `worker ${operation} request failed`
-              : "worker completion failed",
+              : 'worker completion failed',
         });
       }
     }
@@ -421,9 +421,9 @@ export async function listenWorkerCompletionHttpServer(
   port: number,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    server.once('error', reject);
     server.listen(port, host, () => {
-      server.off("error", reject);
+      server.off('error', reject);
       resolve();
     });
   });

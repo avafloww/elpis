@@ -1,25 +1,25 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import type { AddressInfo } from 'node:net';
 import {
   createWorkerCompletionHttpServer,
   listenWorkerCompletionHttpServer,
-} from "../src/worker/http.js";
-import { WorkerCompletionError } from "../src/worker/completion.js";
-import { WorkerMailboxError } from "../src/worker/mailbox.js";
-import type { WorkerMailboxService } from "../src/worker/mailbox-request.js";
-import { WorkerMindError } from "../src/worker/mind.js";
-import type { WorkerMindService } from "../src/worker/mind-request.js";
-import type { SecretaryConversationService } from "../src/secretary/conversation-request.js";
-import type { WorkerWorkspaceService } from "../src/worker/workspace-request.js";
-import { noopLogger } from "../src/lib/log.js";
+} from '../src/worker/http.js';
+import { WorkerCompletionError } from '../src/worker/completion.js';
+import { WorkerMailboxError } from '../src/worker/mailbox.js';
+import type { WorkerMailboxService } from '../src/worker/mailbox-request.js';
+import { WorkerMindError } from '../src/worker/mind.js';
+import type { WorkerMindService } from '../src/worker/mind-request.js';
+import type { SecretaryConversationService } from '../src/secretary/conversation-request.js';
+import type { WorkerWorkspaceService } from '../src/worker/workspace-request.js';
+import { noopLogger } from '../src/lib/log.js';
 
-const TOKEN = "a".repeat(43);
+const TOKEN = 'a'.repeat(43);
 
 async function fixture(
   complete: Parameters<
     typeof createWorkerCompletionHttpServer
-  >[0]["broker"]["complete"],
+  >[0]['broker']['complete'],
   maxBodyBytes?: number,
   mind?: WorkerMindService,
   mailbox?: WorkerMailboxService,
@@ -32,12 +32,12 @@ async function fixture(
     mailbox,
     workspace,
     secretaryConversation,
-    host: "127.0.0.1",
+    host: '127.0.0.1',
     port: 0,
     logger: noopLogger,
     maxBodyBytes,
   });
-  await listenWorkerCompletionHttpServer(server, "127.0.0.1", 0);
+  await listenWorkerCompletionHttpServer(server, '127.0.0.1', 0);
   const port = (server.address() as AddressInfo).port;
   return {
     server,
@@ -49,44 +49,44 @@ async function fixture(
   };
 }
 
-test("HTTP workspace transport dispatches only token-bound closed operations", async () => {
+test('HTTP workspace transport dispatches only token-bound closed operations', async () => {
   const calls: unknown[] = [];
-  const sourceData = Buffer.from("source");
+  const sourceData = Buffer.from('source');
   const workspace: WorkerWorkspaceService = {
     sourceForWorker(token) {
-      calls.push({ operation: "source", token });
+      calls.push({ operation: 'source', token });
       return {
         binding: {
-          sessionId: "wrk-a1b2c3d4",
-          worker: "worker:otter",
-          modelRef: "p/worker",
-          mindId: "elm-worker001",
-          runtime: "kubernetes",
+          sessionId: 'wrk-a1b2c3d4',
+          worker: 'worker:otter',
+          modelRef: 'p/worker',
+          mindId: 'elm-worker001',
+          runtime: 'kubernetes',
         },
-        revision: "a".repeat(40),
-        sha256: "b".repeat(64),
+        revision: 'a'.repeat(40),
+        sha256: 'b'.repeat(64),
         sizeBytes: sourceData.length,
         data: sourceData,
       };
     },
     putArtifactForWorker(input) {
-      calls.push({ operation: "put", token: input.token, key: input.key });
+      calls.push({ operation: 'put', token: input.token, key: input.key });
       return {
         id: 1,
-        sessionId: "wrk-a1b2c3d4",
+        sessionId: 'wrk-a1b2c3d4',
         key: input.key,
         kind: input.kind,
         sourceSha256: input.sourceSha256,
         sha256: input.sha256!,
         sizeBytes: input.data.length,
-        relativePath: "not-returned",
+        relativePath: 'not-returned',
         createdAt: 1,
       };
     },
   };
   const f = await fixture(
     async () => {
-      throw new Error("completion must not run");
+      throw new Error('completion must not run');
     },
     undefined,
     undefined,
@@ -95,66 +95,66 @@ test("HTTP workspace transport dispatches only token-bound closed operations", a
   );
   const headers = {
     authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
+    'content-type': 'application/json',
   };
   let response = await fetch(f.workspaceUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
-    body: JSON.stringify({ protocol: 1, operation: "source" }),
+    body: JSON.stringify({ protocol: 1, operation: 'source' }),
   });
   assert.equal(response.status, 200);
   assert.equal(
     ((await response.json()) as any).source.data,
-    sourceData.toString("base64"),
+    sourceData.toString('base64'),
   );
-  const patch = Buffer.from("patch");
+  const patch = Buffer.from('patch');
   response = await fetch(f.workspaceUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
     body: JSON.stringify({
       protocol: 1,
-      operation: "put_artifact",
-      key: "workspace.patch.gz",
-      kind: "unified_patch_gzip",
-      sourceSha256: "b".repeat(64),
-      sha256: "c".repeat(64),
-      data: patch.toString("base64"),
+      operation: 'put_artifact',
+      key: 'workspace.patch.gz',
+      kind: 'unified_patch_gzip',
+      sourceSha256: 'b'.repeat(64),
+      sha256: 'c'.repeat(64),
+      data: patch.toString('base64'),
     }),
   });
   assert.equal(response.status, 200);
   assert.equal(
     ((await response.json()) as any).artifact.key,
-    "workspace.patch.gz",
+    'workspace.patch.gz',
   );
   assert.deepEqual(calls, [
-    { operation: "source", token: TOKEN },
-    { operation: "put", token: TOKEN, key: "workspace.patch.gz" },
+    { operation: 'source', token: TOKEN },
+    { operation: 'put', token: TOKEN, key: 'workspace.patch.gz' },
   ]);
   await close(f.server);
 });
 
-test("HTTP secretary conversation route dispatches only strict token-bound operations", async () => {
+test('HTTP secretary conversation route dispatches only strict token-bound operations', async () => {
   const calls: unknown[] = [];
   const secretaryConversation: SecretaryConversationService = {
     pull(token) {
-      calls.push({ operation: "pull", token });
+      calls.push({ operation: 'pull', token });
       return {
         binding: {
-          sessionId: "sec-AAAAAAAAAAAAAAAAAAAAAA",
-          rootMindId: "elm-000000a1",
-          modelRef: "p/secretary",
-          runtime: "kubernetes",
+          sessionId: 'sec-AAAAAAAAAAAAAAAAAAAAAA',
+          rootMindId: 'elm-000000a1',
+          modelRef: 'p/secretary',
+          runtime: 'kubernetes',
         },
         turn: null,
       };
     },
     complete() {
-      throw new Error("complete must not run");
+      throw new Error('complete must not run');
     },
   };
   const f = await fixture(
     async () => {
-      throw new Error("worker completion must not run");
+      throw new Error('worker completion must not run');
     },
     undefined,
     undefined,
@@ -163,26 +163,26 @@ test("HTTP secretary conversation route dispatches only strict token-bound opera
     secretaryConversation,
   );
   const response = await fetch(f.secretaryConversationUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
-    body: JSON.stringify({ protocol: 1, operation: "pull" }),
+    body: JSON.stringify({ protocol: 1, operation: 'pull' }),
   });
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as any).protocol, 1);
-  assert.deepEqual(calls, [{ operation: "pull", token: TOKEN }]);
+  assert.deepEqual(calls, [{ operation: 'pull', token: TOKEN }]);
   const spoofed = await fetch(f.secretaryConversationUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
     body: JSON.stringify({
       protocol: 1,
-      operation: "pull",
-      sessionId: "spoof",
+      operation: 'pull',
+      sessionId: 'spoof',
     }),
   });
   assert.equal(spoofed.status, 400);
@@ -198,69 +198,69 @@ async function close(
   );
 }
 
-test("HTTP completion transport passes only token and messages to bound broker", async () => {
+test('HTTP completion transport passes only token and messages to bound broker', async () => {
   const calls: unknown[] = [];
   const f = await fixture(async (token, messages, signal) => {
     calls.push({ token, messages, aborted: signal?.aborted });
     return {
       binding: {
-        sessionId: "f-1",
-        worker: "worker:otter",
-        modelRef: "p/worker",
-        mindId: "elm-worker001",
-        runtime: "kubernetes",
+        sessionId: 'f-1',
+        worker: 'worker:otter',
+        modelRef: 'p/worker',
+        mindId: 'elm-worker001',
+        runtime: 'kubernetes',
       },
       result: {
-        message: { role: "assistant", content: "ok" },
+        message: { role: 'assistant', content: 'ok' },
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         stripped: false,
       },
     };
   });
   const response = await fetch(f.url, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
     body: JSON.stringify({
       protocol: 1,
-      messages: [{ role: "user", content: "work" }],
+      messages: [{ role: 'user', content: 'work' }],
     }),
   });
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get('cache-control'), 'no-store');
   const body = (await response.json()) as Record<string, unknown>;
   assert.equal(body.protocol, 1);
   assert.deepEqual(calls, [
     {
       token: TOKEN,
-      messages: [{ role: "user", content: "work" }],
+      messages: [{ role: 'user', content: 'work' }],
       aborted: false,
     },
   ]);
   await close(f.server);
 });
 
-test("HTTP transport rejects spoofable routing fields, bad auth, methods, and oversized bodies", async () => {
+test('HTTP transport rejects spoofable routing fields, bad auth, methods, and oversized bodies', async () => {
   let calls = 0;
   const f = await fixture(async () => {
     calls++;
-    throw new Error("must not call");
+    throw new Error('must not call');
   }, 80);
   const headers = {
     authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
+    'content-type': 'application/json',
   };
   assert.equal(
     (
       await fetch(f.url, {
-        method: "POST",
+        method: 'POST',
         headers,
         body: JSON.stringify({
           protocol: 1,
           messages: [],
-          modelRef: "spoof/model",
+          modelRef: 'spoof/model',
         }),
       })
     ).status,
@@ -269,7 +269,7 @@ test("HTTP transport rejects spoofable routing fields, bad auth, methods, and ov
   assert.equal(
     (
       await fetch(f.url, {
-        method: "POST",
+        method: 'POST',
         body: JSON.stringify({ protocol: 1, messages: [] }),
       })
     ).status,
@@ -279,11 +279,11 @@ test("HTTP transport rejects spoofable routing fields, bad auth, methods, and ov
   assert.equal(
     (
       await fetch(f.url, {
-        method: "POST",
+        method: 'POST',
         headers,
         body: JSON.stringify({
           protocol: 1,
-          messages: [{ role: "user", content: "x".repeat(100) }],
+          messages: [{ role: 'user', content: 'x'.repeat(100) }],
         }),
       })
     ).status,
@@ -293,137 +293,137 @@ test("HTTP transport rejects spoofable routing fields, bad auth, methods, and ov
   await close(f.server);
 });
 
-test("HTTP transport maps worker errors without leaking generic failures", async () => {
+test('HTTP transport maps worker errors without leaking generic failures', async () => {
   const busy = await fixture(async () => {
-    throw new WorkerCompletionError("busy", "already running");
+    throw new WorkerCompletionError('busy', 'already running');
   });
   let response = await fetch(busy.url, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
     body: JSON.stringify({ protocol: 1, messages: [] }),
   });
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    error: "already running",
-    code: "busy",
+    error: 'already running',
+    code: 'busy',
   });
   await close(busy.server);
 
   const failed = await fixture(async () => {
-    throw new Error("provider secret detail");
+    throw new Error('provider secret detail');
   });
   response = await fetch(failed.url, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
     body: JSON.stringify({ protocol: 1, messages: [] }),
   });
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), {
-    error: "worker completion failed",
+    error: 'worker completion failed',
   });
   await close(failed.server);
 });
 
-test("HTTP Mind transport passes only token and closed operation input to the broker", async () => {
+test('HTTP Mind transport passes only token and closed operation input to the broker', async () => {
   const calls: unknown[] = [];
   const mind: WorkerMindService = {
     get(token, id) {
-      calls.push({ method: "get", token, id });
+      calls.push({ method: 'get', token, id });
       return {
         binding: {
-          sessionId: "f-1",
-          worker: "worker:otter",
-          modelRef: "p/worker",
-          mindId: "elm-a2b3k7q9",
-          runtime: "kubernetes",
+          sessionId: 'f-1',
+          worker: 'worker:otter',
+          modelRef: 'p/worker',
+          mindId: 'elm-a2b3k7q9',
+          runtime: 'kubernetes',
         },
-        item: { id: id ?? "elm-a2b3k7q9" } as never,
+        item: { id: id ?? 'elm-a2b3k7q9' } as never,
       };
     },
     createChild() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     addComment() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     setStatus() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
   };
   const f = await fixture(
     async () => {
-      throw new Error("completion must not run");
+      throw new Error('completion must not run');
     },
     undefined,
     mind,
   );
   const response = await fetch(f.mindUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
-    body: JSON.stringify({ protocol: 1, operation: "get", id: "elm-b2b3k7q9" }),
+    body: JSON.stringify({ protocol: 1, operation: 'get', id: 'elm-b2b3k7q9' }),
   });
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.equal(((await response.json()) as any).item.id, "elm-b2b3k7q9");
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(((await response.json()) as any).item.id, 'elm-b2b3k7q9');
   assert.deepEqual(calls, [
-    { method: "get", token: TOKEN, id: "elm-b2b3k7q9" },
+    { method: 'get', token: TOKEN, id: 'elm-b2b3k7q9' },
   ]);
 
   const spoofed = await fetch(f.mindUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
     body: JSON.stringify({
       protocol: 1,
-      operation: "get",
-      worker: "worker:spoof",
+      operation: 'get',
+      worker: 'worker:spoof',
     }),
   });
   assert.equal(spoofed.status, 400);
   assert.deepEqual(calls, [
-    { method: "get", token: TOKEN, id: "elm-b2b3k7q9" },
+    { method: 'get', token: TOKEN, id: 'elm-b2b3k7q9' },
   ]);
   await close(f.server);
 });
 
-test("HTTP Mind route is opt-in and maps authentication and scope failures", async () => {
+test('HTTP Mind route is opt-in and maps authentication and scope failures', async () => {
   const disabled = await fixture(async () => {
-    throw new Error("unused");
+    throw new Error('unused');
   });
-  assert.equal((await fetch(disabled.mindUrl, { method: "POST" })).status, 404);
+  assert.equal((await fetch(disabled.mindUrl, { method: 'POST' })).status, 404);
   await close(disabled.server);
 
   const mind: WorkerMindService = {
     get() {
       throw new WorkerMindError(
-        "outside_scope",
-        "Mind item is outside worker scope",
+        'outside_scope',
+        'Mind item is outside worker scope',
       );
     },
     createChild() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     addComment() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     setStatus() {
-      throw new Error("unused");
+      throw new Error('unused');
     },
   };
   const f = await fixture(
     async () => {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     undefined,
     mind,
@@ -431,103 +431,103 @@ test("HTTP Mind route is opt-in and maps authentication and scope failures", asy
   assert.equal(
     (
       await fetch(f.mindUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ protocol: 1, operation: "get" }),
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ protocol: 1, operation: 'get' }),
       })
     ).status,
     401,
   );
   const outside = await fetch(f.mindUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
-    body: JSON.stringify({ protocol: 1, operation: "get", id: "elm-b2b3k7q9" }),
+    body: JSON.stringify({ protocol: 1, operation: 'get', id: 'elm-b2b3k7q9' }),
   });
   assert.equal(outside.status, 403);
   assert.deepEqual(await outside.json(), {
-    error: "Mind item is outside worker scope",
-    code: "outside_scope",
+    error: 'Mind item is outside worker scope',
+    code: 'outside_scope',
   });
   assert.equal((await fetch(f.mindUrl)).status, 405);
   await close(f.server);
 
   const failed = await fixture(
     async () => {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     undefined,
     {
       get() {
-        throw new Error("database secret detail");
+        throw new Error('database secret detail');
       },
       createChild() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
       addComment() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
       setStatus() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
     },
   );
   const response = await fetch(failed.mindUrl, {
-    method: "POST",
+    method: 'POST',
     headers: {
       authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
+      'content-type': 'application/json',
     },
-    body: JSON.stringify({ protocol: 1, operation: "get" }),
+    body: JSON.stringify({ protocol: 1, operation: 'get' }),
   });
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), {
-    error: "worker Mind request failed",
+    error: 'worker Mind request failed',
   });
   await close(failed.server);
 });
 
-test("HTTP mailbox transport exposes only token-bound pull, ack, and post", async () => {
+test('HTTP mailbox transport exposes only token-bound pull, ack, and post', async () => {
   const calls: unknown[] = [];
   const message = {
     id: 7,
-    sessionId: "f-1",
-    direction: "worker_to_dispatcher" as const,
-    kind: "message" as const,
-    messageKey: "progress-1",
-    sender: "worker:otter",
-    body: "working",
+    sessionId: 'f-1',
+    direction: 'worker_to_dispatcher' as const,
+    kind: 'message' as const,
+    messageKey: 'progress-1',
+    sender: 'worker:otter',
+    body: 'working',
     createdAt: 1,
     acknowledgedAt: null,
   };
   const mailbox: WorkerMailboxService = {
     pullForWorker(token, limit) {
-      calls.push({ method: "pull", token, limit });
+      calls.push({ method: 'pull', token, limit });
       return {
         binding: {
-          sessionId: "f-1",
-          worker: "worker:otter",
-          modelRef: "p/worker",
-          mindId: "elm-a2b3k7q9",
-          runtime: "kubernetes",
+          sessionId: 'f-1',
+          worker: 'worker:otter',
+          modelRef: 'p/worker',
+          mindId: 'elm-a2b3k7q9',
+          runtime: 'kubernetes',
         },
         messages: [],
       };
     },
     acknowledgeForWorker(token, ids) {
-      calls.push({ method: "ack", token, ids });
+      calls.push({ method: 'ack', token, ids });
       return ids.length;
     },
     postFromWorker(token, messageKey, kind, body) {
-      calls.push({ method: "post", token, messageKey, kind, body });
+      calls.push({ method: 'post', token, messageKey, kind, body });
       return { ...message, messageKey, kind, body };
     },
   };
   const f = await fixture(
     async () => {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     undefined,
     undefined,
@@ -535,56 +535,56 @@ test("HTTP mailbox transport exposes only token-bound pull, ack, and post", asyn
   );
   const headers = {
     authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
+    'content-type': 'application/json',
   };
   let response = await fetch(f.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
-    body: JSON.stringify({ protocol: 1, operation: "pull", limit: 5 }),
+    body: JSON.stringify({ protocol: 1, operation: 'pull', limit: 5 }),
   });
   assert.equal(response.status, 200);
-  assert.equal(((await response.json()) as any).binding.worker, "worker:otter");
+  assert.equal(((await response.json()) as any).binding.worker, 'worker:otter');
   response = await fetch(f.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
     body: JSON.stringify({
       protocol: 1,
-      operation: "post",
-      messageKey: "progress-1",
-      kind: "message",
-      body: "working",
+      operation: 'post',
+      messageKey: 'progress-1',
+      kind: 'message',
+      body: 'working',
     }),
   });
   assert.equal(response.status, 200);
   response = await fetch(f.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
-    body: JSON.stringify({ protocol: 1, operation: "ack", ids: [3, 4] }),
+    body: JSON.stringify({ protocol: 1, operation: 'ack', ids: [3, 4] }),
   });
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as any).acknowledged, 2);
   assert.deepEqual(calls, [
-    { method: "pull", token: TOKEN, limit: 5 },
+    { method: 'pull', token: TOKEN, limit: 5 },
     {
-      method: "post",
+      method: 'post',
       token: TOKEN,
-      messageKey: "progress-1",
-      kind: "message",
-      body: "working",
+      messageKey: 'progress-1',
+      kind: 'message',
+      body: 'working',
     },
-    { method: "ack", token: TOKEN, ids: [3, 4] },
+    { method: 'ack', token: TOKEN, ids: [3, 4] },
   ]);
 
   response = await fetch(f.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
     body: JSON.stringify({
       protocol: 1,
-      operation: "post",
-      messageKey: "x",
-      kind: "message",
-      body: "x",
-      sender: "worker:spoof",
+      operation: 'post',
+      messageKey: 'x',
+      kind: 'message',
+      body: 'x',
+      sender: 'worker:spoof',
     }),
   });
   assert.equal(response.status, 400);
@@ -592,85 +592,85 @@ test("HTTP mailbox transport exposes only token-bound pull, ack, and post", asyn
   await close(f.server);
 });
 
-test("HTTP mailbox route is opt-in and redacts failures", async () => {
+test('HTTP mailbox route is opt-in and redacts failures', async () => {
   const disabled = await fixture(async () => {
-    throw new Error("unused");
+    throw new Error('unused');
   });
   assert.equal(
-    (await fetch(disabled.mailboxUrl, { method: "POST" })).status,
+    (await fetch(disabled.mailboxUrl, { method: 'POST' })).status,
     404,
   );
   await close(disabled.server);
 
   const headers = {
     authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
+    'content-type': 'application/json',
   };
   const conflict = await fixture(
     async () => {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     undefined,
     undefined,
     {
       pullForWorker() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
       acknowledgeForWorker() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
       postFromWorker() {
         throw new WorkerMailboxError(
-          "conflict",
-          "worker session already has a finish message",
+          'conflict',
+          'worker session already has a finish message',
         );
       },
     },
   );
   let response = await fetch(conflict.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
     body: JSON.stringify({
       protocol: 1,
-      operation: "post",
-      messageKey: "finish-2",
-      kind: "finish",
-      body: "again",
+      operation: 'post',
+      messageKey: 'finish-2',
+      kind: 'finish',
+      body: 'again',
     }),
   });
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    error: "worker session already has a finish message",
-    code: "conflict",
+    error: 'worker session already has a finish message',
+    code: 'conflict',
   });
   await close(conflict.server);
 
   const failed = await fixture(
     async () => {
-      throw new Error("unused");
+      throw new Error('unused');
     },
     undefined,
     undefined,
     {
       pullForWorker() {
-        throw new Error("database secret detail");
+        throw new Error('database secret detail');
       },
       acknowledgeForWorker() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
       postFromWorker() {
-        throw new Error("unused");
+        throw new Error('unused');
       },
     },
   );
   response = await fetch(failed.mailboxUrl, {
-    method: "POST",
+    method: 'POST',
     headers,
-    body: JSON.stringify({ protocol: 1, operation: "pull" }),
+    body: JSON.stringify({ protocol: 1, operation: 'pull' }),
   });
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), {
-    error: "worker mailbox request failed",
+    error: 'worker mailbox request failed',
   });
   await close(failed.server);
 });

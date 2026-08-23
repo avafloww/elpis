@@ -10,7 +10,13 @@ function freshDb(): DatabaseSync {
   return db;
 }
 
-const base: OAuthCredentials = { access: 'A0', refresh: 'R0', expires: Date.now() + 3_600_000, orgId: 'org1', authorizedAt: 1000 };
+const base: OAuthCredentials = {
+  access: 'A0',
+  refresh: 'R0',
+  expires: Date.now() + 3_600_000,
+  orgId: 'org1',
+  authorizedAt: 1000,
+};
 
 test('store: write persists and read round-trips', () => {
   const db = freshDb();
@@ -38,14 +44,23 @@ test('store: providers are isolated by key (codex reuse)', () => {
   const codex = new OAuthStore(db, 'openai-codex', async () => base);
   assert.equal(codex.isLoggedIn(), false);
   codex.write({ access: 'CX', refresh: 'CXR', expires: Date.now() + 1000 });
-  assert.equal(new OAuthStore(db, 'anthropic', async () => base).read()?.access, 'A0');
-  assert.equal(new OAuthStore(db, 'openai-codex', async () => base).read()?.access, 'CX');
+  assert.equal(
+    new OAuthStore(db, 'anthropic', async () => base).read()?.access,
+    'A0',
+  );
+  assert.equal(
+    new OAuthStore(db, 'openai-codex', async () => base).read()?.access,
+    'CX',
+  );
 });
 
 test('store: getAccessToken returns current token when far from expiry', async () => {
   const db = freshDb();
   let refreshes = 0;
-  const store = new OAuthStore(db, 'anthropic', async () => { refreshes++; return base; });
+  const store = new OAuthStore(db, 'anthropic', async () => {
+    refreshes++;
+    return base;
+  });
   store.write(base);
   assert.equal(await store.getAccessToken(), 'A0');
   assert.equal(refreshes, 0);
@@ -53,10 +68,15 @@ test('store: getAccessToken returns current token when far from expiry', async (
 
 test('store: refreshes near expiry, persists rotated token, merges over stored', async () => {
   const db = freshDb();
-  const expiring: OAuthCredentials = { ...base, access: 'A0', refresh: 'R0', expires: Date.now() + 1000 };
+  const expiring: OAuthCredentials = {
+    ...base,
+    access: 'A0',
+    refresh: 'R0',
+    expires: Date.now() + 1000,
+  };
   const store = new OAuthStore(db, 'anthropic', async (rt) => {
     assert.equal(rt, 'R0');
- // Refresh omits org (fixed at login) — the store must preserve it.
+    // Refresh omits org (fixed at login) — the store must preserve it.
     return { access: 'A1', refresh: 'R1', expires: Date.now() + 3_600_000 };
   });
   store.write(expiring);
@@ -78,7 +98,11 @@ test('store: concurrent getAccessToken single-flights the refresh', async () => 
     return { access: 'A1', refresh: 'R1', expires: Date.now() + 3_600_000 };
   });
   store.write(expiring);
-  const tokens = await Promise.all([store.getAccessToken(), store.getAccessToken(), store.getAccessToken()]);
+  const tokens = await Promise.all([
+    store.getAccessToken(),
+    store.getAccessToken(),
+    store.getAccessToken(),
+  ]);
   assert.deepEqual(tokens, ['A1', 'A1', 'A1']);
   assert.equal(refreshes, 1);
 });

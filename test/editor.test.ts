@@ -5,10 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  replace,
-  nearMiss,
-} from '../src/lib/editor.js';
+import { replace, nearMiss } from '../src/lib/editor.js';
 
 // ---------------------------------------------------------------------------
 // replace (the single string-replace core behind elpis.edit)
@@ -39,7 +36,11 @@ test('replace: { all: true } replaces every occurrence', () => {
 test('replace: not-found throws with a line-numbered near-miss window', () => {
   const src = 'alpha\nconst timeout = 5000;\ngamma\n';
   let msg = '';
-  try { replace(src, 'const timeuot = 5000;', 'x'); } catch (e) { msg = String((e as Error).message); }
+  try {
+    replace(src, 'const timeuot = 5000;', 'x');
+  } catch (e) {
+    msg = String((e as Error).message);
+  }
   assert.match(msg, /not found/);
   assert.match(msg, /closest match near line 2/);
   assert.match(msg, /^\s*2: const timeout = 5000;$/m); // the near-miss line carries its NN: number
@@ -54,6 +55,6 @@ test('nearMiss: renders ~2 lines of context around the closest line', () => {
   const src = 'l1\nl2\ntarget line here\nl4\nl5\n';
   const w = nearMiss(src, 'target len here');
   assert.match(w, /closest match near line 3/);
-  assert.match(w, /^\s*1: l1$/m);   // capped window includes context above
-  assert.match(w, /^\s*5: l5$/m);   // and below
+  assert.match(w, /^\s*1: l1$/m); // capped window includes context above
+  assert.match(w, /^\s*5: l5$/m); // and below
 });

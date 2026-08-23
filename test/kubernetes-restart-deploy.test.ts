@@ -4,9 +4,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
-const broker = fs.readFileSync(path.join(root, 'deploy/kubernetes/restart-broker/broker.yaml'), 'utf8');
-const harness = fs.readFileSync(path.join(root, 'deploy/kubernetes/restart-broker/harness-patch.yaml'), 'utf8');
-const egress = fs.readFileSync(path.join(root, 'deploy/kubernetes/restart-broker/broker-egress-k3s.yaml'), 'utf8');
+const broker = fs.readFileSync(
+  path.join(root, 'deploy/kubernetes/restart-broker/broker.yaml'),
+  'utf8',
+);
+const harness = fs.readFileSync(
+  path.join(root, 'deploy/kubernetes/restart-broker/harness-patch.yaml'),
+  'utf8',
+);
+const egress = fs.readFileSync(
+  path.join(root, 'deploy/kubernetes/restart-broker/broker-egress-k3s.yaml'),
+  'utf8',
+);
 const docs = fs.readFileSync(path.join(root, 'docs/kubernetes.md'), 'utf8');
 
 test('Kubernetes broker RBAC can only list and delete Pods', () => {
@@ -15,7 +24,10 @@ test('Kubernetes broker RBAC can only list and delete Pods', () => {
   assert.match(role, /apiGroups: \[""\]/);
   assert.match(role, /resources: \["pods"\]/);
   assert.match(role, /verbs: \["list", "delete"\]/);
-  assert.doesNotMatch(role, /deployments|secrets|pods\/exec|patch|create|update|get/);
+  assert.doesNotMatch(
+    role,
+    /deployments|secrets|pods\/exec|patch|create|update|get/,
+  );
   assert.match(broker, /serviceAccountName: elpis-restart-broker/);
 });
 
@@ -45,5 +57,8 @@ test('k3s API egress example is explicit and docs require verification', () => {
   assert.match(docs, /never a ClusterRole/);
   assert.match(docs, /denial of service/);
   assert.match(docs, /cannot create code, alter an image or command/);
-  assert.match(docs, /prevents the restart channel.*different image.*cluster-level code execution/s);
+  assert.match(
+    docs,
+    /prevents the restart channel.*different image.*cluster-level code execution/s,
+  );
 });

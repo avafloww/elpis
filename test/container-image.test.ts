@@ -10,7 +10,10 @@ test('official image hard-codes the restricted non-root runtime contract', () =>
   const dockerignore = read('.dockerignore');
   assert.equal((docker.match(/FROM node:24-trixie-slim/g) ?? []).length, 2);
   assert.match(docker, /COPY tsconfig\.json tsconfig\.console\.json \.\//);
-  assert.match(docker, /COPY scripts\/build-console\.mjs \.\/scripts\/build-console\.mjs/);
+  assert.match(
+    docker,
+    /COPY scripts\/build-console\.mjs \.\/scripts\/build-console\.mjs/,
+  );
   assert.match(dockerignore, /^!tsconfig\.console\.json$/m);
   assert.match(dockerignore, /^!scripts\/build-console\.mjs$/m);
   assert.doesNotMatch(docker, /bookworm/);
@@ -21,7 +24,16 @@ test('official image hard-codes the restricted non-root runtime contract', () =>
   assert.match(docker, /USER 10001:10001/);
   assert.match(docker, /VOLUME \["\/data"\]/);
   assert.match(docker, /HEALTHCHECK/);
-  for (const tool of ['bash', 'curl', 'jq', 'python3', 'python3-pip', 'python3-venv', 'ripgrep', 'wget']) {
+  for (const tool of [
+    'bash',
+    'curl',
+    'jq',
+    'python3',
+    'python3-pip',
+    'python3-venv',
+    'ripgrep',
+    'wget',
+  ]) {
     assert.match(docker, new RegExp(`\\b${tool}\\b`));
   }
   assert.match(docker, /--shell \/bin\/bash/);
@@ -40,5 +52,8 @@ test('container entrypoint fails closed around sentinel config and writable data
 test('GHCR workflow publishes the official repository while PRs only build', () => {
   const workflow = read('.github/workflows/container.yml');
   assert.match(workflow, /ghcr\.io\/avafloww\/elpis/);
-  assert.match(workflow, /push: \$\{\{ github\.event_name != 'pull_request' \}\}/);
+  assert.match(
+    workflow,
+    /push: \$\{\{ github\.event_name != 'pull_request' \}\}/,
+  );
 });

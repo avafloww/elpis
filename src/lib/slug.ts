@@ -6,5 +6,10 @@
 
 /** Lowercase, collapse non-alphanumerics to single dashes, trim edge dashes. */
 export function slugify(name: string, fallback = 'unknown'): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || fallback;
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || fallback
+  );
 }

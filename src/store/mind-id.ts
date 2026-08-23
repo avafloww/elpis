@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes } from 'node:crypto';
 
 export type MindId = `elm-${string}`;
 
@@ -13,24 +13,24 @@ export function newMindId(
   let value: number;
   do value = bytes(6).readUIntBE(0, 6);
   while (value >= ceiling);
-  return `elm-${(value % limit).toString(36).padStart(8, "0")}`;
+  return `elm-${(value % limit).toString(36).padStart(8, '0')}`;
 }
 
 export function isMindId(value: unknown): value is MindId {
-  return typeof value === "string" && FULL_RE.test(value);
+  return typeof value === 'string' && FULL_RE.test(value);
 }
 
 export function isMindIdPrefix(value: unknown): value is string {
-  return typeof value === "string" && PREFIX_RE.test(value);
+  return typeof value === 'string' && PREFIX_RE.test(value);
 }
 
 export function resolveMindRef<T extends { id: MindId; title: string }>(
   items: readonly T[],
   ref: unknown,
 ): T {
-  if (typeof ref !== "string" || !ref.trim())
+  if (typeof ref !== 'string' || !ref.trim())
     throw new Error(
-      "mind: expected an elm-* id, unique prefix, or exact title",
+      'mind: expected an elm-* id, unique prefix, or exact title',
     );
   const value = ref.trim();
   const exact = items.find((item) => item.id === value);

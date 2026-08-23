@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import { parseFrontmatter } from '../src/lib/frontmatter.js';
 
 test('frontmatter: parses scalar keys and body', () => {
-  const p = parseFrontmatter('---\nname: Bramble\nrole: host\n---\nbody line one\nbody line two');
+  const p = parseFrontmatter(
+    '---\nname: Bramble\nrole: host\n---\nbody line one\nbody line two',
+  );
   assert.ok(p);
   assert.equal(p.frontmatter.name, 'Bramble');
   assert.equal(p.frontmatter.role, 'host');
@@ -13,9 +15,14 @@ test('frontmatter: parses scalar keys and body', () => {
 });
 
 test('frontmatter: parses the ids: [..] list format elpis.memory.person writes', () => {
-  const p = parseFrontmatter('---\nname: Bramble\nids: [discord:111111111111111101, discord:42]\n---\n\n- [2026-07-02] a fact');
+  const p = parseFrontmatter(
+    '---\nname: Bramble\nids: [discord:111111111111111101, discord:42]\n---\n\n- [2026-07-02] a fact',
+  );
   assert.ok(p);
-  assert.deepEqual(p.frontmatter.ids, ['discord:111111111111111101', 'discord:42']);
+  assert.deepEqual(p.frontmatter.ids, [
+    'discord:111111111111111101',
+    'discord:42',
+  ]);
 });
 
 test('frontmatter: empty ids list becomes an empty array', () => {

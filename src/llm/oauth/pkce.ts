@@ -9,14 +9,18 @@ import { createHash, randomBytes } from 'node:crypto';
 /** base64url (no padding), the encoding both the verifier and the S256
  * challenge use per RFC 7636. */
 function base64url(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return buf
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
 }
 
 export interface Pkce {
   /** The high-entropy secret, sent on the token exchange as `code_verifier`. */
   verifier: string;
   /** SHA-256(verifier), base64url — sent on the authorize URL as
- * `code_challenge` with `code_challenge_method=S256`. */
+   * `code_challenge` with `code_challenge_method=S256`. */
   challenge: string;
 }
 

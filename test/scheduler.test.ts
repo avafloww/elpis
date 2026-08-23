@@ -19,7 +19,11 @@ function noopLogger() {
 test('create and list tasks', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
   const task = scheduler.create({
     name: 'estrogen',
@@ -93,7 +97,10 @@ test('recurring task reschedules after firing', () => {
 
   const task = scheduler.getByName('daily');
   assert.ok(task);
-  assert.ok(task.nextRunAt >= base + 86_400_000 - 1000, 'next run moved forward by interval');
+  assert.ok(
+    task.nextRunAt >= base + 86_400_000 - 1000,
+    'next run moved forward by interval',
+  );
   assert.equal(task.doneAt, null);
 
   scheduler.stop();
@@ -127,7 +134,10 @@ test('reminder spawns nag tasks', () => {
   assert.equal(list.length, 2, 'parent + nag');
   const nag = list.find((t) => t.kind === 'reminder-nag');
   assert.ok(nag);
-  assert.ok(nag.nextRunAt >= base + 2 * 60 * 60 * 1000 - 1000, 'nag scheduled at interval');
+  assert.ok(
+    nag.nextRunAt >= base + 2 * 60 * 60 * 1000 - 1000,
+    'nag scheduled at interval',
+  );
 
   scheduler.stop();
   db.close();
@@ -136,7 +146,11 @@ test('reminder spawns nag tasks', () => {
 test('markDoneByName re-arms recurring reminder, kills nags', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
   const base = Date.now();
   scheduler.create({
@@ -156,7 +170,10 @@ test('markDoneByName re-arms recurring reminder, kills nags', () => {
   const nags = all.filter((t) => t.kind === 'reminder-nag');
   assert.ok(parent.doneAt == null, 'recurring parent re-armed, not killed');
   assert.ok(parent.nextRunAt > Date.now(), 'next run advanced past now');
-  assert.ok(nags.length > 0 && nags.every((t) => t.doneAt != null), 'nags done');
+  assert.ok(
+    nags.length > 0 && nags.every((t) => t.doneAt != null),
+    'nags done',
+  );
 
   scheduler.stop();
   db.close();
@@ -165,12 +182,23 @@ test('markDoneByName re-arms recurring reminder, kills nags', () => {
 test('markDoneByName on one-shot still marks done', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
-  scheduler.create({ name: 'once', payload: 'one shot', nextRunAt: Date.now() - 1 });
+  scheduler.create({
+    name: 'once',
+    payload: 'one shot',
+    nextRunAt: Date.now() - 1,
+  });
   scheduler.poll();
   scheduler.markDoneByName('once');
-  assert.ok(scheduler.list().every((t) => t.doneAt != null), 'one-shot stays done');
+  assert.ok(
+    scheduler.list().every((t) => t.doneAt != null),
+    'one-shot stays done',
+  );
 
   scheduler.stop();
   db.close();
@@ -203,11 +231,22 @@ test('snooze prevents firing until after snooze', () => {
 test('update patches payload and nextRunAt on an existing task', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
-  const task = scheduler.create({ name: 'updateme', payload: 'before', nextRunAt: Date.now() + 60_000 });
+  const task = scheduler.create({
+    name: 'updateme',
+    payload: 'before',
+    nextRunAt: Date.now() + 60_000,
+  });
   const newNextRunAt = Date.now() + 120_000;
-  const updated = scheduler.update(task.id, { payload: 'after', nextRunAt: newNextRunAt });
+  const updated = scheduler.update(task.id, {
+    payload: 'after',
+    nextRunAt: newNextRunAt,
+  });
 
   assert.ok(updated);
   assert.equal(updated!.payload, 'after');
@@ -220,9 +259,17 @@ test('update patches payload and nextRunAt on an existing task', () => {
 test('update with no patch fields returns the task unchanged', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
-  const task = scheduler.create({ name: 'unchanged', payload: 'x', nextRunAt: Date.now() + 60_000 });
+  const task = scheduler.create({
+    name: 'unchanged',
+    payload: 'x',
+    nextRunAt: Date.now() + 60_000,
+  });
   const updated = scheduler.update(task.id, {});
 
   assert.ok(updated);
@@ -235,7 +282,11 @@ test('update with no patch fields returns the task unchanged', () => {
 test('update on a missing id returns null', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
   assert.equal(scheduler.update(999999, { payload: 'x' }), null);
 
@@ -246,9 +297,17 @@ test('update on a missing id returns null', () => {
 test('delete removes a task', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: () => {} });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
 
-  const task = scheduler.create({ name: 'delete-me', payload: 'x', nextRunAt: Date.now() });
+  const task = scheduler.create({
+    name: 'delete-me',
+    payload: 'x',
+    nextRunAt: Date.now(),
+  });
   assert.equal(scheduler.delete(task.id), true);
   assert.equal(scheduler.getById(task.id), null);
 
@@ -260,12 +319,24 @@ test('started scheduler re-arms its single timer when an earlier task is created
   const dir = tmpDir();
   const db = openDatabase(dir);
   const fired: string[] = [];
-  const scheduler = new Scheduler({ db, logger: noopLogger(), onTaskWake: (task) => fired.push(task.name) });
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: (task) => fired.push(task.name),
+  });
   try {
-    scheduler.create({ name: 'later', payload: 'later', nextRunAt: Date.now() + 500 });
+    scheduler.create({
+      name: 'later',
+      payload: 'later',
+      nextRunAt: Date.now() + 500,
+    });
     scheduler.start();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    scheduler.create({ name: 'earlier', payload: 'earlier', nextRunAt: Date.now() + 40 });
+    scheduler.create({
+      name: 'earlier',
+      payload: 'earlier',
+      nextRunAt: Date.now() + 40,
+    });
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.deepEqual(fired, ['earlier']);
     assert.ok(scheduler.getByName('earlier')?.doneAt);

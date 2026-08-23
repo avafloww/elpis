@@ -24,9 +24,17 @@ export interface MemoryHooks {
  * stack cleanly. Shared by memory.append, ponder, ponder.close, and
  * memory.person so the stamp format + newline handling can't diverge across
  * MEMORY.md, ponder/, and people/. */
-export function appendDatedBullet(file: string, text: string, stamp = new Date().toISOString().slice(0, 10)): void {
+export function appendDatedBullet(
+  file: string,
+  text: string,
+  stamp = new Date().toISOString().slice(0, 10),
+): void {
   let existing = '';
-  try { existing = fs.readFileSync(file, 'utf8'); } catch { /* new file */ }
+  try {
+    existing = fs.readFileSync(file, 'utf8');
+  } catch {
+    /* new file */
+  }
   const updated = existing.replace(/\n*$/, '') + `\n- [${stamp}] ${text}\n`;
   fs.writeFileSync(file, updated);
 }
@@ -38,12 +46,12 @@ export function createMemory(path: string, hooks: MemoryHooks = {}): Memory {
       try {
         return fs.readFileSync(path, 'utf8');
       } catch {
-        return '';                       // missing file = empty memory
+        return ''; // missing file = empty memory
       }
     },
     append(text: string): { ok: true } {
- // Route through the shared dated-bullet writer so MEMORY.md, ponder/, and
- // people/ all stamp the same `- [YYYY-MM-DD] text` format.
+      // Route through the shared dated-bullet writer so MEMORY.md, ponder/, and
+      // people/ all stamp the same `- [YYYY-MM-DD] text` format.
       appendDatedBullet(path, text.trim());
       hooks.changed?.(path);
       return { ok: true };

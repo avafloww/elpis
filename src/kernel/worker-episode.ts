@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
-import type { ChatMessage, CompleteResult } from "../llm/llm.js";
-import { applyKernelTurn } from "./turn.js";
-import { WorkerJournal } from "./worker-journal.js";
+import { createHash } from 'node:crypto';
+import type { ChatMessage, CompleteResult } from '../llm/llm.js';
+import { applyKernelTurn } from './turn.js';
+import { WorkerJournal } from './worker-journal.js';
 
 export interface WorkerMandate {
   id: string;
@@ -32,10 +32,10 @@ export interface WorkerEpisodeBroker {
 export interface WorkerRunResult {
   ok: boolean;
   preview?: string;
-  savedAs?: "_";
+  savedAs?: '_';
   logs?: string;
   error?: string;
-  failureKind?: "preparse" | "runtime";
+  failureKind?: 'preparse' | 'runtime';
   detached?: boolean;
   bgId?: string;
   note?: string;
@@ -67,11 +67,11 @@ export interface WorkerEpisodeResult {
 export class WorkerEpisodeError extends Error {
   constructor(
     public readonly code:
-      "ambiguous_tool" | "empty_finish" | "message_limit" | "turn_limit",
+      'ambiguous_tool' | 'empty_finish' | 'message_limit' | 'turn_limit',
     message: string,
   ) {
     super(message);
-    this.name = "WorkerEpisodeError";
+    this.name = 'WorkerEpisodeError';
   }
 }
 
@@ -82,7 +82,7 @@ Use run for concrete work in your isolated workspace. Continue until the mandate
 
 function mandateMessage(mandate: WorkerMandate): ChatMessage {
   return {
-    role: "user",
+    role: 'user',
     content: `<worker-mandate id=${JSON.stringify(mandate.id)} status=${JSON.stringify(mandate.status)}>
 <title>${mandate.title}</title>
 <body>${mandate.body}</body>
@@ -94,15 +94,15 @@ function mandateMessage(mandate: WorkerMandate): ChatMessage {
 
 function guidanceMessage(guidance: WorkerGuidance): ChatMessage {
   return {
-    role: "user",
+    role: 'user',
     content: `<worker-guidance sender=${JSON.stringify(guidance.sender)}>${guidance.body}</worker-guidance>`,
   };
 }
 
 function parseObject(raw: string): Record<string, unknown> {
   const value = JSON.parse(raw) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("tool arguments must be an object");
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('tool arguments must be an object');
   }
   return value as Record<string, unknown>;
 }
@@ -117,38 +117,38 @@ function exactKeys(
     actual.length !== wanted.length ||
     actual.some((key, index) => key !== wanted[index])
   ) {
-    throw new Error(`tool arguments must contain exactly ${wanted.join(", ")}`);
+    throw new Error(`tool arguments must contain exactly ${wanted.join(', ')}`);
   }
 }
 
 function runArguments(raw: string): { code: string; detail: string } {
   const value = parseObject(raw);
-  exactKeys(value, ["code", "detail"]);
-  if (typeof value.code !== "string" || value.code.length === 0) {
-    throw new Error("run.code must be a non-empty string");
+  exactKeys(value, ['code', 'detail']);
+  if (typeof value.code !== 'string' || value.code.length === 0) {
+    throw new Error('run.code must be a non-empty string');
   }
   if (
-    typeof value.detail !== "string" ||
-    value.detail.includes("\n") ||
+    typeof value.detail !== 'string' ||
+    value.detail.includes('\n') ||
     value.detail.length > 120
   ) {
-    throw new Error("run.detail must be one line of at most 120 characters");
+    throw new Error('run.detail must be one line of at most 120 characters');
   }
   const words = value.detail.trim().split(/\s+/).filter(Boolean);
   if (words.length < 1 || words.length > 10) {
-    throw new Error("run.detail must contain 1 to 10 words");
+    throw new Error('run.detail must contain 1 to 10 words');
   }
   return { code: value.code, detail: value.detail };
 }
 
 function thinkArguments(raw: string): void {
   const value = parseObject(raw);
-  exactKeys(value, ["thoughts"]);
+  exactKeys(value, ['thoughts']);
   if (
-    typeof value.thoughts !== "string" ||
+    typeof value.thoughts !== 'string' ||
     value.thoughts.trim().length === 0
   ) {
-    throw new Error("think.thoughts must be a non-empty string");
+    throw new Error('think.thoughts must be a non-empty string');
   }
 }
 
@@ -160,7 +160,7 @@ function toolError(error: unknown): string {
 }
 
 function finishKey(body: string): string {
-  return `worker-finish-${createHash("sha256").update(body).digest("hex").slice(0, 24)}`;
+  return `worker-finish-${createHash('sha256').update(body).digest('hex').slice(0, 24)}`;
 }
 
 export class WorkerEpisode {
@@ -175,9 +175,9 @@ export class WorkerEpisode {
   async run(signal?: AbortSignal): Promise<WorkerEpisodeResult> {
     const initial = this.options.journal.state();
     if (initial.pendingTools.size > 0) {
-      const ids = [...initial.pendingTools.keys()].join(", ");
+      const ids = [...initial.pendingTools.keys()].join(', ');
       throw new WorkerEpisodeError(
-        "ambiguous_tool",
+        'ambiguous_tool',
         `worker journal has prepared tools without completion: ${ids}`,
       );
     }
@@ -213,7 +213,7 @@ export class WorkerEpisode {
       signal?.throwIfAborted();
       const mandate = await this.options.broker.getMandate(signal);
       const system: ChatMessage = {
-        role: "system",
+        role: 'system',
         content: WORKER_SYSTEM_PROMPT,
       };
       const user = mandateMessage(mandate);
@@ -238,7 +238,7 @@ export class WorkerEpisode {
       }
       if (messages.length > this.maxMessages) {
         throw new WorkerEpisodeError(
-          "message_limit",
+          'message_limit',
           `worker episode exceeded ${this.maxMessages} messages`,
         );
       }
@@ -252,13 +252,13 @@ export class WorkerEpisode {
         completion.message,
         async (call) => {
           try {
-            if (call.function.name === "think") {
+            if (call.function.name === 'think') {
               thinkArguments(call.function.arguments);
               return {
                 content: JSON.stringify({ ok: true, recorded: true }),
               };
             }
-            if (call.function.name !== "run") {
+            if (call.function.name !== 'run') {
               throw new Error(`unsupported worker tool ${call.function.name}`);
             }
             const args = runArguments(call.function.arguments);
@@ -267,7 +267,7 @@ export class WorkerEpisode {
             const result = await this.options.sandbox.run(args.code);
             if (result.detached) {
               throw new Error(
-                "worker tool detached before completion; effect outcome is ambiguous",
+                'worker tool detached before completion; effect outcome is ambiguous',
               );
             }
             return { content: JSON.stringify(result) };
@@ -283,7 +283,7 @@ export class WorkerEpisode {
           },
           appendTool: (message) => {
             const callId = message.tool_call_id;
-            if (!callId) throw new Error("worker tool result has no call id");
+            if (!callId) throw new Error('worker tool result has no call id');
             if (preparedRuns.delete(callId)) {
               this.options.journal.completeTool(callId, message);
             } else {
@@ -298,8 +298,8 @@ export class WorkerEpisode {
       const body = completion.message.content.trim();
       if (!body) {
         throw new WorkerEpisodeError(
-          "empty_finish",
-          "worker ended without a finish body",
+          'empty_finish',
+          'worker ended without a finish body',
         );
       }
       const key = finishKey(body);
@@ -311,7 +311,7 @@ export class WorkerEpisode {
     }
 
     throw new WorkerEpisodeError(
-      "turn_limit",
+      'turn_limit',
       `worker episode exceeded ${this.maxTurns} model turns`,
     );
   }

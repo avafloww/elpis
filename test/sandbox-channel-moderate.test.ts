@@ -12,17 +12,29 @@ import { buildGlobals } from '../src/sandbox/globals.js';
 
 const baseConfig = {
   paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
-  sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 },
+  sandbox: {
+    syncTimeoutMs: 5000,
+    asyncDeadlineMs: 10000,
+    previewMaxBytes: 2048,
+    logMaxBytes: 2048,
+  },
   kagi: { apiKey: null },
 };
 
-function buildHandle(moderate?: (channelId: string, reason?: string) => { ok: boolean; note: string }) {
+function buildHandle(
+  moderate?: (
+    channelId: string,
+    reason?: string,
+  ) => { ok: boolean; note: string },
+) {
   const g = buildGlobals({
     config: baseConfig,
     send: async () => {},
     moderate,
   } as unknown as import('../src/types.js').SandboxDeps);
-  const elpis = g.elpis as { channel: (id?: string) => Record<string, unknown> };
+  const elpis = g.elpis as {
+    channel: (id?: string) => Record<string, unknown>;
+  };
   return elpis.channel('2001');
 }
 
@@ -37,9 +49,16 @@ test('elpis.channel(ref).mute(reason) delegates to deps.moderate with the channe
   const calls: { channelId: string; reason?: string }[] = [];
   const handle = buildHandle((channelId: string, reason?: string) => {
     calls.push({ channelId, reason });
-    return { ok: true, note: `channel ${channelId} muted by Echo (self): ${reason}` };
+    return {
+      ok: true,
+      note: `channel ${channelId} muted by Echo (self): ${reason}`,
+    };
   });
-  const mute = handle.mute as (reason?: string) => { ok: boolean; channelId: string; note: string };
+  const mute = handle.mute as (reason?: string) => {
+    ok: boolean;
+    channelId: string;
+    note: string;
+  };
   const result = mute('taking a break');
   assert.deepEqual(calls, [{ channelId: '2001', reason: 'taking a break' }]);
   assert.equal(result.ok, true);
@@ -50,5 +69,8 @@ test('elpis.channel(ref).mute(reason) delegates to deps.moderate with the channe
 test('elpis.channel(ref).mute() throws when deps.moderate is not wired', () => {
   const handle = buildHandle(undefined);
   const mute = handle.mute as (reason?: string) => unknown;
-  assert.throws(() => mute('reason'), /elpis\.channel\(\)\.mute\(\) is not wired/);
+  assert.throws(
+    () => mute('reason'),
+    /elpis\.channel\(\)\.mute\(\) is not wired/,
+  );
 });

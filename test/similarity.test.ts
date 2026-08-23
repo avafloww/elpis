@@ -5,7 +5,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tokenize, jaccard, containment, findRepetition, BLIND_SPOTS } from '../src/lib/similarity.js';
+import {
+  tokenize,
+  jaccard,
+  containment,
+  findRepetition,
+  BLIND_SPOTS,
+} from '../src/lib/similarity.js';
 
 test('tokenize: lowercases, strips punctuation and short words, drops urls', () => {
   const t = tokenize('The visit is LIVE! see https://example.com/x — ok?');
@@ -67,7 +73,11 @@ test('findRepetition: DOES NOT catch paraphrase (the declared blind spot)', () =
     'i remain inside the room; nothing has been decided, the door stays unlocked, and judgement waits',
     'still situated here, conclusions deferred, exit available, determination postponed',
   ];
-  assert.equal(findRepetition(paraphrased), null, 'if this ever starts passing, update BLIND_SPOTS');
+  assert.equal(
+    findRepetition(paraphrased),
+    null,
+    'if this ever starts passing, update BLIND_SPOTS',
+  );
 });
 
 test('BLIND_SPOTS names paraphrase and admits the reading is a floor', () => {
@@ -82,5 +92,9 @@ test('findRepetition: anchors on the NEWEST message, not old resolved loops', ()
     'visit held refusal open comparison ahead still no verdict',
     'found seven pre-parse failures in the transcript audit today',
   ];
-  assert.equal(findRepetition(msgs, { minCount: 3 }), null, 'old cluster must not fire once the topic moves');
+  assert.equal(
+    findRepetition(msgs, { minCount: 3 }),
+    null,
+    'old cluster must not fire once the topic moves',
+  );
 });

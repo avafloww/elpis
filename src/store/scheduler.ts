@@ -45,8 +45,8 @@ export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
 
- // Prepared once at construction (channels.ts:61-68 idiom) rather than
- // per-call — listDue would otherwise recompile on every timer wake.
+  // Prepared once at construction (channels.ts:61-68 idiom) rather than
+  // per-call — listDue would otherwise recompile on every timer wake.
   private readonly stmtInsert;
   private readonly stmtGetById;
   private readonly stmtGetByName;
@@ -65,18 +65,36 @@ export class Scheduler {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       RETURNING *
     `);
-    this.stmtGetById = this.deps.db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?');
-    this.stmtGetByName = this.deps.db.prepare('SELECT * FROM scheduled_tasks WHERE name = ?');
-    this.stmtList = this.deps.db.prepare('SELECT * FROM scheduled_tasks ORDER BY next_run_at');
-    this.stmtListByParent = this.deps.db.prepare('SELECT * FROM scheduled_tasks WHERE parent_id = ?');
-    this.stmtListDue = this.deps.db.prepare(
-      'SELECT * FROM scheduled_tasks WHERE done_at IS NULL AND next_run_at <= ? AND (snooze_until IS NULL OR snooze_until <= ?) ORDER BY next_run_at'
+    this.stmtGetById = this.deps.db.prepare(
+      'SELECT * FROM scheduled_tasks WHERE id = ?',
     );
-    this.stmtDelete = this.deps.db.prepare('DELETE FROM scheduled_tasks WHERE id = ?');
-    this.stmtMarkDone = this.deps.db.prepare('UPDATE scheduled_tasks SET done_at = ? WHERE id = ? RETURNING *');
-    this.stmtSnooze = this.deps.db.prepare('UPDATE scheduled_tasks SET snooze_until = ? WHERE id = ? RETURNING *');
-    this.stmtUpdateNextRun = this.deps.db.prepare('UPDATE scheduled_tasks SET next_run_at = ? WHERE id = ? RETURNING *');
-    this.stmtIncrementNagCount = this.deps.db.prepare('UPDATE scheduled_tasks SET nag_count = nag_count + 1 WHERE id = ?');
+    this.stmtGetByName = this.deps.db.prepare(
+      'SELECT * FROM scheduled_tasks WHERE name = ?',
+    );
+    this.stmtList = this.deps.db.prepare(
+      'SELECT * FROM scheduled_tasks ORDER BY next_run_at',
+    );
+    this.stmtListByParent = this.deps.db.prepare(
+      'SELECT * FROM scheduled_tasks WHERE parent_id = ?',
+    );
+    this.stmtListDue = this.deps.db.prepare(
+      'SELECT * FROM scheduled_tasks WHERE done_at IS NULL AND next_run_at <= ? AND (snooze_until IS NULL OR snooze_until <= ?) ORDER BY next_run_at',
+    );
+    this.stmtDelete = this.deps.db.prepare(
+      'DELETE FROM scheduled_tasks WHERE id = ?',
+    );
+    this.stmtMarkDone = this.deps.db.prepare(
+      'UPDATE scheduled_tasks SET done_at = ? WHERE id = ? RETURNING *',
+    );
+    this.stmtSnooze = this.deps.db.prepare(
+      'UPDATE scheduled_tasks SET snooze_until = ? WHERE id = ? RETURNING *',
+    );
+    this.stmtUpdateNextRun = this.deps.db.prepare(
+      'UPDATE scheduled_tasks SET next_run_at = ? WHERE id = ? RETURNING *',
+    );
+    this.stmtIncrementNagCount = this.deps.db.prepare(
+      'UPDATE scheduled_tasks SET nag_count = nag_count + 1 WHERE id = ?',
+    );
   }
 
   start(): void {
@@ -102,11 +120,17 @@ export class Scheduler {
     let nextAt = now + 60_000;
     for (const task of this.list()) {
       if (task.doneAt != null) continue;
-      const effectiveAt = Math.max(task.nextRunAt, task.snoozeUntil ?? task.nextRunAt);
+      const effectiveAt = Math.max(
+        task.nextRunAt,
+        task.snoozeUntil ?? task.nextRunAt,
+      );
       if (effectiveAt < nextAt) nextAt = effectiveAt;
     }
     const delayMs = Math.max(0, Math.min(60_000, nextAt - now));
-    this.timer = setTimeout(() => { this.timer = null; this.poll(); }, delayMs);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.poll();
+    }, delayMs);
   }
 
   poll(): void {
@@ -118,10 +142,12 @@ export class Scheduler {
 
   private handleDue(task: ScheduledTask, now: number): void {
     this.deps.onTaskWake(task);
-    this.deps.logger.info(`[scheduler] task due | id=${task.id} name=${task.name}`);
+    this.deps.logger.info(
+      `[scheduler] task due | id=${task.id} name=${task.name}`,
+    );
 
     if (task.kind === 'reminder') {
- // Send initial nudge, reschedule main cadence, and spawn first nag.
+      // Send initial nudge, reschedule main cadence, and spawn first nag.
       const next = Math.max(now, task.nextRunAt + (task.intervalMs ?? 0));
       this.updateNextRun(task.id, next);
       this.incrementNagCount(task.id);
@@ -129,7 +155,7 @@ export class Scheduler {
         this.spawnNag(task, now + task.nagIntervalMs);
       }
     } else if (task.kind === 'reminder-nag') {
- // Send nag, then chain another nag unless parent is done.
+      // Send nag, then chain another nag unless parent is done.
       const parent = task.parentId ? this.getById(task.parentId) : null;
       if (parent && parent.doneAt != null) {
         this.markDone(task.id, now);
@@ -173,36 +199,65 @@ export class Scheduler {
       opts.parentId ?? null,
     );
     const result = fromRow(raw);
-    this.deps.logger.info(`[scheduler] created task | id=${result.id} name=${result.name}`);
+    this.deps.logger.info(
+      `[scheduler] created task | id=${result.id} name=${result.name}`,
+    );
     this.rearm();
     return result;
   }
 
-  update(id: number, patch: Partial<Pick<ScheduledTask, 'payload' | 'nextRunAt' | 'intervalMs' | 'nagIntervalMs' | 'snoozeUntil'>>): ScheduledTask | null {
- // Snooze cascades to nag children the same way snoozeByName does — a
- // parent-level snooze that leaves a pending nag unsnoozed fires at the
- // old time anyway ( midnight-nag papercut). Only the snooze
- // field cascades; the rest of the patch stays parent-local.
+  update(
+    id: number,
+    patch: Partial<
+      Pick<
+        ScheduledTask,
+        'payload' | 'nextRunAt' | 'intervalMs' | 'nagIntervalMs' | 'snoozeUntil'
+      >
+    >,
+  ): ScheduledTask | null {
+    // Snooze cascades to nag children the same way snoozeByName does — a
+    // parent-level snooze that leaves a pending nag unsnoozed fires at the
+    // old time anyway ( midnight-nag papercut). Only the snooze
+    // field cascades; the rest of the patch stays parent-local.
     if (patch.snoozeUntil !== undefined && patch.snoozeUntil != null) {
       for (const child of this.listByParent(id)) {
         if (child.doneAt == null) this.snooze(child.id, patch.snoozeUntil);
       }
     }
- // NOT prepare-once: the SET clause's shape depends on which patch fields
- // are present, so there's no single statement to prepare ahead of time
- // (unlike every other method here, whose SQL text is fixed).
+    // NOT prepare-once: the SET clause's shape depends on which patch fields
+    // are present, so there's no single statement to prepare ahead of time
+    // (unlike every other method here, whose SQL text is fixed).
     const sets: string[] = [];
     const values: (string | number | null)[] = [];
-    if (patch.payload !== undefined) { sets.push('payload = ?'); values.push(patch.payload); }
-    if (patch.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(patch.nextRunAt); }
-    if (patch.intervalMs !== undefined) { sets.push('interval_ms = ?'); values.push(patch.intervalMs); }
-    if (patch.nagIntervalMs !== undefined) { sets.push('nag_interval_ms = ?'); values.push(patch.nagIntervalMs); }
-    if (patch.snoozeUntil !== undefined) { sets.push('snooze_until = ?'); values.push(patch.snoozeUntil); }
+    if (patch.payload !== undefined) {
+      sets.push('payload = ?');
+      values.push(patch.payload);
+    }
+    if (patch.nextRunAt !== undefined) {
+      sets.push('next_run_at = ?');
+      values.push(patch.nextRunAt);
+    }
+    if (patch.intervalMs !== undefined) {
+      sets.push('interval_ms = ?');
+      values.push(patch.intervalMs);
+    }
+    if (patch.nagIntervalMs !== undefined) {
+      sets.push('nag_interval_ms = ?');
+      values.push(patch.nagIntervalMs);
+    }
+    if (patch.snoozeUntil !== undefined) {
+      sets.push('snooze_until = ?');
+      values.push(patch.snoozeUntil);
+    }
     if (sets.length === 0) return this.getById(id);
     values.push(id);
-    const raw = this.deps.db.prepare(`
+    const raw = this.deps.db
+      .prepare(
+        `
       UPDATE scheduled_tasks SET ${sets.join(', ')} WHERE id = ? RETURNING *
-    `).get(...values);
+    `,
+      )
+      .get(...values);
     const result = raw ? fromRow(raw) : null;
     this.rearm();
     return result;
@@ -251,8 +306,8 @@ export class Scheduler {
     const task = this.getByName(name);
     if (!task) return false;
     if (task.intervalMs && task.intervalMs > 0 && task.doneAt == null) {
- // recurring reminder: "done" means this occurrence is handled — re-arm
- // the next slot and quiet the nags rather than killing the cadence.
+      // recurring reminder: "done" means this occurrence is handled — re-arm
+      // the next slot and quiet the nags rather than killing the cadence.
       let next = task.nextRunAt;
       while (next <= at) next += task.intervalMs;
       this.updateNextRun(task.id, next);

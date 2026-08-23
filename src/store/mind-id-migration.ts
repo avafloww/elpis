@@ -1,8 +1,8 @@
-import type { MigrationDatabase } from "./migrations.js";
-import { newMindId, type MindId } from "./mind-id.js";
+import type { MigrationDatabase } from './migrations.js';
+import { newMindId, type MindId } from './mind-id.js';
 
 export const MIND_ID_MIGRATION_CHECKSUM =
-  "e1b78fed03275bc53aa632b66629dfb0feda655c224438b44b08168df5409000";
+  'e1b78fed03275bc53aa632b66629dfb0feda655c224438b44b08168df5409000';
 
 function tableExists(db: MigrationDatabase, name: string): boolean {
   return Boolean(
@@ -21,9 +21,9 @@ export function migrateMindIds(
       "SELECT type FROM pragma_table_info('mind_items') WHERE name = 'id'",
     )
     .get() as { type?: string } | undefined;
-  if (!type || String(type.type).toUpperCase() === "TEXT") return;
+  if (!type || String(type.type).toUpperCase() === 'TEXT') return;
 
-  const rows = db.prepare("SELECT id FROM mind_items ORDER BY id").all() as {
+  const rows = db.prepare('SELECT id FROM mind_items ORDER BY id').all() as {
     id: number;
   }[];
   const ids = new Map<number, MindId>();
@@ -44,7 +44,7 @@ export function migrateMindIds(
     return id;
   };
 
-  db.exec("PRAGMA defer_foreign_keys = ON");
+  db.exec('PRAGMA defer_foreign_keys = ON');
   db.exec(`
     CREATE TABLE mind_id_migration_map (
       legacy_id INTEGER PRIMARY KEY,
@@ -67,19 +67,19 @@ export function migrateMindIds(
     );
   `);
   const insertMap = db.prepare(
-    "INSERT INTO mind_id_migration_map (legacy_id, mind_id) VALUES (?, ?)",
+    'INSERT INTO mind_id_migration_map (legacy_id, mind_id) VALUES (?, ?)',
   );
   for (const [legacy, id] of ids) insertMap.run(legacy, id);
   const insertItem = db.prepare(`INSERT INTO mind_items_v16
     (id,title,body,kind,status,priority,parent_id,due_at,created_by,created_at,updated_at,closed_at,archived_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   for (const row of db
-    .prepare("SELECT * FROM mind_items ORDER BY id")
+    .prepare('SELECT * FROM mind_items ORDER BY id')
     .all() as Record<string, unknown>[]) {
     insertItem.run(
       ref(row.id),
       String(row.title),
-      String(row.body ?? ""),
+      String(row.body ?? ''),
       String(row.kind),
       String(row.status),
       Number(row.priority),
@@ -94,12 +94,12 @@ export function migrateMindIds(
   }
 
   const childTables = [
-    ["mind_dependencies", ["item_id", "depends_on_id"], ["TEXT", "TEXT"]],
-    ["mind_tags", ["item_id"], ["TEXT"]],
-    ["mind_comments", ["item_id"], ["TEXT"]],
-    ["mind_events", ["item_id"], ["TEXT"]],
-    ["mind_reminders", ["item_id"], ["TEXT"]],
-    ["mind_claims", ["item_id"], ["TEXT"]],
+    ['mind_dependencies', ['item_id', 'depends_on_id'], ['TEXT', 'TEXT']],
+    ['mind_tags', ['item_id'], ['TEXT']],
+    ['mind_comments', ['item_id'], ['TEXT']],
+    ['mind_events', ['item_id'], ['TEXT']],
+    ['mind_reminders', ['item_id'], ['TEXT']],
+    ['mind_claims', ['item_id'], ['TEXT']],
   ] as const;
   const existingChildTables = childTables.filter(([table]) =>
     tableExists(db, table),
@@ -112,24 +112,24 @@ export function migrateMindIds(
       .get(`${table}_legacy_v15`) as { sql: string };
     const create = sql.sql
       .replace(
-        new RegExp(`CREATE TABLE ["']?${table}_legacy_v15["']?`, "i"),
+        new RegExp(`CREATE TABLE ["']?${table}_legacy_v15["']?`, 'i'),
         `CREATE TABLE ${table}`,
       )
       .replace(
         /INTEGER NOT NULL REFERENCES ["']?mind_items["']?\(id\)/g,
-        "TEXT NOT NULL REFERENCES mind_items_v16(id)",
+        'TEXT NOT NULL REFERENCES mind_items_v16(id)',
       )
       .replace(
         /INTEGER PRIMARY KEY REFERENCES ["']?mind_items["']?\(id\)/g,
-        "TEXT PRIMARY KEY REFERENCES mind_items_v16(id)",
+        'TEXT PRIMARY KEY REFERENCES mind_items_v16(id)',
       )
       .replace(
         /REFERENCES ["']?mind_items["']?\(id\)/g,
-        "REFERENCES mind_items_v16(id)",
+        'REFERENCES mind_items_v16(id)',
       )
       .replace(
         /REFERENCES ["']?mind_comments_legacy_v15["']?\(id\)/g,
-        "REFERENCES mind_comments(id)",
+        'REFERENCES mind_comments(id)',
       );
     db.exec(create);
     const info = db
@@ -146,15 +146,15 @@ export function migrateMindIds(
         (name) =>
           `JOIN mind_id_migration_map m_${name} ON m_${name}.legacy_id = l.${name}`,
       )
-      .join(" ");
+      .join(' ');
     db.exec(
-      `INSERT INTO ${table} (${names.join(",")}) SELECT ${select.join(",")} FROM ${table}_legacy_v15 l ${joins}`,
+      `INSERT INTO ${table} (${names.join(',')}) SELECT ${select.join(',')} FROM ${table}_legacy_v15 l ${joins}`,
     );
   }
   for (const [table] of [...existingChildTables].reverse())
     db.exec(`DROP TABLE ${table}_legacy_v15`);
 
-  if (tableExists(db, "persistent_sandboxes")) {
+  if (tableExists(db, 'persistent_sandboxes')) {
     db.exec(`
       DROP TRIGGER IF EXISTS persistent_sandboxes_identity_no_update;
       DROP TRIGGER IF EXISTS persistent_sandboxes_no_delete;

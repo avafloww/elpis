@@ -21,13 +21,17 @@ import type { OAuthCredentials } from './store.js';
 
 // Claude Code's public OAuth client id (base64 to keep it out of plain grep,
 // matching upstream; it is not a secret — it ships in every Claude Code build).
-const CLIENT_ID = Buffer.from('OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl', 'base64').toString('utf8');
+const CLIENT_ID = Buffer.from(
+  'OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl',
+  'base64',
+).toString('utf8');
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 const TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
 const BOOTSTRAP_URL = 'https://api.anthropic.com/api/claude_cli/bootstrap';
 /** Manual (headless) redirect: claude.ai renders the code for the operator to
  * copy, so login works without a loopback server or reachable browser host. */
-export const ANTHROPIC_REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback';
+export const ANTHROPIC_REDIRECT_URI =
+  'https://console.anthropic.com/oauth/code/callback';
 // Scopes required for direct OAuth-token inference (`user:inference`) plus
 // account/session management. Byte-identical to Claude Code's request.
 const SCOPES =
@@ -69,7 +73,10 @@ function nonEmpty(v: string | undefined): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
-async function postJson(body: Record<string, string>, extraHeaders?: Record<string, string>): Promise<AnthropicTokenResponse> {
+async function postJson(
+  body: Record<string, string>,
+  extraHeaders?: Record<string, string>,
+): Promise<AnthropicTokenResponse> {
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...extraHeaders },
@@ -77,17 +84,22 @@ async function postJson(body: Record<string, string>, extraHeaders?: Record<stri
     signal: AbortSignal.timeout(30_000),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`anthropic oauth token endpoint ${res.status}: ${text}`);
+  if (!res.ok)
+    throw new Error(`anthropic oauth token endpoint ${res.status}: ${text}`);
   try {
     return JSON.parse(text) as AnthropicTokenResponse;
   } catch {
-    throw new Error(`anthropic oauth token endpoint returned invalid JSON: ${text}`);
+    throw new Error(
+      `anthropic oauth token endpoint returned invalid JSON: ${text}`,
+    );
   }
 }
 
 /** Best-effort identity from the `/api/claude_cli/bootstrap` endpoint, used only
  * when the token response omits account/org. Failures are swallowed. */
-async function fetchBootstrapIdentity(accessToken: string): Promise<AnthropicIdentity> {
+async function fetchBootstrapIdentity(
+  accessToken: string,
+): Promise<AnthropicIdentity> {
   const url = `${BOOTSTRAP_URL}?entrypoint=cli&model=${encodeURIComponent(BOOTSTRAP_MODEL)}`;
   const res = await fetch(url, {
     method: 'GET',
@@ -117,7 +129,10 @@ function identityFromToken(data: AnthropicTokenResponse): AnthropicIdentity {
   };
 }
 
-async function resolveIdentity(data: AnthropicTokenResponse, includeOrg: boolean): Promise<AnthropicIdentity> {
+async function resolveIdentity(
+  data: AnthropicTokenResponse,
+  includeOrg: boolean,
+): Promise<AnthropicIdentity> {
   const id = identityFromToken(data);
   const orgSatisfied = !includeOrg || id.orgId !== undefined;
   if (id.accountId && id.email && orgSatisfied) return id;
@@ -169,7 +184,11 @@ export function startAnthropicLogin(): AnthropicLoginStart {
 /** Exchange the pasted authorization code for tokens. The manual redirect
  * returns the value as `code#state`; either the bare code or the combined
  * form is accepted (the fragment's state wins when present, matching CC). */
-export async function exchangeAnthropicCode(pasted: string, pkce: Pkce, state: string): Promise<OAuthCredentials> {
+export async function exchangeAnthropicCode(
+  pasted: string,
+  pkce: Pkce,
+  state: string,
+): Promise<OAuthCredentials> {
   let code = pasted.trim();
   let exchangeState = state;
   const hash = code.indexOf('#');
@@ -199,9 +218,15 @@ export async function exchangeAnthropicCode(pasted: string, pkce: Pkce, state: s
 /** Refresh an access token. The org is fixed at login and deliberately not
  * re-resolved here (the store merges this over the stored record, preserving
  * org/authorizedAt). */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshAnthropicToken(
+  refreshToken: string,
+): Promise<OAuthCredentials> {
   const data = await postJson(
-    { grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: refreshToken },
+    {
+      grant_type: 'refresh_token',
+      client_id: CLIENT_ID,
+      refresh_token: refreshToken,
+    },
     { 'anthropic-beta': REFRESH_BETA, 'User-Agent': REFRESH_USER_AGENT },
   );
   const id = await resolveIdentity(data, false);

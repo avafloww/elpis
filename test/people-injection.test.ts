@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { build, buildPersonMemoryContent, loadPeopleFiles } from '../src/llm/prompt.js';
+import {
+  build,
+  buildPersonMemoryContent,
+  loadPeopleFiles,
+} from '../src/llm/prompt.js';
 import { toApiMessage, type ChatMessage } from '../src/llm/llm.js';
 import { toResponsesInput } from '../src/llm/responses.js';
 import { type InboundMessage } from '../src/agent.js';
@@ -15,7 +19,12 @@ function tmpDataDir(): string {
   return dir;
 }
 
-function writePerson(dir: string, slug: string, ids: string[], facts: string): void {
+function writePerson(
+  dir: string,
+  slug: string,
+  ids: string[],
+  facts: string,
+): void {
   const idsStr = ids.length ? `[${ids.join(', ')}]` : '[]';
   fs.mkdirSync(path.join(dir, 'people'), { recursive: true });
   fs.writeFileSync(
@@ -24,7 +33,12 @@ function writePerson(dir: string, slug: string, ids: string[], facts: string): v
   );
 }
 
-function inbound(authorId: string, author: string, id: string, wakeClass?: 'direct' | 'ambient'): InboundMessage {
+function inbound(
+  authorId: string,
+  author: string,
+  id: string,
+  wakeClass?: 'direct' | 'ambient',
+): InboundMessage {
   return {
     id,
     channelId: '100',
@@ -41,7 +55,10 @@ function inbound(authorId: string, author: string, id: string, wakeClass?: 'dire
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+): Promise<void> {
   const until = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= until) throw new Error('timed out waiting for agent');
@@ -54,9 +71,18 @@ test('person-memory renderer matches by Discord id, then slug, and names a missi
   writePerson(dir, 'bramble', ['discord:111'], 'ID_MATCH_FACT');
   writePerson(dir, 'clover', [], 'SLUG_MATCH_FACT');
   const files = loadPeopleFiles(dir);
-  assert.match(buildPersonMemoryContent(files, { authorId: '111', author: 'Elsewhere' }), /ID_MATCH_FACT/);
-  assert.match(buildPersonMemoryContent(files, { authorId: '999', author: 'Clover' }), /SLUG_MATCH_FACT/);
-  const missing = buildPersonMemoryContent(files, { authorId: '333', author: 'New Person' });
+  assert.match(
+    buildPersonMemoryContent(files, { authorId: '111', author: 'Elsewhere' }),
+    /ID_MATCH_FACT/,
+  );
+  assert.match(
+    buildPersonMemoryContent(files, { authorId: '999', author: 'Clover' }),
+    /SLUG_MATCH_FACT/,
+  );
+  const missing = buildPersonMemoryContent(files, {
+    authorId: '333',
+    author: 'New Person',
+  });
   assert.match(missing, /no people\/ file yet for new-person/);
   assert.match(missing, /memory\.person\('new-person'/);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -65,14 +91,23 @@ test('person-memory renderer matches by Discord id, then slug, and names a missi
 test('person-memory renderer bounds each profile message', () => {
   const dir = tmpDataDir();
   writePerson(dir, 'large', ['discord:1'], 'x'.repeat(8000));
-  const rendered = buildPersonMemoryContent(loadPeopleFiles(dir), { authorId: '1', author: 'Large' });
+  const rendered = buildPersonMemoryContent(loadPeopleFiles(dir), {
+    authorId: '1',
+    author: 'Large',
+  });
   assert.equal(rendered.length, 4000);
   assert.match(rendered, /truncated to bound context growth/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('system prompt never embeds participant profiles', () => {
-  const prompt = build({ soul: '', memory: '', now: '', harnessRoot: '/x', dataDirectory: '/y' });
+  const prompt = build({
+    soul: '',
+    memory: '',
+    now: '',
+    harnessRoot: '/x',
+    dataDirectory: '/y',
+  });
   assert.doesNotMatch(prompt, /## People here/);
   assert.doesNotMatch(prompt, /person-memory — first appearance/);
   assert.match(prompt, /A `\[person-memory …\]` history message is/);
@@ -109,7 +144,11 @@ test('first real inbound appends one profile before the inbound and keeps the sy
   assert.match(profiles[0].content, /DURABLE_BRAMBLE_FACT/);
   assert.match(profiles[1].content, /UNRELATED_ROWAN_FACT/);
   assert.equal(requests[0][0].content, requests[1][0].content);
-  assert.equal(requests[1][0].content, requests[2][0].content, 'a new participant must not move messages[0]');
+  assert.equal(
+    requests[1][0].content,
+    requests[2][0].content,
+    'a new participant must not move messages[0]',
+  );
   cleanup();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -119,7 +158,12 @@ test('ambient multi-speaker batches inject each profile before first inbound and
   writePerson(dir, 'abe', ['discord:1'], 'ABE_FACT');
   writePerson(dir, 'clover', ['discord:2'], 'CLOVER_FACT');
   let calls = 0;
-  const llm = makeStubLLM({ complete: async () => { calls++; return EMPTY_WAKE; } });
+  const llm = makeStubLLM({
+    complete: async () => {
+      calls++;
+      return EMPTY_WAKE;
+    },
+  });
   const { agent, cleanup } = buildTestAgent({ dir, llm });
   void agent.loop();
   agent.enqueue(inbound('1', 'Abe', 'a1', 'ambient'));
@@ -130,13 +174,18 @@ test('ambient multi-speaker batches inject each profile before first inbound and
     channelId: 'internal',
     channelName: 'internal',
   });
-  await waitFor(() => agent.messagesForTest.filter((m) => m.personContext?.kind === 'inbound').length === 2);
+  await waitFor(
+    () =>
+      agent.messagesForTest.filter((m) => m.personContext?.kind === 'inbound')
+        .length === 2,
+  );
   agent.stop();
   assert.equal(calls, 1);
   const marked = agent.messagesForTest.filter((m) => m.personContext);
-  assert.deepEqual(marked.map((m) => `${m.personContext?.kind}:${m.personContext?.authorId}`), [
-    'memory:1', 'inbound:1', 'memory:2', 'inbound:2',
-  ]);
+  assert.deepEqual(
+    marked.map((m) => `${m.personContext?.kind}:${m.personContext?.authorId}`),
+    ['memory:1', 'inbound:1', 'memory:2', 'inbound:2'],
+  );
   cleanup();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -146,20 +195,35 @@ test('restored profile metadata prevents duplicate injection after restart', asy
   writePerson(dir, 'bramble', ['discord:111'], 'RESTORED_FACT');
   const initialMessages: ChatMessage[] = [
     {
-      role: 'user', content: '[person-memory]', channel: 'internal',
+      role: 'user',
+      content: '[person-memory]',
+      channel: 'internal',
       personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
     },
     {
-      role: 'user', content: '<incoming-message>old</incoming-message>', channel: '100',
+      role: 'user',
+      content: '<incoming-message>old</incoming-message>',
+      channel: '100',
       personContext: { kind: 'inbound', authorId: '111', author: 'Bramble' },
     },
   ];
-  const { agent, cleanup } = buildTestAgent({ dir, agentDeps: { initialMessages } });
+  const { agent, cleanup } = buildTestAgent({
+    dir,
+    agentDeps: { initialMessages },
+  });
   void agent.loop();
   agent.enqueue(inbound('111', 'Bramble', 'm2'));
-  await waitFor(() => agent.messagesForTest.some((m) => m.personContext?.kind === 'inbound' && m.content.includes('m2')));
+  await waitFor(() =>
+    agent.messagesForTest.some(
+      (m) => m.personContext?.kind === 'inbound' && m.content.includes('m2'),
+    ),
+  );
   agent.stop();
-  assert.equal(agent.messagesForTest.filter((m) => m.personContext?.kind === 'memory').length, 1);
+  assert.equal(
+    agent.messagesForTest.filter((m) => m.personContext?.kind === 'memory')
+      .length,
+    1,
+  );
   cleanup();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -171,18 +235,38 @@ test('compaction refreshes retained identities and ages out absent profiles', ()
   const { agent, cleanup } = buildTestAgent({ dir });
   writePerson(dir, 'bramble', ['discord:111'], 'REFRESHED_FACT');
   agent.messagesForTest.push(
-    { role: 'user', content: 'retained inbound', personContext: { kind: 'inbound', authorId: '111', author: 'Bramble' } },
-    { role: 'user', content: 'old bramble profile', personContext: { kind: 'memory', authorId: '111', author: 'Bramble' } },
-    { role: 'user', content: 'orphan rowan profile', personContext: { kind: 'memory', authorId: '222', author: 'Rowan' } },
+    {
+      role: 'user',
+      content: 'retained inbound',
+      personContext: { kind: 'inbound', authorId: '111', author: 'Bramble' },
+    },
+    {
+      role: 'user',
+      content: 'old bramble profile',
+      personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
+    },
+    {
+      role: 'user',
+      content: 'orphan rowan profile',
+      personContext: { kind: 'memory', authorId: '222', author: 'Rowan' },
+    },
   );
   (agent as unknown as { onCompaction(): void }).onCompaction();
-  const profiles = agent.messagesForTest.filter((m) => m.personContext?.kind === 'memory');
+  const profiles = agent.messagesForTest.filter(
+    (m) => m.personContext?.kind === 'memory',
+  );
   assert.equal(profiles.length, 1);
   assert.equal(profiles[0].personContext?.authorId, '111');
   assert.match(profiles[0].content, /REFRESHED_FACT/);
   assert.doesNotMatch(profiles[0].content, /OLD_FACT|ROWAN_FACT/);
-  const inboundIndex = agent.messagesForTest.findIndex((m) => m.personContext?.kind === 'inbound');
-  assert.equal(agent.messagesForTest[inboundIndex - 1], profiles[0], 'refreshed profile precedes the first retained inbound');
+  const inboundIndex = agent.messagesForTest.findIndex(
+    (m) => m.personContext?.kind === 'inbound',
+  );
+  assert.equal(
+    agent.messagesForTest[inboundIndex - 1],
+    profiles[0],
+    'refreshed profile precedes the first retained inbound',
+  );
   cleanup();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -194,9 +278,14 @@ test('person metadata is harness-only and absent from provider wire objects', ()
     personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
   });
   assert.deepEqual(wire, { role: 'user', content: 'profile content' });
-  assert.deepEqual(toResponsesInput([{
-    role: 'user',
-    content: 'profile content',
-    personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
-  }]), [{ role: 'user', content: 'profile content' }]);
+  assert.deepEqual(
+    toResponsesInput([
+      {
+        role: 'user',
+        content: 'profile content',
+        personContext: { kind: 'memory', authorId: '111', author: 'Bramble' },
+      },
+    ]),
+    [{ role: 'user', content: 'profile content' }],
+  );
 });

@@ -66,7 +66,8 @@ export function containment(a: Set<string>, b: Set<string>): number {
  * message. So a reading here is a FLOOR on how much I am repeating myself,
  * never a measure of it, and silence from it is not evidence of variety.
  */
-export const BLIND_SPOTS = 'blind to paraphrase (same skeleton, new words): on the loop it was built from it misses 65% of same-content pairs, so this is a floor, not a measure';
+export const BLIND_SPOTS =
+  'blind to paraphrase (same skeleton, new words): on the loop it was built from it misses 65% of same-content pairs, so this is a floor, not a measure';
 
 export interface RepetitionReport {
   /** How many of the examined messages fall in the similar cluster. */
@@ -94,8 +95,8 @@ export function findRepetition(
   const recent = messages.slice(-window);
   if (recent.length < minCount) return null;
   const toks = recent.map(tokenize);
- // Seed on the newest message; a loop is "I keep saying THIS", so the newest
- // is the right anchor and avoids reporting old resolved repetition.
+  // Seed on the newest message; a loop is "I keep saying THIS", so the newest
+  // is the right anchor and avoids reporting old resolved repetition.
   const seed = toks[toks.length - 1];
   const sims: number[] = [];
   for (let i = 0; i < toks.length - 1; i++) {

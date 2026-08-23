@@ -1,12 +1,12 @@
-import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
-import { isMindId, type MindId } from "../store/mind-id.js";
+import { randomUUID } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
+import { isMindId, type MindId } from '../store/mind-id.js';
 
 export const SANDBOX_LIFECYCLES = [
-  "ready",
-  "busy",
-  "detached",
-  "retired",
+  'ready',
+  'busy',
+  'detached',
+  'retired',
 ] as const;
 export type SandboxLifecycle = (typeof SANDBOX_LIFECYCLES)[number];
 
@@ -55,7 +55,7 @@ type SandboxRow = {
   retired_at: number | null;
 };
 
-const SELECT_REGISTRATION = "SELECT * FROM persistent_sandboxes";
+const SELECT_REGISTRATION = 'SELECT * FROM persistent_sandboxes';
 
 function registration(row: SandboxRow): SandboxRegistration {
   return {
@@ -78,7 +78,7 @@ function registration(row: SandboxRow): SandboxRegistration {
 
 function assertMindId(mindId: MindId): void {
   if (!isMindId(mindId))
-    throw new Error("sandbox registry: mind id must be a canonical elm-* id");
+    throw new Error('sandbox registry: mind id must be a canonical elm-* id');
 }
 
 export class SandboxRegistry {
@@ -95,14 +95,14 @@ export class SandboxRegistry {
   }
 
   private immediate<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    this.db.exec('BEGIN IMMEDIATE');
     try {
       const value = fn();
-      this.db.exec("COMMIT");
+      this.db.exec('COMMIT');
       return value;
     } catch (error) {
       try {
-        this.db.exec("ROLLBACK");
+        this.db.exec('ROLLBACK');
       } catch {
         /* original error wins */
       }
@@ -114,14 +114,14 @@ export class SandboxRegistry {
     return this.immediate(() => {
       const existing = this.db
         .prepare(
-          "SELECT executor_id FROM sandbox_executor_identity WHERE singleton = 1",
+          'SELECT executor_id FROM sandbox_executor_identity WHERE singleton = 1',
         )
         .get() as { executor_id: string } | undefined;
       if (existing) return existing.executor_id;
       const executorId = this.uuid();
       this.db
         .prepare(
-          "INSERT INTO sandbox_executor_identity (singleton, executor_id, created_at) VALUES (1, ?, ?)",
+          'INSERT INTO sandbox_executor_identity (singleton, executor_id, created_at) VALUES (1, ?, ?)',
         )
         .run(executorId, this.now());
       return executorId;
@@ -173,11 +173,11 @@ export class SandboxRegistry {
     assertMindId(mindId);
     return this.immediate(() => {
       const mind = this.db
-        .prepare("SELECT status, archived_at FROM mind_items WHERE id = ?")
+        .prepare('SELECT status, archived_at FROM mind_items WHERE id = ?')
         .get(mindId) as
         { status: string; archived_at: number | null } | undefined;
       if (!mind) throw new Error(`sandbox registry: no Mind item ${mindId}`);
-      if (mind.status === "proposal")
+      if (mind.status === 'proposal')
         throw new Error(
           `sandbox registry: Mind ${mindId} is a proposal and cannot receive a persistent sandbox`,
         );
@@ -187,8 +187,8 @@ export class SandboxRegistry {
       if (existing) return registration(existing);
       if (
         mind.archived_at !== null ||
-        mind.status === "done" ||
-        mind.status === "cancelled"
+        mind.status === 'done' ||
+        mind.status === 'cancelled'
       )
         throw new Error(
           `sandbox registry: Mind ${mindId} is closed and cannot receive a persistent sandbox`,
@@ -209,22 +209,22 @@ export class SandboxRegistry {
     const id = this.resolveId(ref);
     return this.immediate(() => {
       let current = this.byId(id);
-      if (current.lifecycle !== "ready") {
+      if (current.lifecycle !== 'ready') {
         throw new Error(
           `sandbox registry: ${current.id} is ${current.lifecycle}`,
         );
       }
       const mind = this.db
-        .prepare("SELECT status, archived_at FROM mind_items WHERE id = ?")
+        .prepare('SELECT status, archived_at FROM mind_items WHERE id = ?')
         .get(current.mindId) as { status: string; archived_at: number | null };
-      if (mind.status === "proposal")
+      if (mind.status === 'proposal')
         throw new Error(
           `sandbox registry: Mind ${current.mindId} is a proposal and cannot resume a persistent sandbox`,
         );
       if (
         !current.retireRequested &&
-        (mind.status === "done" ||
-          mind.status === "cancelled" ||
+        (mind.status === 'done' ||
+          mind.status === 'cancelled' ||
           mind.archived_at !== null)
       ) {
         this.requestRetirementInside(current);
@@ -242,7 +242,7 @@ export class SandboxRegistry {
   }
 
   detachRun(ref: string, runId: string): SandboxRegistration {
-    return this.transitionRun(ref, runId, "detached");
+    return this.transitionRun(ref, runId, 'detached');
   }
 
   finishRun(ref: string, runId: string): SandboxRegistration {
@@ -250,7 +250,7 @@ export class SandboxRegistry {
     return this.immediate(() => {
       const current = this.byId(id);
       if (
-        (current.lifecycle !== "busy" && current.lifecycle !== "detached") ||
+        (current.lifecycle !== 'busy' && current.lifecycle !== 'detached') ||
         current.activeRunId !== runId
       ) {
         throw new Error(
@@ -258,11 +258,11 @@ export class SandboxRegistry {
         );
       }
       const mind = this.db
-        .prepare("SELECT status, archived_at FROM mind_items WHERE id = ?")
+        .prepare('SELECT status, archived_at FROM mind_items WHERE id = ?')
         .get(current.mindId) as { status: string; archived_at: number | null };
       const closed =
-        mind.status === "done" ||
-        mind.status === "cancelled" ||
+        mind.status === 'done' ||
+        mind.status === 'cancelled' ||
         mind.archived_at !== null;
       const now = this.now();
       this.db
@@ -284,19 +284,19 @@ export class SandboxRegistry {
   private transitionRun(
     ref: string,
     runId: string,
-    target: "detached",
+    target: 'detached',
   ): SandboxRegistration {
     const id = this.resolveId(ref);
     return this.immediate(() => {
       const current = this.byId(id);
-      if (current.lifecycle !== "busy" || current.activeRunId !== runId) {
+      if (current.lifecycle !== 'busy' || current.activeRunId !== runId) {
         throw new Error(
           `sandbox registry: ${current.id} does not own active run ${JSON.stringify(runId)}`,
         );
       }
       this.db
         .prepare(
-          "UPDATE persistent_sandboxes SET lifecycle = ?, updated_at = ? WHERE id = ?",
+          'UPDATE persistent_sandboxes SET lifecycle = ?, updated_at = ? WHERE id = ?',
         )
         .run(target, this.now(), id);
       return this.byId(id);
@@ -317,7 +317,7 @@ export class SandboxRegistry {
     return this.immediate(() => {
       const current = this.byId(id);
       if (
-        (current.lifecycle !== "busy" && current.lifecycle !== "detached") ||
+        (current.lifecycle !== 'busy' && current.lifecycle !== 'detached') ||
         current.activeRunId !== runId
       ) {
         throw new Error(
@@ -356,7 +356,7 @@ export class SandboxRegistry {
     const id = this.resolveId(ref);
     const result = this.db
       .prepare(
-        "UPDATE persistent_sandboxes SET cold_notice_pending = 0 WHERE id = ? AND cold_notice_pending = 1",
+        'UPDATE persistent_sandboxes SET cold_notice_pending = 0 WHERE id = ? AND cold_notice_pending = 1',
       )
       .run(id);
     return Number(result.changes) === 1;
@@ -366,7 +366,7 @@ export class SandboxRegistry {
     const id = this.resolveId(ref);
     return this.immediate(() => {
       const current = this.byId(id);
-      if (current.lifecycle !== "ready")
+      if (current.lifecycle !== 'ready')
         throw new Error(
           `sandbox registry: ${current.id} must be ready to reset`,
         );
@@ -397,7 +397,7 @@ export class SandboxRegistry {
     const id = this.resolveId(ref);
     this.db
       .prepare(
-        "UPDATE persistent_sandboxes SET reminder_latched = 0, updated_at = ? WHERE id = ?",
+        'UPDATE persistent_sandboxes SET reminder_latched = 0, updated_at = ? WHERE id = ?',
       )
       .run(this.now(), id);
     return this.byId(id);
@@ -418,11 +418,11 @@ export class SandboxRegistry {
 
   cancelRetirement(mindId: MindId): SandboxRegistration | null {
     const current = this.getByMind(mindId);
-    if (!current || current.lifecycle === "retired" || !current.retireRequested)
+    if (!current || current.lifecycle === 'retired' || !current.retireRequested)
       return current;
     this.db
       .prepare(
-        "UPDATE persistent_sandboxes SET retire_requested = 0, retire_requested_at = NULL, updated_at = ? WHERE id = ?",
+        'UPDATE persistent_sandboxes SET retire_requested = 0, retire_requested_at = NULL, updated_at = ? WHERE id = ?',
       )
       .run(this.now(), current.id);
     return this.byId(current.id);
@@ -435,24 +435,24 @@ export class SandboxRegistry {
     const id = this.resolveId(ref);
     return this.immediate(() => {
       const current = this.byId(id);
-      if (current.lifecycle === "retired") return current;
-      if (current.lifecycle !== "ready" || !current.retireRequested) {
+      if (current.lifecycle === 'retired') return current;
+      if (current.lifecycle !== 'ready' || !current.retireRequested) {
         throw new Error(
           `sandbox registry: ${current.id} is not ready for retirement GC`,
         );
       }
       const mind = this.db
-        .prepare("SELECT status, archived_at FROM mind_items WHERE id = ?")
+        .prepare('SELECT status, archived_at FROM mind_items WHERE id = ?')
         .get(current.mindId) as { status: string; archived_at: number | null };
       if (
         !options.expired &&
-        mind.status !== "done" &&
-        mind.status !== "cancelled" &&
+        mind.status !== 'done' &&
+        mind.status !== 'cancelled' &&
         mind.archived_at === null
       ) {
         this.db
           .prepare(
-            "UPDATE persistent_sandboxes SET retire_requested = 0, retire_requested_at = NULL, updated_at = ? WHERE id = ?",
+            'UPDATE persistent_sandboxes SET retire_requested = 0, retire_requested_at = NULL, updated_at = ? WHERE id = ?',
           )
           .run(this.now(), id);
         return this.byId(id);
@@ -484,12 +484,12 @@ export class SandboxRegistry {
   private requestRetirementInside(
     current: SandboxRegistration,
   ): SandboxRegistration {
-    if (current.lifecycle === "retired" || current.retireRequested)
+    if (current.lifecycle === 'retired' || current.retireRequested)
       return current;
     const now = this.now();
     this.db
       .prepare(
-        "UPDATE persistent_sandboxes SET retire_requested = 1, retire_requested_at = COALESCE(retire_requested_at, ?), updated_at = ? WHERE id = ?",
+        'UPDATE persistent_sandboxes SET retire_requested = 1, retire_requested_at = COALESCE(retire_requested_at, ?), updated_at = ? WHERE id = ?',
       )
       .run(now, now, current.id);
 

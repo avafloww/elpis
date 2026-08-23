@@ -4,13 +4,28 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCompactor, enforcePairIntegrity, walkKeepBoundary, SUMMARY_FLOOR_CAP, SUMMARY_FLOOR_PER_MESSAGE } from '../src/llm/compactor.js';
+import {
+  createCompactor,
+  enforcePairIntegrity,
+  walkKeepBoundary,
+  SUMMARY_FLOOR_CAP,
+  SUMMARY_FLOOR_PER_MESSAGE,
+} from '../src/llm/compactor.js';
 import { createContextTracker } from '../src/llm/context-tracker.js';
 import { serializeHistory } from '../src/llm/summarize.js';
-import { SOCIAL_SUMMARIZE_PROMPT, SUMMARIZE_TAIL_REMINDER, computeCharsSent, RUN_TOOL } from '../src/llm/llm.js';
+import {
+  SOCIAL_SUMMARIZE_PROMPT,
+  SUMMARIZE_TAIL_REMINDER,
+  computeCharsSent,
+  RUN_TOOL,
+} from '../src/llm/llm.js';
 import type { ChatMessage, LLM } from '../src/llm/llm.js';
 
-function mk(role: ChatMessage['role'], content: string, extra: Partial<ChatMessage> = {}): ChatMessage {
+function mk(
+  role: ChatMessage['role'],
+  content: string,
+  extra: Partial<ChatMessage> = {},
+): ChatMessage {
   return { role, content, ...extra };
 }
 /** ~400-char message ≈ 102 tokens. */
@@ -33,23 +48,36 @@ function fakeLLM(opts: { summary?: string; fail?: boolean } = {}): LLM & {
   let calls = 0;
   let settled = false;
   const inputs: string[] = [];
-  const pending: Array<{ resolve: (s: string) => void; reject: (e: Error) => void }> = [];
+  const pending: Array<{
+    resolve: (s: string) => void;
+    reject: (e: Error) => void;
+  }> = [];
   const llm: LLM = {
     client: {} as unknown as LLM['client'],
     model: 'test',
     runTool: {} as unknown as LLM['runTool'],
-    complete: async () => ({ message: mk('assistant', ''), stripped: false, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
+    complete: async () => ({
+      message: mk('assistant', ''),
+      stripped: false,
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    }),
     summarize(text: string): Promise<string> {
       calls++;
       inputs.push(text);
       if (settled) {
-        return opts.fail ? Promise.reject(new Error('summarize failed')) : Promise.resolve(padOk(opts.summary ?? 'SUMMARY'));
+        return opts.fail
+          ? Promise.reject(new Error('summarize failed'))
+          : Promise.resolve(padOk(opts.summary ?? 'SUMMARY'));
       }
-      return new Promise((resolve, reject) => { pending.push({ resolve, reject }); });
+      return new Promise((resolve, reject) => {
+        pending.push({ resolve, reject });
+      });
     },
   };
   return Object.assign(llm, {
-    get calls() { return calls; },
+    get calls() {
+      return calls;
+    },
     inputs,
     resolveAll() {
       settled = true;
@@ -63,7 +91,10 @@ function fakeLLM(opts: { summary?: string; fail?: boolean } = {}): LLM & {
 }
 
 test('compaction prompt requires a first-person note to the future self at both ends', () => {
-  assert.match(SOCIAL_SUMMARIZE_PROMPT, /first person as a note to your future self/);
+  assert.match(
+    SOCIAL_SUMMARIZE_PROMPT,
+    /first person as a note to your future self/,
+  );
   assert.match(SOCIAL_SUMMARIZE_PROMPT, /I told Bramble/);
   assert.doesNotMatch(SOCIAL_SUMMARIZE_PROMPT, /write in second person/i);
   assert.match(SUMMARIZE_TAIL_REMINDER, /FIRST PERSON/);
@@ -84,12 +115,18 @@ test('walkKeepBoundary: returns 0 when everything fits in keep (nothing to fold)
 });
 
 test('walkKeepBoundary: a smaller ratio (denser tokens) folds fewer messages', () => {
- // 10 messages, each 400 content chars → sentChars ≈ 400 + role + 4.
-  const msgs = Array.from({ length: 10 }, () => ({ role: 'user' as const, content: 'x'.repeat(400) }));
- // At ratio 4: each ~101 tokens; at ratio 2: each ~202 tokens. Keep budget 500.
-  const b4 = walkKeepBoundary(msgs, 500);      // default ratio 4
-  const b2 = walkKeepBoundary(msgs, 500, 2);   // denser → hits 500 sooner → higher boundary index
-  assert.ok(b2 > b4, `denser ratio keeps fewer messages (b2=${b2} should exceed b4=${b4})`);
+  // 10 messages, each 400 content chars → sentChars ≈ 400 + role + 4.
+  const msgs = Array.from({ length: 10 }, () => ({
+    role: 'user' as const,
+    content: 'x'.repeat(400),
+  }));
+  // At ratio 4: each ~101 tokens; at ratio 2: each ~202 tokens. Keep budget 500.
+  const b4 = walkKeepBoundary(msgs, 500); // default ratio 4
+  const b2 = walkKeepBoundary(msgs, 500, 2); // denser → hits 500 sooner → higher boundary index
+  assert.ok(
+    b2 > b4,
+    `denser ratio keeps fewer messages (b2=${b2} should exceed b4=${b4})`,
+  );
 });
 
 // ---------- computeCharsSent ----------
@@ -97,25 +134,36 @@ test('walkKeepBoundary: a smaller ratio (denser tokens) folds fewer messages', (
 test('computeCharsSent: sums per-message sentChars plus the tool-schema constant', () => {
   const toolChars = JSON.stringify([RUN_TOOL]).length;
   const msgs = [
-    { role: 'system' as const, content: 'S'.repeat(100) },     // 100 + 6 + 4 = 110
-    { role: 'user' as const, content: 'U'.repeat(40) },         // 40 + 4 + 4 = 48
+    { role: 'system' as const, content: 'S'.repeat(100) }, // 100 + 6 + 4 = 110
+    { role: 'user' as const, content: 'U'.repeat(40) }, // 40 + 4 + 4 = 48
   ];
- // Σ sentChars = 110 + 48 = 158, plus the tool schema.
+  // Σ sentChars = 110 + 48 = 158, plus the tool schema.
   assert.equal(computeCharsSent(msgs), 158 + toolChars);
 });
 
 // ---------- CompactorOpts.ratio (fixes reviewer M2) ----------
 
 test('createCompactor: opts.ratio feeds the keep-boundary walk (denser → higher boundary)', () => {
-  const msgs = Array.from({ length: 10 }, () => ({ role: 'user' as const, content: 'x'.repeat(400) }));
+  const msgs = Array.from({ length: 10 }, () => ({
+    role: 'user' as const,
+    content: 'x'.repeat(400),
+  }));
   const tracker = createContextTracker(1_000_000, 2000);
   const stubLLM = { summarize: async () => 'x' } as unknown as LLM;
-  const cAt4 = createCompactor(stubLLM, tracker, { keepTokens: 500, ratio: () => 4 });
-  const cAt2 = createCompactor(stubLLM, tracker, { keepTokens: 500, ratio: () => 2 });
+  const cAt4 = createCompactor(stubLLM, tracker, {
+    keepTokens: 500,
+    ratio: () => 4,
+  });
+  const cAt2 = createCompactor(stubLLM, tracker, {
+    keepTokens: 500,
+    ratio: () => 2,
+  });
   cAt4.start(msgs);
   cAt2.start(msgs);
-  assert.ok(cAt2.boundaryIndex > cAt4.boundaryIndex,
-    `denser ratio folds a shorter tail (b2=${cAt2.boundaryIndex} > b4=${cAt4.boundaryIndex})`);
+  assert.ok(
+    cAt2.boundaryIndex > cAt4.boundaryIndex,
+    `denser ratio folds a shorter tail (b2=${cAt2.boundaryIndex} > b4=${cAt4.boundaryIndex})`,
+  );
 });
 
 // ---------- enforcePairIntegrity ----------
@@ -123,7 +171,15 @@ test('createCompactor: opts.ratio feeds the keep-boundary walk (denser → highe
 test('pairIntegrity: boundary after assistant-with-tool_calls advances past tool results', () => {
   const msgs: ChatMessage[] = [
     mk('user', 'q'),
-    mk('assistant', '', { tool_calls: [{ id: 't1', type: 'function', function: { name: 'run', arguments: '{}' } }] }),
+    mk('assistant', '', {
+      tool_calls: [
+        {
+          id: 't1',
+          type: 'function',
+          function: { name: 'run', arguments: '{}' },
+        },
+      ],
+    }),
     mk('tool', 'r1', { tool_call_id: 't1' }),
     mk('user', 'next'),
   ];
@@ -150,7 +206,11 @@ test('compactor: start is non-blocking, folds older, keeps the tail', () => {
   c.start(msgs);
   assert.equal(c.running, true);
   assert.equal(c.hasCompletedResult(), false);
-  assert.equal(c.boundaryIndex, 7, 'fold everything before the ~keepTokens tail');
+  assert.equal(
+    c.boundaryIndex,
+    7,
+    'fold everything before the ~keepTokens tail',
+  );
 });
 
 test('compactor: applyCompaction swaps [summary, ...tail, notice]', async () => {
@@ -163,9 +223,12 @@ test('compactor: applyCompaction swaps [summary, ...tail, notice]', async () => 
   await c.done();
   const result = c.applyCompaction(msgs);
   assert.equal(result[0].role, 'system');
-  assert.match(result[0].content, /Summary of earlier conversation \(7 earlier messages compacted\)/);
+  assert.match(
+    result[0].content,
+    /Summary of earlier conversation \(7 earlier messages compacted\)/,
+  );
   assert.match(result[0].content, /SUMMARY-TEXT/);
- // tail (3 messages) preserved verbatim, then the notice
+  // tail (3 messages) preserved verbatim, then the notice
   assert.equal(result.length, 5);
   assert.match(result[1].content, /m7/);
   assert.match(result[3].content, /m9/);
@@ -223,7 +286,11 @@ test('compactor: ratio drops after applyCompaction (recompute)', async () => {
   const tracker = createContextTracker(10000, 2000);
   const llm = fakeLLM({ summary: 'short summary' });
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
-  tracker.update({ prompt_tokens: 7000, completion_tokens: 1000, total_tokens: 8000 });
+  tracker.update({
+    prompt_tokens: 7000,
+    completion_tokens: 1000,
+    total_tokens: 8000,
+  });
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   llm.resolveAll();
@@ -252,29 +319,41 @@ test('compactor: prior summary is carried out of the fold into EARLIER MEMORY', 
   const tracker = createContextTracker(1_000_000, 2000);
   const llm = fakeLLM({ summary: 'FRESH-SUMMARY' });
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
- // First cycle produces [summary, tail..., notice].
+  // First cycle produces [summary, tail..., notice].
   let msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   llm.resolveAll();
   await c.done();
   msgs = c.applyCompaction(msgs);
   assert.match(msgs[0].content, /Summary of earlier conversation/);
- // Grow again so a second fold is worthwhile.
+  // Grow again so a second fold is worthwhile.
   for (let i = 0; i < 10; i++) msgs.push(big(`n${i}`));
   const inputsBefore = llm.inputs.length;
   c.start(msgs);
   const input = llm.inputs[inputsBefore];
-  assert.ok(input.includes('EARLIER MEMORY'), 'prior summary carried as a labeled section');
-  assert.ok(input.includes('FRESH-SUMMARY'), 'the prior summary text is in the EARLIER MEMORY section');
-  assert.ok(input.includes('RECENT CONVERSATION TO FOLD IN'), 'the recent fold body follows');
+  assert.ok(
+    input.includes('EARLIER MEMORY'),
+    'prior summary carried as a labeled section',
+  );
+  assert.ok(
+    input.includes('FRESH-SUMMARY'),
+    'the prior summary text is in the EARLIER MEMORY section',
+  );
+  assert.ok(
+    input.includes('RECENT CONVERSATION TO FOLD IN'),
+    'the recent fold body follows',
+  );
 });
 
 test('compactor: prior summary survives even when the fold body exceeds totalCap', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
   const llm = fakeLLM({ summary: 'PRIOR' });
- // Tiny fold-serialize cap so the recent body is truncated, but the EARLIER
- // MEMORY carry is OUTSIDE that cap and must survive.
-  const c = createCompactor(llm, tracker, { keepTokens: 250, foldSerializeCap: 200 });
+  // Tiny fold-serialize cap so the recent body is truncated, but the EARLIER
+  // MEMORY carry is OUTSIDE that cap and must survive.
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    foldSerializeCap: 200,
+  });
   let msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   llm.resolveAll();
@@ -312,15 +391,23 @@ test('compactor: reset discards an in-flight summary — stale result never appl
   c.reset();
   llm.resolveAll();
   await c.done();
-  assert.equal(c.hasCompletedResult(), false, 'stale summary must not become a completed result');
+  assert.equal(
+    c.hasCompletedResult(),
+    false,
+    'stale summary must not become a completed result',
+  );
   assert.equal(c.boundaryIndex, 0);
 });
 
 // ---------- serializeHistory (reasoning visibility) ----------
 
 test('serializeHistory: includes assistant reasoning_content', () => {
-  const reasoning = 'I need to call elpis.channel().send() because assistant content is not visible.';
-  const text = serializeHistory([mk('user', 'hi'), mk('assistant', '', { reasoning_content: reasoning })]);
+  const reasoning =
+    'I need to call elpis.channel().send() because assistant content is not visible.';
+  const text = serializeHistory([
+    mk('user', 'hi'),
+    mk('assistant', '', { reasoning_content: reasoning }),
+  ]);
   assert.ok(text.includes('[reasoning]'));
   assert.ok(text.includes(reasoning));
 });
@@ -334,7 +421,6 @@ test('serializeHistory: over-cap history drops the OLDEST, keeps the NEWEST', ()
   assert.ok(!text.includes('MSG_0 '), 'oldest dropped');
   assert.ok(text.startsWith('[oldest history truncated]'));
 });
-
 
 test('SOCIAL_SUMMARIZE_PROMPT asks for multi-paragraph summaries', () => {
   assert.ok(SOCIAL_SUMMARIZE_PROMPT.includes('Write several paragraphs'));
@@ -354,23 +440,35 @@ test('compactor: summarize input ends with the tail restatement, after the fold 
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   const input = llm.inputs[0];
-  assert.ok(input.endsWith(SUMMARIZE_TAIL_REMINDER), 'reminder is the LAST thing the model reads');
-  assert.ok(input.indexOf('m0') < input.indexOf(SUMMARIZE_TAIL_REMINDER), 'fold body precedes the reminder');
+  assert.ok(
+    input.endsWith(SUMMARIZE_TAIL_REMINDER),
+    'reminder is the LAST thing the model reads',
+  );
+  assert.ok(
+    input.indexOf('m0') < input.indexOf(SUMMARIZE_TAIL_REMINDER),
+    'fold body precedes the reminder',
+  );
 });
 
 test('compactor: a degenerate short summary is rejected and retried (quality gate)', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
   let calls = 0;
   const good = 'GOOD-SUMMARY '.padEnd(300, 'z');
-  const llm = { summarize: async () => (++calls === 1 ? 'one terse in-voice sentence.' : good) } as unknown as LLM;
+  const llm = {
+    summarize: async () =>
+      ++calls === 1 ? 'one terse in-voice sentence.' : good,
+  } as unknown as LLM;
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`)); // fold = 7 → floor 70 chars
   c.start(msgs);
   await c.done();
   assert.equal(calls, 2, 'short first attempt consumed a retry');
   assert.equal(c.hasCompletedResult(), true);
-  assert.equal(c.lastError, null,
-    'the interim rejection is cleared by the later success — a stale rejection would be misreported by the escalation nudge (finding 4)');
+  assert.equal(
+    c.lastError,
+    null,
+    'the interim rejection is cleared by the later success — a stale rejection would be misreported by the escalation nudge (finding 4)',
+  );
   const result = c.applyCompaction(msgs);
   assert.match(result[0].content, /GOOD-SUMMARY/);
 });
@@ -378,26 +476,39 @@ test('compactor: a degenerate short summary is rejected and retried (quality gat
 test('compactor: persistently short summaries exhaust retries and leave no result', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
   let calls = 0;
-  const llm = { summarize: async () => { calls++; return 'nope.'; } } as unknown as LLM;
+  const llm = {
+    summarize: async () => {
+      calls++;
+      return 'nope.';
+    },
+  } as unknown as LLM;
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   await c.done();
   assert.equal(calls, 3, 'all three attempts used');
-  assert.equal(c.hasCompletedResult(), false, 'a degenerate summary never applies');
+  assert.equal(
+    c.hasCompletedResult(),
+    false,
+    'a degenerate summary never applies',
+  );
   assert.match(c.lastError!, /floor/);
 });
 
 test('compactor: the floor scales with fold size (small folds may be terse)', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
- // Fold of 2 messages → floor min(2000, 20) = 20 chars; 25 chars passes.
+  // Fold of 2 messages → floor min(2000, 20) = 20 chars; 25 chars passes.
   const llm = { summarize: async () => 'a'.repeat(25) } as unknown as LLM;
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
   const msgs = Array.from({ length: 5 }, (_, i) => big(`m${i}`)); // boundary = 2
   c.start(msgs);
   await c.done();
   assert.equal(c.boundaryIndex, 2);
-  assert.equal(c.hasCompletedResult(), true, 'a legitimately small fold is not held to the cap');
+  assert.equal(
+    c.hasCompletedResult(),
+    true,
+    'a legitimately small fold is not held to the cap',
+  );
   assert.equal(Math.min(SUMMARY_FLOOR_CAP, SUMMARY_FLOOR_PER_MESSAGE * 2), 20);
 });
 
@@ -405,14 +516,21 @@ test('compactor: applyCompaction logs replaced count and summary length', async 
   const tracker = createContextTracker(1_000_000, 2000);
   const lines: string[] = [];
   const llm = fakeLLM({ summary: 'SUMMARY-TEXT' });
-  const c = createCompactor(llm, tracker, { keepTokens: 250, log: (l) => lines.push(l) });
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    log: (l) => lines.push(l),
+  });
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs);
   llm.resolveAll();
   await c.done();
   c.applyCompaction(msgs);
-  assert.ok(lines.some((l) => /^compaction applied \| replaced=7 \| summary_chars=\d+$/.test(l)),
-    `apply line present in: ${JSON.stringify(lines)}`);
+  assert.ok(
+    lines.some((l) =>
+      /^compaction applied \| replaced=7 \| summary_chars=\d+$/.test(l),
+    ),
+    `apply line present in: ${JSON.stringify(lines)}`,
+  );
 });
 
 test('SUMMARIZE_TAIL_REMINDER names the observed failure (voice continuation)', () => {

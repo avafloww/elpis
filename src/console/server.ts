@@ -26,7 +26,10 @@ export interface ConsoleServer {
   readonly port: number;
 }
 
-const PUBLIC_DIR = path.join(url.fileURLToPath(new URL('.', import.meta.url)), 'public');
+const PUBLIC_DIR = path.join(
+  url.fileURLToPath(new URL('.', import.meta.url)),
+  'public',
+);
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -61,7 +64,9 @@ const ATTACHMENT_CONTENT_TYPES: Record<string, string> = {
 export function resolveAttachmentPath(reqPath: string): string | null {
   const prefix = '/attachments/';
   if (!reqPath.startsWith(prefix)) return null;
-  const resolved = path.normalize(path.join(ATTACHMENT_DIR, reqPath.slice(prefix.length)));
+  const resolved = path.normalize(
+    path.join(ATTACHMENT_DIR, reqPath.slice(prefix.length)),
+  );
   if (!resolved.startsWith(ATTACHMENT_DIR + path.sep)) return null;
   return resolved;
 }
@@ -69,8 +74,12 @@ export function resolveAttachmentPath(reqPath: string): string | null {
 /** Wrap a ws.WebSocket as the minimal HubClient the hub talks to. */
 function asHubClient(ws: WebSocket): HubClient {
   return {
-    send(data: string) { ws.send(data); },
-    get closed() { return ws.readyState !== ws.OPEN; },
+    send(data: string) {
+      ws.send(data);
+    },
+    get closed() {
+      return ws.readyState !== ws.OPEN;
+    },
   };
 }
 
@@ -88,7 +97,10 @@ function asHubClient(ws: WebSocket): HubClient {
  * browser's ambient reach into that loopback. Exported for direct unit
  * testing without standing up a real server.
  */
-export function isAllowedOrigin(origin: string | undefined, port: number): boolean {
+export function isAllowedOrigin(
+  origin: string | undefined,
+  port: number,
+): boolean {
   if (!origin) return true;
   let parsed: url.URL;
   try {
@@ -96,34 +108,53 @@ export function isAllowedOrigin(origin: string | undefined, port: number): boole
   } catch {
     return false;
   }
-  if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') return false;
-  const originPort = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+  if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost')
+    return false;
+  const originPort =
+    parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
   return originPort === String(port);
 }
 
-export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHttpEndpoint): ConsoleServer {
+export function createConsoleServer(
+  config: Config,
+  hub: ConsoleHub,
+  mcp?: McpHttpEndpoint,
+): ConsoleServer {
   const log = config.logger;
 
   const server = http.createServer((req, res) => {
- // Static file server for the SPA. Only GET, only within PUBLIC_DIR.
+    // Static file server for the SPA. Only GET, only within PUBLIC_DIR.
     const reqPath = decodeURIComponent((req.url ?? '/').split('?')[0]);
     if (reqPath === '/mcp') {
-      if (!config.console.mcpEnabled || !mcp) { res.writeHead(404); res.end('not found'); return; }
+      if (!config.console.mcpEnabled || !mcp) {
+        res.writeHead(404);
+        res.end('not found');
+        return;
+      }
       void mcp.handle(req, res);
       return;
     }
- // Downloaded inbound Discord attachments (read-only) — lets the SPA render
- // image inputs inline. Files live under /tmp, so a reboot clears them; the
- // SPA falls back to a file chip on 404.
+    // Downloaded inbound Discord attachments (read-only) — lets the SPA render
+    // image inputs inline. Files live under /tmp, so a reboot clears them; the
+    // SPA falls back to a file chip on 404.
     const attachment = resolveAttachmentPath(reqPath);
     if (reqPath.startsWith('/attachments/')) {
-      if (!attachment) { res.writeHead(403); res.end('forbidden'); return; }
+      if (!attachment) {
+        res.writeHead(403);
+        res.end('forbidden');
+        return;
+      }
       fs.readFile(attachment, (err, data) => {
-        if (err) { res.writeHead(404); res.end('not found'); return; }
+        if (err) {
+          res.writeHead(404);
+          res.end('not found');
+          return;
+        }
         const ext = path.extname(attachment).toLowerCase();
         res.writeHead(200, {
-          'content-type': ATTACHMENT_CONTENT_TYPES[ext] ?? 'application/octet-stream',
- // Attachment files are immutable once downloaded — safe to cache.
+          'content-type':
+            ATTACHMENT_CONTENT_TYPES[ext] ?? 'application/octet-stream',
+          // Attachment files are immutable once downloaded — safe to cache.
           'cache-control': 'private, max-age=3600',
         });
         res.end(data);
@@ -131,28 +162,39 @@ export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHt
       return;
     }
     let rel = reqPath === '/' ? 'index.html' : reqPath.replace(/^\/+/, '');
- // Prevent path traversal.
+    // Prevent path traversal.
     const resolved = path.join(PUBLIC_DIR, rel);
- // Trailing separator so a sibling dir named `public*` can't be served.
-    if (resolved !== PUBLIC_DIR && !resolved.startsWith(PUBLIC_DIR + path.sep)) {
-      res.writeHead(403); res.end('forbidden'); return;
+    // Trailing separator so a sibling dir named `public*` can't be served.
+    if (
+      resolved !== PUBLIC_DIR &&
+      !resolved.startsWith(PUBLIC_DIR + path.sep)
+    ) {
+      res.writeHead(403);
+      res.end('forbidden');
+      return;
     }
     fs.readFile(resolved, (err, data) => {
       if (err) {
- // SPA fallback: unknown non-file paths serve index.html.
+        // SPA fallback: unknown non-file paths serve index.html.
         if (!path.extname(resolved)) {
           fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e2, html) => {
-            if (e2) { res.writeHead(404); res.end('not found'); return; }
+            if (e2) {
+              res.writeHead(404);
+              res.end('not found');
+              return;
+            }
             res.writeHead(200, { 'content-type': CONTENT_TYPES['.html'] });
             res.end(html);
           });
           return;
         }
-        res.writeHead(404); res.end('not found'); return;
+        res.writeHead(404);
+        res.end('not found');
+        return;
       }
       const ext = path.extname(resolved).toLowerCase();
- // no-cache: the SPA is tiny and redeploys often — the operator must always
- // get current assets after a build, never a stale bundle.
+      // no-cache: the SPA is tiny and redeploys often — the operator must always
+      // get current assets after a build, never a stale bundle.
       res.writeHead(200, {
         'content-type': CONTENT_TYPES[ext] ?? 'application/octet-stream',
         'cache-control': 'no-cache, no-store, must-revalidate',
@@ -161,10 +203,10 @@ export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHt
     });
   });
 
- // One WebSocket endpoint for the whole app. verifyClient rejects a browser
- // page's drive-by connection attempt (an Origin that isn't the console's
- // own) while still accepting the legitimate operator paths: a same-machine
- // non-browser client (no Origin header) or the SPA itself.
+  // One WebSocket endpoint for the whole app. verifyClient rejects a browser
+  // page's drive-by connection attempt (an Origin that isn't the console's
+  // own) while still accepting the legitimate operator paths: a same-machine
+  // non-browser client (no Origin header) or the SPA itself.
   const wss = new WebSocketServer({
     server,
     path: '/ws',
@@ -172,8 +214,13 @@ export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHt
       info: { origin: string; secure: boolean; req: http.IncomingMessage },
       cb: (res: boolean, code?: number, message?: string) => void,
     ) => {
-      if (isAllowedOrigin(info.origin, config.console.port)) { cb(true); return; }
-      log.warn(`[console] rejected websocket upgrade — origin '${info.origin}' is not the console's own origin`);
+      if (isAllowedOrigin(info.origin, config.console.port)) {
+        cb(true);
+        return;
+      }
+      log.warn(
+        `[console] rejected websocket upgrade — origin '${info.origin}' is not the console's own origin`,
+      );
       cb(false, 403, 'Forbidden');
     },
   });
@@ -182,30 +229,53 @@ export function createConsoleServer(config: Config, hub: ConsoleHub, mcp?: McpHt
     void hub.addClient(client);
     log.debug('[console] client connected');
     ws.on('message', (raw) => {
-      try { hub.handleClientMessage(client, raw.toString()); } catch { /* ignore bad frame */ }
+      try {
+        hub.handleClientMessage(client, raw.toString());
+      } catch {
+        /* ignore bad frame */
+      }
     });
-    ws.on('close', () => { hub.removeClient(client); log.debug('[console] client disconnected'); });
-    ws.on('error', () => { hub.removeClient(client); });
+    ws.on('close', () => {
+      hub.removeClient(client);
+      log.debug('[console] client disconnected');
+    });
+    ws.on('error', () => {
+      hub.removeClient(client);
+    });
   });
 
   return {
-    get port() { return config.console.port; },
+    get port() {
+      return config.console.port;
+    },
     start(): Promise<void> {
       return new Promise<void>((resolve) => {
         server.once('error', (e) => {
-          log.warn(`[console] server failed to bind :${config.console.port} — ${e instanceof Error ? e.message : String(e)} (console disabled this run)`);
+          log.warn(
+            `[console] server failed to bind :${config.console.port} — ${e instanceof Error ? e.message : String(e)} (console disabled this run)`,
+          );
           resolve();
         });
         server.listen(config.console.port, config.console.host, () => {
-          log.info(`[console] listening on http://${config.console.host}:${config.console.port} (ws at /ws${config.console.mcpEnabled ? ", mcp at /mcp" : ""})`);
+          log.info(
+            `[console] listening on http://${config.console.host}:${config.console.port} (ws at /ws${config.console.mcpEnabled ? ', mcp at /mcp' : ''})`,
+          );
           resolve();
         });
       });
     },
     stop(): void {
-      try { wss.close(); } catch { /* ignore */ }
+      try {
+        wss.close();
+      } catch {
+        /* ignore */
+      }
       void mcp?.close();
-      try { server.close(); } catch { /* ignore */ }
+      try {
+        server.close();
+      } catch {
+        /* ignore */
+      }
     },
   };
 }

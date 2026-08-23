@@ -10,13 +10,16 @@ import type { OAuthCredentials } from './store.js';
 
 export const OPENAI_CODEX_CREDENTIAL_KEY = 'openai-codex';
 export const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-export const OPENAI_CODEX_DEVICE_AUTH_URL = 'https://auth.openai.com/codex/device';
+export const OPENAI_CODEX_DEVICE_AUTH_URL =
+  'https://auth.openai.com/codex/device';
 export const OPENAI_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
 export const OPENAI_CODEX_CLIENT_VERSION = '0.144.1';
 
 const TOKEN_URL = 'https://auth.openai.com/oauth/token';
-const DEVICE_USERCODE_URL = 'https://auth.openai.com/api/accounts/deviceauth/usercode';
-const DEVICE_TOKEN_URL = 'https://auth.openai.com/api/accounts/deviceauth/token';
+const DEVICE_USERCODE_URL =
+  'https://auth.openai.com/api/accounts/deviceauth/usercode';
+const DEVICE_TOKEN_URL =
+  'https://auth.openai.com/api/accounts/deviceauth/token';
 const DEVICE_REDIRECT_URI = 'https://auth.openai.com/deviceauth/callback';
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 const DEVICE_POLL_SAFETY_MARGIN_MS = 3_000;
@@ -35,7 +38,10 @@ interface TokenResponse {
 }
 
 interface JwtPayload {
-  [JWT_AUTH_CLAIM]?: { chatgpt_account_id?: string; chatgpt_plan_type?: string };
+  [JWT_AUTH_CLAIM]?: {
+    chatgpt_account_id?: string;
+    chatgpt_plan_type?: string;
+  };
   [JWT_PROFILE_CLAIM]?: { email?: string };
   [key: string]: unknown;
 }
@@ -51,13 +57,18 @@ export function decodeCodexJwt(token: string): JwtPayload | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    return JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as JwtPayload;
+    return JSON.parse(
+      Buffer.from(parts[1] ?? '', 'base64url').toString('utf8'),
+    ) as JwtPayload;
   } catch {
     return null;
   }
 }
 
-export function codexTokenIdentity(accessToken: string, idToken?: string): {
+export function codexTokenIdentity(
+  accessToken: string,
+  idToken?: string,
+): {
   accountId?: string;
   email?: string;
   planType?: string;
@@ -68,9 +79,14 @@ export function codexTokenIdentity(accessToken: string, idToken?: string): {
   const idAuth = id?.[JWT_AUTH_CLAIM];
   const accountId = auth?.chatgpt_account_id;
   const email = access?.[JWT_PROFILE_CLAIM]?.email?.trim().toLowerCase();
-  const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)?.trim().toLowerCase();
+  const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)
+    ?.trim()
+    .toLowerCase();
   return {
-    accountId: typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined,
+    accountId:
+      typeof accountId === 'string' && accountId.length > 0
+        ? accountId
+        : undefined,
     email: email || undefined,
     planType: planType || undefined,
   };
@@ -82,9 +98,10 @@ function endpointError(status: number, text: string): string {
   try {
     const body = JSON.parse(trimmed) as Record<string, unknown>;
     const value = body.error_description ?? body.error ?? body.message;
-    if (typeof value === 'string' && value.trim()) return `${status} ${value.trim()}`;
+    if (typeof value === 'string' && value.trim())
+      return `${status} ${value.trim()}`;
   } catch {
- // Plain-text response — use it below.
+    // Plain-text response — use it below.
   }
   return `${status} ${trimmed}`;
 }
@@ -107,15 +124,24 @@ async function exchangeAuthorizationCode(
     signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`OpenAI Codex token exchange failed: ${endpointError(response.status, text)}`);
+  if (!response.ok)
+    throw new Error(
+      `OpenAI Codex token exchange failed: ${endpointError(response.status, text)}`,
+    );
   let data: TokenResponse;
   try {
     data = JSON.parse(text) as TokenResponse;
   } catch {
     throw new Error('OpenAI Codex token endpoint returned invalid JSON');
   }
-  if (!data.access_token || !data.refresh_token || !Number.isFinite(data.expires_in)) {
-    throw new Error('OpenAI Codex token response missing access_token, refresh_token, or expires_in');
+  if (
+    !data.access_token ||
+    !data.refresh_token ||
+    !Number.isFinite(data.expires_in)
+  ) {
+    throw new Error(
+      'OpenAI Codex token response missing access_token, refresh_token, or expires_in',
+    );
   }
   const identity = codexTokenIdentity(data.access_token, data.id_token);
   if (!identity.accountId) {
@@ -145,7 +171,9 @@ export interface CodexDeviceLoginOptions {
 
 /** Run the complete headless device-code login. 403/404 from the polling route
  * mean "authorization pending"; any other non-2xx response is terminal. */
-export async function loginOpenAICodexDevice(options: CodexDeviceLoginOptions = {}): Promise<OAuthCredentials> {
+export async function loginOpenAICodexDevice(
+  options: CodexDeviceLoginOptions = {},
+): Promise<OAuthCredentials> {
   const fetchFn = options.fetchFn ?? fetch;
   const wait = options.sleepFn ?? sleep;
   options.onProgress?.('Initiating device authorization…');
@@ -157,62 +185,95 @@ export async function loginOpenAICodexDevice(options: CodexDeviceLoginOptions = 
   });
   const initText = await initResponse.text();
   if (!initResponse.ok) {
-    throw new Error(`OpenAI Codex device authorization failed: ${endpointError(initResponse.status, initText)}`);
+    throw new Error(
+      `OpenAI Codex device authorization failed: ${endpointError(initResponse.status, initText)}`,
+    );
   }
-  let init: { device_auth_id?: string; user_code?: string; interval?: number | string };
+  let init: {
+    device_auth_id?: string;
+    user_code?: string;
+    interval?: number | string;
+  };
   try {
     init = JSON.parse(initText) as typeof init;
   } catch {
     throw new Error('OpenAI Codex device authorization returned invalid JSON');
   }
   if (!init.device_auth_id || !init.user_code) {
-    throw new Error('OpenAI Codex device authorization response missing device_auth_id or user_code');
+    throw new Error(
+      'OpenAI Codex device authorization response missing device_auth_id or user_code',
+    );
   }
 
-  const serverInterval = typeof init.interval === 'number'
-    ? init.interval
-    : Number.parseInt(String(init.interval ?? '5'), 10);
-  const pollIntervalMs = (Number.isFinite(serverInterval) && serverInterval > 0 ? serverInterval : 5) * 1000
-    + DEVICE_POLL_SAFETY_MARGIN_MS;
+  const serverInterval =
+    typeof init.interval === 'number'
+      ? init.interval
+      : Number.parseInt(String(init.interval ?? '5'), 10);
+  const pollIntervalMs =
+    (Number.isFinite(serverInterval) && serverInterval > 0
+      ? serverInterval
+      : 5) *
+      1000 +
+    DEVICE_POLL_SAFETY_MARGIN_MS;
   options.onCode?.(OPENAI_CODEX_DEVICE_AUTH_URL, init.user_code);
-  options.onProgress?.(`Waiting for browser authorization (code: ${init.user_code})…`);
+  options.onProgress?.(
+    `Waiting for browser authorization (code: ${init.user_code})…`,
+  );
 
   const maxWaitMs = options.maxWaitMs ?? DEVICE_MAX_WAIT_MS;
   let waitedMs = 0;
   let firstPoll = true;
   while (waitedMs < maxWaitMs) {
- // Match Codex/OMP: do not make the first operator-visible status sit for a
- // long server interval, then honor the full interval + safety margin.
-    const interval = firstPoll ? Math.min(pollIntervalMs, 5_000) : pollIntervalMs;
+    // Match Codex/OMP: do not make the first operator-visible status sit for a
+    // long server interval, then honor the full interval + safety margin.
+    const interval = firstPoll
+      ? Math.min(pollIntervalMs, 5_000)
+      : pollIntervalMs;
     firstPoll = false;
     const waitMs = Math.min(interval, maxWaitMs - waitedMs);
     await wait(waitMs);
     waitedMs += waitMs;
-    if (options.signal?.aborted) throw new Error('OpenAI Codex device authorization cancelled');
+    if (options.signal?.aborted)
+      throw new Error('OpenAI Codex device authorization cancelled');
     const pollResponse = await fetchFn(DEVICE_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_auth_id: init.device_auth_id, user_code: init.user_code }),
+      body: JSON.stringify({
+        device_auth_id: init.device_auth_id,
+        user_code: init.user_code,
+      }),
       signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
     });
     if (pollResponse.status === 403 || pollResponse.status === 404) continue;
     const pollText = await pollResponse.text();
     if (!pollResponse.ok) {
-      throw new Error(`OpenAI Codex device token polling failed: ${endpointError(pollResponse.status, pollText)}`);
+      throw new Error(
+        `OpenAI Codex device token polling failed: ${endpointError(pollResponse.status, pollText)}`,
+      );
     }
     let result: { authorization_code?: string; code_verifier?: string };
     try {
       result = JSON.parse(pollText) as typeof result;
     } catch {
-      throw new Error('OpenAI Codex device token polling returned invalid JSON');
+      throw new Error(
+        'OpenAI Codex device token polling returned invalid JSON',
+      );
     }
     if (!result.authorization_code || !result.code_verifier) {
-      throw new Error('OpenAI Codex device token response missing authorization_code or code_verifier');
+      throw new Error(
+        'OpenAI Codex device token response missing authorization_code or code_verifier',
+      );
     }
     options.onProgress?.('Exchanging authorization code for tokens…');
-    return exchangeAuthorizationCode(result.authorization_code, result.code_verifier, fetchFn);
+    return exchangeAuthorizationCode(
+      result.authorization_code,
+      result.code_verifier,
+      fetchFn,
+    );
   }
-  throw new Error('OpenAI Codex device authorization timed out — login was not completed within 15 minutes');
+  throw new Error(
+    'OpenAI Codex device authorization timed out — login was not completed within 15 minutes',
+  );
 }
 
 /** Refresh a Codex access token. Identity/workspace fields omitted by refresh
@@ -232,7 +293,10 @@ export async function refreshOpenAICodexToken(
     signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`OpenAI Codex token refresh failed: ${endpointError(response.status, text)}`);
+  if (!response.ok)
+    throw new Error(
+      `OpenAI Codex token refresh failed: ${endpointError(response.status, text)}`,
+    );
   let data: TokenResponse;
   try {
     data = JSON.parse(text) as TokenResponse;
@@ -240,15 +304,17 @@ export async function refreshOpenAICodexToken(
     throw new Error('OpenAI Codex token refresh returned invalid JSON');
   }
   if (!data.access_token || !Number.isFinite(data.expires_in)) {
-    throw new Error('OpenAI Codex refresh response missing access_token or expires_in');
+    throw new Error(
+      'OpenAI Codex refresh response missing access_token or expires_in',
+    );
   }
   const identity = codexTokenIdentity(data.access_token);
   return {
     access: data.access_token,
     refresh: data.refresh_token || refreshToken,
     expires: Date.now() + (data.expires_in as number) * 1000,
- // Omit absent identity fields entirely: OAuthStore's shallow merge then
- // preserves the login-fixed workspace instead of `undefined` erasing it.
+    // Omit absent identity fields entirely: OAuthStore's shallow merge then
+    // preserves the login-fixed workspace instead of `undefined` erasing it.
     ...(identity.accountId ? { accountId: identity.accountId } : {}),
     ...(identity.email ? { email: identity.email } : {}),
   };

@@ -19,7 +19,16 @@ fs.writeFileSync(memoryPath, '# Agent Memory\n');
 const bgRegistry = createBgRegistry(tmp);
 
 const deps = {
-  config: { sandbox: { syncTimeoutMs: 3000, asyncDeadlineMs: 8000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null }, paths: { harnessRoot: '/tmp/harness-root', dataDirectory: tmp } },
+  config: {
+    sandbox: {
+      syncTimeoutMs: 3000,
+      asyncDeadlineMs: 8000,
+      previewMaxBytes: 2048,
+      logMaxBytes: 2048,
+    },
+    kagi: { apiKey: null },
+    paths: { harnessRoot: '/tmp/harness-root', dataDirectory: tmp },
+  },
   memory: {
     read: () => fs.readFileSync(memoryPath, 'utf8'),
     append: (t: string) => fs.appendFileSync(memoryPath, `\n- [t] ${t}\n`),
@@ -42,7 +51,7 @@ test('heredoc: unsupported opener form (<<<-EOF) errors with a heredoc hint, not
   assert.doesNotMatch(err, /looks like TypeScript/);
 });
 
-test('heredoc: unsupported opener form (<<<\'EOF\') errors with a heredoc hint, not the generic TS hint', async () => {
+test("heredoc: unsupported opener form (<<<'EOF') errors with a heredoc hint, not the generic TS hint", async () => {
   const r = await sandbox.run("const x = <<<'EOF'\nhello\nEOF");
   assert.equal(r.ok, false);
   const err = r.error ?? '';

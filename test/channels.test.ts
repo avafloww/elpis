@@ -27,13 +27,19 @@ test('records real names and persists them across a reload', () => {
   d1.set('222', 'harness-work');
   assert.equal(d1.get('111'), 'unnamed-agent');
 
- // A fresh directory over a fresh handle reads the same rows back.
+  // A fresh directory over a fresh handle reads the same rows back.
   const d2 = createChannelDirectory(openDatabase(dir), dir);
   assert.equal(d2.get('111'), 'unnamed-agent');
   assert.equal(d2.get('222'), 'harness-work');
   assert.deepEqual(
-    d2.all().map(({ id, name }) => ({ id, name })).sort((a, b) => a.id.localeCompare(b.id)),
-    [{ id: '111', name: 'unnamed-agent' }, { id: '222', name: 'harness-work' }],
+    d2
+      .all()
+      .map(({ id, name }) => ({ id, name }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    [
+      { id: '111', name: 'unnamed-agent' },
+      { id: '222', name: 'harness-work' },
+    ],
   );
 });
 
@@ -55,7 +61,10 @@ test('ignores synthetic/placeholder names so a heartbeat cannot clobber a real n
 
 test('one-time imports a legacy channels.json when the table is empty', () => {
   const dir = tmpDir();
-  writeLegacyChannels(dir, JSON.stringify({ '111': 'general', '222': 'unknown' }));
+  writeLegacyChannels(
+    dir,
+    JSON.stringify({ '111': 'general', '222': 'unknown' }),
+  );
   const d = createChannelDirectory(openDatabase(dir), dir);
   assert.equal(d.get('111'), 'general', 'real legacy name imported');
   assert.equal(d.get('222'), undefined, 'placeholder legacy name skipped');
@@ -74,7 +83,9 @@ test('channels: set records guild id and all() returns entries', () => {
   const dir = tmpDir();
   const d = createChannelDirectory(openDatabase(dir), dir);
   d.set('100', 'general', 'g1');
-  assert.deepEqual(d.all(), [{ id: '100', name: 'general', guildId: 'g1', parentId: null }]);
+  assert.deepEqual(d.all(), [
+    { id: '100', name: 'general', guildId: 'g1', parentId: null },
+  ]);
   assert.equal(d.guildOf('100'), 'g1');
   assert.equal(d.parentOf('100'), null);
 });
@@ -84,39 +95,51 @@ test('channels: set records guild id and all() returns entries', () => {
 test('channels: parent id records, persists, heals, and never downgrades to null', () => {
   const dir = tmpDir();
   const d = createChannelDirectory(openDatabase(dir), dir);
-  d.set('500', 'a-thread', 'g1');              // seen before the parent was known
+  d.set('500', 'a-thread', 'g1'); // seen before the parent was known
   assert.equal(d.parentOf('500'), null);
-  d.set('500', 'a-thread', 'g1', '100');       // heals
+  d.set('500', 'a-thread', 'g1', '100'); // heals
   assert.equal(d.parentOf('500'), '100');
-  d.set('500', 'a-thread', 'g1');              // absent parent must NOT null it back
+  d.set('500', 'a-thread', 'g1'); // absent parent must NOT null it back
   assert.equal(d.parentOf('500'), '100');
-  d.set('500', 'renamed-thread', 'g1');        // name change forces the upsert
-  assert.equal(d.parentOf('500'), '100', 'a name-only update must not null the parent');
+  d.set('500', 'renamed-thread', 'g1'); // name change forces the upsert
+  assert.equal(
+    d.parentOf('500'),
+    '100',
+    'a name-only update must not null the parent',
+  );
 
   const reloaded = createChannelDirectory(openDatabase(dir), dir);
   assert.equal(reloaded.parentOf('500'), '100');
-  assert.deepEqual(reloaded.all(), [{ id: '500', name: 'renamed-thread', guildId: 'g1', parentId: '100' }]);
+  assert.deepEqual(reloaded.all(), [
+    { id: '500', name: 'renamed-thread', guildId: 'g1', parentId: '100' },
+  ]);
 });
 
 test('channels: NULL guild heals on next set, never downgrades to null', () => {
   const dir = tmpDir();
   const d = createChannelDirectory(openDatabase(dir), dir);
-  d.set('100', 'general');                   // legacy-style, no guild
+  d.set('100', 'general'); // legacy-style, no guild
   assert.equal(d.guildOf('100'), null);
-  d.set('100', 'general', 'g1');              // heals
+  d.set('100', 'general', 'g1'); // heals
   assert.equal(d.guildOf('100'), 'g1');
-  d.set('100', 'general');                    // absent guild must NOT null it back
+  d.set('100', 'general'); // absent guild must NOT null it back
   assert.equal(d.guildOf('100'), 'g1');
-  d.set('100', 'renamed');                    // name change forces the upsert (skips the early return)
-  assert.equal(d.guildOf('100'), 'g1', 'a name-only update must not null the guild');
+  d.set('100', 'renamed'); // name change forces the upsert (skips the early return)
+  assert.equal(
+    d.guildOf('100'),
+    'g1',
+    'a name-only update must not null the guild',
+  );
 });
 
 test('channels: two configured guilds leave a legacy NULL-guild row alone', () => {
   const dir = tmpDir();
   const db = openDatabase(dir); // migrations create the (empty) channels table
- // seed a row without a guild (as the v4->v5 migration would leave one), then
- // re-create the directory with TWO configured guilds — ambiguous, so no backfill.
-  db.prepare(`INSERT INTO channels (id, name, updated_at) VALUES ('7', 'old', '2026-01-01')`).run();
+  // seed a row without a guild (as the v4->v5 migration would leave one), then
+  // re-create the directory with TWO configured guilds — ambiguous, so no backfill.
+  db.prepare(
+    `INSERT INTO channels (id, name, updated_at) VALUES ('7', 'old', '2026-01-01')`,
+  ).run();
   const dir2 = createChannelDirectory(db, dir, [{ id: 'g1' }, { id: 'g2' }]);
   assert.equal(dir2.guildOf('7'), null);
 });
@@ -124,9 +147,11 @@ test('channels: two configured guilds leave a legacy NULL-guild row alone', () =
 test('channels: single configured guild backfills legacy NULL rows at creation', () => {
   const dir = tmpDir();
   const db = openDatabase(dir); // migrations create the (empty) channels table
- // seed a row without a guild (as the v4->v5 migration would leave one), then
- // re-create the directory with exactly one configured guild.
-  db.prepare(`INSERT INTO channels (id, name, updated_at) VALUES ('7', 'old', '2026-01-01')`).run();
+  // seed a row without a guild (as the v4->v5 migration would leave one), then
+  // re-create the directory with exactly one configured guild.
+  db.prepare(
+    `INSERT INTO channels (id, name, updated_at) VALUES ('7', 'old', '2026-01-01')`,
+  ).run();
   const dir2 = createChannelDirectory(db, dir, [{ id: 'g1' }]);
   assert.equal(dir2.guildOf('7'), 'g1');
 });
@@ -135,8 +160,12 @@ test('shared test agents expose production-style qualified channel names', async
   const dir = tmpDir();
   writeLegacyChannels(dir, JSON.stringify({ '100': 'general', '101': 'ops' }));
   const built = buildTestAgent({ dir });
-  const listed = await built.sandbox.run("elpis.channel.list().map((entry) => entry.name).join(',')");
-  const named = await built.sandbox.run("elpis.channel('stub/ops').name === 'ops'");
+  const listed = await built.sandbox.run(
+    "elpis.channel.list().map((entry) => entry.name).join(',')",
+  );
+  const named = await built.sandbox.run(
+    "elpis.channel('stub/ops').name === 'ops'",
+  );
   assert.equal(listed.ok, true);
   assert.match(listed.preview, /console,stub\/general,stub\/ops/);
   assert.equal(named.ok, true);

@@ -1,41 +1,41 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { openDatabase } from "../src/store/db.js";
-import { createWorkerControlCredential } from "../src/worker/auth.js";
-import { resolveWorkerSession } from "../src/worker/session.js";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { openDatabase } from '../src/store/db.js';
+import { createWorkerControlCredential } from '../src/worker/auth.js';
+import { resolveWorkerSession } from '../src/worker/session.js';
 
-test("worker control token resolves immutable model, Mind, runtime, and provenance", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-session-"));
+test('worker control token resolves immutable model, Mind, runtime, and provenance', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-session-'));
   const db = openDatabase(dir);
   const now = Date.now();
   db.prepare(
     `INSERT INTO mind_items (id, title, body, kind, status, priority, created_by, created_at, updated_at)
      VALUES (?, ?, '', 'task', 'in_progress', 2, 'agent', ?, ?)`,
-  ).run("elm-worker001", "worker task", now, now);
+  ).run('elm-worker001', 'worker task', now, now);
   const credential = createWorkerControlCredential();
   db.prepare(
     `INSERT INTO worker_sessions
       (id, slug, status, model_ref, mind_id, runtime, control_token_digest, created_at, updated_at)
      VALUES (?, ?, 'running', ?, ?, 'kubernetes', ?, ?, ?)`,
   ).run(
-    "wrk-worker1",
-    "quiet-otter",
-    "codex/sol",
-    "elm-worker001",
+    'wrk-worker1',
+    'quiet-otter',
+    'codex/sol',
+    'elm-worker001',
     credential.digest,
     now,
     now,
   );
 
   assert.deepEqual(resolveWorkerSession(db, credential.token), {
-    sessionId: "wrk-worker1",
-    worker: "worker:quiet-otter",
-    modelRef: "codex/sol",
-    mindId: "elm-worker001",
-    runtime: "kubernetes",
+    sessionId: 'wrk-worker1',
+    worker: 'worker:quiet-otter',
+    modelRef: 'codex/sol',
+    mindId: 'elm-worker001',
+    runtime: 'kubernetes',
   });
   assert.equal(
     resolveWorkerSession(db, createWorkerControlCredential().token),
@@ -47,14 +47,14 @@ test("worker control token resolves immutable model, Mind, runtime, and provenan
   assert.equal(
     resolveWorkerSession(db, credential.token),
     null,
-    "dismissal revokes the credential",
+    'dismissal revokes the credential',
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("legacy SDK sessions cannot authenticate as scoped workers", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-session-"));
+test('legacy SDK sessions cannot authenticate as scoped workers', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-session-'));
   const db = openDatabase(dir);
   const credential = createWorkerControlCredential();
   db.prepare(

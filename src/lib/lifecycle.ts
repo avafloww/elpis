@@ -12,8 +12,10 @@ export const SERVICE_UNIT = 'elpis-harness';
  * process's own SIGTERM. Returns the child so callers can attach error
  * logging; it is already unref'd. */
 export function restartHarnessService(): ChildProcess {
-  const child = spawn('systemctl', ['--user', 'restart', SERVICE_UNIT],
-    { detached: true, stdio: 'ignore' });
+  const child = spawn('systemctl', ['--user', 'restart', SERVICE_UNIT], {
+    detached: true,
+    stdio: 'ignore',
+  });
   child.unref();
   return child;
 }

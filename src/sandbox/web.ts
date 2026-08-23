@@ -17,11 +17,15 @@ export interface KagiSearchResult {
   [key: string]: unknown;
 }
 
-async function kagiRequest(path: string, body: unknown, apiKey: string): Promise<unknown> {
+async function kagiRequest(
+  path: string,
+  body: unknown,
+  apiKey: string,
+): Promise<unknown> {
   const res = await fetch(`https://kagi.com${path}`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bot ${apiKey}`,
+      Authorization: `Bot ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -52,14 +56,26 @@ export async function kagiSearch(
   deps: SandboxDeps,
   query: string,
   opts: { limit?: number; workflow?: string } = {},
-): Promise<{ ok: true; query: string; results: KagiSearchResult[]; raw: unknown }> {
+): Promise<{
+  ok: true;
+  query: string;
+  results: KagiSearchResult[];
+  raw: unknown;
+}> {
   const apiKey = deps.config.kagi.apiKey;
-  if (!apiKey) throw new Error('search() requires a Kagi API key: set `kagi.api_key` in config.yaml');
-  const data = await kagiRequest('/api/v1/search', {
-    query,
-    limit: opts.limit ?? 10,
-    workflow: opts.workflow ?? 'search',
-  }, apiKey);
+  if (!apiKey)
+    throw new Error(
+      'search() requires a Kagi API key: set `kagi.api_key` in config.yaml',
+    );
+  const data = await kagiRequest(
+    '/api/v1/search',
+    {
+      query,
+      limit: opts.limit ?? 10,
+      workflow: opts.workflow ?? 'search',
+    },
+    apiKey,
+  );
   return { ok: true, query, results: formatSearchResults(data), raw: data };
 }
 
@@ -69,20 +85,35 @@ export async function kagiExtract(
   deps: SandboxDeps,
   url: string,
   opts: { timeout?: number; format?: string } = {},
-): Promise<{ ok: boolean; url: string; markdown: string | null; error: string | null; raw: unknown }> {
+): Promise<{
+  ok: boolean;
+  url: string;
+  markdown: string | null;
+  error: string | null;
+  raw: unknown;
+}> {
   const apiKey = deps.config.kagi.apiKey;
-  if (!apiKey) throw new Error('extract() requires a Kagi API key: set `kagi.api_key` in config.yaml');
-  const data = await kagiRequest('/api/v1/extract', {
-    pages: [{ url }],
-    timeout: opts.timeout ?? 5,
-    format: opts.format ?? 'json',
-  }, apiKey) as any;
+  if (!apiKey)
+    throw new Error(
+      'extract() requires a Kagi API key: set `kagi.api_key` in config.yaml',
+    );
+  const data = (await kagiRequest(
+    '/api/v1/extract',
+    {
+      pages: [{ url }],
+      timeout: opts.timeout ?? 5,
+      format: opts.format ?? 'json',
+    },
+    apiKey,
+  )) as any;
   const page = data?.data?.[0] ?? {};
- // Success-shaped failure was the softness: ok:true + markdown:null meant a
- // dead extract looked like a valid one ( / hardness-audit lens 2).
- // Surface the API's own error on ok:false so chained .slice/.length fails
- // informatively instead of crashing on null in a later turn.
+  // Success-shaped failure was the softness: ok:true + markdown:null meant a
+  // dead extract looked like a valid one ( / hardness-audit lens 2).
+  // Surface the API's own error on ok:false so chained .slice/.length fails
+  // informatively instead of crashing on null in a later turn.
   const markdown = typeof page.markdown === 'string' ? page.markdown : null;
-  const apiError = page.error ?? (markdown === null ? 'no markdown returned from Kagi crawlers' : null);
+  const apiError =
+    page.error ??
+    (markdown === null ? 'no markdown returned from Kagi crawlers' : null);
   return { ok: markdown !== null, url, markdown, error: apiError, raw: data };
 }

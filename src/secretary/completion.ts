@@ -1,38 +1,38 @@
-import { configForLlmRef, type Config } from "../config.js";
+import { configForLlmRef, type Config } from '../config.js';
 import {
   createLLM,
   type ChatMessage,
   type CompleteResult,
   type LLM,
   type RunTool,
-} from "../llm/llm.js";
-import type { Database } from "../store/db.js";
+} from '../llm/llm.js';
+import type { Database } from '../store/db.js';
 import {
   parseWorkerMessages,
   WorkerCompletionError,
-} from "../worker/completion.js";
+} from '../worker/completion.js';
 import {
   resolveSecretarySession,
   type SecretarySessionBinding,
-} from "./session.js";
-import { SECRETARY_MIND_TOOL } from "./tool.js";
+} from './session.js';
+import { SECRETARY_MIND_TOOL } from './tool.js';
 
-const SECRETARY_MESSAGE_TOOLS = new Set(["mind", "think"]);
+const SECRETARY_MESSAGE_TOOLS = new Set(['mind', 'think']);
 const DEFAULT_MAX_CONCURRENT = 4;
 
 export class SecretaryCompletionError extends Error {
   constructor(
     public readonly code:
-      | "unauthorized"
-      | "invalid_request"
-      | "busy"
-      | "capacity"
-      | "binding_changed"
-      | "unsupported",
+      | 'unauthorized'
+      | 'invalid_request'
+      | 'busy'
+      | 'capacity'
+      | 'binding_changed'
+      | 'unsupported',
     message: string,
   ) {
     super(message);
-    this.name = "SecretaryCompletionError";
+    this.name = 'SecretaryCompletionError';
   }
 }
 
@@ -55,7 +55,7 @@ function parseSecretaryMessages(value: unknown): ChatMessage[] {
     if (error instanceof WorkerCompletionError) {
       throw new SecretaryCompletionError(
         error.code,
-        error.message.replace(/^worker /, "secretary "),
+        error.message.replace(/^worker /, 'secretary '),
       );
     }
     throw error;
@@ -73,7 +73,7 @@ export class SecretaryCompletionBroker {
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
     if (!Number.isSafeInteger(this.maxConcurrent) || this.maxConcurrent < 1)
       throw new Error(
-        "secretary completion capacity must be a positive integer",
+        'secretary completion capacity must be a positive integer',
       );
   }
 
@@ -85,26 +85,26 @@ export class SecretaryCompletionBroker {
     const binding = resolveSecretarySession(this.options.db, token);
     if (!binding)
       throw new SecretaryCompletionError(
-        "unauthorized",
-        "secretary session is unavailable",
+        'unauthorized',
+        'secretary session is unavailable',
       );
     const messages = parseSecretaryMessages(input);
     if (this.active.has(binding.sessionId))
       throw new SecretaryCompletionError(
-        "busy",
-        "secretary session already has a completion in flight",
+        'busy',
+        'secretary session already has a completion in flight',
       );
     if (this.active.size >= this.maxConcurrent)
       throw new SecretaryCompletionError(
-        "capacity",
-        "secretary completion capacity is full",
+        'capacity',
+        'secretary completion capacity is full',
       );
 
     let cached = this.clients.get(binding.sessionId);
     if (cached && cached.modelRef !== binding.modelRef)
       throw new SecretaryCompletionError(
-        "binding_changed",
-        "secretary model binding changed after client creation",
+        'binding_changed',
+        'secretary model binding changed after client creation',
       );
     if (!cached) {
       const llm = this.create(
@@ -123,7 +123,7 @@ export class SecretaryCompletionBroker {
         result: await cached.llm.complete(messages, {
           signal,
           runTool: SECRETARY_MIND_TOOL as unknown as RunTool,
-          toolChoice: "auto",
+          toolChoice: 'auto',
         }),
       };
     } finally {

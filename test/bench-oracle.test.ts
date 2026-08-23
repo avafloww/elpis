@@ -2,11 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { oracleCode } from '../bench/runner.js';
-import { engineTestScenario, RESTART_TEST_SCENARIO } from './bench-scenario-fixtures.js';
+import {
+  engineTestScenario,
+  RESTART_TEST_SCENARIO,
+} from './bench-scenario-fixtures.js';
 
 const fileScenario = engineTestScenario();
 const targetScenario = engineTestScenario({
-  id: 'tool/engine-target', expected: { targetChannel: 'ops', workPaths: [], checks: [{ kind: 'send-includes', values: ['done'] }] },
+  id: 'tool/engine-target',
+  expected: {
+    targetChannel: 'ops',
+    workPaths: [],
+    checks: [{ kind: 'send-includes', values: ['done'] }],
+  },
 });
 
 test('oracle mechanics satisfy test-only typed contracts without a privileged outcome marker', () => {

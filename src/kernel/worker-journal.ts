@@ -1,8 +1,8 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import type { ChatMessage } from "../llm/llm.js";
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { ChatMessage } from '../llm/llm.js';
 
-export type WorkerToolCall = NonNullable<ChatMessage["tool_calls"]>[number];
+export type WorkerToolCall = NonNullable<ChatMessage['tool_calls']>[number];
 
 interface PreparedTool {
   call: WorkerToolCall;
@@ -18,20 +18,20 @@ export interface WorkerJournalState {
 }
 
 type WorkerJournalRecord =
-  | { type: "initialized"; messages: ChatMessage[] }
-  | { type: "message"; message: ChatMessage }
-  | { type: "guidance"; id: number; message: ChatMessage }
-  | { type: "tool_prepared"; call: WorkerToolCall; preparedAt: number }
-  | { type: "tool_completed"; callId: string; message: ChatMessage }
-  | { type: "finish_prepared"; key: string; body: string }
-  | { type: "finished"; key: string; body: string };
+  | { type: 'initialized'; messages: ChatMessage[] }
+  | { type: 'message'; message: ChatMessage }
+  | { type: 'guidance'; id: number; message: ChatMessage }
+  | { type: 'tool_prepared'; call: WorkerToolCall; preparedAt: number }
+  | { type: 'tool_completed'; callId: string; message: ChatMessage }
+  | { type: 'finish_prepared'; key: string; body: string }
+  | { type: 'finished'; key: string; body: string };
 
 function record(value: unknown, line: number): WorkerJournalRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`worker journal line ${line} must be an object`);
   }
   const candidate = value as Record<string, unknown>;
-  if (typeof candidate.type !== "string") {
+  if (typeof candidate.type !== 'string') {
     throw new Error(`worker journal line ${line} has no record type`);
   }
   return candidate as unknown as WorkerJournalRecord;
@@ -47,25 +47,25 @@ function reduce(records: WorkerJournalRecord[]): WorkerJournalState {
   };
   for (const entry of records) {
     switch (entry.type) {
-      case "initialized":
+      case 'initialized':
         if (state.messages.length > 0 || entry.messages.length === 0) {
-          throw new Error("worker journal contains invalid initialization");
+          throw new Error('worker journal contains invalid initialization');
         }
         state.messages.push(...entry.messages);
         break;
-      case "message":
+      case 'message':
         state.messages.push(entry.message);
         break;
-      case "guidance":
+      case 'guidance':
         if (!Number.isSafeInteger(entry.id) || entry.id <= 0) {
-          throw new Error("worker journal contains an invalid guidance id");
+          throw new Error('worker journal contains an invalid guidance id');
         }
         if (!state.guidanceIds.has(entry.id)) {
           state.guidanceIds.add(entry.id);
           state.messages.push(entry.message);
         }
         break;
-      case "tool_prepared":
+      case 'tool_prepared':
         if (state.pendingTools.has(entry.call.id)) {
           throw new Error(
             `worker journal prepared tool ${entry.call.id} twice`,
@@ -76,7 +76,7 @@ function reduce(records: WorkerJournalRecord[]): WorkerJournalState {
           preparedAt: entry.preparedAt,
         });
         break;
-      case "tool_completed":
+      case 'tool_completed':
         if (!state.pendingTools.delete(entry.callId)) {
           throw new Error(
             `worker journal completed unprepared tool ${entry.callId}`,
@@ -84,32 +84,32 @@ function reduce(records: WorkerJournalRecord[]): WorkerJournalState {
         }
         state.messages.push(entry.message);
         break;
-      case "finish_prepared":
+      case 'finish_prepared':
         if (
           state.pendingFinish &&
           (state.pendingFinish.key !== entry.key ||
             state.pendingFinish.body !== entry.body)
         ) {
           throw new Error(
-            "worker journal contains conflicting prepared finishes",
+            'worker journal contains conflicting prepared finishes',
           );
         }
         state.pendingFinish = { key: entry.key, body: entry.body };
         break;
-      case "finished":
+      case 'finished':
         if (
           !state.pendingFinish ||
           state.pendingFinish.key !== entry.key ||
           state.pendingFinish.body !== entry.body
         ) {
-          throw new Error("worker journal completed an unprepared finish");
+          throw new Error('worker journal completed an unprepared finish');
         }
         if (
           state.finished &&
           (state.finished.key !== entry.key ||
             state.finished.body !== entry.body)
         ) {
-          throw new Error("worker journal contains conflicting finish records");
+          throw new Error('worker journal contains conflicting finish records');
         }
         state.pendingFinish = null;
         state.finished = { key: entry.key, body: entry.body };
@@ -132,16 +132,16 @@ export class WorkerJournal {
     private readonly now: () => number = Date.now,
   ) {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-    if (existing && !existing.endsWith("\n")) {
-      throw new Error("worker journal ends with a partial record");
+    const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    if (existing && !existing.endsWith('\n')) {
+      throw new Error('worker journal ends with a partial record');
     }
     const records = existing
-      .split("\n")
+      .split('\n')
       .filter(Boolean)
       .map((line, index) => record(JSON.parse(line), index + 1));
     this.current = reduce(records);
-    this.fd = fs.openSync(file, "a", 0o600);
+    this.fd = fs.openSync(file, 'a', 0o600);
     fs.chmodSync(file, 0o600);
   }
 
@@ -164,20 +164,20 @@ export class WorkerJournal {
 
   initialize(messages: ChatMessage[]): void {
     if (this.current.messages.length > 0 || messages.length === 0) {
-      throw new Error("worker journal is already initialized");
+      throw new Error('worker journal is already initialized');
     }
-    this.append({ type: "initialized", messages });
+    this.append({ type: 'initialized', messages });
     this.current.messages.push(...messages);
   }
 
   appendMessage(message: ChatMessage): void {
-    this.append({ type: "message", message });
+    this.append({ type: 'message', message });
     this.current.messages.push(message);
   }
 
   appendGuidance(id: number, message: ChatMessage): boolean {
     if (this.current.guidanceIds.has(id)) return false;
-    this.append({ type: "guidance", id, message });
+    this.append({ type: 'guidance', id, message });
     this.current.guidanceIds.add(id);
     this.current.messages.push(message);
     return true;
@@ -188,7 +188,7 @@ export class WorkerJournal {
       throw new Error(`worker tool ${call.id} is already prepared`);
     }
     const preparedAt = this.now();
-    this.append({ type: "tool_prepared", call, preparedAt });
+    this.append({ type: 'tool_prepared', call, preparedAt });
     this.current.pendingTools.set(call.id, { call, preparedAt });
   }
 
@@ -196,7 +196,7 @@ export class WorkerJournal {
     if (!this.current.pendingTools.has(callId)) {
       throw new Error(`worker tool ${callId} was not prepared`);
     }
-    this.append({ type: "tool_completed", callId, message });
+    this.append({ type: 'tool_completed', callId, message });
     this.current.pendingTools.delete(callId);
     this.current.messages.push(message);
   }
@@ -207,7 +207,7 @@ export class WorkerJournal {
         this.current.finished.key !== key ||
         this.current.finished.body !== body
       ) {
-        throw new Error("worker episode already finished differently");
+        throw new Error('worker episode already finished differently');
       }
       return;
     }
@@ -216,11 +216,11 @@ export class WorkerJournal {
         this.current.pendingFinish.key !== key ||
         this.current.pendingFinish.body !== body
       ) {
-        throw new Error("worker episode has a different prepared finish");
+        throw new Error('worker episode has a different prepared finish');
       }
       return;
     }
-    this.append({ type: "finish_prepared", key, body });
+    this.append({ type: 'finish_prepared', key, body });
     this.current.pendingFinish = { key, body };
   }
 
@@ -230,9 +230,9 @@ export class WorkerJournal {
       this.current.pendingFinish.key !== key ||
       this.current.pendingFinish.body !== body
     ) {
-      throw new Error("worker finish was not prepared");
+      throw new Error('worker finish was not prepared');
     }
-    this.append({ type: "finished", key, body });
+    this.append({ type: 'finished', key, body });
     this.current.pendingFinish = null;
     this.current.finished = { key, body };
   }

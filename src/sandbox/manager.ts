@@ -1,21 +1,21 @@
-import type { ChatMessage } from "../llm/llm.js";
-import type { Logger } from "../lib/log.js";
+import type { ChatMessage } from '../llm/llm.js';
+import type { Logger } from '../lib/log.js';
 import type {
   RunResult,
   SandboxDeps,
   SandboxExecutionMetadata,
-} from "../types.js";
-import type { MindId } from "../store/mind-id.js";
-import { createSandbox, type Sandbox } from "./index.js";
-import { transform } from "./transform.js";
-import type { SandboxRegistration, SandboxRegistry } from "./registry.js";
+} from '../types.js';
+import type { MindId } from '../store/mind-id.js';
+import { createSandbox, type Sandbox } from './index.js';
+import { transform } from './transform.js';
+import type { SandboxRegistration, SandboxRegistry } from './registry.js';
 import {
   adviseWake as chooseWakeAdvice,
   snapshotWakeAdvisorState,
   WAKE_ADVISOR_TIMEOUT_MS,
   type WakeAdvice,
   type WakeAdviceTurnContext,
-} from "./wake-advisor.js";
+} from './wake-advisor.js';
 
 const CLASSIFIER_SOURCE_LIMIT = 8_000;
 const CLASSIFIER_TIMEOUT_MS = 3_000;
@@ -28,7 +28,7 @@ export interface ManagedRunRequest {
 export interface SandboxManagerOptions {
   deps: SandboxDeps;
   registry: SandboxRegistry;
-  logger: Pick<Logger, "debug" | "warn">;
+  logger: Pick<Logger, 'debug' | 'warn'>;
   create?: typeof createSandbox;
   now?: () => number;
   coldStart?: boolean;
@@ -53,9 +53,9 @@ function cloneDeps(
 function hasSubstance(code: string): boolean {
   return (
     code
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "")
-      .trim() !== ""
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '')
+      .trim() !== ''
   );
 }
 
@@ -70,16 +70,16 @@ function mindState(
   const latest = item?.comments?.at(-1)?.body;
   return {
     title: item?.title ?? `Mind #${registration.mindId}`,
-    status: item?.status ?? "unknown",
+    status: item?.status ?? 'unknown',
     latestComment:
-      typeof latest === "string" && latest ? latest.slice(0, 240) : null,
+      typeof latest === 'string' && latest ? latest.slice(0, 240) : null,
   };
 }
 
 export class SandboxManager {
   private readonly deps: SandboxDeps;
   private readonly registry: SandboxRegistry;
-  private readonly logger: Pick<Logger, "debug" | "warn">;
+  private readonly logger: Pick<Logger, 'debug' | 'warn'>;
   private readonly create: typeof createSandbox;
   private readonly now: () => number;
   private readonly classifierTimeoutMs: number;
@@ -147,7 +147,7 @@ export class SandboxManager {
     status: string,
     archived: boolean,
   ): void {
-    if (archived || status === "done" || status === "cancelled") {
+    if (archived || status === 'done' || status === 'cancelled') {
       const registration = this.registry.retireByMind(mindId);
       if (registration) this.finalizeExpired(registration);
       this.registry.clearReminderByMind(mindId);
@@ -162,7 +162,7 @@ export class SandboxManager {
       }
     }
     this.registry.cancelRetirement(mindId);
-    if (status !== "in_progress") this.registry.clearReminderByMind(mindId);
+    if (status !== 'in_progress') this.registry.clearReminderByMind(mindId);
   }
 
   private retirementDeadline(registration: SandboxRegistration): number | null {
@@ -181,7 +181,7 @@ export class SandboxManager {
   private finalizeExpired(registration: SandboxRegistration): boolean {
     const deadline = this.retirementDeadline(registration);
     if (
-      registration.lifecycle !== "ready" ||
+      registration.lifecycle !== 'ready' ||
       deadline === null ||
       deadline > this.now()
     )
@@ -189,7 +189,7 @@ export class SandboxManager {
     const retired = this.registry.finalizeRetirement(registration.id, {
       expired: true,
     });
-    if (retired.lifecycle !== "retired") return false;
+    if (retired.lifecycle !== 'retired') return false;
     this.contexts.delete(registration.id);
     return true;
   }
@@ -213,8 +213,8 @@ export class SandboxManager {
   async run(request: ManagedRunRequest): Promise<RunResult> {
     try {
       this.collectGarbage();
-      if (!request || typeof request.code !== "string")
-        throw new Error("sandbox manager: run requires string code");
+      if (!request || typeof request.code !== 'string')
+        throw new Error('sandbox manager: run requires string code');
       if (request.sandbox === undefined)
         return await this.runEphemeral(request.code);
       return await this.runPersistent(request.sandbox, request.code);
@@ -232,15 +232,15 @@ export class SandboxManager {
       : Promise.resolve(false);
     const sandbox = this.create(
       cloneDeps(this.deps, {
-        surface: "core",
+        surface: 'core',
         mindDefaultId: undefined,
       }),
     );
     const result = await sandbox.run(code);
     const remind = await classification;
     result.execution = {
-      kind: "ephemeral",
-      lifecycle: "ephemeral",
+      kind: 'ephemeral',
+      lifecycle: 'ephemeral',
       classifierReminder: remind,
     };
     return result;
@@ -250,29 +250,29 @@ export class SandboxManager {
     selector: string,
     code: string,
   ): Promise<RunResult> {
-    if (typeof selector !== "string" || !selector.trim())
+    if (typeof selector !== 'string' || !selector.trim())
       throw new Error(
-        "sandbox manager: persistent selector must be a Mind id, unique prefix, or exact title",
+        'sandbox manager: persistent selector must be a Mind id, unique prefix, or exact title',
       );
     const parsed = transform(code);
     if (!parsed.parsed)
       return {
         ok: false,
-        failureKind: "preparse",
+        failureKind: 'preparse',
         error: `SyntaxError (pre-parse): ${parsed.error}\nNothing in this program executed — no sandbox was created. Fix and re-run the whole batch.`,
       };
     if (!this.deps.mind)
-      throw new Error("sandbox manager: Mind service is unavailable");
+      throw new Error('sandbox manager: Mind service is unavailable');
     const mindId = this.deps.mind.resolve(selector);
     const existing = this.registry.getByMind(mindId);
     const before = existing ?? this.registry.ensureForMind(mindId);
     const created = existing === null;
-    if (before.lifecycle === "detached") {
+    if (before.lifecycle === 'detached') {
       const future = Array.from(this.detached.entries()).find(
         ([, owner]) => owner.alias === mindId,
       )?.[0];
       throw new Error(
-        `sandbox manager: ${mindId} is detached${future ? ` as bg future ${future}` : ""}`,
+        `sandbox manager: ${mindId} is detached${future ? ` as bg future ${future}` : ''}`,
       );
     }
     const mind = mindState(this.deps, before);
@@ -293,11 +293,11 @@ export class SandboxManager {
     const coldStart =
       run.sandbox.coldNoticePending && this.registry.consumeColdNotice(alias);
     const statusReminder =
-      mind.status === "open" &&
+      mind.status === 'open' &&
       !run.sandbox.reminderLatched &&
       this.registry.latchReminder(alias);
     const execution: SandboxExecutionMetadata = {
-      kind: "persistent",
+      kind: 'persistent',
       alias,
       mindId: run.sandbox.mindId,
       mindTitle: mind.title,
@@ -315,7 +315,7 @@ export class SandboxManager {
           ? undefined
           : `Mind #${run.sandbox.mindId} is closed; sandbox ${alias} retires at ${new Date(retirementDeadlineAt).toISOString()}. Select or create a sandbox bound to active work.`,
       statusReminder,
-      lifecycle: "busy",
+      lifecycle: 'busy',
     };
 
     let result: RunResult;
@@ -327,10 +327,10 @@ export class SandboxManager {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
-      execution.lifecycle = this.finalizeExpired(reset) ? "retired" : "reset";
+      execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
       return {
         ok: false,
-        failureKind: "runtime",
+        failureKind: 'runtime',
         error: error instanceof Error ? error.message : String(error),
         execution,
       };
@@ -341,16 +341,16 @@ export class SandboxManager {
         const reset = this.registry.failRunAndReset(alias, run.runId);
         this.contexts.delete(alias);
         execution.resetGeneration = reset.generation;
-        execution.lifecycle = this.finalizeExpired(reset) ? "retired" : "reset";
+        execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
         result.ok = false;
         result.detached = false;
-        result.failureKind = "runtime";
+        result.failureKind = 'runtime';
         result.error =
-          "persistent sandbox detached without a background-future registry; generation reset";
+          'persistent sandbox detached without a background-future registry; generation reset';
         delete result.note;
       } else {
         this.registry.detachRun(alias, run.runId);
-        execution.lifecycle = "detached";
+        execution.lifecycle = 'detached';
         this.detached.set(result.bgId, { alias, runId: run.runId });
         const early = this.earlySettlements.get(result.bgId);
         if (early) {
@@ -358,16 +358,16 @@ export class SandboxManager {
           this.settleDetached(result.bgId, early.rejected);
         }
       }
-    } else if (!result.ok && result.failureKind === "runtime") {
+    } else if (!result.ok && result.failureKind === 'runtime') {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
       execution.resetGeneration = reset.generation;
-      execution.lifecycle = this.finalizeExpired(reset) ? "retired" : "reset";
+      execution.lifecycle = this.finalizeExpired(reset) ? 'retired' : 'reset';
     } else {
       const finished = this.registry.finishRun(alias, run.runId);
       execution.lifecycle = this.finalizeExpired(finished)
-        ? "retired"
-        : "ready";
+        ? 'retired'
+        : 'ready';
     }
 
     result.execution = execution;
@@ -382,7 +382,7 @@ export class SandboxManager {
     const notifyLate = this.deps.onLateProcessError;
     const sandbox = this.create(
       cloneDeps(this.deps, {
-        surface: "full",
+        surface: 'full',
         mindDefaultId: registration.mindId,
         onFutureSettled: (id, value, rejected, logs, sends) => {
           if (this.detached.has(id)) this.settleDetached(id, rejected);
@@ -430,11 +430,11 @@ export class SandboxManager {
     });
     const messages: ChatMessage[] = [
       {
-        role: "system",
+        role: 'system',
         content:
-          "Decide whether this JavaScript likely needs persistent cross-run JS state or host-local tools unavailable in a core ephemeral sandbox. Answer exactly YES or NO. Do not explain.",
+          'Decide whether this JavaScript likely needs persistent cross-run JS state or host-local tools unavailable in a core ephemeral sandbox. Answer exactly YES or NO. Do not explain.',
       },
-      { role: "user", content: code.slice(0, CLASSIFIER_SOURCE_LIMIT) },
+      { role: 'user', content: code.slice(0, CLASSIFIER_SOURCE_LIMIT) },
     ];
     try {
       const completion = await Promise.race([
@@ -442,8 +442,8 @@ export class SandboxManager {
         timeout,
       ]);
       const answer = completion.content.trim();
-      if (answer === "YES") return true;
-      if (answer === "NO") return false;
+      if (answer === 'YES') return true;
+      if (answer === 'NO') return false;
       this.logger.warn(
         `sandbox classifier: ignored nonconforming ${answer.length}-character response`,
       );

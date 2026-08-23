@@ -6,14 +6,23 @@ const NUDGE_MS = 12 * 60 * 60 * 1000;
 
 function buildAgent(socialNudgeMs = NUDGE_MS) {
   const built = buildTestAgent({
-    config: { heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, socialNudgeMs, reflectionMinMessages: 1 } },
+    config: {
+      heartbeat: {
+        intervalMs: 0,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        socialNudgeMs,
+        reflectionMinMessages: 1,
+      },
+    },
     tmpPrefix: 'harness-hb-minimal-',
   });
   built.agent.primeForHeartbeatTest();
   return built;
 }
 
-async function fireBeat(agent: ReturnType<typeof buildAgent>['agent']): Promise<string> {
+async function fireBeat(
+  agent: ReturnType<typeof buildAgent>['agent'],
+): Promise<string> {
   await agent.fireHeartbeatForTest();
   const queue = agent['inbound'] as { content: string }[];
   assert.equal(queue.length, 1, 'beat enqueued');
@@ -25,7 +34,10 @@ async function fireBeat(agent: ReturnType<typeof buildAgent>['agent']): Promise<
 test('heartbeat payload stays minimal past the social threshold', async () => {
   const { agent, cleanup } = buildAgent();
   try {
-    (agent['lastSendAt'] as Map<string, number>).set('stub', Date.now() - NUDGE_MS - 60_000);
+    (agent['lastSendAt'] as Map<string, number>).set(
+      'stub',
+      Date.now() - NUDGE_MS - 60_000,
+    );
     agent['messagesSinceReflection'] = 10;
     assert.equal(await fireBeat(agent), '[heartbeat]');
   } finally {
@@ -48,7 +60,10 @@ test('repeated heartbeats carry the same irreducible signal', async () => {
 test('social-nudge configuration cannot alter heartbeat content', async () => {
   const { agent, cleanup } = buildAgent(0);
   try {
-    (agent['lastSendAt'] as Map<string, number>).set('stub', Date.now() - 365 * 24 * 60 * 60 * 1000);
+    (agent['lastSendAt'] as Map<string, number>).set(
+      'stub',
+      Date.now() - 365 * 24 * 60 * 60 * 1000,
+    );
     assert.equal(await fireBeat(agent), '[heartbeat]');
   } finally {
     agent.stop();

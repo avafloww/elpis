@@ -1,14 +1,14 @@
-import type { Config } from "../config.js";
-import { WORKER_RUN_TOOL } from "../kernel/run-tool.js";
-import { configForLlmRef } from "../config.js";
+import type { Config } from '../config.js';
+import { WORKER_RUN_TOOL } from '../kernel/run-tool.js';
+import { configForLlmRef } from '../config.js';
 import {
   createLLM,
   type ChatMessage,
   type CompleteResult,
   type LLM,
-} from "../llm/llm.js";
-import type { Database } from "../store/db.js";
-import { resolveWorkerSession, type WorkerSessionBinding } from "./session.js";
+} from '../llm/llm.js';
+import type { Database } from '../store/db.js';
+import { resolveWorkerSession, type WorkerSessionBinding } from './session.js';
 
 const MAX_MESSAGES = 512;
 const MAX_REQUEST_CHARS = 8 * 1024 * 1024;
@@ -18,16 +18,16 @@ const MAX_TOOL_CALLS = 16;
 export class WorkerCompletionError extends Error {
   constructor(
     public readonly code:
-      | "unauthorized"
-      | "invalid_request"
-      | "busy"
-      | "capacity"
-      | "binding_changed"
-      | "unsupported",
+      | 'unauthorized'
+      | 'invalid_request'
+      | 'busy'
+      | 'capacity'
+      | 'binding_changed'
+      | 'unsupported',
     message: string,
   ) {
     super(message);
-    this.name = "WorkerCompletionError";
+    this.name = 'WorkerCompletionError';
   }
 }
 
@@ -48,14 +48,14 @@ function boundedString(
   required = true,
 ): string | undefined {
   if (value === undefined && !required) return undefined;
-  if (typeof value !== "string")
+  if (typeof value !== 'string')
     throw new WorkerCompletionError(
-      "invalid_request",
+      'invalid_request',
       `${label} must be a string`,
     );
   if (value.length > MAX_FIELD_CHARS)
     throw new WorkerCompletionError(
-      "invalid_request",
+      'invalid_request',
       `${label} exceeds ${MAX_FIELD_CHARS} characters`,
     );
   return value;
@@ -65,7 +65,7 @@ function cloneOpaque(value: unknown, label: string): unknown {
   const encoded = JSON.stringify(value);
   if (encoded === undefined || encoded.length > MAX_FIELD_CHARS) {
     throw new WorkerCompletionError(
-      "invalid_request",
+      'invalid_request',
       `${label} is not bounded JSON`,
     );
   }
@@ -74,19 +74,19 @@ function cloneOpaque(value: unknown, label: string): unknown {
 
 export function parseWorkerMessages(
   value: unknown,
-  allowedToolNames: ReadonlySet<string> = new Set(["run", "think"]),
+  allowedToolNames: ReadonlySet<string> = new Set(['run', 'think']),
 ): ChatMessage[] {
   let encoded: string;
   try {
     encoded = JSON.stringify(value);
   } catch {
-    throw new WorkerCompletionError("invalid_request", "messages must be JSON");
+    throw new WorkerCompletionError('invalid_request', 'messages must be JSON');
   }
-  if (typeof encoded !== "string")
-    throw new WorkerCompletionError("invalid_request", "messages must be JSON");
+  if (typeof encoded !== 'string')
+    throw new WorkerCompletionError('invalid_request', 'messages must be JSON');
   if (encoded.length > MAX_REQUEST_CHARS)
     throw new WorkerCompletionError(
-      "invalid_request",
+      'invalid_request',
       `messages exceed ${MAX_REQUEST_CHARS} characters`,
     );
   if (
@@ -95,35 +95,35 @@ export function parseWorkerMessages(
     value.length > MAX_MESSAGES
   ) {
     throw new WorkerCompletionError(
-      "invalid_request",
+      'invalid_request',
       `messages must contain 1-${MAX_MESSAGES} entries`,
     );
   }
 
   return value.map((raw, index) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new WorkerCompletionError(
-        "invalid_request",
+        'invalid_request',
         `messages[${index}] must be an object`,
       );
     }
     const input = raw as Record<string, unknown>;
     const role = input.role;
     if (
-      role !== "system" &&
-      role !== "user" &&
-      role !== "assistant" &&
-      role !== "tool"
+      role !== 'system' &&
+      role !== 'user' &&
+      role !== 'assistant' &&
+      role !== 'tool'
     ) {
       throw new WorkerCompletionError(
-        "invalid_request",
+        'invalid_request',
         `messages[${index}].role is invalid`,
       );
     }
     if (input.contentParts !== undefined) {
       throw new WorkerCompletionError(
-        "unsupported",
-        "worker image inputs are not supported yet",
+        'unsupported',
+        'worker image inputs are not supported yet',
       );
     }
     const message: ChatMessage = {
@@ -131,7 +131,7 @@ export function parseWorkerMessages(
       content: boundedString(input.content, `messages[${index}].content`)!,
     };
 
-    if (role === "assistant") {
+    if (role === 'assistant') {
       const reasoning = boundedString(
         input.reasoning_content,
         `messages[${index}].reasoning_content`,
@@ -142,12 +142,12 @@ export function parseWorkerMessages(
         message.reasoning_items = cloneOpaque(
           input.reasoning_items,
           `messages[${index}].reasoning_items`,
-        ) as ChatMessage["reasoning_items"];
+        ) as ChatMessage['reasoning_items'];
       if (input.thinking_blocks !== undefined)
         message.thinking_blocks = cloneOpaque(
           input.thinking_blocks,
           `messages[${index}].thinking_blocks`,
-        ) as ChatMessage["thinking_blocks"];
+        ) as ChatMessage['thinking_blocks'];
       if (input.tool_calls !== undefined) {
         if (
           !Array.isArray(input.tool_calls) ||
@@ -155,31 +155,31 @@ export function parseWorkerMessages(
           input.tool_calls.length > MAX_TOOL_CALLS
         ) {
           throw new WorkerCompletionError(
-            "invalid_request",
+            'invalid_request',
             `messages[${index}].tool_calls must contain 1-${MAX_TOOL_CALLS} entries`,
           );
         }
         message.tool_calls = input.tool_calls.map((rawCall, callIndex) => {
           if (
             !rawCall ||
-            typeof rawCall !== "object" ||
+            typeof rawCall !== 'object' ||
             Array.isArray(rawCall)
           ) {
             throw new WorkerCompletionError(
-              "invalid_request",
+              'invalid_request',
               `messages[${index}].tool_calls[${callIndex}] must be an object`,
             );
           }
           const call = rawCall as Record<string, unknown>;
           const fn = call.function;
           if (
-            call.type !== "function" ||
+            call.type !== 'function' ||
             !fn ||
-            typeof fn !== "object" ||
+            typeof fn !== 'object' ||
             Array.isArray(fn)
           ) {
             throw new WorkerCompletionError(
-              "invalid_request",
+              'invalid_request',
               `messages[${index}].tool_calls[${callIndex}] must be a function call`,
             );
           }
@@ -190,7 +190,7 @@ export function parseWorkerMessages(
           )!;
           if (!allowedToolNames.has(name)) {
             throw new WorkerCompletionError(
-              "unsupported",
+              'unsupported',
               `worker tool ${JSON.stringify(name)} is not supported`,
             );
           }
@@ -199,7 +199,7 @@ export function parseWorkerMessages(
               call.id,
               `messages[${index}].tool_calls[${callIndex}].id`,
             )!,
-            type: "function" as const,
+            type: 'function' as const,
             function: {
               name,
               arguments: boundedString(
@@ -210,7 +210,7 @@ export function parseWorkerMessages(
           };
         });
       }
-    } else if (role === "tool") {
+    } else if (role === 'tool') {
       message.tool_call_id = boundedString(
         input.tool_call_id,
         `messages[${index}].tool_call_id`,
@@ -220,7 +220,7 @@ export function parseWorkerMessages(
       input.tool_call_id !== undefined
     ) {
       throw new WorkerCompletionError(
-        "invalid_request",
+        'invalid_request',
         `messages[${index}] has tool fields for role ${role}`,
       );
     }
@@ -245,26 +245,26 @@ export class WorkerCompletionBroker {
     const binding = resolveWorkerSession(this.options.db, token);
     if (!binding)
       throw new WorkerCompletionError(
-        "unauthorized",
-        "worker session is unavailable",
+        'unauthorized',
+        'worker session is unavailable',
       );
     const messages = parseWorkerMessages(input);
     if (this.active.has(binding.sessionId))
       throw new WorkerCompletionError(
-        "busy",
-        "worker session already has a completion in flight",
+        'busy',
+        'worker session already has a completion in flight',
       );
     if (this.active.size >= this.options.config.workers.maxConcurrent)
       throw new WorkerCompletionError(
-        "capacity",
-        "worker completion capacity is full",
+        'capacity',
+        'worker completion capacity is full',
       );
 
     let cached = this.clients.get(binding.sessionId);
     if (cached && cached.modelRef !== binding.modelRef) {
       throw new WorkerCompletionError(
-        "binding_changed",
-        "worker model binding changed after client creation",
+        'binding_changed',
+        'worker model binding changed after client creation',
       );
     }
     if (!cached) {
@@ -284,7 +284,7 @@ export class WorkerCompletionBroker {
         result: await cached.llm.complete(messages, {
           signal,
           runTool: WORKER_RUN_TOOL,
-          toolChoice: "auto",
+          toolChoice: 'auto',
         }),
       };
     } finally {

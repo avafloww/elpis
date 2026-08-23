@@ -30,26 +30,29 @@ export function serializeHistory(
   const text = messages
     .map((m) => {
       let s = `[${m.role}] ${cap(m.content ?? '', contentCap)}`;
- // Include the model's reasoning_content so the summarizer sees what the
- // agent was thinking, not just what it said/did — this preserves the
- // decision rationale across compaction boundaries.
+      // Include the model's reasoning_content so the summarizer sees what the
+      // agent was thinking, not just what it said/did — this preserves the
+      // decision rationale across compaction boundaries.
       if (m.role === 'assistant' && m.reasoning_content) {
         s += `\n[reasoning]\n${cap(m.reasoning_content, contentCap)}`;
       }
       for (const tc of m.tool_calls ?? []) {
         try {
           const args = JSON.parse(tc.function.arguments);
-          if (typeof args.code === 'string') s += `\n[ran code]\n${cap(args.code, codeCap)}`;
-        } catch { /* malformed args — skip */ }
+          if (typeof args.code === 'string')
+            s += `\n[ran code]\n${cap(args.code, codeCap)}`;
+        } catch {
+          /* malformed args — skip */
+        }
       }
       return s;
     })
     .join('\n');
- // When over the cap, drop the OLDEST content and keep the NEWEST: the tail of
- // the conversation is what a resuming instance most needs, and the summarizer
- // already lists early user messages verbatim from what survives. Keeping the
- // head (slice(0, totalCap)) would silently discard the most recent activity
- // while the note claimed the opposite.
+  // When over the cap, drop the OLDEST content and keep the NEWEST: the tail of
+  // the conversation is what a resuming instance most needs, and the summarizer
+  // already lists early user messages verbatim from what survives. Keeping the
+  // head (slice(0, totalCap)) would silently discard the most recent activity
+  // while the note claimed the opposite.
   return text.length > totalCap
     ? '[oldest history truncated]…\n' + text.slice(-totalCap)
     : text;
@@ -59,14 +62,14 @@ export interface GuardedSummarizer {
   readonly running: boolean;
   readonly lastError: string | null;
   /** Kick off a background summarize call (no-op if already running). Returns
- * immediately; the result is delivered via the `onResult` callback.
- * `minChars` is the quality gate: a summary shorter than it is treated as a
- * FAILED attempt (recorded in lastError, retried up to `retries`) — a
- * degenerate one-sentence "summary" is a successful API call but a
- * catastrophic memory loss, so success must mean more than non-empty. */
+   * immediately; the result is delivered via the `onResult` callback.
+   * `minChars` is the quality gate: a summary shorter than it is treated as a
+   * FAILED attempt (recorded in lastError, retried up to `retries`) — a
+   * degenerate one-sentence "summary" is a successful API call but a
+   * catastrophic memory loss, so success must mean more than non-empty. */
   start(input: string, startOpts?: { minChars?: number }): void;
   /** Resolves when the in-flight summarize call finishes (or immediately if
- * none). Used by callers that need to wait at a safe checkpoint. */
+   * none). Used by callers that need to wait at a safe checkpoint. */
   done(): Promise<void>;
   /** Bump the epoch (invalidate any in-flight call) and clear state. */
   reset(): void;
@@ -84,7 +87,11 @@ export interface GuardedSummarizer {
  * is otherwise invisible until the escalation nudge fires). */
 export function createGuardedSummarizer(
   llm: LLM,
-  opts: { retries?: number; onResult?: (summary: string) => void; log?: (line: string) => void } = {},
+  opts: {
+    retries?: number;
+    onResult?: (summary: string) => void;
+    log?: (line: string) => void;
+  } = {},
 ): GuardedSummarizer {
   const maxAttempts = opts.retries ?? 1;
   let running = false;
@@ -93,8 +100,12 @@ export function createGuardedSummarizer(
   let epoch = 0;
 
   return {
-    get running() { return running; },
-    get lastError() { return lastError; },
+    get running() {
+      return running;
+    },
+    get lastError() {
+      return lastError;
+    },
     start(input: string, startOpts: { minChars?: number } = {}): void {
       if (running) return;
       running = true;
@@ -110,22 +121,26 @@ export function createGuardedSummarizer(
             if (summary !== null && summary.length < minChars) {
               if (startEpoch !== epoch) return; // superseded by a reset
               lastError = `summary rejected: ${summary.length} chars < ${minChars} floor (attempt ${attempts}/${maxAttempts})`;
-              opts.log?.(`summarize attempt ${attempts}/${maxAttempts} rejected: ${summary.length} chars < ${minChars} floor`);
+              opts.log?.(
+                `summarize attempt ${attempts}/${maxAttempts} rejected: ${summary.length} chars < ${minChars} floor`,
+              );
               summary = null;
             }
           } catch (e) {
             if (startEpoch !== epoch) return; // superseded by a reset
             lastError = e instanceof Error ? e.message : String(e);
-            opts.log?.(`summarize attempt ${attempts}/${maxAttempts} failed: ${lastError}`);
+            opts.log?.(
+              `summarize attempt ${attempts}/${maxAttempts} failed: ${lastError}`,
+            );
             summary = null;
           }
         }
         if (summary !== null) {
           if (startEpoch !== epoch) return; // superseded by a reset
- // Clear the failure record on success: with the quality gate, a
- // reject-then-succeed cycle is the intended happy path, and a stale
- // rejection here would be misreported by the escalation nudge as the
- // current cycle's failure.
+          // Clear the failure record on success: with the quality gate, a
+          // reject-then-succeed cycle is the intended happy path, and a stale
+          // rejection here would be misreported by the escalation nudge as the
+          // current cycle's failure.
           lastError = null;
           try {
             opts.onResult?.(summary);

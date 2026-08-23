@@ -1,17 +1,17 @@
-import type { Config } from "../config.js";
-import { resolveLlmModelTarget } from "../llm/model-registry.js";
-import type { Database } from "../store/db.js";
-import { isMindId, type MindId } from "../store/mind-id.js";
-import type { MindDetail, MindService } from "../store/mind.js";
+import type { Config } from '../config.js';
+import { resolveLlmModelTarget } from '../llm/model-registry.js';
+import type { Database } from '../store/db.js';
+import { isMindId, type MindId } from '../store/mind-id.js';
+import type { MindDetail, MindService } from '../store/mind.js';
 import {
   createWorkerControlCredential,
   type WorkerControlCredential,
-} from "./auth.js";
-import { generateWorkerSlug, newWorkerId } from "./names.js";
-import type { WorkerSourceReceipt, WorkerWorkspaceStore } from "./workspace.js";
+} from './auth.js';
+import { generateWorkerSlug, newWorkerId } from './names.js';
+import type { WorkerSourceReceipt, WorkerWorkspaceStore } from './workspace.js';
 
 export type WorkerSessionStatus =
-  "spawning" | "running" | "idle" | "finished" | "failed" | "dismissed";
+  'spawning' | 'running' | 'idle' | 'finished' | 'failed' | 'dismissed';
 
 export interface WorkerSession {
   id: string;
@@ -20,7 +20,7 @@ export interface WorkerSession {
   status: WorkerSessionStatus;
   modelRef: string;
   mindId: MindId;
-  runtime: "trusted" | "kubernetes";
+  runtime: 'trusted' | 'kubernetes';
   podName: string | null;
   podUid: string | null;
   workspaceRef: string | null;
@@ -45,11 +45,11 @@ export interface WorkerProvisionReceipt {
 }
 
 export type WorkerProvisionState =
-  | { state: "pending"; receipt?: WorkerProvisionReceipt }
-  | { state: "ready"; receipt: WorkerProvisionReceipt }
-  | { state: "succeeded"; receipt?: WorkerProvisionReceipt }
-  | { state: "failed"; error: string; receipt?: WorkerProvisionReceipt }
-  | { state: "missing" };
+  | { state: 'pending'; receipt?: WorkerProvisionReceipt }
+  | { state: 'ready'; receipt: WorkerProvisionReceipt }
+  | { state: 'succeeded'; receipt?: WorkerProvisionReceipt }
+  | { state: 'failed'; error: string; receipt?: WorkerProvisionReceipt }
+  | { state: 'missing' };
 
 export interface WorkerPodRuntime {
   provision(request: WorkerProvisionRequest): Promise<WorkerProvisionReceipt>;
@@ -60,20 +60,20 @@ export interface WorkerPodRuntime {
 export class WorkerSpawnError extends Error {
   constructor(
     public readonly code:
-      | "disabled"
-      | "invalid_request"
-      | "not_found"
-      | "unavailable"
-      | "blocked"
-      | "conflict"
-      | "capacity"
-      | "workspace_failed"
-      | "provision_failed"
-      | "cleanup_failed",
+      | 'disabled'
+      | 'invalid_request'
+      | 'not_found'
+      | 'unavailable'
+      | 'blocked'
+      | 'conflict'
+      | 'capacity'
+      | 'workspace_failed'
+      | 'provision_failed'
+      | 'cleanup_failed',
     message: string,
   ) {
     super(message);
-    this.name = "WorkerSpawnError";
+    this.name = 'WorkerSpawnError';
   }
 }
 
@@ -82,25 +82,25 @@ export interface WorkerSpawnBrokerOptions {
   config: Config;
   mind: MindService;
   runtime: WorkerPodRuntime;
-  workspace?: Pick<WorkerWorkspaceStore, "prepareSource" | "discardSource">;
+  workspace?: Pick<WorkerWorkspaceStore, 'prepareSource' | 'discardSource'>;
   now?: () => number;
   credential?: () => WorkerControlCredential;
   id?: () => string;
   slug?: (taken: Set<string>) => string;
 }
 
-const ACTIVE: WorkerSessionStatus[] = ["spawning", "running", "idle"];
-const CLOSED_MIND = new Set(["done", "cancelled"]);
+const ACTIVE: WorkerSessionStatus[] = ['spawning', 'running', 'idle'];
+const CLOSED_MIND = new Set(['done', 'cancelled']);
 
 function boundedError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.slice(0, 1000) || "worker operation failed";
+  return message.slice(0, 1000) || 'worker operation failed';
 }
 
 function rowSession(row: Record<string, unknown>): WorkerSession {
   const mindId = String(row.mind_id);
   if (!isMindId(mindId))
-    throw new Error("worker session has invalid Mind identity");
+    throw new Error('worker session has invalid Mind identity');
   return {
     id: String(row.id),
     slug: String(row.slug),
@@ -108,7 +108,7 @@ function rowSession(row: Record<string, unknown>): WorkerSession {
     status: row.status as WorkerSessionStatus,
     modelRef: String(row.model_ref),
     mindId,
-    runtime: row.runtime as "trusted" | "kubernetes",
+    runtime: row.runtime as 'trusted' | 'kubernetes',
     podName: row.pod_name == null ? null : String(row.pod_name),
     podUid: row.pod_uid == null ? null : String(row.pod_uid),
     workspaceRef: row.workspace_ref == null ? null : String(row.workspace_ref),
@@ -124,47 +124,47 @@ function rowSession(row: Record<string, unknown>): WorkerSession {
 
 function parseStartOptions(value: unknown): { modelRef?: string } {
   if (value === undefined) return {};
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new WorkerSpawnError(
-      "invalid_request",
-      "worker options must be an object",
+      'invalid_request',
+      'worker options must be an object',
     );
   const input = value as Record<string, unknown>;
-  const extra = Object.keys(input).filter((key) => key !== "modelRef");
+  const extra = Object.keys(input).filter((key) => key !== 'modelRef');
   if (extra.length > 0)
     throw new WorkerSpawnError(
-      "invalid_request",
+      'invalid_request',
       `unknown worker option ${JSON.stringify(extra[0])}`,
     );
-  if (input.modelRef !== undefined && typeof input.modelRef !== "string")
-    throw new WorkerSpawnError("invalid_request", "modelRef must be a string");
+  if (input.modelRef !== undefined && typeof input.modelRef !== 'string')
+    throw new WorkerSpawnError('invalid_request', 'modelRef must be a string');
   return input.modelRef === undefined ? {} : { modelRef: input.modelRef };
 }
 
 function validateMind(mind: MindService, value: unknown): MindDetail {
-  if (typeof value !== "string" || !isMindId(value))
+  if (typeof value !== 'string' || !isMindId(value))
     throw new WorkerSpawnError(
-      "invalid_request",
-      "mindId must be a canonical elm- Mind identity",
+      'invalid_request',
+      'mindId must be a canonical elm- Mind identity',
     );
   const item = mind.get(value);
   if (!item)
-    throw new WorkerSpawnError("not_found", "Mind item is unavailable");
+    throw new WorkerSpawnError('not_found', 'Mind item is unavailable');
   if (item.archivedAt !== null || CLOSED_MIND.has(item.status))
-    throw new WorkerSpawnError("unavailable", "Mind item is closed");
-  if (item.status === "proposal")
+    throw new WorkerSpawnError('unavailable', 'Mind item is closed');
+  if (item.status === 'proposal')
     throw new WorkerSpawnError(
-      "blocked",
-      "Mind proposal is not committed work",
+      'blocked',
+      'Mind proposal is not committed work',
     );
   if (
-    item.status === "inbox" ||
-    item.status === "waiting" ||
-    item.effectiveStatus === "blocked"
+    item.status === 'inbox' ||
+    item.status === 'waiting' ||
+    item.effectiveStatus === 'blocked'
   )
     throw new WorkerSpawnError(
-      "blocked",
-      "Mind item is not ready for a worker",
+      'blocked',
+      'Mind item is not ready for a worker',
     );
   return item;
 }
@@ -184,23 +184,23 @@ export class WorkerSpawnBroker {
 
   private requireEnabled(): void {
     if (!this.options.config.workers.enabled)
-      throw new WorkerSpawnError("disabled", "workers are disabled");
+      throw new WorkerSpawnError('disabled', 'workers are disabled');
   }
 
   private byId(id: string): WorkerSession | null {
     const row = this.options.db
-      .prepare("SELECT * FROM worker_sessions WHERE id = ?")
+      .prepare('SELECT * FROM worker_sessions WHERE id = ?')
       .get(id) as Record<string, unknown> | undefined;
     return row ? rowSession(row) : null;
   }
 
   private resolve(ref: string): WorkerSession {
-    if (typeof ref !== "string" || ref.trim().length === 0)
+    if (typeof ref !== 'string' || ref.trim().length === 0)
       throw new WorkerSpawnError(
-        "invalid_request",
-        "worker ref must be a string",
+        'invalid_request',
+        'worker ref must be a string',
       );
-    const clean = ref.startsWith("worker:") ? ref.slice(7) : ref;
+    const clean = ref.startsWith('worker:') ? ref.slice(7) : ref;
     const rows = this.options.db
       .prepare(
         `SELECT * FROM worker_sessions
@@ -209,9 +209,9 @@ export class WorkerSpawnBroker {
       )
       .all(clean, clean, `${clean}%`) as Record<string, unknown>[];
     if (rows.length === 0)
-      throw new WorkerSpawnError("not_found", "worker session is unavailable");
+      throw new WorkerSpawnError('not_found', 'worker session is unavailable');
     if (rows.length > 1)
-      throw new WorkerSpawnError("conflict", "worker ref is ambiguous");
+      throw new WorkerSpawnError('conflict', 'worker ref is ambiguous');
     return rowSession(rows[0]);
   }
 
@@ -219,7 +219,7 @@ export class WorkerSpawnBroker {
     return (
       this.options.db
         .prepare(
-          "SELECT * FROM worker_sessions ORDER BY created_at DESC, id DESC",
+          'SELECT * FROM worker_sessions ORDER BY created_at DESC, id DESC',
         )
         .all() as Record<string, unknown>[]
     ).map(rowSession);
@@ -239,18 +239,18 @@ export class WorkerSpawnBroker {
       resolveLlmModelTarget(
         this.options.config.llm.registry,
         modelRef,
-        "worker model",
+        'worker model',
       );
     } catch (error) {
-      throw new WorkerSpawnError("invalid_request", boundedError(error));
+      throw new WorkerSpawnError('invalid_request', boundedError(error));
     }
 
     await this.recover();
     const credential = this.credential();
     const now = this.now();
-    let id = "";
-    let slug = "";
-    this.options.db.exec("BEGIN IMMEDIATE");
+    let id = '';
+    let slug = '';
+    this.options.db.exec('BEGIN IMMEDIATE');
     try {
       const active = this.options.db
         .prepare(
@@ -259,7 +259,7 @@ export class WorkerSpawnBroker {
         )
         .get() as { n: number };
       if (active.n >= this.options.config.workers.maxConcurrent)
-        throw new WorkerSpawnError("capacity", "worker capacity is full");
+        throw new WorkerSpawnError('capacity', 'worker capacity is full');
       const claimed = this.options.db
         .prepare(
           `SELECT id FROM worker_sessions
@@ -268,12 +268,12 @@ export class WorkerSpawnBroker {
         .get(item.id);
       if (claimed)
         throw new WorkerSpawnError(
-          "conflict",
-          "Mind item already has an active worker",
+          'conflict',
+          'Mind item already has an active worker',
         );
       const ids = new Set(
         (
-          this.options.db.prepare("SELECT id FROM worker_sessions").all() as {
+          this.options.db.prepare('SELECT id FROM worker_sessions').all() as {
             id: string;
           }[]
         ).map((row) => row.id),
@@ -286,10 +286,10 @@ export class WorkerSpawnBroker {
         }
       }
       if (!id)
-        throw new WorkerSpawnError("conflict", "worker id space is exhausted");
+        throw new WorkerSpawnError('conflict', 'worker id space is exhausted');
       const slugs = new Set(
         (
-          this.options.db.prepare("SELECT slug FROM worker_sessions").all() as {
+          this.options.db.prepare('SELECT slug FROM worker_sessions').all() as {
             slug: string;
           }[]
         ).map((row) => row.slug),
@@ -302,11 +302,11 @@ export class WorkerSpawnBroker {
            VALUES (?, ?, 'spawning', ?, ?, 'kubernetes', ?, ?, ?)`,
         )
         .run(id, slug, modelRef, item.id, credential.digest, now, now);
-      this.options.db.exec("COMMIT");
+      this.options.db.exec('COMMIT');
     } catch (error) {
-      this.options.db.exec("ROLLBACK");
+      this.options.db.exec('ROLLBACK');
       if (error instanceof WorkerSpawnError) throw error;
-      throw new WorkerSpawnError("conflict", boundedError(error));
+      throw new WorkerSpawnError('conflict', boundedError(error));
     }
 
     let source: WorkerSourceReceipt | null = null;
@@ -331,8 +331,8 @@ export class WorkerSpawnBroker {
           if (Number(bound.changes) !== 1) {
             this.options.workspace.discardSource(id);
             throw new WorkerSpawnError(
-              "conflict",
-              "worker was revoked during source preparation",
+              'conflict',
+              'worker was revoked during source preparation',
             );
           }
         }
@@ -348,8 +348,8 @@ export class WorkerSpawnBroker {
           .run(this.now(), detail, id);
         if (error instanceof WorkerSpawnError) throw error;
         throw new WorkerSpawnError(
-          "workspace_failed",
-          "worker source preparation failed",
+          'workspace_failed',
+          'worker source preparation failed',
         );
       }
     }
@@ -369,15 +369,15 @@ export class WorkerSpawnBroker {
       } catch (cleanup) {
         cleanupError = boundedError(cleanup);
       }
-      const message = `${boundedError(error)}${cleanupError ? `; cleanup: ${cleanupError}` : ""}`;
+      const message = `${boundedError(error)}${cleanupError ? `; cleanup: ${cleanupError}` : ''}`;
       this.options.db
         .prepare(
           "UPDATE worker_sessions SET status = 'failed', updated_at = ?, last_error = ? WHERE id = ? AND status = 'spawning'",
         )
         .run(this.now(), message.slice(0, 1000), id);
       throw new WorkerSpawnError(
-        "provision_failed",
-        "worker provisioning failed",
+        'provision_failed',
+        'worker provisioning failed',
       );
     }
 
@@ -397,8 +397,8 @@ export class WorkerSpawnBroker {
     if (Number(result.changes) !== 1) {
       await this.options.runtime.cleanup(this.byId(id)!);
       throw new WorkerSpawnError(
-        "conflict",
-        "worker was revoked during provisioning",
+        'conflict',
+        'worker was revoked during provisioning',
       );
     }
     return this.byId(id)!;
@@ -420,10 +420,10 @@ export class WorkerSpawnBroker {
     } catch (error) {
       this.options.db
         .prepare(
-          "UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?",
+          'UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?',
         )
         .run(boundedError(error), this.now(), session.id);
-      throw new WorkerSpawnError("cleanup_failed", "worker cleanup failed");
+      throw new WorkerSpawnError('cleanup_failed', 'worker cleanup failed');
     }
     return this.byId(session.id)!;
   }
@@ -439,8 +439,8 @@ export class WorkerSpawnBroker {
       } catch {
         continue;
       }
-      if (state.state === "pending") continue;
-      if (state.state === "ready") {
+      if (state.state === 'pending') continue;
+      if (state.state === 'ready') {
         this.options.db
           .prepare(
             `UPDATE worker_sessions
@@ -456,12 +456,12 @@ export class WorkerSpawnBroker {
           );
         continue;
       }
-      const status = state.state === "succeeded" ? "finished" : "failed";
+      const status = state.state === 'succeeded' ? 'finished' : 'failed';
       const error =
-        state.state === "failed"
+        state.state === 'failed'
           ? boundedError(state.error)
-          : state.state === "missing"
-            ? "worker Pod is missing"
+          : state.state === 'missing'
+            ? 'worker Pod is missing'
             : null;
       this.options.db
         .prepare(
@@ -473,10 +473,10 @@ export class WorkerSpawnBroker {
       } catch (cleanup) {
         this.options.db
           .prepare(
-            "UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?",
+            'UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?',
           )
           .run(
-            `${error ? `${error}; ` : ""}cleanup: ${boundedError(cleanup)}`.slice(
+            `${error ? `${error}; ` : ''}cleanup: ${boundedError(cleanup)}`.slice(
               0,
               1000,
             ),

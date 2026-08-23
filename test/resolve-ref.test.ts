@@ -15,10 +15,22 @@ import { buildGlobals } from '../src/sandbox/globals.js';
 import type { GuildConfig } from '../src/config.js';
 
 const guilds: GuildConfig[] = [
-  { id: 'g1', slug: 'home', slashCommands: true, quietHours: null, timezone: null,
-    channels: { '1001': 'direct', '1002': 'social' } },
-  { id: 'g2', slug: 'friends-a', slashCommands: false, quietHours: null, timezone: null,
-    channels: { '2001': 'social' } },
+  {
+    id: 'g1',
+    slug: 'home',
+    slashCommands: true,
+    quietHours: null,
+    timezone: null,
+    channels: { '1001': 'direct', '1002': 'social' },
+  },
+  {
+    id: 'g2',
+    slug: 'friends-a',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '2001': 'social' },
+  },
 ];
 
 function buildAgentWithChannels() {
@@ -44,11 +56,11 @@ function buildAgentWithNullGuildRows() {
     config: { discord: { ...makeConfig().discord, guilds } },
     agentDeps: ({ tmpDir }) => {
       const channels = createChannelDirectory(openDatabase(tmpDir), tmpDir);
- // '1002' IS in the config allowlist (guild g1/home) but its row has never
- // healed — simulates the untouched legacy row on first boot post-upgrade.
+      // '1002' IS in the config allowlist (guild g1/home) but its row has never
+      // healed — simulates the untouched legacy row on first boot post-upgrade.
       channels.set('1002', 'lounge');
- // '9999' is NOT in the config allowlist — a NULL-guild row here has no
- // config fallback and must correctly stay unaddressable by qualified name.
+      // '9999' is NOT in the config allowlist — a NULL-guild row here has no
+      // config fallback and must correctly stay unaddressable by qualified name.
       channels.set('9999', 'archived');
       return { channels };
     },
@@ -73,7 +85,10 @@ test('resolveChannelRef: raw id passes unqualified', () => {
 
 test('resolveChannelRef: bare name throws even when unique, listing qualified candidates', () => {
   const { agent, cleanup } = buildAgentWithChannels();
-  assert.throws(() => agent.resolveChannelRef('general'), /unqualified.*home\/general/s);
+  assert.throws(
+    () => agent.resolveChannelRef('general'),
+    /unqualified.*home\/general/s,
+  );
   assert.throws(() => agent.resolveChannelRef('lounge'), /home\/lounge/s);
   assert.throws(() => agent.resolveChannelRef('lounge'), /friends-a\/lounge/s);
   cleanup();
@@ -96,16 +111,27 @@ test('resolveChannelRef: configured-but-never-seen raw id resolves; qualified na
   const { agent, cleanup } = buildTestAgent({
     config: { discord: { ...makeConfig().discord, guilds } },
     agentDeps: ({ tmpDir }) => ({
- // A freshly-added second server: configured, but nothing has ever spoken
- // there, so the directory is empty.
+      // A freshly-added second server: configured, but nothing has ever spoken
+      // there, so the directory is empty.
       channels: createChannelDirectory(openDatabase(tmpDir), tmpDir),
     }),
     tmpPrefix: 'harness-resolve-ref-unseen-',
   });
-  assert.equal(agent.resolveChannelRef('2001'), '2001', 'addressable by raw id immediately');
-  assert.equal(agent.resolveChannelRef('friends-a/lounge'), null,
-    'config carries ids, not names — a qualified name needs the channel to have carried one message');
-  assert.equal(agent.resolveChannelRef('4242'), null, 'an unconfigured, unseen raw id stays unknown');
+  assert.equal(
+    agent.resolveChannelRef('2001'),
+    '2001',
+    'addressable by raw id immediately',
+  );
+  assert.equal(
+    agent.resolveChannelRef('friends-a/lounge'),
+    null,
+    'config carries ids, not names — a qualified name needs the channel to have carried one message',
+  );
+  assert.equal(
+    agent.resolveChannelRef('4242'),
+    null,
+    'an unconfigured, unseen raw id stays unknown',
+  );
   cleanup();
 });
 
@@ -118,14 +144,25 @@ test('roomsSnapshot: reserved console room is not duplicated by its directory ro
     },
     tmpPrefix: 'harness-console-room-',
   });
-  assert.equal(built.agent.roomsSnapshot().filter((room) => room.id === 'console').length, 1);
+  assert.equal(
+    built.agent.roomsSnapshot().filter((room) => room.id === 'console').length,
+    1,
+  );
   built.cleanup();
 });
 
 test('knownChannels: labels are guild-qualified', () => {
   const { agent, cleanup } = buildAgentWithChannels();
-  const names = agent.knownChannels().map((c) => c.name).sort();
-  assert.deepEqual(names, ['console', 'friends-a/lounge', 'home/general', 'home/lounge']);
+  const names = agent
+    .knownChannels()
+    .map((c) => c.name)
+    .sort();
+  assert.deepEqual(names, [
+    'console',
+    'friends-a/lounge',
+    'home/general',
+    'home/lounge',
+  ]);
   assert.equal(agent.resolveChannelRef('console'), 'console');
   assert.equal(agent.qualifiedChannelLabel('console'), 'console');
   cleanup();
@@ -171,12 +208,25 @@ test('knownChannels/qualifiedChannelLabel: a NULL-guild row for an UNCONFIGURED 
 test('elpis.channel().send(): delivered-echo renders the guild-qualified label end to end', async () => {
   const { agent, cleanup } = buildAgentWithChannels();
   const g = buildGlobals({
-    config: { paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' }, sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null } },
+    config: {
+      paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
+      sandbox: {
+        syncTimeoutMs: 5000,
+        asyncDeadlineMs: 10000,
+        previewMaxBytes: 2048,
+        logMaxBytes: 2048,
+      },
+      kagi: { apiKey: null },
+    },
     resolveChannel: (ref: string) => agent.resolveChannelRef(ref),
     channelLabel: (id: string) => agent.qualifiedChannelLabel(id),
     send: async () => {},
   } as Parameters<typeof buildGlobals>[0]);
-  const elpis = g.elpis as { channel: (ref: string) => { send: (t: string) => Promise<{ note: string }> } };
+  const elpis = g.elpis as {
+    channel: (ref: string) => {
+      send: (t: string) => Promise<{ note: string }>;
+    };
+  };
   const res = await elpis.channel('home/lounge').send('hi');
   assert.match(res.note, /message delivered to home\/lounge \(1002\)/);
   cleanup();
@@ -185,12 +235,25 @@ test('elpis.channel().send(): delivered-echo renders the guild-qualified label e
 test('elpis.channel().send(): delivered-echo for an unknown channel id renders it once, not twice (Fix 3)', async () => {
   const { agent, cleanup } = buildAgentWithChannels();
   const g = buildGlobals({
-    config: { paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' }, sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null } },
+    config: {
+      paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
+      sandbox: {
+        syncTimeoutMs: 5000,
+        asyncDeadlineMs: 10000,
+        previewMaxBytes: 2048,
+        logMaxBytes: 2048,
+      },
+      kagi: { apiKey: null },
+    },
     resolveChannel: (ref: string) => agent.resolveChannelRef(ref),
     channelLabel: (id: string) => agent.qualifiedChannelLabel(id),
     send: async () => {},
   } as Parameters<typeof buildGlobals>[0]);
-  const elpis = g.elpis as { channel: (ref: string) => { send: (t: string) => Promise<{ note: string }> } };
+  const elpis = g.elpis as {
+    channel: (ref: string) => {
+      send: (t: string) => Promise<{ note: string }>;
+    };
+  };
   const res = await elpis.channel('999999').send('hi');
   assert.match(res.note, /delivered to 999999\./);
   assert.doesNotMatch(res.note, /999999 \(999999\)/);

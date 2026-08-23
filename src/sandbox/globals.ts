@@ -5,35 +5,35 @@
 // whole reason we stayed in `node:vm`. `elpis` itself is deep-frozen: neither
 // the namespace object nor any of its members can be reassigned or clobbered.
 
-import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
-import { AsyncLocalStorage } from "node:async_hooks";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as editor from "../lib/editor.js";
-import { fill } from "../lib/fill.js";
-import { preview } from "./preview.js";
-import { createStalenessTracker } from "./esm-staleness.js";
-import type { SandboxDeps } from "../types.js";
-import { isMindId, type MindId } from "../store/mind-id.js";
-import type { BgStartOpts } from "./bg.js";
-import { INTERNAL_CHANNEL_ID } from "../types.js";
-import type { Config } from "../config.js";
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as editor from '../lib/editor.js';
+import { fill } from '../lib/fill.js';
+import { preview } from './preview.js';
+import { createStalenessTracker } from './esm-staleness.js';
+import type { SandboxDeps } from '../types.js';
+import { isMindId, type MindId } from '../store/mind-id.js';
+import type { BgStartOpts } from './bg.js';
+import { INTERNAL_CHANNEL_ID } from '../types.js';
+import type { Config } from '../config.js';
 import {
   resolveBuiltinModules,
   type BuiltinModuleId,
-} from "../builtin-modules.js";
-import { parseFrontmatter } from "../lib/frontmatter.js";
-import { appendDatedBullet } from "../store/memory.js";
-import { clearResumeMarker, writeResumeMarker } from "../store/resume.js";
-import { requestRestrictedRestart } from "../lib/restart-request.js";
-import { restartHarnessService } from "../lib/lifecycle.js";
-import { slugifyName, authorHasPeopleFile } from "./people.js";
-import { formatRead } from "./read.js";
-import { kagiSearch, kagiExtract } from "./web.js";
-import { createBrowserTools } from "./browser.js";
-import { createComputerTools, displayShellCommand } from "./computer.js";
-import { createMotorController } from "./motor.js";
+} from '../builtin-modules.js';
+import { parseFrontmatter } from '../lib/frontmatter.js';
+import { appendDatedBullet } from '../store/memory.js';
+import { clearResumeMarker, writeResumeMarker } from '../store/resume.js';
+import { requestRestrictedRestart } from '../lib/restart-request.js';
+import { restartHarnessService } from '../lib/lifecycle.js';
+import { slugifyName, authorHasPeopleFile } from './people.js';
+import { formatRead } from './read.js';
+import { kagiSearch, kagiExtract } from './web.js';
+import { createBrowserTools } from './browser.js';
+import { createComputerTools, displayShellCommand } from './computer.js';
+import { createMotorController } from './motor.js';
 import {
   bskyPost,
   bskyFeed,
@@ -42,10 +42,10 @@ import {
   bskyLike,
   bskyFollow,
   bskyTimeline,
-} from "./bsky.js";
-import type { SshRegistry, SshHandle } from "./ssh.js";
-import { resolveDataLayout } from "../store/data-layout.js";
-import { parseMindId } from "../store/mind.js";
+} from './bsky.js';
+import type { SshRegistry, SshHandle } from './ssh.js';
+import { resolveDataLayout } from '../store/data-layout.js';
+import { parseMindId } from '../store/mind.js';
 
 // ─── Per-run scope (A5 / / ) ─────────────────────────────────────────
 // Each run(code) call establishes its OWN scope via AsyncLocalStorage so that
@@ -57,7 +57,7 @@ import { parseMindId } from "../store/mind.js";
 // NEXT run. `childPids` is a LIVE set: sh/sudo add on spawn and remove on exit,
 // so a detach can adopt the currently-live children (bg.cancel / TTL reap kill
 // the tree).
-export type RunProcessErrorKind = "unhandledRejection" | "uncaughtException";
+export type RunProcessErrorKind = 'unhandledRejection' | 'uncaughtException';
 export interface RunScope {
   logbuf: string[];
   childPids: Set<number>;
@@ -103,7 +103,7 @@ const baseRequire = createRequire(import.meta.url);
 // otherwise the process silently keeps serving the first version it loaded.
 const staleness = createStalenessTracker();
 const require_ = Object.assign(function requireFresh(id: string): unknown {
-  if (id.startsWith(".") || id.startsWith("/")) {
+  if (id.startsWith('.') || id.startsWith('/')) {
     let resolved: string | null = null;
     try {
       resolved = baseRequire.resolve(id);
@@ -118,7 +118,7 @@ const require_ = Object.assign(function requireFresh(id: string): unknown {
       // live verification: the unit tests covered the tracker, not delivery.)
       if (warning) {
         const buf = runScope.getStore()?.logbuf;
-        if (buf) buf.push("[warn] " + warning);
+        if (buf) buf.push('[warn] ' + warning);
         else console.warn(warning);
       }
     }
@@ -192,12 +192,12 @@ export const RESERVED_GLOBALS: Readonly<Record<string, true>> = {
 // and recursing into a getter's return would snapshot a live value and break
 // liveness. Guards against cycles via `Object.isFrozen`.
 function deepFreeze(o: unknown): void {
-  if (o === null || (typeof o !== "object" && typeof o !== "function")) return;
+  if (o === null || (typeof o !== 'object' && typeof o !== 'function')) return;
   if (Object.isFrozen(o)) return;
   Object.freeze(o);
   for (const k of Object.getOwnPropertyNames(o)) {
     const d = Object.getOwnPropertyDescriptor(o, k);
-    if (d && "value" in d) deepFreeze(d.value);
+    if (d && 'value' in d) deepFreeze(d.value);
   }
 }
 
@@ -211,15 +211,15 @@ function safeInspect(v: unknown): string {
 }
 
 function fmtArg(a: unknown): string {
-  if (typeof a === "string") return a;
+  if (typeof a === 'string') return a;
   return safeInspect(a);
 }
 
 /** Coerce a schedule nextRunAt (epoch-ms | ISO string | Date) to finite epoch-ms, or throw. */
 export function coerceNextRunAt(v: unknown): number {
   if (v instanceof Date) v = v.getTime();
-  if (typeof v === "string") v = Date.parse(v);
-  if (typeof v !== "number" || !Number.isFinite(v)) {
+  if (typeof v === 'string') v = Date.parse(v);
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
     throw new Error(
       `elpis.schedule: nextRunAt must be finite epoch-ms, an ISO-8601 string, or a Date (got ${JSON.stringify(v)})`,
     );
@@ -232,7 +232,7 @@ export function createRunLogger(
 ): (...args: unknown[]) => void {
   return (...args: unknown[]) => {
     const buf = runScope.getStore()?.logbuf ?? fallback;
-    buf.push(args.map(fmtArg).join(" "));
+    buf.push(args.map(fmtArg).join(' '));
   };
 }
 
@@ -245,7 +245,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     deps.modules ?? resolveBuiltinModules(deps.config as unknown as Config);
   const profile = deps.profile ?? {
     restricted: false,
-    source: "normal" as const,
+    source: 'normal' as const,
   };
   const unavailableFunction =
     (key: string, reason: string) =>
@@ -255,17 +255,17 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const unavailableObject = (key: string, reason: string) =>
     new Proxy(Object.freeze({}), {
       get(_target, property) {
-        if (property === Symbol.toStringTag) return "UnavailableModule";
+        if (property === Symbol.toStringTag) return 'UnavailableModule';
         return unavailableFunction(`${key}.${String(property)}`, reason);
       },
     });
   const installUnavailableModule = (id: BuiltinModuleId) => {
-    if (modules.state(id) !== "unavailable") return;
+    if (modules.state(id) !== 'unavailable') return;
     const reason = modules.reason(id) ?? `${id} module is unavailable`;
     for (const key of modules.statuses.find((status) => status.id === id)
       ?.keys ?? []) {
       e[key] =
-        id === "kagi"
+        id === 'kagi'
           ? unavailableFunction(key, reason)
           : unavailableObject(key, reason);
     }
@@ -294,7 +294,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
 
   // Persistent full sandboxes retain the last completion value. Fresh core
   // sandboxes deliberately have no `_` global or cross-run last-value state.
-  if (deps.surface !== "core") g._ = undefined;
+  if (deps.surface !== 'core') g._ = undefined;
 
   // inbound — structured metadata for the Discord message currently being
   // processed (or null on heartbeats). A LIVE getter over deps.inbound (the
@@ -304,7 +304,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // referenced it (agents got a ReferenceError and couldn't even shadow it).
   // Lives on `e` (elpis.inbound). It stays configurable only until the surface
   // projection can omit it; deepFreeze seals retained accessors before exposure.
-  Object.defineProperty(e, "inbound", {
+  Object.defineProperty(e, 'inbound', {
     get: () => deps.inbound ?? null,
     enumerable: true,
     configurable: true,
@@ -376,8 +376,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     const unregister = () => {
       if (scope && child.pid) scope.childPids.delete(child.pid);
     };
-    let stdout = "";
-    let stderr = "";
+    let stdout = '';
+    let stderr = '';
     let stdoutTrunc = false;
     let stderrTrunc = false;
     let done = false;
@@ -407,8 +407,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       if (!done) {
         done = true;
         unregister();
-        killGroup("SIGTERM");
-        killTimer = setTimeout(() => killGroup("SIGKILL"), 5000);
+        killGroup('SIGTERM');
+        killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
         killTimer.unref?.();
         // resolve with TIMEOUT signal + partial output (matches the contract
         // of "never throws"; the agent checks .signal/.code). Append a visible
@@ -420,25 +420,25 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
             stderr +
             `\n[elpis.sh TIMED OUT after ${timeoutMs}ms — output above is partial]`,
           code: null,
-          signal: "TIMEOUT",
+          signal: 'TIMEOUT',
         });
       }
     }, timeoutMs);
-    child.stdout?.on("data", (d: Buffer) => {
+    child.stdout?.on('data', (d: Buffer) => {
       [stdout, stdoutTrunc] = appendCapped(
         stdout,
-        d.toString("utf8"),
+        d.toString('utf8'),
         stdoutTrunc,
       );
     });
-    child.stderr?.on("data", (d: Buffer) => {
+    child.stderr?.on('data', (d: Buffer) => {
       [stderr, stderrTrunc] = appendCapped(
         stderr,
-        d.toString("utf8"),
+        d.toString('utf8'),
         stderrTrunc,
       );
     });
-    child.on("error", (err) => {
+    child.on('error', (err) => {
       if (killTimer) {
         clearTimeout(killTimer);
         killTimer = undefined;
@@ -450,7 +450,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         reject(err);
       }
     });
-    child.on("close", (code, signal) => {
+    child.on('close', (code, signal) => {
       // Clear the escalation timer regardless of `done` — the child may close
       // after a timeout-triggered SIGTERM but before the 5s SIGKILL fires.
       if (killTimer) {
@@ -467,7 +467,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     return promise;
   }
 
-  const SH_RESULT_KEYS = new Set(["stdout", "stderr", "code", "signal"]);
+  const SH_RESULT_KEYS = new Set(['stdout', 'stderr', 'code', 'signal']);
   /** Wrap a sh promise so property access on the un-awaited promise throws a
    * teachable error. then/catch/finally pass through. */
   function guardShPromise(
@@ -480,13 +480,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         // promise, not the proxy, or `await`/Promise.all throw "called on
         // incompatible receiver". Bind them; pass everything else through.
         if (
-          typeof prop === "string" &&
-          (prop === "then" || prop === "catch" || prop === "finally")
+          typeof prop === 'string' &&
+          (prop === 'then' || prop === 'catch' || prop === 'finally')
         ) {
           const fn = Reflect.get(target, prop, target);
-          return typeof fn === "function" ? fn.bind(target) : fn;
+          return typeof fn === 'function' ? fn.bind(target) : fn;
         }
-        if (typeof prop !== "string") {
+        if (typeof prop !== 'string') {
           return Reflect.get(target, prop, recv);
         }
         if (SH_RESULT_KEYS.has(prop)) {
@@ -502,7 +502,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const sh = ((
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => guardShPromise(shImpl(cmd, opts), "elpis.sh")) as ((
+  ) => guardShPromise(shImpl(cmd, opts), 'elpis.sh')) as ((
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
   ) => Promise<ShResult>) & { q: (s: unknown) => string };
@@ -515,7 +515,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const sudo = (
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => guardShPromise(shImpl(`sudo ${cmd}`, opts), "elpis.sudo");
+  ) => guardShPromise(shImpl(`sudo ${cmd}`, opts), 'elpis.sudo');
   if (!profile.restricted) e.sudo = sudo;
 
   // grep(pattern, opts?) — recursive text search, defaulting to the harness
@@ -535,23 +535,23 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       max?: number;
     } = {},
   ) => {
-    if (typeof pattern !== "string" || pattern === "") {
+    if (typeof pattern !== 'string' || pattern === '') {
       throw new Error(
-        "grep(pattern, opts?): pattern must be a non-empty string",
+        'grep(pattern, opts?): pattern must be a non-empty string',
       );
     }
-    const where = opts.path ?? path.join(deps.config.paths.harnessRoot, "src");
-    const flags = ["-rn", "--color=never"];
-    if (opts.ignoreCase) flags.push("-i");
+    const where = opts.path ?? path.join(deps.config.paths.harnessRoot, 'src');
+    const flags = ['-rn', '--color=never'];
+    if (opts.ignoreCase) flags.push('-i');
     // Extended regex by default: a bare `|` in BRE is a literal, which made
     // alternation patterns silently report "no matches" (-08-03 #20).
-    if (!opts.fixed) flags.push("-E");
-    if (opts.fixed) flags.push("-F");
+    if (!opts.fixed) flags.push('-E');
+    if (opts.fixed) flags.push('-F');
     if (opts.glob) flags.push(`--include=${sh.q(opts.glob)}`);
     const max = Number.isFinite(opts.max)
       ? Math.max(1, Math.floor(opts.max as number))
       : 200;
-    const cmd = `grep ${flags.join(" ")} -e ${sh.q(pattern)} ${sh.q(where)} 2>/dev/null | head -n ${max}`;
+    const cmd = `grep ${flags.join(' ')} -e ${sh.q(pattern)} ${sh.q(where)} 2>/dev/null | head -n ${max}`;
     const r = await shImpl(cmd, {
       cwd: deps.config.paths.harnessRoot,
       timeout: 30_000,
@@ -574,12 +574,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const requireSsh = (): SshRegistry => {
     if (!deps.ssh)
       throw new Error(
-        "ssh not wired — the harness did not construct an ssh registry",
+        'ssh not wired — the harness did not construct an ssh registry',
       );
     return deps.ssh;
   };
   e.ssh = (host: string, opts?: { user?: string }): SshHandle => {
-    if (typeof host !== "string" || host === "") {
+    if (typeof host !== 'string' || host === '') {
       throw new Error(
         'elpis.ssh(host): host must be a non-empty string — e.g. elpis.ssh("ai.example.com").exec("uptime")',
       );
@@ -602,7 +602,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       rows.push(
         `${p} @@ -${h.from},${h.removed.length} +${h.from},${h.inserted.length} @@`,
       );
-      const emit = (sign: "-" | "+", ls: string[]) => {
+      const emit = (sign: '-' | '+', ls: string[]) => {
         const tag = (i: number) =>
           `${sign}${String(h.from + i).padStart(4)}: ${ls[i]}`;
         if (ls.length <= DIFF_EDGE * 2 + 1) {
@@ -614,10 +614,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
             rows.push(tag(i));
         }
       };
-      emit("-", h.removed);
-      emit("+", h.inserted);
+      emit('-', h.removed);
+      emit('+', h.inserted);
     }
-    return rows.join("\n");
+    return rows.join('\n');
   };
   e.edit = (
     p: string,
@@ -625,7 +625,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     newString: string,
     opts?: { replaceAll?: boolean },
   ) => {
-    const src = fs.readFileSync(p, "utf8");
+    const src = fs.readFileSync(p, 'utf8');
     const r = editor.replace(src, oldString, newString, {
       all: opts?.replaceAll,
     }); // throws BEFORE any write
@@ -661,7 +661,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   ) => {
     const out = formatRead(
       p,
-      fs.readFileSync(p, "utf8"),
+      fs.readFileSync(p, 'utf8'),
       opts,
       deps.config.sandbox.previewMaxBytes,
     );
@@ -676,8 +676,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // it with the first line as the seed question if new). ponder.close(thread,
   // conclusion?) archives the file to ponder/resolved/. Reading and
   // restructuring stay plain fs/read.
-  const ponderDir = path.join(deps.config.paths.dataDirectory, "ponder");
-  const ponderResolvedDir = path.join(ponderDir, "resolved");
+  const ponderDir = path.join(deps.config.paths.dataDirectory, 'ponder');
+  const ponderResolvedDir = path.join(ponderDir, 'resolved');
   const ponderFn = ((thread: string, text: string) => {
     fs.mkdirSync(ponderDir, { recursive: true });
     // Slugify the thread name so `ponder('../SOUL',...)` can't escape the
@@ -708,9 +708,9 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     const slug = slugifyName(thread);
     const file = path.join(ponderDir, `${slug}.md`);
     fs.mkdirSync(ponderResolvedDir, { recursive: true });
-    let body = "";
+    let body = '';
     try {
-      body = fs.readFileSync(file, "utf8");
+      body = fs.readFileSync(file, 'utf8');
     } catch {
       return { ok: true, thread };
     }
@@ -718,7 +718,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       // Append the resolution bullet to the body before archiving.
       const stamp = new Date().toISOString().slice(0, 10);
       body =
-        body.replace(/\n*$/, "") + `\n- [${stamp}] (resolved) ${conclusion}\n`;
+        body.replace(/\n*$/, '') + `\n- [${stamp}] (resolved) ${conclusion}\n`;
     }
     // Collision-safe: never clobber an existing resolved/<slug>.md —
     // append -2, -3… when a same-named thread was resolved before.
@@ -759,14 +759,14 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // memory.person(name, text) — append a dated bullet to people/<name>.md,
   // creating it with a frontmatter stub (ids pre-filled from inbound when the
   // author has no file yet). General, non-person facts use remember.
-  const peopleDir = path.join(deps.config.paths.dataDirectory, "people");
+  const peopleDir = path.join(deps.config.paths.dataDirectory, 'people');
   const personFn = (name: string, text: string) => {
     fs.mkdirSync(peopleDir, { recursive: true });
     const slug = slugifyName(name);
     const file = path.join(peopleDir, `${slug}.md`);
     // Ensure frontmatter stub exists for a new person.
     try {
-      fs.readFileSync(file, "utf8");
+      fs.readFileSync(file, 'utf8');
     } catch {
       // Pre-fill ids ONLY when this new file plausibly belongs to the current
       // inbound author: the slug matches the author's own name AND that author
@@ -778,7 +778,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         !!authorId &&
         slug === slugifyName(deps.inbound!.author) &&
         !authorHasPeopleFile(peopleDir, authorId);
-      const ids = isAuthorFile ? `ids: [discord:${authorId}]` : "ids: []";
+      const ids = isAuthorFile ? `ids: [discord:${authorId}]` : 'ids: []';
       fs.writeFileSync(file, `---\nname: ${name}\n${ids}\n---\n\n`);
     }
     appendDatedBullet(file, text);
@@ -797,22 +797,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   ) => {
     const limit = opts.limit ?? 50;
     const re =
-      typeof pattern === "string"
-        ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+      typeof pattern === 'string'
+        ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
         : pattern;
     const dataDir = deps.config.paths.dataDirectory;
     // MEMORY.md / SOUL.md always live at the data-dir root (config.ts derives
     // both from DATA_DIRECTORY; there is no separate path knob).
     const roots: string[] = [
-      path.join(dataDir, "MEMORY.md"),
-      path.join(dataDir, "NOW.md"),
-      path.join(dataDir, "SOUL.md"),
+      path.join(dataDir, 'MEMORY.md'),
+      path.join(dataDir, 'NOW.md'),
+      path.join(dataDir, 'SOUL.md'),
     ];
     for (const sub of [
-      "people",
-      "ponder",
-      path.join("ponder", "resolved"),
-      "notes",
+      'people',
+      'ponder',
+      path.join('ponder', 'resolved'),
+      'notes',
     ]) {
       const dir = path.join(dataDir, sub);
       let entries: string[] = [];
@@ -822,7 +822,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         continue;
       }
       for (const name of entries) {
-        if (name.endsWith(".md")) roots.push(path.join(dir, name));
+        if (name.endsWith('.md')) roots.push(path.join(dir, name));
       }
     }
     const matches: { file: string; line: number; text: string }[] = [];
@@ -830,11 +830,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     for (const file of roots) {
       let raw: string;
       try {
-        raw = fs.readFileSync(file, "utf8");
+        raw = fs.readFileSync(file, 'utf8');
       } catch {
         continue;
       }
-      const lines = raw.split("\n");
+      const lines = raw.split('\n');
       for (let i = 0; i < lines.length; i++) {
         if (!re.test(lines[i])) continue;
         if (matches.length >= limit) {
@@ -905,52 +905,52 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   g.queueMicrotask = queueMicrotask;
   g.crypto = crypto;
   // web search + page extraction via Kagi (`kagi.api_key`); bodies in web.ts
-  if (modules.isActive("kagi")) {
+  if (modules.isActive('kagi')) {
     e.search = (query: string, opts?: { limit?: number; workflow?: string }) =>
       kagiSearch(deps, query, opts);
     e.extract = (url: string, opts?: { timeout?: number; format?: string }) =>
       kagiExtract(deps, url, opts);
-  } else installUnavailableModule("kagi");
+  } else installUnavailableModule('kagi');
 
   // Browser and whole-desktop control share the one real Xorg seat. Headless
   // Playwright ignores these variables; headed sessions render onto the exact
   // same :0 screen that elpis.computer and the Proxmox console observe.
   const harnessData = resolveDataLayout(deps.config.paths.dataDirectory);
   const computerDir = harnessData.computer;
-  const computerDisplay = ":0";
-  const computerXauthority = path.join(computerDir, "Xauthority");
+  const computerDisplay = ':0';
+  const computerXauthority = path.join(computerDir, 'Xauthority');
 
   // browser automation: a thin, structured wrapper over the locally pinned
   // Playwright CLI. Session state + screenshots live under DATA_DIR/elpis-data/browser so
   // repeated run calls and harness restarts can keep the same page open.
-  if (modules.isActive("browser")) {
+  if (modules.isActive('browser')) {
     const browserDir = harnessData.browser;
     const browserBin = path.join(
       deps.config.paths.harnessRoot,
-      "node_modules",
-      ".bin",
-      "playwright-cli",
+      'node_modules',
+      '.bin',
+      'playwright-cli',
     );
     const maximizedChromiumConfig = path.join(
       browserDir,
-      "maximized-chromium.config.json",
+      'maximized-chromium.config.json',
     );
     const maximizedConfigBody =
       JSON.stringify(
         {
           browser: {
-            browserName: "chromium",
-            launchOptions: { args: ["--start-maximized"] },
+            browserName: 'chromium',
+            launchOptions: { args: ['--start-maximized'] },
             contextOptions: { viewport: null },
           },
         },
         null,
         2,
-      ) + "\n";
+      ) + '\n';
     fs.mkdirSync(browserDir, { recursive: true });
     if (
       !fs.existsSync(maximizedChromiumConfig) ||
-      fs.readFileSync(maximizedChromiumConfig, "utf8") !== maximizedConfigBody
+      fs.readFileSync(maximizedChromiumConfig, 'utf8') !== maximizedConfigBody
     ) {
       fs.writeFileSync(maximizedChromiumConfig, maximizedConfigBody);
     }
@@ -961,12 +961,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       run: async (args, opts) => {
         if (!fs.existsSync(browserBin))
           throw new Error(
-            "elpis.browser: local playwright-cli is not installed; run npm install in HARNESS_ROOT",
+            'elpis.browser: local playwright-cli is not installed; run npm install in HARNESS_ROOT',
           );
         const command = [
           sh.q(browserBin),
           ...args.map((arg) => sh.q(arg)),
-        ].join(" ");
+        ].join(' ');
         return shImpl(
           `env DISPLAY=${sh.q(computerDisplay)} XAUTHORITY=${sh.q(computerXauthority)} ${command}`,
           {
@@ -977,7 +977,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       },
     });
-  } else installUnavailableModule("browser");
+  } else installUnavailableModule('browser');
 
   type MotorComputerApi = {
     screenshot(opts: { filename: string }): Promise<{ file: string }>;
@@ -997,13 +997,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // Real Xorg :0 is a root system service driving the VM VGA; Openbox/tint2
   // are a user service. The sandbox supplies window/input/clipboard/screenshot
   // control and injects the display credentials into each short command.
-  if (modules.isActive("computer")) {
+  if (modules.isActive('computer')) {
     const computer = createComputerTools({
       computerDir,
       display: computerDisplay,
       xauthority: computerXauthority,
-      serviceName: "elpis-desktop",
-      xorgServiceName: "elpis-xorg",
+      serviceName: 'elpis-desktop',
+      xorgServiceName: 'elpis-xorg',
       watch: deps.watch,
       run: (command, opts) =>
         shImpl(
@@ -1017,12 +1017,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     });
     e.computer = computer;
     computerApi = computer as unknown as MotorComputerApi;
-  } else installUnavailableModule("computer");
+  } else installUnavailableModule('computer');
 
-  if (modules.isActive("motor")) {
+  if (modules.isActive('motor')) {
     if (!computerApi)
       throw new Error(
-        "motor module resolved enabled without computer dependency",
+        'motor module resolved enabled without computer dependency',
       );
     const motorComputer = computerApi;
     e.motor = createMotorController({
@@ -1030,7 +1030,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       completeStandalone: (messages, opts) => {
         if (!deps.motorCompleteStandalone)
           throw new Error(
-            "elpis.motor: configured motor role has no isolated standalone completion path",
+            'elpis.motor: configured motor role has no isolated standalone completion path',
           );
         return deps.motorCompleteStandalone(messages, opts);
       },
@@ -1051,15 +1051,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       },
     });
-  } else installUnavailableModule("motor");
+  } else installUnavailableModule('motor');
 
   // bluesky/atproto (`bluesky.*` config); bodies in bsky.ts
-  if (modules.isActive("bsky")) {
+  if (modules.isActive('bsky')) {
     const bskyCfg = () => {
       const c = deps.config.bluesky;
       if (!c)
         throw new Error(
-          "bsky: not configured — set bluesky.identifier + bluesky.app_password in config.yaml",
+          'bsky: not configured — set bluesky.identifier + bluesky.app_password in config.yaml',
         );
       return c;
     };
@@ -1076,7 +1076,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       timeline: async (limit = 20) => bskyTimeline(bskyCfg(), limit),
       notifications: async (limit = 10) => bskyNotifications(bskyCfg(), limit),
     };
-  } else installUnavailableModule("bsky");
+  } else installUnavailableModule('bsky');
 
   // preview(x, opts?) — the same bounded, type-aware renderer the harness uses
   // for run results, callable on demand so the agent can drill into a value
@@ -1107,7 +1107,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     restartHarnessService();
     return {
       ok: true,
-      note: `${notePrefix}${reason ? `: ${reason}` : ""} — this is your last turn before reboot; you'll get a [restart complete] message when you're back`,
+      note: `${notePrefix}${reason ? `: ${reason}` : ''} — this is your last turn before reboot; you'll get a [restart complete] message when you're back`,
     };
   };
 
@@ -1128,12 +1128,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     }
     return {
       ok: true,
-      note: `restart accepted${reason ? `: ${reason}` : ""} — the Kubernetes broker will refresh this container; this is your last turn before reboot and you'll get a [restart complete] message when back`,
+      note: `restart accepted${reason ? `: ${reason}` : ''} — the Kubernetes broker will refresh this container; this is your last turn before reboot and you'll get a [restart complete] message when back`,
     };
   };
   e.restart = profile.restricted
     ? (reason?: string) => triggerRestrictedRestart(reason)
-    : (reason?: string) => triggerRestart(reason, "restarting");
+    : (reason?: string) => triggerRestart(reason, 'restarting');
 
   // deploy — build the harness, then restart ONLY if the build succeeded.
   // Replaces the easy-to-forget `npm run build` + elpis.restart two-step:
@@ -1148,47 +1148,47 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     // match what's about to run — the divergence that let a "deployed" fix live
     // only in dist/ with no commit behind it. `{ allowDirty: true }` overrides.
     if (!opts?.allowDirty) {
-      const status = await shImpl("git status --porcelain", {
+      const status = await shImpl('git status --porcelain', {
         cwd: root,
         timeout: 30_000,
       });
-      if (status.code === 0 && status.stdout.trim() !== "") {
+      if (status.code === 0 && status.stdout.trim() !== '') {
         return {
           ok: false,
           note:
-            "deploy aborted: uncommitted changes in the harness tree — commit + push first " +
+            'deploy aborted: uncommitted changes in the harness tree — commit + push first ' +
             '(elpis.git.commitAndPush("...")), or elpis.deploy(reason, { allowDirty: true }) to build from the dirty tree anyway.',
           dirty: status.stdout.trim().slice(0, 1000),
         };
       }
-      const upstream = await shImpl("git rev-parse --abbrev-ref @{u}", {
+      const upstream = await shImpl('git rev-parse --abbrev-ref @{u}', {
         cwd: root,
         timeout: 30_000,
       });
       if (upstream.code === 0) {
-        const unpushed = await shImpl("git log @{u}.. --oneline", {
+        const unpushed = await shImpl('git log @{u}.. --oneline', {
           cwd: root,
           timeout: 30_000,
         });
-        if (unpushed.code === 0 && unpushed.stdout.trim() !== "") {
+        if (unpushed.code === 0 && unpushed.stdout.trim() !== '') {
           return {
             ok: false,
             note:
-              "deploy aborted: local commit(s) not pushed to origin — push first (elpis.git.push()) so a " +
-              "fresh checkout matches what you deploy, or elpis.deploy(reason, { allowDirty: true }).",
+              'deploy aborted: local commit(s) not pushed to origin — push first (elpis.git.push()) so a ' +
+              'fresh checkout matches what you deploy, or elpis.deploy(reason, { allowDirty: true }).',
             unpushed: unpushed.stdout.trim().slice(0, 1000),
           };
         }
       }
     }
-    const res = await shImpl("npm run build", {
+    const res = await shImpl('npm run build', {
       cwd: deps.config.paths.harnessRoot,
       timeout: 180_000,
     });
     if (res.code !== 0) {
       return {
         ok: false,
-        note: "build FAILED — not restarting (the running harness is unchanged). Fix the errors and elpis.deploy() again.",
+        note: 'build FAILED — not restarting (the running harness is unchanged). Fix the errors and elpis.deploy() again.',
         stderr: res.stderr.slice(-4000),
         stdout: res.stdout.slice(-2000),
       };
@@ -1200,12 +1200,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     if (configCheck.code !== 0) {
       return {
         ok: false,
-        note: "live config preflight FAILED against the freshly built harness — not restarting (the running harness is unchanged). Fix the config/code mismatch and elpis.deploy() again.",
+        note: 'live config preflight FAILED against the freshly built harness — not restarting (the running harness is unchanged). Fix the config/code mismatch and elpis.deploy() again.',
         stderr: configCheck.stderr.slice(-4000),
         stdout: configCheck.stdout.slice(-2000),
       };
     }
-    return triggerRestart(reason, "built, config-checked, and restarting");
+    return triggerRestart(reason, 'built, config-checked, and restarting');
   };
   if (!profile.restricted) e.deploy = deploy;
 
@@ -1222,19 +1222,19 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   }
   const gitApi = {
     status: async (opts?: GitOpts) => {
-      const r = await gitRun("status --short --branch", opts);
+      const r = await gitRun('status --short --branch', opts);
       return { ok: r.code === 0, ...r };
     },
     diff: async (opts?: GitOpts) => {
-      const r = await gitRun("diff", opts);
+      const r = await gitRun('diff', opts);
       return { ok: r.code === 0, ...r };
     },
     add: async (paths?: string | string[], opts?: GitOpts) => {
       const spec =
         paths === undefined
-          ? "."
+          ? '.'
           : Array.isArray(paths)
-            ? paths.join(" ")
+            ? paths.join(' ')
             : String(paths);
       const r = await gitRun(`add -- ${spec}`, opts);
       // Throw on failure: a returned {ok:false} that the caller ignored
@@ -1246,12 +1246,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       return { ok: true, ...r };
     },
     commit: async (message: string, opts?: GitOpts & { add?: boolean }) => {
-      if (typeof message !== "string" || message === "") {
+      if (typeof message !== 'string' || message === '') {
         throw new Error(
-          "elpis.git.commit(message): message must be a non-empty string",
+          'elpis.git.commit(message): message must be a non-empty string',
         );
       }
-      const flags = opts?.add ? "-a" : "";
+      const flags = opts?.add ? '-a' : '';
       const r = await gitRun(
         `commit ${flags} -m ${JSON.stringify(message)}`,
         opts,
@@ -1262,7 +1262,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         throw new Error(
           `elpis.git.commit failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`,
         );
-      const sha = (await gitRun("rev-parse --short HEAD", opts)).stdout.trim();
+      const sha = (await gitRun('rev-parse --short HEAD', opts)).stdout.trim();
       return {
         ok: true,
         sha,
@@ -1273,7 +1273,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       };
     },
     push: async (opts?: GitOpts) => {
-      const r = await gitRun("push", opts);
+      const r = await gitRun('push', opts);
       if (r.code !== 0)
         throw new Error(
           `elpis.git.push failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`,
@@ -1287,7 +1287,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       message: string,
       opts?: GitOpts & { add?: boolean },
     ) => {
-      if (opts?.add !== false) await gitApi.add(".", opts);
+      if (opts?.add !== false) await gitApi.add('.', opts);
       const commitRes = await gitApi.commit(message, { ...opts, add: false });
       const pushRes = await gitApi.push(opts);
       return { ok: true, sha: commitRes.sha, commit: commitRes, push: pushRes };
@@ -1300,10 +1300,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // context's system prompt beside MEMORY.md. Overwrite-only so it can't grow
   // unbounded. Verb form matches remember/ponder; named `focus` rather than `now`
   // since `now` is a near-certain local-variable collision (A6).
-  const nowPath = path.join(deps.config.paths.dataDirectory, "NOW.md");
+  const nowPath = path.join(deps.config.paths.dataDirectory, 'NOW.md');
   e.focus = (text: string) => {
     fs.writeFileSync(nowPath, text);
-    return { ok: true, note: "NOW.md updated — visible in every room" };
+    return { ok: true, note: 'NOW.md updated — visible in every room' };
   };
   const extensionRoot = Object.create(null) as Record<string, unknown>;
   for (const summary of deps.extensions?.summaries ?? []) {
@@ -1313,8 +1313,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   extensionRoot.$help = (namespace?: string) => {
     const summaries = deps.extensions?.summaries ?? [];
     if (namespace === undefined) return summaries;
-    if (typeof namespace !== "string")
-      throw new Error("elpis.ext.$help(namespace) requires a string namespace");
+    if (typeof namespace !== 'string')
+      throw new Error('elpis.ext.$help(namespace) requires a string namespace');
     const found = summaries.find((summary) => summary.namespace === namespace);
     if (!found) throw new Error(`unknown extension namespace: ${namespace}`);
     return found;
@@ -1332,13 +1332,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // propagate unmodified here. Refuses the 'internal' provenance label. Known
   // channels come from the directory.
   e.channel = (idOrRef?: string) => {
-    if (idOrRef === undefined || idOrRef === null || idOrRef === "") {
+    if (idOrRef === undefined || idOrRef === null || idOrRef === '') {
       const known = deps.listChannelsWithNames
         ? deps.listChannelsWithNames().map((c) => c.name)
         : [];
       throw new Error(
         `elpis.channel(): a channel ref is required — a raw id or a guild-qualified 'slug/name' (e.g. elpis.channel('home/general').send(…)). ` +
-          `Known: ${known.length ? known.join(", ") : "(none yet — wait for a real message)"}`,
+          `Known: ${known.length ? known.join(', ') : '(none yet — wait for a real message)'}`,
       );
     }
     let channelId = idOrRef;
@@ -1359,7 +1359,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ? deps.listChannelsWithNames().map((c) => c.name)
           : [];
         throw new Error(
-          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified name ('friends-a/lounge') or a raw id. Known: ${known.length ? known.join(", ") : "(none yet)"}`,
+          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified name ('friends-a/lounge') or a raw id. Known: ${known.length ? known.join(', ') : '(none yet)'}`,
         );
       }
     }
@@ -1388,20 +1388,20 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         const hasFiles =
           Array.isArray(sendOpts?.files) &&
           sendOpts!.files.some(
-            (f) => typeof (f as { path?: unknown }).path === "string",
+            (f) => typeof (f as { path?: unknown }).path === 'string',
           );
         // Bind to a fresh `string` (reassigning the `unknown` param doesn't
         // narrow for downstream uses). Attachment-only send: caption optional.
         let text: string;
-        if (typeof content === "string") text = content;
-        else if (hasFiles) text = "";
+        if (typeof content === 'string') text = content;
+        else if (hasFiles) text = '';
         else
           throw new Error(
-            "elpis.channel().send(content) requires a string (or pass { files } for an attachment-only send)",
+            'elpis.channel().send(content) requires a string (or pass { files } for an attachment-only send)',
           );
         if (!deps.send) {
           throw new Error(
-            "elpis.channel().send() is not wired in this harness",
+            'elpis.channel().send() is not wired in this harness',
           );
         }
         // Escape guard: literal `\n`/`\t`/`\uXXXX` render as backslash-n.
@@ -1410,16 +1410,16 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           /\\(?:n|t|r|u[0-9a-fA-F]{4})/.test(text)
         ) {
           throw new Error(
-            "elpis.channel().send: message contains literal escape sequences (\\n, \\t, or \\uXXXX) that will " +
-              "render as backslash-n to the reader, not line breaks. Use REAL newlines (a <<<HEREDOC block " +
-              "authors multi-line text with zero escaping). To send the backslashes literally, pass " +
-              "elpis.channel(id).send(text, { allowEscapes: true }).",
+            'elpis.channel().send: message contains literal escape sequences (\\n, \\t, or \\uXXXX) that will ' +
+              'render as backslash-n to the reader, not line breaks. Use REAL newlines (a <<<HEREDOC block ' +
+              'authors multi-line text with zero escaping). To send the backslashes literally, pass ' +
+              'elpis.channel(id).send(text, { allowEscapes: true }).',
           );
         }
         const files = Array.isArray(sendOpts?.files)
           ? sendOpts.files.filter(
               (f: unknown): f is { path: string; name?: string } =>
-                typeof (f as { path?: unknown }).path === "string",
+                typeof (f as { path?: unknown }).path === 'string',
             )
           : undefined;
         await deps.send(channelId, text, { files });
@@ -1429,8 +1429,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           { channel: channelId, text };
         if (files && files.length > 0)
           sendRecord.files = files
-            .map((f) => f.name || String(f.path).split("/").pop())
-            .filter((n): n is string => typeof n === "string");
+            .map((f) => f.name || String(f.path).split('/').pop())
+            .filter((n): n is string => typeof n === 'string');
         runScope.getStore()?.sends.push(sendRecord);
         // Echo the resolved room first (mis-target guardrail): a misdirect
         // becomes visible in the very next tool result.
@@ -1443,11 +1443,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       typing: () => {
         if (!deps.typing) {
           throw new Error(
-            "elpis.channel().typing() is not wired in this harness",
+            'elpis.channel().typing() is not wired in this harness',
           );
         }
         deps.typing(channelId);
-        return { ok: true, channelId, note: "typing indicator active" };
+        return { ok: true, channelId, note: 'typing indicator active' };
       },
       // Killswitch self-mute: "no speaking here." Deliberately the
       // ONLY moderation member on this handle — no unmute/deafen. Release is
@@ -1455,12 +1455,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       mute: (reason?: string) => {
         if (!deps.moderate) {
           throw new Error(
-            "elpis.channel().mute() is not wired in this harness",
+            'elpis.channel().mute() is not wired in this harness',
           );
         }
         const r = deps.moderate(
           channelId,
-          typeof reason === "string" ? reason : undefined,
+          typeof reason === 'string' ? reason : undefined,
         );
         return { ok: r.ok, channelId, note: r.note };
       },
@@ -1483,12 +1483,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // For the watch-together pipeline (episode keyframes etc).
   e.watch = (paths: string[], note: string) => {
     if (!deps.watch)
-      throw new Error("elpis.watch is not wired in this harness");
+      throw new Error('elpis.watch is not wired in this harness');
     if (!Array.isArray(paths) || paths.length === 0)
       throw new Error(
-        "elpis.watch(paths, note): paths must be a non-empty array of local image paths",
+        'elpis.watch(paths, note): paths must be a non-empty array of local image paths',
       );
-    const res = deps.watch(paths, note ?? "");
+    const res = deps.watch(paths, note ?? '');
     return {
       ...res,
       note: `queued ${res.count} frame(s) — they arrive as your next turn. describe/react in that turn; the frames are gone after it.`,
@@ -1497,23 +1497,29 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
 
   // mind — dependency-aware external cortex. One authoritative MindService backs
   // this sandbox API, Discord /mind, and the console dashboard.
-  const requireMind = (): NonNullable<SandboxDeps["mind"]> => {
-    if (!deps.mind) throw new Error("elpis.mind is not wired in this harness");
+  const requireMind = (): NonNullable<SandboxDeps['mind']> => {
+    if (!deps.mind) throw new Error('elpis.mind is not wired in this harness');
     return deps.mind;
   };
-  const mindActor = () => deps.agentName?.().trim() || "agent";
+  const mindActor = () => deps.agentName?.().trim() || 'agent';
   const boundMindId = (): MindId => {
     if (!isMindId(deps.mindDefaultId))
-      throw new Error("elpis.mind.bound: this sandbox has no bound Mind item");
+      throw new Error('elpis.mind.bound: this sandbox has no bound Mind item');
     return deps.mindDefaultId;
   };
   e.mind = {
     add: (opts: {
       title: string;
       body?: string;
-      kind?: "task" | "project" | "idea" | "question" | "reminder";
+      kind?: 'task' | 'project' | 'idea' | 'question' | 'reminder';
       status?:
-        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
+        | 'proposal'
+        | 'inbox'
+        | 'open'
+        | 'in_progress'
+        | 'waiting'
+        | 'done'
+        | 'cancelled';
       priority?: number;
       parentId?: number | string | null;
       dueAt?: unknown;
@@ -1523,8 +1529,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       channelId?: string | null;
       actor?: string;
     }) => {
-      if (!opts || typeof opts !== "object")
-        throw new Error("elpis.mind.add(opts): opts is required");
+      if (!opts || typeof opts !== 'object')
+        throw new Error('elpis.mind.add(opts): opts is required');
       return requireMind().create({
         ...opts,
         parentId: opts.parentId == null ? null : parseMindId(opts.parentId),
@@ -1544,9 +1550,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     get: (ref: number | string) => requireMind().get(parseMindId(ref)),
     list: (filter?: {
       statuses?: Array<
-        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled"
+        | 'proposal'
+        | 'inbox'
+        | 'open'
+        | 'in_progress'
+        | 'waiting'
+        | 'done'
+        | 'cancelled'
       >;
-      kinds?: Array<"task" | "project" | "idea" | "question" | "reminder">;
+      kinds?: Array<'task' | 'project' | 'idea' | 'question' | 'reminder'>;
       tag?: string;
       query?: string;
       parentId?: number | string | null;
@@ -1555,12 +1567,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       overdue?: boolean;
       includeArchived?: boolean;
       sort?:
-        | "created_asc"
-        | "created_desc"
-        | "updated_asc"
-        | "updated_desc"
-        | "last_comment_asc"
-        | "last_comment_desc";
+        | 'created_asc'
+        | 'created_desc'
+        | 'updated_asc'
+        | 'updated_desc'
+        | 'last_comment_asc'
+        | 'last_comment_desc';
       limit?: number;
       offset?: number;
     }) =>
@@ -1584,9 +1596,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       patch: {
         title?: string;
         body?: string;
-        kind?: "task" | "project" | "idea" | "question" | "reminder";
+        kind?: 'task' | 'project' | 'idea' | 'question' | 'reminder';
         status?:
-          "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled";
+          | 'proposal'
+          | 'inbox'
+          | 'open'
+          | 'in_progress'
+          | 'waiting'
+          | 'done'
+          | 'cancelled';
         priority?: number;
         parentId?: number | string | null;
         dueAt?: unknown;
@@ -1595,7 +1613,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       actor?: string,
     ) => {
       const normalized: Parameters<
-        NonNullable<SandboxDeps["mind"]>["update"]
+        NonNullable<SandboxDeps['mind']>['update']
       >[1] = {};
       if (patch.title !== undefined) normalized.title = patch.title;
       if (patch.body !== undefined) normalized.body = patch.body;
@@ -1618,7 +1636,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     status: (
       ref: number | string,
       status:
-        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
+        | 'proposal'
+        | 'inbox'
+        | 'open'
+        | 'in_progress'
+        | 'waiting'
+        | 'done'
+        | 'cancelled',
       actor?: string,
     ) =>
       requireMind().setStatus(parseMindId(ref), status, actor ?? mindActor()),
@@ -1626,13 +1650,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       const id = parseMindId(ref);
       const who = actor ?? mindActor();
       if (comment) requireMind().addComment(id, comment, who);
-      return requireMind().setStatus(id, "done", who);
+      return requireMind().setStatus(id, 'done', who);
     },
     cancel: (ref: number | string, comment?: string, actor?: string) => {
       const id = parseMindId(ref);
       const who = actor ?? mindActor();
       if (comment) requireMind().addComment(id, comment, who);
-      return requireMind().setStatus(id, "cancelled", who);
+      return requireMind().setStatus(id, 'cancelled', who);
     },
     archive: (ref: number | string, actor?: string) =>
       requireMind().archive(parseMindId(ref), actor ?? mindActor()),
@@ -1696,25 +1720,31 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     id: () => boundMindId(),
     get: () => requireMind().get(boundMindId()),
     update: (
-      patch: Parameters<NonNullable<SandboxDeps["mind"]>["update"]>[1],
+      patch: Parameters<NonNullable<SandboxDeps['mind']>['update']>[1],
       actor?: string,
     ) => requireMind().update(boundMindId(), patch, actor ?? mindActor()),
     status: (
       status:
-        "proposal" | "inbox" | "open" | "in_progress" | "waiting" | "done" | "cancelled",
+        | 'proposal'
+        | 'inbox'
+        | 'open'
+        | 'in_progress'
+        | 'waiting'
+        | 'done'
+        | 'cancelled',
       actor?: string,
     ) => requireMind().setStatus(boundMindId(), status, actor ?? mindActor()),
     done: (comment?: string, actor?: string) => {
       const id = boundMindId();
       const who = actor ?? mindActor();
       if (comment) requireMind().addComment(id, comment, who);
-      return requireMind().setStatus(id, "done", who);
+      return requireMind().setStatus(id, 'done', who);
     },
     cancel: (comment?: string, actor?: string) => {
       const id = boundMindId();
       const who = actor ?? mindActor();
       if (comment) requireMind().addComment(id, comment, who);
-      return requireMind().setStatus(id, "cancelled", who);
+      return requireMind().setStatus(id, 'cancelled', who);
     },
     archive: (actor?: string) =>
       requireMind().archive(boundMindId(), actor ?? mindActor()),
@@ -1760,7 +1790,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // the requested millisecond count (or 0 if omitted/invalid).
   e.sleep = async (ms?: number) => {
     const delay =
-      typeof ms === "number" && Number.isFinite(ms)
+      typeof ms === 'number' && Number.isFinite(ms)
         ? Math.max(0, Math.floor(ms))
         : 0;
     // A sleep is the agent *choosing to wait* — showing "typing…" through it
@@ -1783,8 +1813,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // requireScheduler — the same optional-dependency idiom as requireSsh
   // above: throw a teachable error rather than leaving elpis.schedule/tasks
   // undefined when no scheduler was wired.
-  const requireScheduler = (): NonNullable<SandboxDeps["scheduler"]> => {
-    if (!deps.scheduler) throw new Error("scheduler not wired");
+  const requireScheduler = (): NonNullable<SandboxDeps['scheduler']> => {
+    if (!deps.scheduler) throw new Error('scheduler not wired');
     return deps.scheduler;
   };
   const scheduleGlobal = (opts: {
@@ -1797,10 +1827,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     nagIntervalMs?: number | null;
     parentId?: number | null;
   }) => {
-    if (!opts || typeof opts.name !== "string" || opts.name.trim() === "")
-      throw new Error("elpis.schedule: { name } must be a non-empty string");
-    if (typeof opts.payload !== "string")
-      throw new Error("elpis.schedule: { payload } must be a string");
+    if (!opts || typeof opts.name !== 'string' || opts.name.trim() === '')
+      throw new Error('elpis.schedule: { name } must be a non-empty string');
+    if (typeof opts.payload !== 'string')
+      throw new Error('elpis.schedule: { payload } must be a string');
     return requireScheduler().create({
       ...opts,
       nextRunAt: coerceNextRunAt(opts.nextRunAt),
@@ -1842,7 +1872,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   };
   scheduleGlobal.remove = async (ref: number | string) => {
     const sched = requireScheduler();
-    if (typeof ref === "string") {
+    if (typeof ref === 'string') {
       const task = (sched.list() as Array<{ id: number; name: string }>).find(
         (entry) => entry.name === ref,
       );
@@ -1877,7 +1907,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
 
   e.timeout = async <T>(promise: Promise<T>, ms?: number): Promise<T> => {
     const delay =
-      typeof ms === "number" && Number.isFinite(ms)
+      typeof ms === 'number' && Number.isFinite(ms)
         ? Math.max(0, Math.floor(ms))
         : 0;
     if (delay === 0) return promise;
@@ -1895,36 +1925,36 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     }
   };
 
-  if (deps.surface === "core") {
+  if (deps.surface === 'core') {
     const coreElpis = new Set([
-      "inbound",
-      "channel",
-      "memory",
-      "remember",
-      "focus",
-      "ponder",
-      "mind",
-      "sandbox",
-      "schedule",
-      "sleep",
-      "wait",
-      "timeout",
-      "preview",
-      "fill",
+      'inbound',
+      'channel',
+      'memory',
+      'remember',
+      'focus',
+      'ponder',
+      'mind',
+      'sandbox',
+      'schedule',
+      'sleep',
+      'wait',
+      'timeout',
+      'preview',
+      'fill',
     ]);
     for (const key of Object.keys(e)) if (!coreElpis.has(key)) delete e[key];
-    for (const key of Object.keys(g)) if (key !== "console") delete g[key];
-  } else if (deps.surface === "worker") {
+    for (const key of Object.keys(g)) if (key !== 'console') delete g[key];
+  } else if (deps.surface === 'worker') {
     const workerElpis = new Set([
-      "edit",
-      "fill",
-      "git",
-      "preview",
-      "read",
-      "sh",
-      "sleep",
-      "wait",
-      "timeout",
+      'edit',
+      'fill',
+      'git',
+      'preview',
+      'read',
+      'sh',
+      'sleep',
+      'wait',
+      'timeout',
     ]);
     for (const key of Object.keys(e)) if (!workerElpis.has(key)) delete e[key];
   }

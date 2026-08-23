@@ -1,21 +1,21 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { parseLlmModelRef } from "../llm/model-registry.js";
-import type { Database } from "../store/db.js";
-import { isMindId, type MindId } from "../store/mind-id.js";
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { parseLlmModelRef } from '../llm/model-registry.js';
+import type { Database } from '../store/db.js';
+import { isMindId, type MindId } from '../store/mind-id.js';
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const SESSION_ID_RE = /^sec-[A-Za-z0-9_-]{22}$/;
-const ACTIVE_STATUSES = new Set<SecretarySessionStatus>(["starting", "ready"]);
+const ACTIVE_STATUSES = new Set<SecretarySessionStatus>(['starting', 'ready']);
 
-export type SecretarySessionStatus = "starting" | "ready" | "closed" | "failed";
+export type SecretarySessionStatus = 'starting' | 'ready' | 'closed' | 'failed';
 
 export interface SecretarySession {
   id: string;
   hintMindId: MindId | null;
   status: SecretarySessionStatus;
   modelRef: string;
-  runtime: "kubernetes";
+  runtime: 'kubernetes';
   podName: string | null;
   podUid: string | null;
   createdAt: number;
@@ -28,7 +28,7 @@ export interface SecretarySessionBinding {
   sessionId: string;
   hintMindId: MindId | null;
   modelRef: string;
-  runtime: "kubernetes";
+  runtime: 'kubernetes';
 }
 
 export interface SecretaryControlCredential {
@@ -57,35 +57,35 @@ export interface SecretarySessionStoreOptions {
 export class SecretarySessionError extends Error {
   constructor(
     public readonly code:
-      "invalid_request" | "not_found" | "unavailable" | "conflict",
+      'invalid_request' | 'not_found' | 'unavailable' | 'conflict',
     message: string,
   ) {
     super(message);
-    this.name = "SecretarySessionError";
+    this.name = 'SecretarySessionError';
   }
 }
 
 export function isSecretarySessionId(value: unknown): value is string {
-  return typeof value === "string" && SESSION_ID_RE.test(value);
+  return typeof value === 'string' && SESSION_ID_RE.test(value);
 }
 
 export function newSecretarySessionId(
   bytes: (size: number) => Buffer = randomBytes,
 ): string {
-  const id = `sec-${bytes(16).toString("base64url")}`;
+  const id = `sec-${bytes(16).toString('base64url')}`;
   if (!isSecretarySessionId(id))
-    throw new Error("secretary session id source did not return 128 bits");
+    throw new Error('secretary session id source did not return 128 bits');
   return id;
 }
 
 export function secretaryControlTokenDigest(token: string): string {
-  if (typeof token !== "string" || !TOKEN_RE.test(token))
-    throw new Error("secretary control token is malformed");
-  return createHash("sha256").update(token, "utf8").digest("hex");
+  if (typeof token !== 'string' || !TOKEN_RE.test(token))
+    throw new Error('secretary control token is malformed');
+  return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
 export function createSecretaryControlCredential(): SecretaryControlCredential {
-  const token = randomBytes(32).toString("base64url");
+  const token = randomBytes(32).toString('base64url');
   return { token, digest: secretaryControlTokenDigest(token) };
 }
 
@@ -93,15 +93,15 @@ export function verifySecretaryControlToken(
   token: string,
   expectedDigest: string,
 ): boolean {
-  if (typeof expectedDigest !== "string" || !DIGEST_RE.test(expectedDigest))
+  if (typeof expectedDigest !== 'string' || !DIGEST_RE.test(expectedDigest))
     return false;
   let actual: Buffer;
   try {
-    actual = Buffer.from(secretaryControlTokenDigest(token), "hex");
+    actual = Buffer.from(secretaryControlTokenDigest(token), 'hex');
   } catch {
     return false;
   }
-  const expected = Buffer.from(expectedDigest, "hex");
+  const expected = Buffer.from(expectedDigest, 'hex');
   return timingSafeEqual(actual, expected);
 }
 
@@ -111,31 +111,31 @@ function rowSession(row: Record<string, unknown>): SecretarySession {
   const status = row.status;
   const modelRef = row.model_ref;
   if (!isSecretarySessionId(id))
-    throw new Error("secretary session has invalid identity");
+    throw new Error('secretary session has invalid identity');
   if (hintMindId !== null && !isMindId(hintMindId))
-    throw new Error("secretary session has invalid hint Mind identity");
+    throw new Error('secretary session has invalid hint Mind identity');
   if (
-    status !== "starting" &&
-    status !== "ready" &&
-    status !== "closed" &&
-    status !== "failed"
+    status !== 'starting' &&
+    status !== 'ready' &&
+    status !== 'closed' &&
+    status !== 'failed'
   )
-    throw new Error("secretary session has invalid status");
-  if (typeof modelRef !== "string")
-    throw new Error("secretary session has invalid model reference");
-  parseLlmModelRef(modelRef, "secretary session model ref");
-  if (row.runtime !== "kubernetes")
-    throw new Error("secretary session has invalid runtime");
+    throw new Error('secretary session has invalid status');
+  if (typeof modelRef !== 'string')
+    throw new Error('secretary session has invalid model reference');
+  parseLlmModelRef(modelRef, 'secretary session model ref');
+  if (row.runtime !== 'kubernetes')
+    throw new Error('secretary session has invalid runtime');
   const createdAt = Number(row.created_at);
   const updatedAt = Number(row.updated_at);
   if (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(updatedAt))
-    throw new Error("secretary session has invalid timestamps");
+    throw new Error('secretary session has invalid timestamps');
   return {
     id,
     hintMindId,
     status,
     modelRef,
-    runtime: "kubernetes",
+    runtime: 'kubernetes',
     podName: row.pod_name == null ? null : String(row.pod_name),
     podUid: row.pod_uid == null ? null : String(row.pod_uid),
     createdAt,
@@ -164,7 +164,7 @@ export function resolveSecretarySession(
     .get(digest) as Record<string, unknown> | undefined;
   if (
     !row ||
-    typeof row.control_token_digest !== "string" ||
+    typeof row.control_token_digest !== 'string' ||
     !verifySecretaryControlToken(token, row.control_token_digest)
   )
     return null;
@@ -185,14 +185,14 @@ export function resolveSecretarySession(
 
 function boundedError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.slice(0, 1000) || "secretary session failed";
+  return message.slice(0, 1000) || 'secretary session failed';
 }
 
 function validateModelRef(modelRef: string): void {
   try {
-    parseLlmModelRef(modelRef, "secretary model ref");
+    parseLlmModelRef(modelRef, 'secretary model ref');
   } catch (error) {
-    throw new SecretarySessionError("invalid_request", boundedError(error));
+    throw new SecretarySessionError('invalid_request', boundedError(error));
   }
 }
 
@@ -200,33 +200,33 @@ function validatePodIdentity(value: SecretaryPodIdentity): {
   podName: string | null;
   podUid: string | null;
 } {
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new SecretarySessionError(
-      "invalid_request",
-      "pod identity must be an object",
+      'invalid_request',
+      'pod identity must be an object',
     );
   const input = value as Record<string, unknown>;
   const unknown = Object.keys(input).find(
-    (key) => key !== "podName" && key !== "podUid",
+    (key) => key !== 'podName' && key !== 'podUid',
   );
   if (unknown)
     throw new SecretarySessionError(
-      "invalid_request",
+      'invalid_request',
       `unknown pod identity field ${JSON.stringify(unknown)}`,
     );
   const podName = input.podName ?? null;
   const podUid = input.podUid ?? null;
   if (
     (podName !== null &&
-      (typeof podName !== "string" ||
+      (typeof podName !== 'string' ||
         podName.length < 1 ||
         podName.length > 253)) ||
     (podUid !== null &&
-      (typeof podUid !== "string" || podUid.length < 1 || podUid.length > 128))
+      (typeof podUid !== 'string' || podUid.length < 1 || podUid.length > 128))
   )
     throw new SecretarySessionError(
-      "invalid_request",
-      "pod identity is invalid",
+      'invalid_request',
+      'pod identity is invalid',
     );
   return { podName, podUid };
 }
@@ -246,7 +246,7 @@ export class SecretarySessionStore {
   get(sessionId: string): SecretarySession | null {
     if (!isSecretarySessionId(sessionId)) return null;
     const row = this.options.db
-      .prepare("SELECT * FROM secretary_sessions WHERE id = ?")
+      .prepare('SELECT * FROM secretary_sessions WHERE id = ?')
       .get(sessionId) as Record<string, unknown> | undefined;
     return row ? rowSession(row) : null;
   }
@@ -255,7 +255,7 @@ export class SecretarySessionStore {
     return (
       this.options.db
         .prepare(
-          "SELECT * FROM secretary_sessions ORDER BY created_at DESC, id DESC",
+          'SELECT * FROM secretary_sessions ORDER BY created_at DESC, id DESC',
         )
         .all() as Record<string, unknown>[]
     ).map(rowSession);
@@ -264,8 +264,8 @@ export class SecretarySessionStore {
   create(hintMindId: MindId | null, modelRef: string): CreatedSecretarySession {
     if (hintMindId !== null && !isMindId(hintMindId))
       throw new SecretarySessionError(
-        "invalid_request",
-        "hintMindId must be null or an exact canonical elm- identity",
+        'invalid_request',
+        'hintMindId must be null or an exact canonical elm- identity',
       );
     validateModelRef(modelRef);
     const credential = this.credential();
@@ -273,7 +273,7 @@ export class SecretarySessionStore {
     try {
       computedDigest = secretaryControlTokenDigest(credential.token);
     } catch (error) {
-      throw new SecretarySessionError("invalid_request", boundedError(error));
+      throw new SecretarySessionError('invalid_request', boundedError(error));
     }
     if (
       !DIGEST_RE.test(credential.digest) ||
@@ -281,38 +281,38 @@ export class SecretarySessionStore {
       credential.digest !== computedDigest
     )
       throw new SecretarySessionError(
-        "invalid_request",
-        "secretary credential is inconsistent",
+        'invalid_request',
+        'secretary credential is inconsistent',
       );
     const now = this.now();
     if (!Number.isSafeInteger(now))
       throw new SecretarySessionError(
-        "invalid_request",
-        "session time is invalid",
+        'invalid_request',
+        'session time is invalid',
       );
 
-    let sessionId = "";
-    this.options.db.exec("BEGIN IMMEDIATE");
+    let sessionId = '';
+    this.options.db.exec('BEGIN IMMEDIATE');
     try {
       if (hintMindId !== null) {
         const hint = this.options.db
-          .prepare("SELECT id FROM mind_items WHERE id = ?")
+          .prepare('SELECT id FROM mind_items WHERE id = ?')
           .get(hintMindId) as { id: unknown } | undefined;
         if (!hint || hint.id !== hintMindId)
           throw new SecretarySessionError(
-            "not_found",
-            "hint Mind item is unavailable",
+            'not_found',
+            'hint Mind item is unavailable',
           );
       }
       for (let attempt = 0; attempt < 32; attempt++) {
         const candidate = this.id();
         if (!isSecretarySessionId(candidate))
           throw new SecretarySessionError(
-            "invalid_request",
-            "secretary session id source returned a non-canonical identity",
+            'invalid_request',
+            'secretary session id source returned a non-canonical identity',
           );
         const exists = this.options.db
-          .prepare("SELECT 1 FROM secretary_sessions WHERE id = ?")
+          .prepare('SELECT 1 FROM secretary_sessions WHERE id = ?')
           .get(candidate);
         if (!exists) {
           sessionId = candidate;
@@ -321,8 +321,8 @@ export class SecretarySessionStore {
       }
       if (!sessionId)
         throw new SecretarySessionError(
-          "conflict",
-          "secretary session id space is exhausted",
+          'conflict',
+          'secretary session id space is exhausted',
         );
       this.options.db
         .prepare(
@@ -332,23 +332,23 @@ export class SecretarySessionStore {
            VALUES (?, ?, 'starting', ?, 'kubernetes', ?, ?, ?)`,
         )
         .run(sessionId, hintMindId, modelRef, credential.digest, now, now);
-      this.options.db.exec("COMMIT");
+      this.options.db.exec('COMMIT');
     } catch (error) {
-      this.options.db.exec("ROLLBACK");
+      this.options.db.exec('ROLLBACK');
       if (error instanceof SecretarySessionError) throw error;
-      throw new SecretarySessionError("conflict", boundedError(error));
+      throw new SecretarySessionError('conflict', boundedError(error));
     }
     const session = this.get(sessionId);
-    if (!session) throw new Error("created secretary session is unavailable");
+    if (!session) throw new Error('created secretary session is unavailable');
     return { session, token: credential.token };
   }
 
   ready(sessionId: string, pod: SecretaryPodIdentity = {}): SecretarySession {
     const current = this.requireSession(sessionId);
-    if (current.status !== "starting")
+    if (current.status !== 'starting')
       throw new SecretarySessionError(
-        "conflict",
-        "secretary session is not starting",
+        'conflict',
+        'secretary session is not starting',
       );
     const identity = validatePodIdentity(pod);
     const updatedAt = Math.max(this.now(), current.updatedAt);
@@ -361,8 +361,8 @@ export class SecretarySessionStore {
       .run(identity.podName, identity.podUid, updatedAt, sessionId);
     if (Number(result.changes) !== 1)
       throw new SecretarySessionError(
-        "conflict",
-        "secretary session changed during transition",
+        'conflict',
+        'secretary session changed during transition',
       );
     return this.requireSession(sessionId);
   }
@@ -376,26 +376,26 @@ export class SecretarySessionStore {
 
   close(sessionId: string): SecretarySession {
     const current = this.requireSession(sessionId);
-    if (current.status === "closed") return current;
-    if (current.status === "failed")
+    if (current.status === 'closed') return current;
+    if (current.status === 'failed')
       throw new SecretarySessionError(
-        "conflict",
-        "secretary session has failed",
+        'conflict',
+        'secretary session has failed',
       );
-    return this.finish(sessionId, "closed", null, current.updatedAt);
+    return this.finish(sessionId, 'closed', null, current.updatedAt);
   }
 
   fail(sessionId: string, error: unknown): SecretarySession {
     const current = this.requireSession(sessionId);
-    if (current.status === "failed") return current;
-    if (current.status === "closed")
+    if (current.status === 'failed') return current;
+    if (current.status === 'closed')
       throw new SecretarySessionError(
-        "conflict",
-        "secretary session is closed",
+        'conflict',
+        'secretary session is closed',
       );
     return this.finish(
       sessionId,
-      "failed",
+      'failed',
       boundedError(error),
       current.updatedAt,
     );
@@ -405,15 +405,15 @@ export class SecretarySessionStore {
     const session = this.get(sessionId);
     if (!session)
       throw new SecretarySessionError(
-        "not_found",
-        "secretary session is unavailable",
+        'not_found',
+        'secretary session is unavailable',
       );
     return session;
   }
 
   private finish(
     sessionId: string,
-    status: "closed" | "failed",
+    status: 'closed' | 'failed',
     lastError: string | null,
     previousUpdatedAt: number,
   ): SecretarySession {
@@ -427,8 +427,8 @@ export class SecretarySessionStore {
       .run(status, lastError, updatedAt, sessionId);
     if (Number(result.changes) !== 1)
       throw new SecretarySessionError(
-        "conflict",
-        "secretary session changed during transition",
+        'conflict',
+        'secretary session changed during transition',
       );
     return this.requireSession(sessionId);
   }

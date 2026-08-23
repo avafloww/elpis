@@ -25,22 +25,44 @@ import { mindAddAmbientNotice } from '../src/discord/discord.js';
 // one social channel — enough to exercise a cross-guild ambient burst and the
 // quiet/muted no-fire case.
 const FIXTURE_GUILDS: GuildConfig[] = [
-  { id: 'g1', slug: 'alpha', slashCommands: false, quietHours: null, timezone: null,
-    channels: { '1001': 'direct', '1002': 'social', '1003': 'quiet' } },
-  { id: 'g2', slug: 'beta', slashCommands: false, quietHours: null, timezone: null,
-    channels: { '2001': 'social' } },
+  {
+    id: 'g1',
+    slug: 'alpha',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '1001': 'direct', '1002': 'social', '1003': 'quiet' },
+  },
+  {
+    id: 'g2',
+    slug: 'beta',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '2001': 'social' },
+  },
 ];
 
-function scriptedLLM(responses: CompleteResult[], throwOn: Set<number> = new Set()):
-  LLM & { calls: number; onCall: ((n: number) => void) | null } {
+function scriptedLLM(
+  responses: CompleteResult[],
+  throwOn: Set<number> = new Set(),
+): LLM & { calls: number; onCall: ((n: number) => void) | null } {
   let i = 0;
   let calls = 0;
   let hook: ((n: number) => void) | null = null;
   return {
-    client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    get calls() { return calls; },
-    set onCall(fn) { hook = fn; },
-    get onCall() { return hook; },
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
+    get calls() {
+      return calls;
+    },
+    set onCall(fn) {
+      hook = fn;
+    },
+    get onCall() {
+      return hook;
+    },
     complete(): Promise<CompleteResult> {
       calls++;
       const n = calls;
@@ -50,15 +72,22 @@ function scriptedLLM(responses: CompleteResult[], throwOn: Set<number> = new Set
       i++;
       return Promise.resolve(r);
     },
-    summarize(): Promise<string> { return Promise.resolve('SUMMARY'); },
+    summarize(): Promise<string> {
+      return Promise.resolve('SUMMARY');
+    },
   } as LLM & { calls: number; onCall: ((n: number) => void) | null };
 }
 
 /** A minimal MuteStore stub — only `.get()` is exercised by fireAmbientTick's
  * countsForTick check. */
 function stubMutes(muted: Record<string, MuteType>): MuteStore {
-  const row = (id: string, type: MuteType): MuteRow =>
-    ({ channelId: id, type, setBy: 'operator', reason: null, createdAt: '2026-01-01T00:00:00Z' });
+  const row = (id: string, type: MuteType): MuteRow => ({
+    channelId: id,
+    type,
+    setBy: 'operator',
+    reason: null,
+    createdAt: '2026-01-01T00:00:00Z',
+  });
   return {
     get: (id) => (muted[id] ? row(id, muted[id]) : null),
     set: () => {},
@@ -67,12 +96,24 @@ function stubMutes(muted: Record<string, MuteType>): MuteStore {
   };
 }
 
-function buildAgent(llm: LLM, opts: { mutes?: MuteStore; ambientAllowSend?: boolean } = {}) {
+function buildAgent(
+  llm: LLM,
+  opts: { mutes?: MuteStore; ambientAllowSend?: boolean } = {},
+) {
   const { agent, sent, tmpDir } = buildTestAgent({
     llm,
     config: {
-      heartbeat: { intervalMs: 60_000, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 },
-      discord: { ...makeConfig().discord, guilds: FIXTURE_GUILDS, ambientAllowSend: opts.ambientAllowSend ?? true },
+      heartbeat: {
+        intervalMs: 60_000,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        reflectionMinMessages: 99,
+        socialNudgeMs: 12 * 60 * 60 * 1000,
+      },
+      discord: {
+        ...makeConfig().discord,
+        guilds: FIXTURE_GUILDS,
+        ambientAllowSend: opts.ambientAllowSend ?? true,
+      },
     },
     agentDeps: opts.mutes ? { mutes: opts.mutes } : {},
     tmpPrefix: 'harness-loop-ambient-',
@@ -86,11 +127,23 @@ function microtask(): Promise<void> {
   return promise;
 }
 
-function ambientMsg(channelId: string, id: string, extra: Partial<InboundMessage> = {}): InboundMessage {
+function ambientMsg(
+  channelId: string,
+  id: string,
+  extra: Partial<InboundMessage> = {},
+): InboundMessage {
   return {
-    id, channelId, channelName: channelId, author: 'u', authorId: 'u',
-    content: `chat in ${channelId}`, createdAt: '2026-01-01T00:00:00Z',
-    replyTo: null, forwarded: null, mentions: [], attachments: [],
+    id,
+    channelId,
+    channelName: channelId,
+    author: 'u',
+    authorId: 'u',
+    content: `chat in ${channelId}`,
+    createdAt: '2026-01-01T00:00:00Z',
+    replyTo: null,
+    forwarded: null,
+    mentions: [],
+    attachments: [],
     guildId: FIXTURE_GUILDS[0].id,
     wakeClass: 'ambient',
     ...extra,
@@ -109,8 +162,16 @@ test('ambient: an ambient enqueue does not wake the parked loop', async () => {
   await microtask();
 
   assert.equal(llm.calls, 0, 'ambient enqueue must not trigger an LLM call');
-  assert.equal(agent.inboundQueueLengthForTest, 1, 'the message stays queued — nothing woke the loop to drain it');
-  assert.equal(agent.messagesForTest.length, 0, 'nothing entered history while the loop stays parked');
+  assert.equal(
+    agent.inboundQueueLengthForTest,
+    1,
+    'the message stays queued — nothing woke the loop to drain it',
+  );
+  assert.equal(
+    agent.messagesForTest.length,
+    0,
+    'nothing entered history while the loop stays parked',
+  );
   agent.stop();
 });
 
@@ -118,35 +179,77 @@ test('ambient: a /mind add notice waits without waking, then rides the next room
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
   const item = {
-    id: 42, title: 'A thought arrived', body: '', kind: 'idea' as const, status: 'open' as const, effectiveStatus: 'open' as const,
-    priority: 2, parentId: null, dueAt: null, createdBy: 'discord:bramble', createdAt: 1, updatedAt: 1,
-    lastCommentAt: null, closedAt: null, archivedAt: null, tags: [], blockedBy: [], blocks: [], childCount: 0, commentCount: 0, reminderCount: 0,
+    id: 42,
+    title: 'A thought arrived',
+    body: '',
+    kind: 'idea' as const,
+    status: 'open' as const,
+    effectiveStatus: 'open' as const,
+    priority: 2,
+    parentId: null,
+    dueAt: null,
+    createdBy: 'discord:bramble',
+    createdAt: 1,
+    updatedAt: 1,
+    lastCommentAt: null,
+    closedAt: null,
+    archivedAt: null,
+    tags: [],
+    blockedBy: [],
+    blocks: [],
+    childCount: 0,
+    commentCount: 0,
+    reminderCount: 0,
   };
 
   void agent.loop();
   await microtask();
-  agent.enqueue(mindAddAmbientNotice(item, { channelId: '1002', channelName: 'ideas', guildId: 'g1', guildSlug: 'alpha', createdAt: '2026-08-11T00:00:00Z' }));
+  agent.enqueue(
+    mindAddAmbientNotice(item, {
+      channelId: '1002',
+      channelName: 'ideas',
+      guildId: 'g1',
+      guildSlug: 'alpha',
+      createdAt: '2026-08-11T00:00:00Z',
+    }),
+  );
   await microtask();
-  assert.equal(llm.calls, 0, 'the slash-created notice must not wake the inhabitant immediately');
+  assert.equal(
+    llm.calls,
+    0,
+    'the slash-created notice must not wake the inhabitant immediately',
+  );
 
   agent.fireAmbientTick();
   await done;
   await microtask();
-  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
+  const users = agent.messagesForTest.filter(
+    (m) => m.role === 'user' && m.personContext?.kind !== 'memory',
+  );
   assert.equal(llm.calls, 1);
-  assert.equal(users.filter((m) => m.content.includes('[mind item added via /mind]')).length, 1);
-  assert.ok(users[0].content.includes('#42') && users[0].content.includes('A thought arrived'));
+  assert.equal(
+    users.filter((m) => m.content.includes('[mind item added via /mind]'))
+      .length,
+    1,
+  );
+  assert.ok(
+    users[0].content.includes('#42') &&
+      users[0].content.includes('A thought arrived'),
+  );
   agent.stop();
 });
 
 test('ambient: tick enqueues one room-context notice and one turn drains all ambient', async () => {
-
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent, tmpDir } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
   agent.enqueue(ambientMsg('1002', 'a-1'));
@@ -160,28 +263,67 @@ test('ambient: tick enqueues one room-context notice and one turn drains all amb
   await microtask();
 
   assert.equal(llm.calls, 1, 'exactly one turn ran for the whole burst');
-  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
+  const users = agent.messagesForTest.filter(
+    (m) => m.role === 'user' && m.personContext?.kind !== 'memory',
+  );
   assert.equal(users.length, 4, '3 ambient envelopes + 1 room-context notice');
   assert.ok(users[0].content.includes('chat in 1002'));
   assert.ok(users[1].content.includes('chat in 2001'));
   assert.ok(users[2].content.includes('chat in 1002'));
-  assert.ok(users[3].content.includes('room context — 3 messages'), 'the notice trails the drained ambient chat');
+  assert.ok(
+    users[3].content.includes('room context — 3 messages'),
+    'the notice trails the drained ambient chat',
+  );
 
- // Provenance half of the contract: ambient messages carry the
- // real room id, not the internal-channel label, and land in the transcript
- // exactly as they land in history — verified by reading the persisted
- // transcript back off disk, not just the in-memory `messages` array.
-  assert.equal(users[0].channel, '1002', 'in-history stamp: ambient message keeps its real room id');
-  assert.equal(users[1].channel, '2001', 'in-history stamp: a second guild\'s room id is kept too');
-  assert.equal(users[3].channel, 'internal', 'in-history stamp: the tick-generated notice is internal/harness provenance');
+  // Provenance half of the contract: ambient messages carry the
+  // real room id, not the internal-channel label, and land in the transcript
+  // exactly as they land in history — verified by reading the persisted
+  // transcript back off disk, not just the in-memory `messages` array.
+  assert.equal(
+    users[0].channel,
+    '1002',
+    'in-history stamp: ambient message keeps its real room id',
+  );
+  assert.equal(
+    users[1].channel,
+    '2001',
+    "in-history stamp: a second guild's room id is kept too",
+  );
+  assert.equal(
+    users[3].channel,
+    'internal',
+    'in-history stamp: the tick-generated notice is internal/harness provenance',
+  );
   const loaded = loadMostRecentMain(path.join(tmpDir, 'sessions'));
   assert.ok(loaded, 'the turn persisted to the one transcript stream');
-  const persistedUsers = loaded!.messages.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
-  assert.equal(persistedUsers.length, 4, 'transcript holds the 3 ambient envelopes + the room-context notice');
-  assert.equal(persistedUsers[0].channel, '1002', 'transcript stamp: ambient message a-1 keeps its real room id');
-  assert.equal(persistedUsers[1].channel, '2001', 'transcript stamp: ambient message a-2 keeps its real room id');
-  assert.equal(persistedUsers[2].channel, '1002', 'transcript stamp: ambient message a-3 keeps its real room id');
-  assert.equal(persistedUsers[3].channel, 'internal', 'transcript stamp: the room-context notice is internal provenance');
+  const persistedUsers = loaded!.messages.filter(
+    (m) => m.role === 'user' && m.personContext?.kind !== 'memory',
+  );
+  assert.equal(
+    persistedUsers.length,
+    4,
+    'transcript holds the 3 ambient envelopes + the room-context notice',
+  );
+  assert.equal(
+    persistedUsers[0].channel,
+    '1002',
+    'transcript stamp: ambient message a-1 keeps its real room id',
+  );
+  assert.equal(
+    persistedUsers[1].channel,
+    '2001',
+    'transcript stamp: ambient message a-2 keeps its real room id',
+  );
+  assert.equal(
+    persistedUsers[2].channel,
+    '1002',
+    'transcript stamp: ambient message a-3 keeps its real room id',
+  );
+  assert.equal(
+    persistedUsers[3].channel,
+    'internal',
+    'transcript stamp: the room-context notice is internal provenance',
+  );
   agent.stop();
 });
 
@@ -189,8 +331,13 @@ test('ambient: receive-only tick hard-denies room and console sends while preser
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<CompleteResult>();
   const llm = {
-    client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    complete: () => { started.resolve(); return release.promise; },
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
+    complete: () => {
+      started.resolve();
+      return release.promise;
+    },
     summarize: () => Promise.resolve('SUMMARY'),
   } as LLM;
   const { agent, sent } = buildAgent(llm, { ambientAllowSend: false });
@@ -200,13 +347,23 @@ test('ambient: receive-only tick hard-denies room and console sends while preser
   agent.fireAmbientTick();
   await started.promise;
 
-  await assert.rejects(() => agent.send('1002', 'must not leave'), /ambient observation turn.*ambient_allow_send=false/);
-  await assert.rejects(() => agent.send('console', 'maintenance hatch'), /ambient observation turn.*ambient_allow_send=false/);
+  await assert.rejects(
+    () => agent.send('1002', 'must not leave'),
+    /ambient observation turn.*ambient_allow_send=false/,
+  );
+  await assert.rejects(
+    () => agent.send('console', 'maintenance hatch'),
+    /ambient observation turn.*ambient_allow_send=false/,
+  );
   assert.equal(sent.length, 0);
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
-  const ambient = users.find((m) => m.content.includes('chat in 1002'))?.content ?? '';
+  const ambient =
+    users.find((m) => m.content.includes('chat in 1002'))?.content ?? '';
   assert.doesNotMatch(ambient, /REMINDER: use elpis\.channel/);
-  assert.match(ambient, /ambient observation turn.*discord\.ambient_allow_send=false/);
+  assert.match(
+    ambient,
+    /ambient observation turn.*discord\.ambient_allow_send=false/,
+  );
   const notice = users.at(-1)?.content ?? '';
   assert.match(notice, /receive-only observation turn/);
 
@@ -228,30 +385,47 @@ test('send-denied Discord inbound replaces the reply reminder with a configurati
     tmpPrefix: 'harness-loop-send-denied-note-',
   });
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
   agent.enqueue({ ...ambientMsg('1002', 'locked-1'), wakeClass: 'wake' });
   await done;
   await microtask();
 
-  const content = agent.messagesForTest.find((m) => m.role === 'user' && m.personContext?.kind === 'inbound')?.content ?? '';
+  const content =
+    agent.messagesForTest.find(
+      (m) => m.role === 'user' && m.personContext?.kind === 'inbound',
+    )?.content ?? '';
   assert.doesNotMatch(content, /REMINDER: use elpis\.channel/);
-  assert.match(content, /can't reply to this message due to channel configuration \(allow_send=false\)/);
+  assert.match(
+    content,
+    /can't reply to this message due to channel configuration \(allow_send=false\)/,
+  );
   agent.stop();
 });
 
 test('ambient: ghost-nudge does not fire on an ambient-only turn', async () => {
- // Two scripted responses because a bare no-tool-call reply is no longer a
- // turn-end : it earns the YIELD_TURN_NUDGE, so a second completion
- // always follows. What must NOT appear is the ghost bounce.
-  const llm = scriptedLLM([{
-    message: { role: 'assistant', content: 'a private thought, never sent anywhere' },
-    stripped: false, usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
-  }, EMPTY_WAKE]);
+  // Two scripted responses because a bare no-tool-call reply is no longer a
+  // turn-end : it earns the YIELD_TURN_NUDGE, so a second completion
+  // always follows. What must NOT appear is the ghost bounce.
+  const llm = scriptedLLM([
+    {
+      message: {
+        role: 'assistant',
+        content: 'a private thought, never sent anywhere',
+      },
+      stripped: false,
+      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    },
+    EMPTY_WAKE,
+  ]);
   const { agent, sent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 2) signal(); };
+  llm.onCall = (n) => {
+    if (n === 2) signal();
+  };
 
   void agent.loop();
   agent.enqueue(ambientMsg('1002', 'a-1'));
@@ -260,11 +434,19 @@ test('ambient: ghost-nudge does not fire on an ambient-only turn', async () => {
   await microtask();
   await microtask();
 
-  assert.equal(llm.calls, 2, 'exactly the end-nudge round trip — no third (repair) turn from a ghost-nudge');
+  assert.equal(
+    llm.calls,
+    2,
+    'exactly the end-nudge round trip — no third (repair) turn from a ghost-nudge',
+  );
   assert.equal(sent.length, 0);
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
-  assert.ok(!users.some((m) => m.content.includes('you wrote a reply but sent nothing')),
-    'no ghost-nudge message appended — an ambient-only turn never sets realUserTurn');
+  assert.ok(
+    !users.some((m) =>
+      m.content.includes('you wrote a reply but sent nothing'),
+    ),
+    'no ghost-nudge message appended — an ambient-only turn never sets realUserTurn',
+  );
   agent.stop();
 });
 
@@ -282,23 +464,33 @@ test('ambient: tick with only quiet-tier/muted ambient does not fire', async () 
   await microtask();
   await microtask();
 
-  assert.equal(llm.calls, 0, 'neither pending message counts toward the tick, so it never fires');
-  assert.equal(agent.inboundQueueLengthForTest, 2, 'both ambient messages remain queued, undrained');
+  assert.equal(
+    llm.calls,
+    0,
+    'neither pending message counts toward the tick, so it never fires',
+  );
+  assert.equal(
+    agent.inboundQueueLengthForTest,
+    2,
+    'both ambient messages remain queued, undrained',
+  );
   agent.stop();
 });
 
-test('ambient: one qualifying room lets a muted room\'s message ride along in the same notice', async () => {
- // countsForTick is a gate over the WHOLE pending batch, not a per-message
- // filter (spec intent, pinned in docs/context.md): a single social-tier
- // message is enough for the tick to fire, and the notice then counts and
- // labels every pending message — including a muted room's, which would not
- // have counted on its own. A muted channel is read-but-not-spoken-in; the
- // killswitch blocks the SEND, not the read.
+test("ambient: one qualifying room lets a muted room's message ride along in the same notice", async () => {
+  // countsForTick is a gate over the WHOLE pending batch, not a per-message
+  // filter (spec intent, pinned in docs/context.md): a single social-tier
+  // message is enough for the tick to fire, and the notice then counts and
+  // labels every pending message — including a muted room's, which would not
+  // have counted on its own. A muted channel is read-but-not-spoken-in; the
+  // killswitch blocks the SEND, not the read.
   const llm = scriptedLLM([EMPTY_WAKE]);
   const mutes = stubMutes({ '2001': 'mute' });
   const { agent } = buildAgent(llm, { mutes });
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
   agent.enqueue(ambientMsg('1002', 's-1')); // social tier — counts on its own
@@ -309,13 +501,25 @@ test('ambient: one qualifying room lets a muted room\'s message ride along in th
   await done;
   await microtask();
 
-  assert.equal(llm.calls, 1, 'the qualifying social-tier message let the tick fire');
-  const users = agent.messagesForTest.filter((m) => m.role === 'user' && m.personContext?.kind !== 'memory');
+  assert.equal(
+    llm.calls,
+    1,
+    'the qualifying social-tier message let the tick fire',
+  );
+  const users = agent.messagesForTest.filter(
+    (m) => m.role === 'user' && m.personContext?.kind !== 'memory',
+  );
   assert.equal(users.length, 3, '2 ambient envelopes + 1 room-context notice');
   const notice = users[2].content;
-  assert.ok(notice.includes('room context — 2 messages'), 'both pending messages are counted, not just the qualifying one');
+  assert.ok(
+    notice.includes('room context — 2 messages'),
+    'both pending messages are counted, not just the qualifying one',
+  );
   assert.ok(notice.includes('1002'), 'the qualifying room is labeled');
-  assert.ok(notice.includes('2001'), 'the muted room rides along in the same notice label');
+  assert.ok(
+    notice.includes('2001'),
+    'the muted room rides along in the same notice label',
+  );
   agent.stop();
 });
 
@@ -323,38 +527,58 @@ test('ambient: mention (wakeClass wake) still wakes immediately', async () => {
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
   agent.enqueue(ambientMsg('1002', 'w-1', { wakeClass: 'wake' }));
   await done;
   await microtask();
 
-  assert.equal(llm.calls, 1, 'a wake-class message starts a turn immediately, batching or not');
+  assert.equal(
+    llm.calls,
+    1,
+    'a wake-class message starts a turn immediately, batching or not',
+  );
   agent.stop();
 });
 
-test('ambient: a thread\'s ambient chat resolves to its parent for the tick', async () => {
+test("ambient: a thread's ambient chat resolves to its parent for the tick", async () => {
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
- // The thread's own id ('thread-under-1002') is NOT itself in the guild
- // index — only its parent ('1002', social tier) is. Without resolving
- // through policyChannelId, countsForTick would never find it and the tick
- // would never fire for thread chat.
-  agent.enqueue(ambientMsg('thread-under-1002', 't-1', { channelName: 'my-thread', policyChannelId: '1002' }));
+  // The thread's own id ('thread-under-1002') is NOT itself in the guild
+  // index — only its parent ('1002', social tier) is. Without resolving
+  // through policyChannelId, countsForTick would never find it and the tick
+  // would never fire for thread chat.
+  agent.enqueue(
+    ambientMsg('thread-under-1002', 't-1', {
+      channelName: 'my-thread',
+      policyChannelId: '1002',
+    }),
+  );
   await microtask();
 
   agent.fireAmbientTick();
   await done;
   await microtask();
 
-  assert.equal(llm.calls, 1, 'the tick fired because the thread resolves to its parent\'s social tier');
+  assert.equal(
+    llm.calls,
+    1,
+    "the tick fired because the thread resolves to its parent's social tier",
+  );
   const users = agent.messagesForTest.filter((m) => m.role === 'user');
-  assert.ok(users.some((m) => m.content.includes('room context — 1 message')), 'a room-context notice was enqueued');
+  assert.ok(
+    users.some((m) => m.content.includes('room context — 1 message')),
+    'a room-context notice was enqueued',
+  );
   agent.stop();
 });
 
@@ -362,7 +586,9 @@ test('ambient: notice wording for three or more rooms is a comma list with a fin
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
 
   void agent.loop();
   agent.enqueue(ambientMsg('1002', 'a-1'));
@@ -380,47 +606,67 @@ test('ambient: notice wording for three or more rooms is a comma list with a fin
     notice.includes('across alpha/1002, beta/2001, and alpha/1003.'),
     `expected a comma list with a final "and" past two rooms, got: ${notice}`,
   );
-  assert.doesNotMatch(notice, /\S+ and \S+ and \S+/, 'must not degrade to "a and b and c"');
+  assert.doesNotMatch(
+    notice,
+    /\S+ and \S+ and \S+/,
+    'must not degrade to "a and b and c"',
+  );
   agent.stop();
 });
 
 test('ambient: clearContext resets ambientUnseen — a post-clear tick must not fire on stale bookkeeping', async () => {
- // Regression for a concrete repro (traced in review, not hypothetical):
- // 1. A wake message starts a real-user turn.
- // 2. Ambient chat is enqueued while that turn's LLM call is in flight.
- // 3. The model yields with its scripted wake -> hasNewInput=false.
- // 4. The loop reaches the top, drains the queued ambient into history AND
- // ambientUnseen, then parks on the (unbounded) wake promise.
- // 5. clearContext fires — wiping history.
- // 6. Without resetting ambientUnseen, the next fireAmbientTick would
- // find the stale entry still pending and enqueue a room-context notice
- // describing history that no longer exists, waking a turn out of thin
- // air on an empty mind.
+  // Regression for a concrete repro (traced in review, not hypothetical):
+  // 1. A wake message starts a real-user turn.
+  // 2. Ambient chat is enqueued while that turn's LLM call is in flight.
+  // 3. The model yields with its scripted wake -> hasNewInput=false.
+  // 4. The loop reaches the top, drains the queued ambient into history AND
+  // ambientUnseen, then parks on the (unbounded) wake promise.
+  // 5. clearContext fires — wiping history.
+  // 6. Without resetting ambientUnseen, the next fireAmbientTick would
+  // find the stale entry still pending and enqueue a room-context notice
+  // describing history that no longer exists, waking a turn out of thin
+  // air on an empty mind.
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent } = buildAgent(llm);
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
   llm.onCall = (n) => {
     if (n === 1) {
- // Ambient traffic lands mid-turn (busy=true) — it queues but cannot
- // itself wake anything; it's still sitting in `inbound` right now.
+      // Ambient traffic lands mid-turn (busy=true) — it queues but cannot
+      // itself wake anything; it's still sitting in `inbound` right now.
       agent.enqueue(ambientMsg('1002', 'a-1'));
       signal();
     }
   };
 
   void agent.loop();
-  agent.enqueue(ambientMsg('1001', 'w-1', { wakeClass: 'wake', content: 'a real user message' }));
+  agent.enqueue(
+    ambientMsg('1001', 'w-1', {
+      wakeClass: 'wake',
+      content: 'a real user message',
+    }),
+  );
   await done;
- // Let the wake-yielding run complete: it drains the queued ambient
- // into history + ambientUnseen, then parks without a second LLM call.
- // Wait on the state invariant rather than a fixed count of internal awaits.
-  for (let i = 0; i < 20 && !agent.messagesForTest.some((m) => m.content.includes('chat in 1002')); i++) {
-  await microtask();
+  // Let the wake-yielding run complete: it drains the queued ambient
+  // into history + ambientUnseen, then parks without a second LLM call.
+  // Wait on the state invariant rather than a fixed count of internal awaits.
+  for (
+    let i = 0;
+    i < 20 &&
+    !agent.messagesForTest.some((m) => m.content.includes('chat in 1002'));
+    i++
+  ) {
+    await microtask();
   }
 
-  assert.equal(llm.calls, 1, 'the real-user turn ended naturally — no second call yet');
-  assert.ok(agent.messagesForTest.some((m) => m.content.includes('chat in 1002')),
-    'the ambient message drained into history before the clear');
+  assert.equal(
+    llm.calls,
+    1,
+    'the real-user turn ended naturally — no second call yet',
+  );
+  assert.ok(
+    agent.messagesForTest.some((m) => m.content.includes('chat in 1002')),
+    'the ambient message drained into history before the clear',
+  );
 
   agent.clearContext();
   agent.fireAmbientTick();
@@ -428,8 +674,16 @@ test('ambient: clearContext resets ambientUnseen — a post-clear tick must not 
   await microtask();
   await microtask();
 
-  assert.equal(llm.calls, 1, 'no turn ran after the clear — the tick found nothing pending');
-  assert.equal(agent.messagesForTest.length, 0, 'history stays empty after the clear');
+  assert.equal(
+    llm.calls,
+    1,
+    'no turn ran after the clear — the tick found nothing pending',
+  );
+  assert.equal(
+    agent.messagesForTest.length,
+    0,
+    'history stays empty after the clear',
+  );
   agent.stop();
 });
 
@@ -446,23 +700,38 @@ test('heartbeat: ambient-only backlog does not skip the beat; a wake-class messa
   const { agent } = buildAgent(llm);
   agent.primeForHeartbeatTest();
 
- // A muted channel is the sharp case: classifyInbound downgrades it to
- // ambient and countsForTick refuses it, so nothing else will ever drain it.
+  // A muted channel is the sharp case: classifyInbound downgrades it to
+  // ambient and countsForTick refuses it, so nothing else will ever drain it.
   agent.enqueue(ambientMsg('1002', 'a-1'));
   agent.enqueue(ambientMsg('1002', 'a-2'));
 
   await agent.fireHeartbeatForTest();
-  assert.equal(agent.inboundQueueLengthForTest, 3, 'the beat fired and enqueued alongside the ambient backlog');
+  assert.equal(
+    agent.inboundQueueLengthForTest,
+    3,
+    'the beat fired and enqueued alongside the ambient backlog',
+  );
   assert.ok(
-    (agent['inbound'] as InboundMessage[]).some((m) => m.channelName === 'heartbeat'),
+    (agent['inbound'] as InboundMessage[]).some(
+      (m) => m.channelName === 'heartbeat',
+    ),
     'the enqueued message is the heartbeat',
   );
 
- // Drain, then re-run with a real (wake-class) message pending: still skips.
+  // Drain, then re-run with a real (wake-class) message pending: still skips.
   (agent['inbound'] as InboundMessage[]).length = 0;
-  agent.enqueue(ambientMsg('1001', 'w-1', { wakeClass: 'wake', content: 'a real user message' }));
+  agent.enqueue(
+    ambientMsg('1001', 'w-1', {
+      wakeClass: 'wake',
+      content: 'a real user message',
+    }),
+  );
   await agent.fireHeartbeatForTest();
-  assert.equal(agent.inboundQueueLengthForTest, 1, 'a queued wake-class message still skips the beat');
+  assert.equal(
+    agent.inboundQueueLengthForTest,
+    1,
+    'a queued wake-class message still skips the beat',
+  );
 
   agent.stop();
 });

@@ -18,14 +18,24 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
 import { chunkText } from '../src/discord/discord.js';
-import { parseTranscriptFile, MAIN_TRANSCRIPT_ID } from '../src/store/sessions.js';
+import {
+  parseTranscriptFile,
+  MAIN_TRANSCRIPT_ID,
+} from '../src/store/sessions.js';
 import { loadConfigFile } from '../src/config.js';
 import { openDatabase } from '../src/store/db.js';
 import { migrateDataLayout } from '../src/store/data-layout.js';
 import type { ChatMessage } from '../src/llm/llm.js';
 
-export interface LoadedFile { file: string; messages: ChatMessage[]; }
-export interface Locator { file: string; sendChannel: string; sendText: string; }
+export interface LoadedFile {
+  file: string;
+  messages: ChatMessage[];
+}
+export interface Locator {
+  file: string;
+  sendChannel: string;
+  sendText: string;
+}
 
 const normWs = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -33,7 +43,11 @@ const normWs = (s: string) => s.replace(/\s+/g, ' ').trim();
  * `transcripts` MUST be newest-file-first; within a file we scan back-to-front
  * so the most recent identical send wins. Exact chunk membership first, then a
  * whitespace-normalized substring fallback. */
-export function localizeByContent(transcripts: LoadedFile[], channelId: string, content: string): Locator | null {
+export function localizeByContent(
+  transcripts: LoadedFile[],
+  channelId: string,
+  content: string,
+): Locator | null {
   const scan = (matchFn: (sendText: string) => boolean): Locator | null => {
     for (const t of transcripts) {
       for (let i = t.messages.length - 1; i >= 0; i--) {
@@ -41,7 +55,8 @@ export function localizeByContent(transcripts: LoadedFile[], channelId: string, 
         if (m.role !== 'tool' || !m.sends) continue;
         for (const s of m.sends) {
           if (s.channel !== channelId) continue;
-          if (matchFn(s.text)) return { file: t.file, sendChannel: s.channel, sendText: s.text };
+          if (matchFn(s.text))
+            return { file: t.file, sendChannel: s.channel, sendText: s.text };
         }
       }
     }
@@ -57,11 +72,22 @@ export function localizeByContent(transcripts: LoadedFile[], channelId: string, 
 /** Render a readable window of up to maxMessages messages ending at the tool
  * message whose sends contain sendText on sendChannel (last such match). Skips
  * reasoning. Returns '' if the send isn't found. */
-export function renderContext(messages: ChatMessage[], sendChannel: string, sendText: string, maxMessages = 12): string {
+export function renderContext(
+  messages: ChatMessage[],
+  sendChannel: string,
+  sendText: string,
+  maxMessages = 12,
+): string {
   let end = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === 'tool' && m.sends?.some((s) => s.channel === sendChannel && s.text === sendText)) { end = i; break; }
+    if (
+      m.role === 'tool' &&
+      m.sends?.some((s) => s.channel === sendChannel && s.text === sendText)
+    ) {
+      end = i;
+      break;
+    }
   }
   if (end < 0) return '';
   const start = Math.max(0, end - maxMessages + 1);
@@ -83,15 +109,26 @@ export function renderContext(messages: ChatMessage[], sendChannel: string, send
 function loadTranscriptsNewestFirst(sessionsRoot: string): LoadedFile[] {
   const dir = path.join(sessionsRoot, 'discord', MAIN_TRANSCRIPT_ID);
   let names: string[];
-  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  } catch {
+    return [];
+  }
   const withMtime = names.map((n) => {
     const p = path.join(dir, n);
     let mtime = 0;
-    try { mtime = fs.statSync(p).mtimeMs; } catch { /* skip */ }
+    try {
+      mtime = fs.statSync(p).mtimeMs;
+    } catch {
+      /* skip */
+    }
     return { file: p, mtime };
   });
-  withMtime.sort((a, b) => (b.mtime - a.mtime) || (a.file < b.file ? 1 : -1));
-  return withMtime.map((w) => ({ file: w.file, messages: parseTranscriptFile(w.file) }));
+  withMtime.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : -1));
+  return withMtime.map((w) => ({
+    file: w.file,
+    messages: parseTranscriptFile(w.file),
+  }));
 }
 
 async function reconcile(): Promise<void> {
@@ -101,18 +138,24 @@ async function reconcile(): Promise<void> {
   const transcripts = loadTranscriptsNewestFirst(layout.sessions);
   const upsert = db.prepare(
     'INSERT INTO message_index (discord_message_id, channel_id, transcript_file, send_channel, send_text, source, indexed_at) ' +
-    'VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(discord_message_id) DO UPDATE SET ' +
-    'transcript_file=excluded.transcript_file, send_channel=excluded.send_channel, send_text=excluded.send_text, indexed_at=excluded.indexed_at',
+      'VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(discord_message_id) DO UPDATE SET ' +
+      'transcript_file=excluded.transcript_file, send_channel=excluded.send_channel, send_text=excluded.send_text, indexed_at=excluded.indexed_at',
   );
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+    ],
     partials: [Partials.Message, Partials.Channel],
   });
   await client.login(config.discord.botToken);
- // login resolves before ClientReady populates client.user; wait for READY so
- // the `msg.author.id !== client.user?.id` self-filter below is deterministic.
-  if (!client.isReady()) await new Promise<void>((r) => client.once(Events.ClientReady, () => r()));
-  let indexed = 0, scanned = 0;
+  // login resolves before ClientReady populates client.user; wait for READY so
+  // the `msg.author.id !== client.user?.id` self-filter below is deterministic.
+  if (!client.isReady())
+    await new Promise<void>((r) => client.once(Events.ClientReady, () => r()));
+  let indexed = 0,
+    scanned = 0;
   const now = new Date().toISOString();
   for (const guildConfig of config.discord.guilds) {
     const guild = await client.guilds.fetch(guildConfig.id);
@@ -120,24 +163,41 @@ async function reconcile(): Promise<void> {
     for (const [, ch] of channels) {
       if (!ch || !ch.isTextBased() || !('messages' in ch)) continue;
       let before: string | undefined;
-      for (let page = 0; page < 100; page++) { // hard cap: 100 pages × 100 = 10k msgs/channel
-        const batch = await ch.messages.fetch({ limit: 100, before }).catch(() => null);
+      for (let page = 0; page < 100; page++) {
+        // hard cap: 100 pages × 100 = 10k msgs/channel
+        const batch = await ch.messages
+          .fetch({ limit: 100, before })
+          .catch(() => null);
         if (!batch || batch.size === 0) break;
         for (const [, msg] of batch) {
           before = msg.id;
           if (msg.author.id !== client.user?.id) continue;
           scanned++;
-          const loc = localizeByContent(transcripts, msg.channelId, msg.content);
+          const loc = localizeByContent(
+            transcripts,
+            msg.channelId,
+            msg.content,
+          );
           if (!loc) continue;
-          upsert.run(msg.id, msg.channelId, loc.file, loc.sendChannel, loc.sendText, 'backfill', now);
+          upsert.run(
+            msg.id,
+            msg.channelId,
+            loc.file,
+            loc.sendChannel,
+            loc.sendText,
+            'backfill',
+            now,
+          );
           indexed++;
         }
         if (batch.size < 100) break;
       }
     }
   }
- // eslint-disable-next-line no-console
-  console.log(`reconcile: scanned ${scanned} of the agent's messages, indexed ${indexed}.`);
+  // eslint-disable-next-line no-console
+  console.log(
+    `reconcile: scanned ${scanned} of the agent's messages, indexed ${indexed}.`,
+  );
   db.close();
   await client.destroy();
 }
@@ -147,26 +207,34 @@ async function review(limit: number): Promise<void> {
   const config = loadConfigFile();
   const layout = migrateDataLayout(config.paths.dataDirectory).layout;
   const db = openDatabase(layout.root);
-  const rows = db.prepare(
-    'SELECT f.*, mi.transcript_file AS tfile, mi.send_channel AS schannel, mi.send_text AS stext ' +
-    'FROM feedback f LEFT JOIN message_index mi USING (discord_message_id) ORDER BY f.reacted_at DESC LIMIT ?',
-  ).all(limit) as Record<string, unknown>[];
+  const rows = db
+    .prepare(
+      'SELECT f.*, mi.transcript_file AS tfile, mi.send_channel AS schannel, mi.send_text AS stext ' +
+        'FROM feedback f LEFT JOIN message_index mi USING (discord_message_id) ORDER BY f.reacted_at DESC LIMIT ?',
+    )
+    .all(limit) as Record<string, unknown>[];
   const fileCache = new Map<string, ChatMessage[]>();
   for (const r of rows) {
     const verdict = String(r.verdict).toUpperCase();
     const who = r.reactor_name || r.reactor_id;
- // eslint-disable-next-line no-console
-    console.log(`\n=== ${verdict} by ${who}${r.is_owner ? ' (owner)' : ''} @ ${r.reacted_at} — #${r.channel_name ?? r.channel_id} ===`);
- // eslint-disable-next-line no-console
+    // eslint-disable-next-line no-console
+    console.log(
+      `\n=== ${verdict} by ${who}${r.is_owner ? ' (owner)' : ''} @ ${r.reacted_at} — #${r.channel_name ?? r.channel_id} ===`,
+    );
+    // eslint-disable-next-line no-console
     console.log(`reacted message: ${r.message_content}`);
     if (r.tfile && r.stext) {
       const file = String(r.tfile);
       if (!fileCache.has(file)) fileCache.set(file, parseTranscriptFile(file));
-      const ctx = renderContext(fileCache.get(file)!, String(r.schannel), String(r.stext));
- // eslint-disable-next-line no-console
+      const ctx = renderContext(
+        fileCache.get(file)!,
+        String(r.schannel),
+        String(r.stext),
+      );
+      // eslint-disable-next-line no-console
       if (ctx) console.log(`--- context ---\n${ctx}`);
     } else {
- // eslint-disable-next-line no-console
+      // eslint-disable-next-line no-console
       console.log('(not localized to a transcript)');
     }
   }
@@ -174,11 +242,24 @@ async function review(limit: number): Promise<void> {
 
 async function mainCli(): Promise<void> {
   const [cmd = 'help', arg] = process.argv.slice(2);
-  if (cmd === 'reconcile') { await reconcile(); return; }
-  if (cmd === 'review') { await review(arg ? parseInt(arg, 10) || 20 : 20); return; }
- // eslint-disable-next-line no-console
+  if (cmd === 'reconcile') {
+    await reconcile();
+    return;
+  }
+  if (cmd === 'review') {
+    await review(arg ? parseInt(arg, 10) || 20 : 20);
+    return;
+  }
+  // eslint-disable-next-line no-console
   console.log('usage: npm run feedback -- <reconcile | review [N]>');
 }
 
-const isDirect = process.argv[1] && path.resolve(process.argv[1]).includes(path.join('scripts', 'feedback'));
-if (isDirect) { mainCli().catch((e) => { console.error(e); process.exit(1); }); }
+const isDirect =
+  process.argv[1] &&
+  path.resolve(process.argv[1]).includes(path.join('scripts', 'feedback'));
+if (isDirect) {
+  mainCli().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

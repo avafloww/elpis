@@ -1,4 +1,7 @@
-import type { ExtensionContext, ExtensionDefinition } from '../src/extensions.js';
+import type {
+  ExtensionContext,
+  ExtensionDefinition,
+} from '../src/extensions.js';
 
 /**
  * Working Elpis extension example.
@@ -20,10 +23,12 @@ export const extension = {
 
   // Names are append-only and sorted. SQL migrations are checksummed automatically
   // and run transactionally before activate. Prefix tables with the extension name.
-  migrations: [{
-    name: '0001-example-state',
-    sql: `CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
-  }],
+  migrations: [
+    {
+      name: '0001-example-state',
+      sql: `CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+    },
+  ],
 
   // activate may be synchronous or async. Return a plain API object containing
   // functions, primitives, arrays, and other plain objects.
@@ -34,7 +39,9 @@ export const extension = {
       greet(name: string) {
         context.runLog('example.greet:', name);
         if (typeof name !== 'string' || !name.trim()) {
-          throw new TypeError('elpis.ext.example.greet(name): name must be a non-empty string');
+          throw new TypeError(
+            'elpis.ext.example.greet(name): name must be a non-empty string',
+          );
         }
         return `hello, ${name.trim()} — from ${context.agentName()}`;
       },

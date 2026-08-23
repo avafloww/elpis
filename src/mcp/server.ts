@@ -1,17 +1,17 @@
-import { randomUUID } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from 'node:crypto';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   McpServer,
   type ToolCallback,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+} from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   isInitializeRequest,
   type CallToolResult,
   type ToolAnnotations,
-} from "@modelcontextprotocol/sdk/types.js";
-import * as z from "zod/v4";
-import type { Logger } from "../lib/log.js";
+} from '@modelcontextprotocol/sdk/types.js';
+import * as z from 'zod/v4';
+import type { Logger } from '../lib/log.js';
 import {
   MIND_GRAPH_RELATIONS,
   MIND_KINDS,
@@ -31,8 +31,8 @@ import {
   type MindSort,
   type MindStatus,
   type UpdateMindItem,
-} from "../store/mind.js";
-import type { MindId } from "../store/mind-id.js";
+} from '../store/mind.js';
+import type { MindId } from '../store/mind-id.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
@@ -40,13 +40,13 @@ const SESSION_REAP_MS = 5 * 60 * 1000;
 const ID = z.union([z.number().int().positive(), z.string().min(1).max(32)]);
 const TIMESTAMP = z
   .union([z.number().int().positive(), z.string().min(1).max(64)])
-  .describe("Epoch milliseconds or an ISO-8601 timestamp");
+  .describe('Epoch milliseconds or an ISO-8601 timestamp');
 
 function parseTimestamp(
   value: number | string | null | undefined,
   field: string,
 ): number | null | undefined {
-  if (value === undefined || value === null || typeof value === "number")
+  if (value === undefined || value === null || typeof value === 'number')
     return value;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed))
@@ -55,16 +55,16 @@ function parseTimestamp(
 }
 
 function encodeListCursor(offset: number): string {
-  return Buffer.from(`mind-list:${offset}`, "utf8").toString("base64url");
+  return Buffer.from(`mind-list:${offset}`, 'utf8').toString('base64url');
 }
 
 function decodeListCursor(cursor: string): number {
-  const decoded = Buffer.from(cursor, "base64url").toString("utf8");
+  const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
   const match = /^mind-list:(\d+)$/.exec(decoded);
-  if (!match) throw new Error("invalid mind_list cursor");
+  if (!match) throw new Error('invalid mind_list cursor');
   const offset = Number(match[1]);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
-    throw new Error("invalid mind_list cursor");
+    throw new Error('invalid mind_list cursor');
   return offset;
 }
 
@@ -101,15 +101,15 @@ function header(req: IncomingMessage, name: string): string | undefined {
 function writeJson(res: ServerResponse, status: number, value: unknown): void {
   if (res.headersSent) return;
   res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
   });
   res.end(JSON.stringify(value));
 }
 
 function rpcError(res: ServerResponse, status: number, message: string): void {
   writeJson(res, status, {
-    jsonrpc: "2.0",
+    jsonrpc: '2.0',
     error: { code: -32000, message },
     id: null,
   });
@@ -128,21 +128,21 @@ export async function readMcpJsonBody(
       throw new Error(`MCP request body exceeds ${maxBytes} bytes`);
     chunks.push(buf);
   }
-  if (size === 0) throw new Error("MCP request body is empty");
+  if (size === 0) throw new Error('MCP request body is empty');
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new Error("MCP request body is not valid JSON");
+    throw new Error('MCP request body is not valid JSON');
   }
 }
 
 function sanitizeClientName(name: string | undefined): string {
-  const clean = (name ?? "client")
+  const clean = (name ?? 'client')
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
     .slice(0, 48);
-  return clean || "client";
+  return clean || 'client';
 }
 
 const TOOL_OUTPUT_SCHEMA = {
@@ -166,7 +166,7 @@ interface ToolResultOptions {
 
 function compactTextData(data: unknown): unknown {
   if (Array.isArray(data)) return { count: data.length };
-  if (!data || typeof data !== "object") return data;
+  if (!data || typeof data !== 'object') return data;
   const record = data as Record<string, unknown>;
   const item = record.item as Record<string, unknown> | undefined;
   const detail = record.detail as Record<string, unknown> | undefined;
@@ -207,38 +207,38 @@ function toolResult(
   if (opts.page) textSummary.page = opts.page;
   return {
     structuredContent,
-    content: [{ type: "text", text: opts.text ?? JSON.stringify(textSummary) }],
+    content: [{ type: 'text', text: opts.text ?? JSON.stringify(textSummary) }],
   };
 }
 
 function toolError(error: unknown): CallToolResult {
   const message = error instanceof Error ? error.message : String(error);
   const rules: [RegExp, string, boolean][] = [
-    [/no item|no comment/i, "NOT_FOUND", false],
-    [/not created by this MCP session/i, "SESSION_SCOPE", false],
+    [/no item|no comment/i, 'NOT_FOUND', false],
+    [/not created by this MCP session/i, 'SESSION_SCOPE', false],
     [
       /claimed by .* until|claimed by another collaborator|has an active claim/i,
-      "CLAIM_CONFLICT",
+      'CLAIM_CONFLICT',
       true,
     ],
-    [/no active claim/i, "CLAIM_REQUIRED", true],
+    [/no active claim/i, 'CLAIM_REQUIRED', true],
     [
       /blocked by dependencies|became blocked by dependencies/i,
-      "DEPENDENCY_BLOCKED",
+      'DEPENDENCY_BLOCKED',
       true,
     ],
-    [/cycle/i, "DEPENDENCY_CYCLE", false],
-    [/archived/i, "ARCHIVED", false],
+    [/cycle/i, 'DEPENDENCY_CYCLE', false],
+    [/archived/i, 'ARCHIVED', false],
     [
       /not waiting|not open work|already in progress|not an executable task|is a .*not an executable task/i,
-      "INVALID_LIFECYCLE",
+      'INVALID_LIFECYCLE',
       false,
     ],
-    [/requires|must be|invalid|at least one/i, "INVALID_ARGUMENT", false],
+    [/requires|must be|invalid|at least one/i, 'INVALID_ARGUMENT', false],
   ];
   const matched = rules.find(([pattern]) => pattern.test(message));
   const detail = {
-    code: matched?.[1] ?? "MIND_ERROR",
+    code: matched?.[1] ?? 'MIND_ERROR',
     message,
     retryable: matched?.[2] ?? false,
   };
@@ -246,23 +246,23 @@ function toolError(error: unknown): CallToolResult {
   return {
     isError: true,
     structuredContent,
-    content: [{ type: "text", text: `[${detail.code}] ${message}` }],
+    content: [{ type: 'text', text: `[${detail.code}] ${message}` }],
   };
 }
 
 const DETAIL_PARTS = [
-  "body",
-  "relations",
-  "comments",
-  "events",
-  "reminders",
+  'body',
+  'relations',
+  'comments',
+  'events',
+  'reminders',
 ] as const;
 type DetailPart = (typeof DETAIL_PARTS)[number];
 const DEFAULT_DETAIL_PARTS: DetailPart[] = [
-  "body",
-  "relations",
-  "comments",
-  "reminders",
+  'body',
+  'relations',
+  'comments',
+  'reminders',
 ];
 
 function compactItem(item: MindItem): Record<string, unknown> {
@@ -295,14 +295,14 @@ function compactItem(item: MindItem): Record<string, unknown> {
     capabilities: {
       claim:
         item.archivedAt == null &&
-        item.kind === "task" &&
-        item.status === "open" &&
+        item.kind === 'task' &&
+        item.status === 'open' &&
         item.blockedBy.length === 0 &&
         item.claim == null,
       resume:
         item.archivedAt == null &&
-        item.kind === "task" &&
-        item.status === "waiting" &&
+        item.kind === 'task' &&
+        item.status === 'waiting' &&
         item.blockedBy.length === 0 &&
         item.claim == null,
       updateMetadata: item.archivedAt == null,
@@ -322,16 +322,16 @@ function projectDetail(
 ): Record<string, unknown> {
   const include = new Set(parts);
   const result: Record<string, unknown> = { item: compactItem(item) };
-  if (include.has("body")) result.body = item.body;
-  if (include.has("relations")) {
+  if (include.has('body')) result.body = item.body;
+  if (include.has('relations')) {
     result.parent = item.parent;
     result.children = item.children;
     result.dependencies = item.dependencies;
   }
-  if (include.has("comments"))
+  if (include.has('comments'))
     result.comments = item.comments.slice(-commentLimit);
-  if (include.has("events")) result.events = item.events.slice(0, eventLimit);
-  if (include.has("reminders")) result.reminders = item.reminders;
+  if (include.has('events')) result.events = item.events.slice(0, eventLimit);
+  if (include.has('reminders')) result.reminders = item.reminders;
   return result;
 }
 
@@ -371,7 +371,7 @@ function waitForReply(
       settled = true;
       clearTimeout(timer);
       unsubscribe();
-      signal?.removeEventListener("abort", onAbort);
+      signal?.removeEventListener('abort', onAbort);
       resolve(reply);
     };
     const check = () => {
@@ -384,7 +384,7 @@ function waitForReply(
     const onAbort = () => finish(null);
     const unsubscribe = mind.subscribe(check);
     const timer = setTimeout(() => finish(null), timeoutMs);
-    signal?.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
     else check();
   });
@@ -394,19 +394,19 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   const principal = randomUUID();
   const createdItemIds = new Set<MindId>();
   const server = new McpServer(
-    { name: "elpis", version: "0.1.0" },
+    { name: 'elpis', version: '0.1.0' },
     {
       instructions: [
-        "This is the resident agent’s durable collaboration surface.",
-        "You are a bounded external collaborator, not another instance of the resident agent.",
-        "At the start of coding work, call mind_discover with fresh repository/task context unless an item was assigned, then call mind_context.",
-        "Before coding an executable task, read it and acquire mind_claim; ideas, questions, projects, and reminders are metadata records and cannot be claimed.",
-        "Renew long work before its lease expires. Record decisions, results, blockers, verification, and omissions as comments.",
-        "Ask the resident agent before guessing about architecture, external behavior, security/privacy, scope conflicts, or ambiguous acceptance criteria.",
-        "Use mind_ask for clarification: it posts to one item, wakes the resident agent, and waits for a structured reply; use mind_await only after a timeout.",
-        "Recorded ideas/questions are not commitments. Do not start unrelated work merely because it exists in Mind.",
-        "Tool results use native structuredContent with compact receipts; domain/runtime errors include stable codes and retryability, while invalid tool arguments are MCP invalid-parameter errors.",
-      ].join(" "),
+        'This is the resident agent’s durable collaboration surface.',
+        'You are a bounded external collaborator, not another instance of the resident agent.',
+        'At the start of coding work, call mind_discover with fresh repository/task context unless an item was assigned, then call mind_context.',
+        'Before coding an executable task, read it and acquire mind_claim; ideas, questions, projects, and reminders are metadata records and cannot be claimed.',
+        'Renew long work before its lease expires. Record decisions, results, blockers, verification, and omissions as comments.',
+        'Ask the resident agent before guessing about architecture, external behavior, security/privacy, scope conflicts, or ambiguous acceptance criteria.',
+        'Use mind_ask for clarification: it posts to one item, wakes the resident agent, and waits for a structured reply; use mind_await only after a timeout.',
+        'Recorded ideas/questions are not commitments. Do not start unrelated work merely because it exists in Mind.',
+        'Tool results use native structuredContent with compact receipts; domain/runtime errors include stable codes and retryability, while invalid tool arguments are MCP invalid-parameter errors.',
+      ].join(' '),
     },
   );
 
@@ -443,9 +443,9 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   };
 
   registerTool(
-    "mind_list",
+    'mind_list',
     {
-      description: "List canonical Mind items with optional filters.",
+      description: 'List canonical Mind items with optional filters.',
       inputSchema: {
         statuses: z
           .array(z.enum(MIND_STATUSES))
@@ -459,7 +459,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Restrict to claimable open tasks with satisfied dependencies",
+            'Restrict to claimable open tasks with satisfied dependencies',
           ),
         blocked: z.boolean().optional(),
         overdue: z.boolean().optional(),
@@ -467,7 +467,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Include softly archived records; summaries expose archived and archivedAt",
+            'Include softly archived records; summaries expose archived and archivedAt',
           ),
         sort: z.enum(MIND_SORTS).optional(),
         limit: z.number().int().min(1).max(200).optional(),
@@ -478,13 +478,13 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(0)
           .max(100_000)
           .optional()
-          .describe("Deprecated compatibility input; prefer cursor"),
+          .describe('Deprecated compatibility input; prefer cursor'),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async (input) => {
       if (input.cursor !== undefined && input.offset !== undefined)
-        throw new Error("mind_list accepts cursor or offset, not both");
+        throw new Error('mind_list accepts cursor or offset, not both');
       const limit = input.limit ?? 50;
       const offset =
         input.cursor === undefined
@@ -526,10 +526,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_get",
+    'mind_get',
     {
       description:
-        "Read one item. Summary is always returned; choose optional detail parts explicitly.",
+        'Read one item. Summary is always returned; choose optional detail parts explicitly.',
       inputSchema: {
         id: ID,
         include: z
@@ -543,7 +543,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(0)
           .max(200)
           .optional()
-          .describe("Return at most this many newest-first events"),
+          .describe('Return at most this many newest-first events'),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -563,10 +563,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_ready",
+    'mind_ready',
     {
       description:
-        "List executable Mind items whose dependencies are satisfied.",
+        'List executable Mind items whose dependencies are satisfied.',
       inputSchema: { limit: z.number().int().min(1).max(200).optional() },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -580,9 +580,9 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_graph",
+    'mind_graph',
     {
-      description: "Read a bounded relation graph around one Mind item.",
+      description: 'Read a bounded relation graph around one Mind item.',
       inputSchema: {
         id: ID,
         depth: z
@@ -591,13 +591,13 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(1)
           .max(8)
           .optional()
-          .describe("Traversal hops, from 1 through 8"),
+          .describe('Traversal hops, from 1 through 8'),
         relations: z
           .array(z.enum(MIND_GRAPH_RELATIONS))
           .max(MIND_GRAPH_RELATIONS.length)
           .optional()
           .describe(
-            "Traversal relations; omit for dependencies, dependents, parent, and children",
+            'Traversal relations; omit for dependencies, dependents, parent, and children',
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -614,10 +614,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       ),
   );
   registerTool(
-    "mind_discover",
+    'mind_discover',
     {
       description:
-        "Rank open dependency-ready tasks against fresh context; filters constrain and boosts only rank.",
+        'Rank open dependency-ready tasks against fresh context; filters constrain and boosts only rank.',
       inputSchema: {
         context: z.string().max(50_000),
         filter_tags: z
@@ -625,19 +625,19 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .max(20)
           .optional()
           .describe(
-            "Strict tag filter; defaults to requiring every listed tag",
+            'Strict tag filter; defaults to requiring every listed tag',
           ),
-        filter_mode: z.enum(["all", "any"]).optional(),
+        filter_mode: z.enum(['all', 'any']).optional(),
         boost_tags: z
           .array(z.string().min(1).max(80))
           .max(20)
           .optional()
-          .describe("Ranking hints; do not exclude unmatched tasks"),
+          .describe('Ranking hints; do not exclude unmatched tasks'),
         tags: z
           .array(z.string().min(1).max(80))
           .max(20)
           .optional()
-          .describe("Deprecated alias for boost_tags"),
+          .describe('Deprecated alias for boost_tags'),
         parent_id: ID.nullable().optional(),
         limit: z.number().int().min(1).max(50).optional(),
       },
@@ -676,10 +676,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_context",
+    'mind_context',
     {
       description:
-        "Read a compact work bundle: projected item detail, compact graph, and related ready tasks.",
+        'Read a compact work bundle: projected item detail, compact graph, and related ready tasks.',
       inputSchema: {
         id: ID,
         depth: z
@@ -688,21 +688,21 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(1)
           .max(6)
           .optional()
-          .describe("Graph traversal hops, from 1 through 6"),
+          .describe('Graph traversal hops, from 1 through 6'),
         related_limit: z.number().int().min(1).max(20).optional(),
         include_related: z
           .boolean()
           .optional()
-          .describe("Set false to omit related suggestions entirely"),
+          .describe('Set false to omit related suggestions entirely'),
         related_parent_id: ID.nullable()
           .optional()
-          .describe("Strictly limit related suggestions to this parent"),
+          .describe('Strictly limit related suggestions to this parent'),
         related_filter_tags: z
           .array(z.string().min(1).max(80))
           .max(20)
           .optional()
-          .describe("Strictly limit related suggestions by tags"),
-        related_filter_mode: z.enum(["all", "any"]).optional(),
+          .describe('Strictly limit related suggestions by tags'),
+        related_filter_mode: z.enum(['all', 'any']).optional(),
         graph_relations: z
           .array(z.enum(MIND_GRAPH_RELATIONS))
           .max(MIND_GRAPH_RELATIONS.length)
@@ -718,7 +718,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(0)
           .max(200)
           .optional()
-          .describe("Return at most this many newest-first events"),
+          .describe('Return at most this many newest-first events'),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -742,7 +742,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         include_related === false
           ? []
           : deps.mind
-              .discover(`${item.title}\n${item.body}\n${item.tags.join(" ")}`, {
+              .discover(`${item.title}\n${item.body}\n${item.tags.join(' ')}`, {
                 boostTags: item.tags,
                 filterTags: related_filter_tags,
                 filterMode: related_filter_mode,
@@ -780,10 +780,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_create",
+    'mind_create',
     {
       description:
-        "Create one canonical open Mind item for newly discovered follow-up work. Recorded does not mean promised.",
+        'Create one canonical open Mind item for newly discovered follow-up work. Recorded does not mean promised.',
       inputSchema: {
         title: z.string().min(1).max(500),
         body: z.string().max(100_000).optional(),
@@ -794,7 +794,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(0)
           .max(4)
           .optional()
-          .describe("0 is highest priority; 4 is lowest"),
+          .describe('0 is highest priority; 4 is lowest'),
         parent_id: ID.nullable().optional(),
         due_at: TIMESTAMP.nullable().optional(),
         tags: z.array(z.string().min(1).max(80)).max(50).optional(),
@@ -818,21 +818,21 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
             : input.parent_id === null
               ? null
               : parseMindId(input.parent_id),
-        dueAt: parseTimestamp(input.due_at, "due_at"),
+        dueAt: parseTimestamp(input.due_at, 'due_at'),
         tags: input.tags,
         dependsOn: input.depends_on?.map(parseMindId),
         actor: actor(),
       });
       createdItemIds.add(item.id);
-      return mutationResult("create", item);
+      return mutationResult('create', item);
     },
   );
 
   registerTool(
-    "mind_claim",
+    'mind_claim',
     {
       description:
-        "Claim one open dependency-ready task with this session’s lease.",
+        'Claim one open dependency-ready task with this session’s lease.',
       inputSchema: {
         id: ID,
         note: z.string().max(20_000).optional(),
@@ -851,16 +851,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         note,
         ttlMs: ttl_minutes === undefined ? undefined : ttl_minutes * 60_000,
       });
-      return mutationResult("claim", item, true, {
+      return mutationResult('claim', item, true, {
         commentId: item.comments.at(-1)?.id,
       });
     },
   );
 
   registerTool(
-    "mind_renew",
+    'mind_renew',
     {
-      description: "Renew this session’s active claim lease.",
+      description: 'Renew this session’s active claim lease.',
       inputSchema: {
         id: ID,
         ttl_minutes: z.number().int().min(1).max(240).optional(),
@@ -877,14 +877,14 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         principal,
         ttl_minutes === undefined ? undefined : ttl_minutes * 60_000,
       );
-      return mutationResult("renew", item);
+      return mutationResult('renew', item);
     },
   );
 
   registerTool(
-    "mind_release",
+    'mind_release',
     {
-      description: "Release this session’s claim to open with a reason.",
+      description: 'Release this session’s claim to open with a reason.',
       inputSchema: { id: ID, note: z.string().min(1).max(20_000) },
       annotations: {
         readOnlyHint: false,
@@ -896,19 +896,19 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       const item = deps.mind.releaseClaim(
         parseMindId(id),
         principal,
-        "open",
+        'open',
         note,
       );
-      return mutationResult("release", item, true, {
+      return mutationResult('release', item, true, {
         commentId: item.comments.at(-1)?.id,
       });
     },
   );
 
   registerTool(
-    "mind_log",
+    'mind_log',
     {
-      description: "Append a typed log to claimed work and renew its lease.",
+      description: 'Append a typed log to claimed work and renew its lease.',
       inputSchema: {
         id: ID,
         kind: z.enum(MIND_LOG_KINDS),
@@ -930,7 +930,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         body,
         ttl_minutes === undefined ? undefined : ttl_minutes * 60_000,
       );
-      return mutationResult("log", item, true, {
+      return mutationResult('log', item, true, {
         kind,
         commentId: item.comments.at(-1)?.id,
       });
@@ -938,10 +938,10 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
   );
 
   registerTool(
-    "mind_block",
+    'mind_block',
     {
       description:
-        "Move claimed work to waiting with a blocker and release its lease.",
+        'Move claimed work to waiting with a blocker and release its lease.',
       inputSchema: { id: ID, blocker: z.string().min(1).max(20_000) },
       annotations: {
         readOnlyHint: false,
@@ -953,20 +953,20 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       const item = deps.mind.releaseClaim(
         parseMindId(id),
         principal,
-        "waiting",
+        'waiting',
         blocker,
       );
-      return mutationResult("block", item, true, {
+      return mutationResult('block', item, true, {
         commentId: item.comments.at(-1)?.id,
       });
     },
   );
 
   registerTool(
-    "mind_resume",
+    'mind_resume',
     {
       description:
-        "Atomically resume one waiting dependency-ready task and claim it for this session.",
+        'Atomically resume one waiting dependency-ready task and claim it for this session.',
       inputSchema: {
         id: ID,
         note: z.string().min(1).max(20_000),
@@ -985,17 +985,17 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         note,
         ttlMs: ttl_minutes === undefined ? undefined : ttl_minutes * 60_000,
       });
-      return mutationResult("resume", item, true, {
+      return mutationResult('resume', item, true, {
         commentId: item.comments.at(-1)?.id,
       });
     },
   );
 
   registerTool(
-    "mind_finish",
+    'mind_finish',
     {
       description:
-        "Complete claimed work atomically; result, verification, and omissions are required.",
+        'Complete claimed work atomically; result, verification, and omissions are required.',
       inputSchema: {
         id: ID,
         result: z.string().min(1).max(10_000),
@@ -1017,16 +1017,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         verification,
         omissions,
       );
-      return mutationResult("finish", item, true, {
+      return mutationResult('finish', item, true, {
         commentId: item.comments.at(-1)?.id,
       });
     },
   );
 
   registerTool(
-    "mind_update",
+    'mind_update',
     {
-      description: "Update item metadata; lifecycle status is excluded.",
+      description: 'Update item metadata; lifecycle status is excluded.',
       inputSchema: {
         id: ID,
         title: z.string().min(1).max(500).optional(),
@@ -1038,7 +1038,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .min(0)
           .max(4)
           .optional()
-          .describe("0 is highest priority; 4 is lowest"),
+          .describe('0 is highest priority; 4 is lowest'),
         parent_id: ID.nullable().optional(),
         due_at: TIMESTAMP.nullable().optional(),
         tags: z.array(z.string().min(1).max(80)).max(50).optional(),
@@ -1062,12 +1062,12 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
             }
           : {}),
         ...(input.due_at !== undefined
-          ? { dueAt: parseTimestamp(input.due_at, "due_at") }
+          ? { dueAt: parseTimestamp(input.due_at, 'due_at') }
           : {}),
         ...(input.tags !== undefined ? { tags: input.tags } : {}),
       };
       if (Object.keys(patch).length === 0)
-        throw new Error("mind_update requires at least one changed field");
+        throw new Error('mind_update requires at least one changed field');
       const itemId = parseMindId(input.id);
       const before = deps.mind.get(itemId);
       if (!before) throw new Error(`mind: no item #${itemId}`);
@@ -1077,14 +1077,14 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           JSON.stringify(before[key as keyof MindDetail]) !==
           JSON.stringify(item[key as keyof MindDetail]),
       );
-      return mutationResult("update", item, changed);
+      return mutationResult('update', item, changed);
     },
   );
 
   registerTool(
-    "mind_archive_created",
+    'mind_archive_created',
     {
-      description: "Archive explicit items created by this exact MCP session.",
+      description: 'Archive explicit items created by this exact MCP session.',
       inputSchema: {
         ids: z.array(ID).min(1).max(100),
         note: z.string().min(1).max(20_000),
@@ -1130,16 +1130,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
             .filter((item) => item.archivedAt != null)
             .map((item) => item.id),
         },
-        { receipt: { operation: "archive-created", changed: changed > 0 } },
+        { receipt: { operation: 'archive-created', changed: changed > 0 } },
       );
     },
   );
 
   registerTool(
-    "mind_comment",
+    'mind_comment',
     {
       description:
-        "Add a durable comment to one Mind item without waking the resident agent.",
+        'Add a durable comment to one Mind item without waking the resident agent.',
       inputSchema: { id: ID, body: z.string().min(1).max(20_000) },
       annotations: {
         readOnlyHint: false,
@@ -1152,15 +1152,15 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       const comment = deps.mind.addComment(itemId, body, actor());
       return toolResult(
         { comment },
-        { receipt: { operation: "comment", itemId, changed: true } },
+        { receipt: { operation: 'comment', itemId, changed: true } },
       );
     },
   );
 
   registerTool(
-    "mind_link",
+    'mind_link',
     {
-      description: "Make one item depend on another. Cycles are rejected.",
+      description: 'Make one item depend on another. Cycles are rejected.',
       inputSchema: { id: ID, depends_on: ID },
       annotations: {
         readOnlyHint: false,
@@ -1176,16 +1176,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .get(itemId)
           ?.dependencies.some((link) => link.id === dependencyId) ?? false;
       const item = deps.mind.addDependency(itemId, dependencyId, actor());
-      return mutationResult("link", item, !before, {
+      return mutationResult('link', item, !before, {
         dependsOnId: dependencyId,
       });
     },
   );
 
   registerTool(
-    "mind_unlink",
+    'mind_unlink',
     {
-      description: "Remove one dependency edge.",
+      description: 'Remove one dependency edge.',
       inputSchema: { id: ID, depends_on: ID },
       annotations: {
         readOnlyHint: false,
@@ -1201,17 +1201,17 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
           .get(itemId)
           ?.dependencies.some((link) => link.id === dependencyId) ?? false;
       const item = deps.mind.removeDependency(itemId, dependencyId, actor());
-      return mutationResult("unlink", item, before, {
+      return mutationResult('unlink', item, before, {
         dependsOnId: dependencyId,
       });
     },
   );
 
   registerTool(
-    "mind_ask",
+    'mind_ask',
     {
       description:
-        "Post a task-bound clarification, wake the resident agent, and wait for its exact structured reply.",
+        'Post a task-bound clarification, wake the resident agent, and wait for its exact structured reply.',
       inputSchema: {
         id: ID,
         body: z.string().min(1).max(32_768),
@@ -1252,16 +1252,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
         timedOut: woke && reply === null,
         next: reply
           ? null
-          : { tool: "mind_await", id: taskId, comment_id: comment.id },
+          : { tool: 'mind_await', id: taskId, comment_id: comment.id },
       });
     },
   );
 
   registerTool(
-    "mind_await",
+    'mind_await',
     {
       description:
-        "Wait once for a structured reply to a prior comment cursor.",
+        'Wait once for a structured reply to a prior comment cursor.',
       inputSchema: {
         id: ID,
         comment_id: z.number().int().positive(),
@@ -1286,16 +1286,16 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       return toolResult({
         reply,
         timedOut: reply === null,
-        next: reply ? null : { tool: "mind_await", id: taskId, comment_id },
+        next: reply ? null : { tool: 'mind_await', id: taskId, comment_id },
       });
     },
   );
 
   registerTool(
-    "mind_message",
+    'mind_message',
     {
       description:
-        "Post a task-bound message, wake the resident agent, and return a mind_await cursor.",
+        'Post a task-bound message, wake the resident agent, and return a mind_await cursor.',
       inputSchema: { id: ID, body: z.string().min(1).max(32_768) },
       annotations: {
         readOnlyHint: false,
@@ -1319,7 +1319,7 @@ function createSessionServer(deps: McpEndpointDeps): McpServer {
       return toolResult({
         comment,
         woke,
-        next: { tool: "mind_await", id: taskId, comment_id: comment.id },
+        next: { tool: 'mind_await', id: taskId, comment_id: comment.id },
       });
     },
   );
@@ -1356,13 +1356,13 @@ export function createMcpEndpoint(deps: McpEndpointDeps): McpHttpEndpoint {
     },
     async handle(req, res): Promise<void> {
       if (req.headers.origin) {
-        rpcError(res, 403, "Browser-origin MCP requests are forbidden");
+        rpcError(res, 403, 'Browser-origin MCP requests are forbidden');
         return;
       }
-      const method = req.method ?? "GET";
-      const sessionId = header(req, "mcp-session-id");
+      const method = req.method ?? 'GET';
+      const sessionId = header(req, 'mcp-session-id');
       try {
-        if (method === "POST") {
+        if (method === 'POST') {
           const body = await readMcpJsonBody(req);
           const existing = sessionId ? sessions.get(sessionId) : undefined;
           if (existing) {
@@ -1371,7 +1371,7 @@ export function createMcpEndpoint(deps: McpEndpointDeps): McpHttpEndpoint {
             return;
           }
           if (sessionId || !isInitializeRequest(body)) {
-            rpcError(res, 400, "Invalid or missing MCP session ID");
+            rpcError(res, 400, 'Invalid or missing MCP session ID');
             return;
           }
 
@@ -1400,14 +1400,14 @@ export function createMcpEndpoint(deps: McpEndpointDeps): McpHttpEndpoint {
           return;
         }
 
-        if (method === "GET" || method === "DELETE") {
+        if (method === 'GET' || method === 'DELETE') {
           if (!sessionId) {
-            rpcError(res, 400, "Missing MCP session ID");
+            rpcError(res, 400, 'Missing MCP session ID');
             return;
           }
           const session = sessions.get(sessionId);
           if (!session) {
-            rpcError(res, 404, "Unknown MCP session ID");
+            rpcError(res, 404, 'Unknown MCP session ID');
             return;
           }
           session.lastSeenAt = Date.now();
@@ -1415,8 +1415,8 @@ export function createMcpEndpoint(deps: McpEndpointDeps): McpHttpEndpoint {
           return;
         }
 
-        res.writeHead(405, { allow: "GET, POST, DELETE" });
-        res.end("method not allowed");
+        res.writeHead(405, { allow: 'GET, POST, DELETE' });
+        res.end('method not allowed');
       } catch (error) {
         deps.logger.warn(
           `mcp request failed: ${error instanceof Error ? error.message : String(error)}`,

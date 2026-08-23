@@ -1,19 +1,19 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import type { AddressInfo } from 'node:net';
 import {
   createWorkerCompletionHttpServer,
   listenWorkerCompletionHttpServer,
-} from "../src/worker/http.js";
-import { noopLogger } from "../src/lib/log.js";
-import { SecretaryMindError } from "../src/secretary/mind.js";
+} from '../src/worker/http.js';
+import { noopLogger } from '../src/lib/log.js';
+import { SecretaryMindError } from '../src/secretary/mind.js';
 
-const TOKEN = "a".repeat(43);
+const TOKEN = 'a'.repeat(43);
 async function start(inject = false) {
   const server = createWorkerCompletionHttpServer({
     broker: {
       async complete() {
-        throw new Error("worker not called");
+        throw new Error('worker not called');
       },
     },
     ...(inject
@@ -22,14 +22,14 @@ async function start(inject = false) {
             async complete(token, messages, signal) {
               return {
                 binding: {
-                  sessionId: "sec-" + "a".repeat(22),
-                  hintMindId: "elm-root0001",
-                  modelRef: "p/sec",
-                  runtime: "kubernetes",
+                  sessionId: 'sec-' + 'a'.repeat(22),
+                  hintMindId: 'elm-root0001',
+                  modelRef: 'p/sec',
+                  runtime: 'kubernetes',
                 },
                 result: {
                   message: {
-                    role: "assistant",
+                    role: 'assistant',
                     content: String((messages as any[]).length),
                   },
                   usage: {
@@ -45,24 +45,24 @@ async function start(inject = false) {
           secretaryMind: {
             get() {
               throw new SecretaryMindError(
-                "invalid_request",
-                "Mind id is required without a hint",
+                'invalid_request',
+                'Mind id is required without a hint',
               );
             },
             tree() {
-              throw new Error("unused");
+              throw new Error('unused');
             },
             propose() {
-              throw new Error("unused");
+              throw new Error('unused');
             },
           },
         }
       : {}),
-    host: "127.0.0.1",
+    host: '127.0.0.1',
     port: 0,
     logger: noopLogger,
   });
-  await listenWorkerCompletionHttpServer(server, "127.0.0.1", 0);
+  await listenWorkerCompletionHttpServer(server, '127.0.0.1', 0);
   return {
     server,
     base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -77,44 +77,44 @@ async function close(
 }
 const headers = {
   authorization: `Bearer ${TOKEN}`,
-  "content-type": "application/json",
+  'content-type': 'application/json',
 };
 
-test("secretary HTTP routes are unavailable unless services are injected", async () => {
+test('secretary HTTP routes are unavailable unless services are injected', async () => {
   const f = await start();
-  for (const path of ["/v1/secretary/complete", "/v1/secretary/mind"]) {
+  for (const path of ['/v1/secretary/complete', '/v1/secretary/mind']) {
     const r = await fetch(f.base + path, {
-      method: "POST",
+      method: 'POST',
       headers,
-      body: "{}",
+      body: '{}',
     });
     assert.equal(r.status, 404);
-    assert.equal(r.headers.get("cache-control"), "no-store");
+    assert.equal(r.headers.get('cache-control'), 'no-store');
   }
   await close(f.server);
 });
 
-test("secretary HTTP routes enforce protocol and global request errors", async () => {
+test('secretary HTTP routes enforce protocol and global request errors', async () => {
   const f = await start(true);
-  let r = await fetch(f.base + "/v1/secretary/complete", {
-    method: "POST",
+  let r = await fetch(f.base + '/v1/secretary/complete', {
+    method: 'POST',
     headers,
     body: JSON.stringify({
       protocol: 1,
-      messages: [{ role: "user", content: "x" }],
+      messages: [{ role: 'user', content: 'x' }],
     }),
   });
   assert.equal(r.status, 200);
   assert.equal(((await r.json()) as any).protocol, 1);
-  r = await fetch(f.base + "/v1/secretary/mind", {
-    method: "POST",
+  r = await fetch(f.base + '/v1/secretary/mind', {
+    method: 'POST',
     headers,
-    body: JSON.stringify({ protocol: 1, operation: "get", id: "elm-other001" }),
+    body: JSON.stringify({ protocol: 1, operation: 'get', id: 'elm-other001' }),
   });
   assert.equal(r.status, 400);
   assert.deepEqual(await r.json(), {
-    error: "Mind id is required without a hint",
-    code: "invalid_request",
+    error: 'Mind id is required without a hint',
+    code: 'invalid_request',
   });
   await close(f.server);
 });

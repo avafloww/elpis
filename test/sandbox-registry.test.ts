@@ -1,14 +1,14 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { openDatabase } from "../src/store/db.js";
-import { createSandboxRegistry } from "../src/sandbox/registry.js";
-import { newMindId, type MindId } from "../src/store/mind-id.js";
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { openDatabase } from '../src/store/db.js';
+import { createSandboxRegistry } from '../src/sandbox/registry.js';
+import { newMindId, type MindId } from '../src/store/mind-id.js';
 
 function fixture() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-registry-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-registry-'));
   const db = openDatabase(dir);
   let clock = 1_000;
   let uuid = 0;
@@ -17,7 +17,7 @@ function fixture() {
     now: () => ++clock,
     uuid: () => `uuid-${++uuid}`,
   });
-  const mind = (status = "open"): MindId => {
+  const mind = (status = 'open'): MindId => {
     const id = newMindId();
     db.prepare(
       `
@@ -30,13 +30,13 @@ function fixture() {
   return { dir, db, registry, mind, now: () => ++clock };
 }
 
-test("executor identity is created once and made immutable by SQLite", () => {
+test('executor identity is created once and made immutable by SQLite', () => {
   const { db, registry } = fixture();
-  assert.equal(registry.executorId, "uuid-1");
+  assert.equal(registry.executorId, 'uuid-1');
   const reopened = createSandboxRegistry({
     db,
     uuid: () => {
-      throw new Error("must not regenerate");
+      throw new Error('must not regenerate');
     },
   });
   assert.equal(reopened.executorId, registry.executorId);
@@ -44,22 +44,22 @@ test("executor identity is created once and made immutable by SQLite", () => {
     () =>
       db
         .prepare(
-          "UPDATE sandbox_executor_identity SET executor_id = ? WHERE singleton = 1",
+          'UPDATE sandbox_executor_identity SET executor_id = ? WHERE singleton = 1',
         )
-        .run("changed"),
+        .run('changed'),
     /immutable/,
   );
   assert.throws(
     () =>
       db
-        .prepare("DELETE FROM sandbox_executor_identity WHERE singleton = 1")
+        .prepare('DELETE FROM sandbox_executor_identity WHERE singleton = 1')
         .run(),
     /immutable/,
   );
   db.close();
 });
 
-test("one Mind owns one same-identity persistent sandbox", () => {
+test('one Mind owns one same-identity persistent sandbox', () => {
   const { db, registry, mind } = fixture();
   const firstMind = mind();
   const first = registry.ensureForMind(firstMind);
@@ -69,7 +69,7 @@ test("one Mind owns one same-identity persistent sandbox", () => {
   assert.equal(
     registry.ensureForMind(firstMind).id,
     first.id,
-    "allocation is idempotent for its Mind",
+    'allocation is idempotent for its Mind',
   );
 
   const secondMind = mind();
@@ -78,28 +78,28 @@ test("one Mind owns one same-identity persistent sandbox", () => {
   assert.notEqual(second.id, first.id);
   assert.throws(() =>
     db
-      .prepare("UPDATE persistent_sandboxes SET id = ? WHERE id = ?")
+      .prepare('UPDATE persistent_sandboxes SET id = ? WHERE id = ?')
       .run(secondMind, first.id),
   );
 
-  const closedMind = mind("done");
+  const closedMind = mind('done');
   assert.throws(() => registry.ensureForMind(closedMind), /closed/);
   db.close();
 });
 
-test("runs carry generation-scoped IDs through busy, detached, finish, and reset", () => {
+test('runs carry generation-scoped IDs through busy, detached, finish, and reset', () => {
   const { db, registry, mind } = fixture();
   const sandbox = registry.ensureForMind(mind());
   const first = registry.beginRun(sandbox.id);
   assert.equal(first.runId, `${sandbox.id}:g1:r1`);
-  assert.equal(first.sandbox.lifecycle, "busy");
+  assert.equal(first.sandbox.lifecycle, 'busy');
   assert.throws(() => registry.beginRun(sandbox.id), /is busy/);
-  assert.throws(() => registry.finishRun(sandbox.id, "wrong"), /does not own/);
+  assert.throws(() => registry.finishRun(sandbox.id, 'wrong'), /does not own/);
   assert.equal(
     registry.detachRun(sandbox.id, first.runId).lifecycle,
-    "detached",
+    'detached',
   );
-  assert.equal(registry.finishRun(sandbox.id, first.runId).lifecycle, "ready");
+  assert.equal(registry.finishRun(sandbox.id, first.runId).lifecycle, 'ready');
 
   const second = registry.beginRun(sandbox.id);
   assert.equal(second.runId, `${sandbox.id}:g1:r2`);
@@ -113,12 +113,12 @@ test("runs carry generation-scoped IDs through busy, detached, finish, and reset
 
   const restarted = createSandboxRegistry({ db });
   assert.equal(restarted.markInterruptedRunsDetached(), 1);
-  assert.equal(restarted.get(sandbox.id).lifecycle, "detached");
-  assert.equal(restarted.finishRun(sandbox.id, third.runId).lifecycle, "ready");
+  assert.equal(restarted.get(sandbox.id).lifecycle, 'detached');
+  assert.equal(restarted.finishRun(sandbox.id, third.runId).lifecycle, 'ready');
   db.close();
 });
 
-test("reminders latch once and retirement waits for explicit idle GC", () => {
+test('reminders latch once and retirement waits for explicit idle GC', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.ensureForMind(mindId);
@@ -131,12 +131,12 @@ test("reminders latch once and retirement waits for explicit idle GC", () => {
     "UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?",
   ).run(now(), now(), mindId);
   const retiring = registry.retireByMind(mindId)!;
-  assert.equal(retiring.lifecycle, "busy");
+  assert.equal(retiring.lifecycle, 'busy');
   assert.equal(retiring.retireRequested, true);
   assert.ok(retiring.retireRequestedAt);
   const requestedAt = retiring.retireRequestedAt;
   const idle = registry.finishRun(sandbox.id, run.runId);
-  assert.equal(idle.lifecycle, "ready");
+  assert.equal(idle.lifecycle, 'ready');
   assert.equal(idle.retireRequested, true);
   assert.equal(idle.retireRequestedAt, requestedAt);
   const finalRun = registry.beginRun(sandbox.id);
@@ -147,7 +147,7 @@ test("reminders latch once and retirement waits for explicit idle GC", () => {
     requestedAt,
   );
   const retired = registry.finalizeRetirement(sandbox.id);
-  assert.equal(retired.lifecycle, "retired");
+  assert.equal(retired.lifecycle, 'retired');
   assert.ok(retired.retiredAt);
   assert.throws(() => registry.beginRun(sandbox.id), /is retired/);
 
@@ -155,11 +155,11 @@ test("reminders latch once and retirement waits for explicit idle GC", () => {
   const replacement = registry.ensureForMind(replacementMind);
   assert.equal(replacement.id, replacementMind);
   assert.notEqual(replacement.id, sandbox.id);
-  assert.equal(registry.get(sandbox.id).lifecycle, "retired");
+  assert.equal(registry.get(sandbox.id).lifecycle, 'retired');
   db.close();
 });
 
-test("beginRun auto-marks a closed Mind retiring but preserves use until GC", () => {
+test('beginRun auto-marks a closed Mind retiring but preserves use until GC', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.ensureForMind(mindId);
@@ -167,18 +167,18 @@ test("beginRun auto-marks a closed Mind retiring but preserves use until GC", ()
     "UPDATE mind_items SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?",
   ).run(now(), now(), mindId);
   const run = registry.beginRun(sandbox.id);
-  assert.equal(run.sandbox.lifecycle, "busy");
+  assert.equal(run.sandbox.lifecycle, 'busy');
   assert.equal(run.sandbox.retireRequested, true);
   assert.ok(run.sandbox.retireRequestedAt);
   const requestedAt = run.sandbox.retireRequestedAt;
   const idle = registry.finishRun(sandbox.id, run.runId);
-  assert.equal(idle.lifecycle, "ready");
+  assert.equal(idle.lifecycle, 'ready');
   assert.equal(idle.retireRequestedAt, requestedAt);
-  assert.equal(registry.finalizeRetirement(sandbox.id).lifecycle, "retired");
+  assert.equal(registry.finalizeRetirement(sandbox.id).lifecycle, 'retired');
   db.close();
 });
 
-test("reopen cancels pending retirement and cold reset advances every live generation once", () => {
+test('reopen cancels pending retirement and cold reset advances every live generation once', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.ensureForMind(mindId);
@@ -201,7 +201,7 @@ test("reopen cancels pending retirement and cold reset advances every live gener
   db.close();
 });
 
-test("finishRun requests retirement when the Mind closes during execution without a callback", () => {
+test('finishRun requests retirement when the Mind closes during execution without a callback', () => {
   const { db, registry, mind, now } = fixture();
   const mindId = mind();
   const sandbox = registry.ensureForMind(mindId);
@@ -210,7 +210,7 @@ test("finishRun requests retirement when the Mind closes during execution withou
     "UPDATE mind_items SET status = 'done', closed_at = ?, updated_at = ? WHERE id = ?",
   ).run(now(), now(), mindId);
   const finished = registry.finishRun(sandbox.id, run.runId);
-  assert.equal(finished.lifecycle, "ready");
+  assert.equal(finished.lifecycle, 'ready');
   assert.equal(finished.retireRequested, true);
   assert.ok(finished.retireRequestedAt);
   db.close();

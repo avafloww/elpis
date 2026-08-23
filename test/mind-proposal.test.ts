@@ -1,32 +1,32 @@
-import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import test from "node:test";
-import { DatabaseSync } from "node:sqlite";
-import { formatMindFrontier } from "../src/agent.js";
-import { createSandboxRegistry } from "../src/sandbox/registry.js";
-import { snapshotWakeAdvisorState } from "../src/sandbox/wake-advisor.js";
-import { runMigrations } from "../src/store/db.js";
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { formatMindFrontier } from '../src/agent.js';
+import { createSandboxRegistry } from '../src/sandbox/registry.js';
+import { snapshotWakeAdvisorState } from '../src/sandbox/wake-advisor.js';
+import { runMigrations } from '../src/store/db.js';
 import {
   MIND_PROPOSAL_STATUS_MIGRATION_CHECKSUM,
   migrateMindProposalStatus,
-} from "../src/store/mind-proposal-migration.js";
-import { MindService, MindStore } from "../src/store/mind.js";
-import { noopLogger } from "../src/lib/log.js";
+} from '../src/store/mind-proposal-migration.js';
+import { MindService, MindStore } from '../src/store/mind.js';
+import { noopLogger } from '../src/lib/log.js';
 
 function database(): DatabaseSync {
-  const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA foreign_keys = ON");
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
   runMigrations(db);
   return db;
 }
 
-function proposal(mind: MindStore, title = "candidate") {
-  return mind.create({ title, kind: "task", status: "proposal" });
+function proposal(mind: MindStore, title = 'candidate') {
+  return mind.create({ title, kind: 'task', status: 'proposal' });
 }
 
-test("0020 migration preserves the complete foreign-key closure and adds proposal guards", () => {
-  const db = new DatabaseSync(":memory:");
+test('0020 migration preserves the complete foreign-key closure and adds proposal guards', () => {
+  const db = new DatabaseSync(':memory:');
   db.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE mind_items (
@@ -98,23 +98,23 @@ test("0020 migration preserves the complete foreign-key closure and adds proposa
   `);
   const snapshots = new Map(
     [
-      "mind_items",
-      "mind_events",
-      "mind_dependencies",
-      "mind_reminders",
-      "mind_claims",
-      "worker_sessions",
-      "worker_mailbox_messages",
-      "persistent_sandboxes",
+      'mind_items',
+      'mind_events',
+      'mind_dependencies',
+      'mind_reminders',
+      'mind_claims',
+      'worker_sessions',
+      'worker_mailbox_messages',
+      'persistent_sandboxes',
     ].map((table) => [
       table,
       db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all(),
     ]),
   );
 
-  db.exec("BEGIN IMMEDIATE");
+  db.exec('BEGIN IMMEDIATE');
   migrateMindProposalStatus(db);
-  db.exec("COMMIT");
+  db.exec('COMMIT');
 
   for (const [table, before] of snapshots)
     assert.deepEqual(
@@ -122,7 +122,7 @@ test("0020 migration preserves the complete foreign-key closure and adds proposa
       before,
       table,
     );
-  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
   assert.match(
     String(
       (
@@ -174,17 +174,17 @@ test("0020 migration preserves the complete foreign-key closure and adds proposa
   db.close();
 });
 
-test("proposal code migration checksum is source-bound and ledger receipts are immutable", () => {
+test('proposal code migration checksum is source-bound and ledger receipts are immutable', () => {
   const source = readFileSync(
-    new URL("../src/store/mind-proposal-migration.ts", import.meta.url),
-    "utf8",
+    new URL('../src/store/mind-proposal-migration.ts', import.meta.url),
+    'utf8',
   );
   const normalized = source.replace(
     /MIND_PROPOSAL_STATUS_MIGRATION_CHECKSUM =\n  "[0-9a-f]{64}"/,
-    `MIND_PROPOSAL_STATUS_MIGRATION_CHECKSUM =\n  "${"0".repeat(64)}"`,
+    `MIND_PROPOSAL_STATUS_MIGRATION_CHECKSUM =\n  "${'0'.repeat(64)}"`,
   );
   assert.equal(
-    createHash("sha256").update(normalized).digest("hex"),
+    createHash('sha256').update(normalized).digest('hex'),
     MIND_PROPOSAL_STATUS_MIGRATION_CHECKSUM,
   );
 
@@ -201,23 +201,23 @@ test("proposal code migration checksum is source-bound and ledger receipts are i
         .prepare(
           "UPDATE elpis_migrations SET checksum = ? WHERE component = 'core' AND name = '0020-mind-proposal-status'",
         )
-        .run("a".repeat(64)),
+        .run('a'.repeat(64)),
     /immutable/,
   );
   db.close();
 });
 
-test("proposals are filterable but excluded from ready frontier and autowake state", () => {
+test('proposals are filterable but excluded from ready frontier and autowake state', () => {
   const db = database();
   const mind = new MindStore(db);
-  const candidate = proposal(mind, "never auto-act candidate");
+  const candidate = proposal(mind, 'never auto-act candidate');
   const active = mind.create({
-    title: "committed work",
-    kind: "task",
-    status: "open",
+    title: 'committed work',
+    kind: 'task',
+    status: 'open',
   });
   assert.deepEqual(
-    mind.list({ statuses: ["proposal"] }).map((item) => item.id),
+    mind.list({ statuses: ['proposal'] }).map((item) => item.id),
     [candidate.id],
   );
   assert.deepEqual(
@@ -243,7 +243,7 @@ test("proposals are filterable but excluded from ready frontier and autowake sta
   const wake = snapshotWakeAdvisorState(
     { mind },
     {
-      turnKind: "internal",
+      turnKind: 'internal',
       ranCode: false,
       continuedMindId: null,
       sendsThisTurn: 0,
@@ -262,36 +262,36 @@ test("proposals are filterable but excluded from ready frontier and autowake sta
   db.close();
 });
 
-test("proposal transitions are one-way and limited to inbox open or cancelled", () => {
+test('proposal transitions are one-way and limited to inbox open or cancelled', () => {
   const db = database();
   const mind = new MindStore(db);
-  for (const target of ["inbox", "open", "cancelled"] as const) {
+  for (const target of ['inbox', 'open', 'cancelled'] as const) {
     const item = proposal(mind, `${target} candidate`);
     assert.equal(mind.setStatus(item.id, target).status, target);
   }
-  for (const target of ["in_progress", "waiting", "done"] as const) {
+  for (const target of ['in_progress', 'waiting', 'done'] as const) {
     const item = proposal(mind, `${target} candidate`);
     assert.throws(() => mind.setStatus(item.id, target), /can transition only/);
-    assert.equal(mind.get(item.id)!.status, "proposal");
+    assert.equal(mind.get(item.id)!.status, 'proposal');
   }
-  const normal = mind.create({ title: "normal", status: "open" });
+  const normal = mind.create({ title: 'normal', status: 'open' });
   assert.throws(
-    () => mind.setStatus(normal.id, "proposal"),
+    () => mind.setStatus(normal.id, 'proposal'),
     /cannot transition to proposal/,
   );
-  assert.equal(mind.get(normal.id)!.status, "open");
+  assert.equal(mind.get(normal.id)!.status, 'open');
   db.close();
 });
 
-test("proposal creation and updates reject scheduling dependencies and claims", () => {
+test('proposal creation and updates reject scheduling dependencies and claims', () => {
   const db = database();
   const mind = new MindStore(db);
-  const normal = mind.create({ title: "normal", status: "open" });
+  const normal = mind.create({ title: 'normal', status: 'open' });
   assert.throws(
     () =>
       mind.create({
-        title: "scheduled",
-        status: "proposal",
+        title: 'scheduled',
+        status: 'proposal',
         dueAt: Date.now() + 60_000,
       }),
     /cannot have a due date/,
@@ -299,8 +299,8 @@ test("proposal creation and updates reject scheduling dependencies and claims", 
   assert.throws(
     () =>
       mind.create({
-        title: "blocked",
-        status: "proposal",
+        title: 'blocked',
+        status: 'proposal',
         dependsOn: [normal.id],
       }),
     /cannot have readiness dependencies/,
@@ -321,15 +321,15 @@ test("proposal creation and updates reject scheduling dependencies and claims", 
   assert.throws(
     () =>
       mind.claim(candidate.id, {
-        owner: "worker:test",
-        principal: "session:test",
+        owner: 'worker:test',
+        principal: 'session:test',
       }),
     /proposal, not open work/,
   );
   db.close();
 });
 
-test("proposal reminders reject before creating scheduler work", () => {
+test('proposal reminders reject before creating scheduler work', () => {
   const db = database();
   let scheduled = 0;
   const mind = new MindService({
@@ -341,7 +341,7 @@ test("proposal reminders reject before creating scheduler work", () => {
         return {
           id: scheduled,
           name: opts.name,
-          kind: "custom" as const,
+          kind: 'custom' as const,
           channelId: opts.channelId ?? null,
           payload: opts.payload,
           nextRunAt: opts.nextRunAt,
@@ -361,7 +361,7 @@ test("proposal reminders reject before creating scheduler work", () => {
       },
     },
   });
-  const candidate = mind.create({ title: "candidate", status: "proposal" });
+  const candidate = mind.create({ title: 'candidate', status: 'proposal' });
   assert.throws(
     () => mind.addReminder(candidate.id, Date.now() + 60_000),
     /cannot have reminders/,
@@ -370,7 +370,7 @@ test("proposal reminders reject before creating scheduler work", () => {
   assert.equal(
     Number(
       (
-        db.prepare("SELECT count(*) AS n FROM mind_reminders").get() as {
+        db.prepare('SELECT count(*) AS n FROM mind_reminders').get() as {
           n: number;
         }
       ).n,
@@ -380,21 +380,21 @@ test("proposal reminders reject before creating scheduler work", () => {
   db.close();
 });
 
-test("proposal tasks cannot create or resume persistent sandboxes", () => {
+test('proposal tasks cannot create or resume persistent sandboxes', () => {
   const db = database();
   const mind = new MindStore(db);
   const registry = createSandboxRegistry({
     db,
-    uuid: () => "executor-test",
+    uuid: () => 'executor-test',
   });
   const candidate = proposal(mind);
   assert.throws(
     () => registry.ensureForMind(candidate.id),
     /proposal.*cannot receive/,
   );
-  const normal = mind.create({ title: "existing sandbox", status: "open" });
+  const normal = mind.create({ title: 'existing sandbox', status: 'open' });
   registry.ensureForMind(normal.id);
-  db.exec("DROP TRIGGER mind_items_proposal_transition_guard");
+  db.exec('DROP TRIGGER mind_items_proposal_transition_guard');
   db.prepare("UPDATE mind_items SET status = 'proposal' WHERE id = ?").run(
     normal.id,
   );

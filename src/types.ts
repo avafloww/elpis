@@ -1,42 +1,42 @@
-import type { InboundMessage } from "./agent.js";
-import type { BgRegistry } from "./sandbox/bg.js";
-import type { SshRegistry } from "./sandbox/ssh.js";
+import type { InboundMessage } from './agent.js';
+import type { BgRegistry } from './sandbox/bg.js';
+import type { SshRegistry } from './sandbox/ssh.js';
 import type {
   ChatMessage,
   StandaloneCompleteOptions,
   StandaloneCompleteResult,
-} from "./llm/llm.js";
-import type { MindService } from "./store/mind.js";
-import type { MindId } from "./store/mind-id.js";
-import type { ReplayIdentity } from "./llm/provenance.js";
-import type { ExtensionRegistry } from "./extensions.js";
+} from './llm/llm.js';
+import type { MindService } from './store/mind.js';
+import type { MindId } from './store/mind-id.js';
+import type { ReplayIdentity } from './llm/provenance.js';
+import type { ExtensionRegistry } from './extensions.js';
 import type {
   BuiltinModuleRegistry,
   RuntimeProfile,
-} from "./builtin-modules.js";
-import type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
-import type { WorkerSession } from "./worker/spawn.js";
-import type { WorkerMailboxMessage } from "./worker/mailbox.js";
+} from './builtin-modules.js';
+import type { SandboxExecutionMetadata } from './sandbox/metadata.js';
+import type { WorkerSession } from './worker/spawn.js';
+import type { WorkerMailboxMessage } from './worker/mailbox.js';
 import type {
   WorkerArtifactFile,
   WorkerArtifactReceipt,
-} from "./worker/workspace.js";
+} from './worker/workspace.js';
 
-export type { SandboxExecutionMetadata } from "./sandbox/metadata.js";
+export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
 /** Reserved provenance label for heartbeat / harness-internal traffic. In the monocontext model,
  * (monocontext) this is no longer a separate context — it is a transcript
  * `channel` stamp and the token the `channel` global refuses. Lives here (not
  * context.ts, which is deleted) so the sandbox globals can import it. */
-export const INTERNAL_CHANNEL_ID = "internal";
+export const INTERNAL_CHANNEL_ID = 'internal';
 /** Private operator-console room. Unlike internal, this is a speakable endpoint. */
-export const CONSOLE_CHANNEL_ID = "console";
+export const CONSOLE_CHANNEL_ID = 'console';
 
 /** Where inbound Discord attachments are downloaded to (one subdir per message
  * id). Lives here so both the Discord ingest (writer) and the console server's
  * read-only /attachments/ route (reader) agree on it without the console
  * importing the whole Discord module. */
-export const ATTACHMENT_DIR = "/tmp/elpis-attach";
+export const ATTACHMENT_DIR = '/tmp/elpis-attach';
 
 export interface OutboundAttachment {
   /** Absolute path to the file to attach. */
@@ -48,11 +48,11 @@ export interface OutboundAttachment {
 export interface RunResult {
   ok: boolean;
   preview?: string;
-  savedAs?: "_";
+  savedAs?: '_';
   logs?: string;
   error?: string;
   /** Harness-only execution classification; omitted from provider requests. */
-  failureKind?: "preparse" | "runtime";
+  failureKind?: 'preparse' | 'runtime';
   /** Harness-only sandbox attribution. Provider wire translation must omit it. */
   execution?: SandboxExecutionMetadata;
   /** Present when the run detached a still-pending promise into the bg registry (A5). */
@@ -66,7 +66,7 @@ export interface RunResult {
 }
 
 export interface SandboxLateProcessError {
-  kind: "unhandledRejection" | "uncaughtException";
+  kind: 'unhandledRejection' | 'uncaughtException';
   error: unknown;
   alias?: string;
   generation?: number;
@@ -75,7 +75,7 @@ export interface SandboxLateProcessError {
 
 export interface SandboxDeps {
   /** Capability surface. Full preserves the host-local control room; core is the fresh ephemeral allowlist. */
-  surface?: "full" | "core" | "worker";
+  surface?: 'full' | 'core' | 'worker';
   /** Structural subset of `Config` — the groups the sandbox actually reads. */
   config: {
     sandbox: {
@@ -92,8 +92,8 @@ export interface SandboxDeps {
       appPassword: string;
     } | null;
     modules?: {
-      enabled: import("./builtin-modules.js").BuiltinModuleId[] | null;
-      disabled: import("./builtin-modules.js").BuiltinModuleId[];
+      enabled: import('./builtin-modules.js').BuiltinModuleId[] | null;
+      disabled: import('./builtin-modules.js').BuiltinModuleId[];
     };
     paths: {
       harnessRoot: string;
@@ -195,7 +195,7 @@ export interface SandboxDeps {
     status(ref: string): Promise<{
       session: WorkerSession;
       messages: WorkerMailboxMessage[];
-      artifacts: Array<Omit<WorkerArtifactReceipt, "relativePath">>;
+      artifacts: Array<Omit<WorkerArtifactReceipt, 'relativePath'>>;
     }>;
     artifact(ref: string, key?: string): Promise<WorkerArtifactFile>;
     dismiss(ref: string): Promise<WorkerSession>;

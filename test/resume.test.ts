@@ -6,7 +6,11 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { clearResumeMarker, writeResumeMarker, consumeResumeMarker } from '../src/store/resume.js';
+import {
+  clearResumeMarker,
+  writeResumeMarker,
+  consumeResumeMarker,
+} from '../src/store/resume.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'harness-resume-'));
@@ -30,7 +34,11 @@ test('resume: marker is consume-once (second read returns null)', () => {
   const dir = tmp();
   writeResumeMarker(dir, 'x');
   assert.ok(consumeResumeMarker(dir));
-  assert.equal(consumeResumeMarker(dir), null, 'a consumed marker must not replay');
+  assert.equal(
+    consumeResumeMarker(dir),
+    null,
+    'a consumed marker must not replay',
+  );
   assert.ok(!fs.existsSync(resolveDataLayout(dir).resumeMarker));
 });
 
@@ -38,10 +46,13 @@ test('resume: a stale marker (older than maxAge) is discarded', () => {
   const dir = tmp();
   fs.mkdirSync(resolveDataLayout(dir).root, { recursive: true });
   const file = resolveDataLayout(dir).resumeMarker;
-  fs.writeFileSync(file, JSON.stringify({
-    reason: null,
-    at: new Date(Date.now() - 20 * 60_000).toISOString(),
-  }));
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      reason: null,
+      at: new Date(Date.now() - 20 * 60_000).toISOString(),
+    }),
+  );
   assert.equal(consumeResumeMarker(dir), null, 'stale marker must be dropped');
   assert.ok(!fs.existsSync(file), 'stale marker is still consumed (deleted)');
 });

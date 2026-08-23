@@ -20,18 +20,30 @@ test('extractCacheTokens: reads the OpenAI-compat prompt_tokens_details shape', 
 });
 
 test('extractCacheTokens: reads a legitimate zero as zero', () => {
-  assert.equal(extractCacheTokens({ prompt_tokens_details: { cached_tokens: 0 } }), 0);
+  assert.equal(
+    extractCacheTokens({ prompt_tokens_details: { cached_tokens: 0 } }),
+    0,
+  );
 });
 
 test('extractCacheTokens: returns undefined (never 0) when the field is absent', () => {
-  assert.equal(extractCacheTokens({ prompt_tokens: 10, completion_tokens: 2 }), undefined);
+  assert.equal(
+    extractCacheTokens({ prompt_tokens: 10, completion_tokens: 2 }),
+    undefined,
+  );
   assert.equal(extractCacheTokens({ prompt_tokens_details: {} }), undefined);
   assert.equal(extractCacheTokens({ prompt_tokens_details: null }), undefined);
 });
 
 test('extractCacheTokens: returns undefined for non-numeric or non-object input', () => {
-  assert.equal(extractCacheTokens({ prompt_tokens_details: { cached_tokens: '70800' } }), undefined);
-  assert.equal(extractCacheTokens({ prompt_tokens_details: { cached_tokens: NaN } }), undefined);
+  assert.equal(
+    extractCacheTokens({ prompt_tokens_details: { cached_tokens: '70800' } }),
+    undefined,
+  );
+  assert.equal(
+    extractCacheTokens({ prompt_tokens_details: { cached_tokens: NaN } }),
+    undefined,
+  );
   assert.equal(extractCacheTokens(undefined), undefined);
   assert.equal(extractCacheTokens(null), undefined);
   assert.equal(extractCacheTokens('nope'), undefined);
@@ -39,7 +51,10 @@ test('extractCacheTokens: returns undefined for non-numeric or non-object input'
 
 // ---------- cache stats ----------
 
-import { createCacheStats, CACHE_BUST_MIN_TOKENS } from '../src/llm/cache-stats.js';
+import {
+  createCacheStats,
+  CACHE_BUST_MIN_TOKENS,
+} from '../src/llm/cache-stats.js';
 import type { LLMUsage } from '../src/llm/llm.js';
 
 /** Build an LLMUsage with the given prompt/cached split. Omit `cached` to model
@@ -179,12 +194,16 @@ test('cache-stats: usage without cached_tokens never busts and stays unsupported
   const s = stats.snapshot();
   assert.equal(s.supported, false);
   assert.equal(s.totalCached, 0);
-  assert.equal(s.totalNew, 0, 'unreported turns contribute nothing to the split');
+  assert.equal(
+    s.totalNew,
+    0,
+    'unreported turns contribute nothing to the split',
+  );
 });
 
 test('cache-stats: a supported turn after unsupported turns cannot bust on a stale prompt', () => {
   const stats = createCacheStats();
-  stats.record(usage(50_000));          // unsupported — no prev prompt recorded
+  stats.record(usage(50_000)); // unsupported — no prev prompt recorded
   const r = stats.record(usage(52_000, 0));
   assert.equal(r.busted, false, 'first SUPPORTED turn is the baseline');
 });
@@ -235,7 +254,10 @@ test('agent: recordCacheUsage feeds the snapshot', () => {
   const h = buildTestAgent({ tmpPrefix: 'cache-record-' });
   try {
     h.agent.recordCacheUsage({
-      prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010, cached_tokens: 900,
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+      cached_tokens: 900,
     });
     const cache = h.agent.usageSnapshot().cache;
     assert.equal(cache.supported, true);
@@ -250,7 +272,10 @@ test('agent: clearContext resets cache stats', () => {
   const h = buildTestAgent({ tmpPrefix: 'cache-clear-' });
   try {
     h.agent.recordCacheUsage({
-      prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010, cached_tokens: 900,
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+      cached_tokens: 900,
     });
     assert.equal(h.agent.usageSnapshot().cache.supported, true);
     h.agent.clearContext();
@@ -267,22 +292,60 @@ test('agent: clearContext resets cache stats', () => {
 /** A spy Logger — records every call by level, args joined into one string. */
 function makeSpyLogger() {
   const calls: { level: string; text: string }[] = [];
-  const record = (level: string) => (...a: unknown[]) => {
-    calls.push({ level, text: a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') });
+  const record =
+    (level: string) =>
+    (...a: unknown[]) => {
+      calls.push({
+        level,
+        text: a
+          .map((x) => (typeof x === 'string' ? x : JSON.stringify(x)))
+          .join(' '),
+      });
+    };
+  return {
+    calls,
+    logger: {
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
+    },
   };
-  return { calls, logger: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') } };
 }
 
 test('agent: an uncached completion with no prior support logs info once, not warn', () => {
   const { calls, logger } = makeSpyLogger();
-  const h = buildTestAgent({ tmpPrefix: 'cache-log-info-', config: { logger: logger as never } });
+  const h = buildTestAgent({
+    tmpPrefix: 'cache-log-info-',
+    config: { logger: logger as never },
+  });
   try {
-    h.agent.recordCacheUsage({ prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 });
-    h.agent.recordCacheUsage({ prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 });
-    const infoLines = calls.filter((c) => c.level === 'info' && /prompt cache/.test(c.text));
-    const warnLines = calls.filter((c) => c.level === 'warn' && /prompt cache/.test(c.text));
-    assert.equal(infoLines.length, 1, 'the no-cache-capability info line fires exactly once');
-    assert.equal(warnLines.length, 0, 'no prior supported turn, so no anomaly warning');
+    h.agent.recordCacheUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+    });
+    h.agent.recordCacheUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+    });
+    const infoLines = calls.filter(
+      (c) => c.level === 'info' && /prompt cache/.test(c.text),
+    );
+    const warnLines = calls.filter(
+      (c) => c.level === 'warn' && /prompt cache/.test(c.text),
+    );
+    assert.equal(
+      infoLines.length,
+      1,
+      'the no-cache-capability info line fires exactly once',
+    );
+    assert.equal(
+      warnLines.length,
+      0,
+      'no prior supported turn, so no anomaly warning',
+    );
   } finally {
     h.cleanup();
   }
@@ -290,24 +353,44 @@ test('agent: an uncached completion with no prior support logs info once, not wa
 
 test('agent: reporting going dark AFTER a supported turn logs a one-shot warn anomaly', () => {
   const { calls, logger } = makeSpyLogger();
-  const h = buildTestAgent({ tmpPrefix: 'cache-log-warn-', config: { logger: logger as never } });
+  const h = buildTestAgent({
+    tmpPrefix: 'cache-log-warn-',
+    config: { logger: logger as never },
+  });
   try {
- // Turn 1: the provider reports cache data — establishes "supported".
+    // Turn 1: the provider reports cache data — establishes "supported".
     h.agent.recordCacheUsage({
-      prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010, cached_tokens: 900,
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+      cached_tokens: 900,
     });
     assert.equal(h.agent.usageSnapshot().cache.supported, true);
 
- // Turn 2: the same session suddenly reports nothing — the anomaly.
-    h.agent.recordCacheUsage({ prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 });
- // Turn 3: still nothing — the warn must not repeat.
-    h.agent.recordCacheUsage({ prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 });
+    // Turn 2: the same session suddenly reports nothing — the anomaly.
+    h.agent.recordCacheUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+    });
+    // Turn 3: still nothing — the warn must not repeat.
+    h.agent.recordCacheUsage({
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      total_tokens: 1010,
+    });
 
-    const warnLines = calls.filter((c) => c.level === 'warn' && /prompt cache/.test(c.text));
-    assert.equal(warnLines.length, 1, 'the went-dark anomaly warns exactly once');
+    const warnLines = calls.filter(
+      (c) => c.level === 'warn' && /prompt cache/.test(c.text),
+    );
+    assert.equal(
+      warnLines.length,
+      1,
+      'the went-dark anomaly warns exactly once',
+    );
 
- // `supported` reflects the historical high-water mark (unaffected by the
- // dark turns); `turns` still counts every completion, dark ones included.
+    // `supported` reflects the historical high-water mark (unaffected by the
+    // dark turns); `turns` still counts every completion, dark ones included.
     const cache = h.agent.usageSnapshot().cache;
     assert.equal(cache.supported, true);
     assert.equal(cache.turns, 3);
@@ -322,18 +405,35 @@ import type { ConsoleHub } from '../src/console/hub.js';
 
 test('agent: a busting recordCacheUsage reaches console.cacheBusted with the rewritten count', () => {
   const busts: number[] = [];
-  const stubConsole = { cacheBusted: (rewritten: number) => { busts.push(rewritten); } } as unknown as ConsoleHub;
-  const h = buildTestAgent({ tmpPrefix: 'cache-hub-bust-', agentDeps: { console: stubConsole } });
+  const stubConsole = {
+    cacheBusted: (rewritten: number) => {
+      busts.push(rewritten);
+    },
+  } as unknown as ConsoleHub;
+  const h = buildTestAgent({
+    tmpPrefix: 'cache-hub-bust-',
+    agentDeps: { console: stubConsole },
+  });
   try {
- // Turn 1 establishes 60k of observed cached coverage.
+    // Turn 1 establishes 60k of observed cached coverage.
     h.agent.recordCacheUsage({
-      prompt_tokens: 60_000, completion_tokens: 10, total_tokens: 60_010, cached_tokens: 60_000,
+      prompt_tokens: 60_000,
+      completion_tokens: 10,
+      total_tokens: 60_010,
+      cached_tokens: 60_000,
     });
- // Turn 2 drops cached coverage to 12,688: loss 47,312.
+    // Turn 2 drops cached coverage to 12,688: loss 47,312.
     h.agent.recordCacheUsage({
-      prompt_tokens: 62_000, completion_tokens: 10, total_tokens: 62_010, cached_tokens: 12_688,
+      prompt_tokens: 62_000,
+      completion_tokens: 10,
+      total_tokens: 62_010,
+      cached_tokens: 12_688,
     });
-    assert.equal(busts.length, 1, 'cacheBusted is called exactly once for the one busting turn');
+    assert.equal(
+      busts.length,
+      1,
+      'cacheBusted is called exactly once for the one busting turn',
+    );
     assert.equal(busts[0], 47_312);
   } finally {
     h.cleanup();
@@ -342,16 +442,27 @@ test('agent: a busting recordCacheUsage reaches console.cacheBusted with the rew
 
 test('agent: a throwing console.cacheBusted is swallowed, never reaches the caller', () => {
   const stubConsole = {
-    cacheBusted: () => { throw new Error('boom — observer-only, must not propagate'); },
+    cacheBusted: () => {
+      throw new Error('boom — observer-only, must not propagate');
+    },
   } as unknown as ConsoleHub;
-  const h = buildTestAgent({ tmpPrefix: 'cache-hub-throw-', agentDeps: { console: stubConsole } });
+  const h = buildTestAgent({
+    tmpPrefix: 'cache-hub-throw-',
+    agentDeps: { console: stubConsole },
+  });
   try {
     h.agent.recordCacheUsage({
-      prompt_tokens: 60_000, completion_tokens: 10, total_tokens: 60_010, cached_tokens: 0,
+      prompt_tokens: 60_000,
+      completion_tokens: 10,
+      total_tokens: 60_010,
+      cached_tokens: 0,
     });
     assert.doesNotThrow(() => {
       h.agent.recordCacheUsage({
-        prompt_tokens: 62_000, completion_tokens: 10, total_tokens: 62_010, cached_tokens: 12_688,
+        prompt_tokens: 62_000,
+        completion_tokens: 10,
+        total_tokens: 62_010,
+        cached_tokens: 12_688,
       });
     }, 'a throwing console must never propagate out of recordCacheUsage');
   } finally {

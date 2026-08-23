@@ -48,7 +48,7 @@ test('transform: destructuring array', () => {
 
 test('transform: function declaration persists', () => {
   const { code } = transform('function f(){ return 42 }');
- // rewritten inline: globalThis.f = function f{ return 42 }
+  // rewritten inline: globalThis.f = function f{ return 42 }
   assert.match(code, /globalThis\.f = function f\(\)\{ return 42 \}/);
 });
 
@@ -61,7 +61,7 @@ test('transform: parse failure returns original unwrapped', () => {
   const { code, parsed, error } = transform('const = ;');
   assert.equal(parsed, false);
   assert.ok(error);
- // unwrapped — original code returned as-is
+  // unwrapped — original code returned as-is
   assert.equal(code, 'const = ;');
 });
 
@@ -73,7 +73,7 @@ test('transform: multiple statements, last expr is completion', () => {
 
 test('transform: statement with no trailing expr sets completion undefined', () => {
   const { code } = transform('const x = 1');
- // last node is the declaration, not an ExpressionStatement → _completion stays undefined
+  // last node is the declaration, not an ExpressionStatement → _completion stays undefined
   assert.match(code, /let _completion = undefined/);
   assert.doesNotMatch(code, /_completion = \(const/);
 });
@@ -82,20 +82,20 @@ test('transform: statement with no trailing expr sets completion undefined', () 
 
 test('heredoc: TAG; terminator (natural end-of-statement) expands + parses', () => {
   const src = 'const x = <<<NOTES\nhello\nworld\nNOTES;\nconsole.log(x);';
-  const { error } = transform(src);        // full pipeline, incl. acorn
+  const { error } = transform(src); // full pipeline, incl. acorn
   assert.equal(error, undefined);
 });
 
 test('heredoc: TAG, terminator (in a call) expands AND still parses', () => {
   const src = 'f(<<<NOTES\nhi\nNOTES,\n2);';
   const t = transform(src);
-  assert.equal(t.error, undefined);        // dropping the comma → f("hi\n"\n2) → acorn error; this guards it
+  assert.equal(t.error, undefined); // dropping the comma → f("hi\n"\n2) → acorn error; this guards it
   assert.equal(t.parsed, true);
 });
 
 test('heredoc: TAG, keeps the comma in emitted code', () => {
   const { code } = expandHeredocs('f(<<<T\nhi\nT,\n2)');
-  assert.match(code, /,\s*\n?\s*2\)/);     // comma survives after the string literal
+  assert.match(code, /,\s*\n?\s*2\)/); // comma survives after the string literal
 });
 
 test('heredoc: TAG); terminator closes the surrounding call', () => {

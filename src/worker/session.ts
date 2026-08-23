@@ -1,15 +1,15 @@
-import type { Database } from "../store/db.js";
-import { workerControlTokenDigest, verifyWorkerControlToken } from "./auth.js";
+import type { Database } from '../store/db.js';
+import { workerControlTokenDigest, verifyWorkerControlToken } from './auth.js';
 
 export interface WorkerSessionBinding {
   sessionId: string;
   worker: string;
   modelRef: string;
   mindId: string;
-  runtime: "trusted" | "kubernetes";
+  runtime: 'trusted' | 'kubernetes';
 }
 
-const ACTIVE = new Set(["spawning", "running", "idle"]);
+const ACTIVE = new Set(['spawning', 'running', 'idle']);
 
 export function resolveWorkerSession(
   db: Database,
@@ -29,13 +29,13 @@ export function resolveWorkerSession(
     .get(digest) as Record<string, unknown> | undefined;
   if (
     !row ||
-    !verifyWorkerControlToken(token, String(row.control_token_digest ?? ""))
+    !verifyWorkerControlToken(token, String(row.control_token_digest ?? ''))
   )
     return null;
   const runtime = row.runtime;
-  if (runtime !== "trusted" && runtime !== "kubernetes") return null;
+  if (runtime !== 'trusted' && runtime !== 'kubernetes') return null;
   if (!ACTIVE.has(String(row.status))) return null;
-  if (typeof row.model_ref !== "string" || typeof row.mind_id !== "string")
+  if (typeof row.model_ref !== 'string' || typeof row.mind_id !== 'string')
     return null;
   return {
     sessionId: String(row.id),

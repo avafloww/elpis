@@ -1,14 +1,14 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
-import { migrateMindIds } from "../src/store/mind-id-migration.js";
-import type { MindId } from "../src/store/mind-id.js";
-import { MindStore } from "../src/store/mind.js";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { migrateMindIds } from '../src/store/mind-id-migration.js';
+import type { MindId } from '../src/store/mind-id.js';
+import { MindStore } from '../src/store/mind.js';
 
-const ids = ["elm-00000001", "elm-00000002"] as MindId[];
+const ids = ['elm-00000001', 'elm-00000002'] as MindId[];
 
-test("v15 Mind relations and sandbox state migrate to shared elm identities", () => {
-  const db = new DatabaseSync(":memory:");
+test('v15 Mind relations and sandbox state migrate to shared elm identities', () => {
+  const db = new DatabaseSync(':memory:');
   db.exec(`
     PRAGMA foreign_keys=ON;
     CREATE TABLE mind_items (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, status TEXT NOT NULL, priority INTEGER NOT NULL, parent_id INTEGER REFERENCES mind_items(id) ON DELETE SET NULL, due_at INTEGER, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, archived_at INTEGER);
@@ -33,7 +33,7 @@ test("v15 Mind relations and sandbox state migrate to shared elm identities", ()
   let n = 0;
   migrateMindIds(db as any, () => ids[n++]);
   const map = db
-    .prepare("SELECT * FROM mind_id_migration_map ORDER BY legacy_id")
+    .prepare('SELECT * FROM mind_id_migration_map ORDER BY legacy_id')
     .all() as any[];
   assert.deepEqual(
     map.map((row) => ({ ...row })),
@@ -45,35 +45,35 @@ test("v15 Mind relations and sandbox state migrate to shared elm identities", ()
   assert.deepEqual(
     (
       db
-        .prepare("SELECT id,parent_id,title FROM mind_items ORDER BY title")
+        .prepare('SELECT id,parent_id,title FROM mind_items ORDER BY title')
         .all() as any[]
     ).map((row) => ({ ...row })),
     [
-      { id: ids[1], parent_id: ids[0], title: "child" },
-      { id: ids[0], parent_id: null, title: "parent" },
+      { id: ids[1], parent_id: ids[0], title: 'child' },
+      { id: ids[0], parent_id: null, title: 'parent' },
     ],
   );
   assert.deepEqual(
     {
       ...(db
-        .prepare("SELECT item_id,depends_on_id FROM mind_dependencies")
+        .prepare('SELECT item_id,depends_on_id FROM mind_dependencies')
         .get() as any),
     },
     { item_id: ids[1], depends_on_id: ids[0] },
   );
   assert.equal(
-    (db.prepare("SELECT item_id FROM mind_comments").get() as any).item_id,
+    (db.prepare('SELECT item_id FROM mind_comments').get() as any).item_id,
     ids[1],
   );
   assert.deepEqual(
     {
       ...(db
         .prepare(
-          "SELECT id,generation,lifecycle,cold_notice_pending FROM persistent_sandboxes",
+          'SELECT id,generation,lifecycle,cold_notice_pending FROM persistent_sandboxes',
         )
         .get() as any),
     },
-    { id: ids[1], generation: 4, lifecycle: "ready", cold_notice_pending: 1 },
+    { id: ids[1], generation: 4, lifecycle: 'ready', cold_notice_pending: 1 },
   );
   assert.equal(
     (
@@ -85,14 +85,14 @@ test("v15 Mind relations and sandbox state migrate to shared elm identities", ()
     ).n,
     0,
   );
-  assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+  assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
   const mind = new MindStore(db);
   assert.throws(
     () => mind.resolve(1),
     /legacy item 1 migrated to elm-00000001; use that canonical elm-\* id instead/,
   );
   assert.throws(
-    () => mind.resolve("#2"),
+    () => mind.resolve('#2'),
     /legacy item "#2" migrated to elm-00000002; use that canonical elm-\* id instead/,
   );
   assert.equal(mind.resolve(ids[0]), ids[0]);

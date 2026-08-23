@@ -19,12 +19,22 @@ process.on('uncaughtException', (error) => {
 
 const sandbox = createSandbox({
   config: {
-    sandbox: { syncTimeoutMs: 1_000, asyncDeadlineMs: 1_000, persistentRetirementGraceMs: 1_000, previewMaxBytes: 2_048, logMaxBytes: 2_048 },
+    sandbox: {
+      syncTimeoutMs: 1_000,
+      asyncDeadlineMs: 1_000,
+      persistentRetirementGraceMs: 1_000,
+      previewMaxBytes: 2_048,
+      logMaxBytes: 2_048,
+    },
     kagi: { apiKey: null },
     bluesky: null,
     paths: { harnessRoot: dir, dataDirectory: dir },
   },
-  memory: { read: () => '', append: () => undefined, overwrite: () => undefined },
+  memory: {
+    read: () => '',
+    append: () => undefined,
+    overwrite: () => undefined,
+  },
   logbuf: [],
   onLateProcessError: (event) => late.push(event),
 } as Parameters<typeof createSandbox>[0]);
@@ -42,12 +52,18 @@ const port = Number(fs.readFileSync(portFile, 'utf8'));
 
 async function hit(): Promise<void> {
   await new Promise<void>((resolve) => {
-    const request = http.get({ host: '127.0.0.1', port, path: '/' }, (response) => {
-      response.resume();
-      response.once('end', resolve);
-    });
+    const request = http.get(
+      { host: '127.0.0.1', port, path: '/' },
+      (response) => {
+        response.resume();
+        response.once('end', resolve);
+      },
+    );
     request.once('error', () => resolve());
-    request.setTimeout(150, () => { request.destroy(); resolve(); });
+    request.setTimeout(150, () => {
+      request.destroy();
+      resolve();
+    });
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -56,16 +72,29 @@ await hit();
 await hit();
 assert.equal(late.length, 1);
 assert.equal(late[0]?.kind, 'uncaughtException');
-assert.match(String((late[0]?.error as Error)?.message), /missing temporary preview/);
+assert.match(
+  String((late[0]?.error as Error)?.message),
+  /missing temporary preview/,
+);
 assert.equal(globalErrors.length, 0);
 
-const closed = await sandbox.run(`await new Promise(resolve => leakedServer.close(resolve)); 'closed'`);
+const closed = await sandbox.run(
+  `await new Promise(resolve => leakedServer.close(resolve)); 'closed'`,
+);
 assert.equal(closed.ok, true);
 
-setImmediate(() => { throw new Error('real harness fault'); });
+setImmediate(() => {
+  throw new Error('real harness fault');
+});
 await new Promise((resolve) => setTimeout(resolve, 30));
 assert.equal(globalErrors.length, 1);
 assert.match(globalErrors[0]!.message, /real harness fault/);
 
 fs.rmSync(dir, { recursive: true, force: true });
-console.log(JSON.stringify({ late: late.length, global: globalErrors.length, closed: closed.ok }));
+console.log(
+  JSON.stringify({
+    late: late.length,
+    global: globalErrors.length,
+    closed: closed.ok,
+  }),
+);

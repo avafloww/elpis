@@ -25,16 +25,25 @@ import { resolveDataLayout } from './data-layout.js';
 
 function readSeen(dataDirectory: string): Set<string> {
   try {
-    const raw = fs.readFileSync(resolveDataLayout(dataDirectory).changelogSeen, 'utf8');
+    const raw = fs.readFileSync(
+      resolveDataLayout(dataDirectory).changelogSeen,
+      'utf8',
+    );
     const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) return new Set(arr.filter((x): x is string => typeof x === 'string'));
-  } catch { /* missing or corrupt → treat as empty */ }
+    if (Array.isArray(arr))
+      return new Set(arr.filter((x): x is string => typeof x === 'string'));
+  } catch {
+    /* missing or corrupt → treat as empty */
+  }
   return new Set();
 }
 
 /** Filenames (not paths) of changelog entries the agent has not seen yet,
  * sorted by filename (the YYYY-MM-DD prefix makes that chronological). */
-export function readUnseenChangelogs(harnessRoot: string, dataDirectory: string): string[] {
+export function readUnseenChangelogs(
+  harnessRoot: string,
+  dataDirectory: string,
+): string[] {
   let files: string[];
   try {
     files = fs.readdirSync(path.join(harnessRoot, 'changelogs'));
@@ -46,14 +55,19 @@ export function readUnseenChangelogs(harnessRoot: string, dataDirectory: string)
 }
 
 /** Record filenames as seen (union with the existing set). Best-effort. */
-export function markChangelogsSeen(dataDirectory: string, files: string[]): void {
+export function markChangelogsSeen(
+  dataDirectory: string,
+  files: string[],
+): void {
   try {
     const seen = readSeen(dataDirectory);
     for (const f of files) seen.add(f);
     const target = resolveDataLayout(dataDirectory).changelogSeen;
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     fs.writeFileSync(target, JSON.stringify([...seen].sort()));
-  } catch { /* best-effort — worst case the notice repeats next boot */ }
+  } catch {
+    /* best-effort — worst case the notice repeats next boot */
+  }
 }
 
 /** The pointer-style notice enqueued into the one history on boot. */

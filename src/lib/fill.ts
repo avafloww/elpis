@@ -16,7 +16,9 @@ export function fill(template: string, vars: Record<string, unknown>): string {
     throw new Error('fill(template, vars): template must be a string');
   }
   if (vars === null || typeof vars !== 'object') {
-    throw new Error('fill(template, vars): vars must be an object of { key: value }');
+    throw new Error(
+      'fill(template, vars): vars must be an object of { key: value }',
+    );
   }
   const used = new Set<string>();
   const out = template.replace(PLACEHOLDER, (_m, key: string) => {
@@ -28,7 +30,9 @@ export function fill(template: string, vars: Record<string, unknown>): string {
   });
   const unused = Object.keys(vars).filter((k) => !used.has(k));
   if (unused.length > 0) {
-    throw new Error(`fill: unused key ${unused.map((k) => `"${k}"`).join(', ')} — no {{${unused[0]}}} placeholder in the template`);
+    throw new Error(
+      `fill: unused key ${unused.map((k) => `"${k}"`).join(', ')} — no {{${unused[0]}}} placeholder in the template`,
+    );
   }
   return out;
 }

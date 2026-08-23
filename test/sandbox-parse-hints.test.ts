@@ -4,7 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { delimiterProblem, parseFailureHints } from '../src/sandbox/parse-hints.js';
+import {
+  delimiterProblem,
+  parseFailureHints,
+} from '../src/sandbox/parse-hints.js';
 
 test('delimiterProblem: names an unclosed paren and the line it opened on', () => {
   const src = 'const a = 1;\nelpis.remember("a long note here"\n';
@@ -15,7 +18,8 @@ test('delimiterProblem: names an unclosed paren and the line it opened on', () =
 });
 
 test('delimiterProblem: ignores brackets inside strings, templates and comments', () => {
-  const src = 'const a = "((( [[[ {{{";\nconst b = `))) ]]]`;\n// {{{ (((\nfoo();\n';
+  const src =
+    'const a = "((( [[[ {{{";\nconst b = `))) ]]]`;\n// {{{ (((\nfoo();\n';
   assert.equal(delimiterProblem(src), null);
 });
 
@@ -33,20 +37,35 @@ test('delimiterProblem: reports a stray closer', () => {
 });
 
 test('delimiterProblem: returns null on balanced code', () => {
-  assert.equal(delimiterProblem('function f(a) { return [a, {b: 1}]; }\n'), null);
+  assert.equal(
+    delimiterProblem('function f(a) { return [a, {b: 1}]; }\n'),
+    null,
+  );
 });
 
 test('parseFailureHints: unterminated string suggests a heredoc', () => {
-  const src = "elpis.channel('x').send('i disappeared for a while\nand came back');\n";
-  const hints = parseFailureHints(src, src, 'Unterminated string constant (1:51)');
-  assert.ok(hints.some((h) => /cannot span multiple lines/.test(h)), hints.join(' | '));
+  const src =
+    "elpis.channel('x').send('i disappeared for a while\nand came back');\n";
+  const hints = parseFailureHints(
+    src,
+    src,
+    'Unterminated string constant (1:51)',
+  );
+  assert.ok(
+    hints.some((h) => /cannot span multiple lines/.test(h)),
+    hints.join(' | '),
+  );
 });
 
 test('parseFailureHints: nested backtick in a template literal is named', () => {
- // acorn trips just after the inner backtick that closed the template early.
-  const src = 'elpis.memory.person("bramble", `switched to `model-x` today`);\n';
+  // acorn trips just after the inner backtick that closed the template early.
+  const src =
+    'elpis.memory.person("bramble", `switched to `model-x` today`);\n';
   const hints = parseFailureHints(src, src, 'Unexpected token (1:45)');
-  assert.ok(hints.some((h) => /backtick/.test(h)), hints.join(' | '));
+  assert.ok(
+    hints.some((h) => /backtick/.test(h)),
+    hints.join(' | '),
+  );
 });
 
 test('parseFailureHints: no backtick hint when the error is nowhere near one', () => {
@@ -65,11 +84,21 @@ test('parseFailureHints: unclosed delimiter hint comes first', () => {
 test('parseFailureHints: TypeScript syntax still detected', () => {
   const src = 'const x = foo as any;\n';
   const hints = parseFailureHints(src, src, 'Unexpected token (1:14)');
-  assert.ok(hints.some((h) => /TypeScript/.test(h)), hints.join(' | '));
+  assert.ok(
+    hints.some((h) => /TypeScript/.test(h)),
+    hints.join(' | '),
+  );
 });
 
 test('parseFailureHints: heredoc present falls back to the heredoc rules', () => {
   const raw = 'const a = <<<T\nbody\n';
-  const hints = parseFailureHints(raw, raw, 'heredoc <<<T opened at line 1 has no terminator');
-  assert.ok(hints.some((h) => /everything after it.*preserved as JavaScript/.test(h)), hints.join(' | '));
+  const hints = parseFailureHints(
+    raw,
+    raw,
+    'heredoc <<<T opened at line 1 has no terminator',
+  );
+  assert.ok(
+    hints.some((h) => /everything after it.*preserved as JavaScript/.test(h)),
+    hints.join(' | '),
+  );
 });

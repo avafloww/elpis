@@ -14,7 +14,16 @@ import { buildGlobals } from '../src/sandbox/globals.js';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-reqfresh-'));
 
 const deps = {
-  config: { sandbox: { syncTimeoutMs: 3000, asyncDeadlineMs: 8000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null }, paths: { harnessRoot: '/tmp/harness-root', dataDirectory: tmp } },
+  config: {
+    sandbox: {
+      syncTimeoutMs: 3000,
+      asyncDeadlineMs: 8000,
+      previewMaxBytes: 2048,
+      logMaxBytes: 2048,
+    },
+    kagi: { apiKey: null },
+    paths: { harnessRoot: '/tmp/harness-root', dataDirectory: tmp },
+  },
   logbuf: [] as string[],
 };
 
@@ -48,7 +57,10 @@ test('require() still caches bare (node builtin) specifiers', async () => {
 // process stdout where only journalctl would see it.
 test('require() warns, in the run logs, when a changed ESM file is re-required', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reqesm-'));
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+  fs.writeFileSync(
+    path.join(dir, 'package.json'),
+    JSON.stringify({ type: 'module' }),
+  );
   const mod = path.join(dir, 'm.js');
   fs.writeFileSync(mod, 'export const v = 1;');
 
@@ -67,10 +79,28 @@ test('require() warns, in the run logs, when a changed ESM file is re-required',
 
 function buildSendHandle(sendCalls: { channelId: string; content: string }[]) {
   const g = buildGlobals({
-    config: { paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' }, sandbox: { syncTimeoutMs: 5000, asyncDeadlineMs: 10000, previewMaxBytes: 2048, logMaxBytes: 2048 }, kagi: { apiKey: null } },
-    send: async (channelId: string, content: string) => { sendCalls.push({ channelId, content }); },
+    config: {
+      paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
+      sandbox: {
+        syncTimeoutMs: 5000,
+        asyncDeadlineMs: 10000,
+        previewMaxBytes: 2048,
+        logMaxBytes: 2048,
+      },
+      kagi: { apiKey: null },
+    },
+    send: async (channelId: string, content: string) => {
+      sendCalls.push({ channelId, content });
+    },
   } as unknown as import('../src/types.js').SandboxDeps);
-  const elpis = g.elpis as { channel: (id?: string) => { send: (content: unknown, opts?: { files?: { path: string; name?: string }[] }) => Promise<{ ok: boolean }> } };
+  const elpis = g.elpis as {
+    channel: (id?: string) => {
+      send: (
+        content: unknown,
+        opts?: { files?: { path: string; name?: string }[] },
+      ) => Promise<{ ok: boolean }>;
+    };
+  };
   return elpis.channel('2001');
 }
 
@@ -85,7 +115,9 @@ test("elpis.channel().send('', { files }) does not throw — attachment-only sen
 test('elpis.channel().send(undefined, { files }) does not throw — attachment-only send', async () => {
   const calls: { channelId: string; content: string }[] = [];
   const handle = buildSendHandle(calls);
-  const result = await handle.send(undefined, { files: [{ path: '/tmp/x.png' }] });
+  const result = await handle.send(undefined, {
+    files: [{ path: '/tmp/x.png' }],
+  });
   assert.equal(result.ok, true);
   assert.equal(calls[0]?.content, '');
 });

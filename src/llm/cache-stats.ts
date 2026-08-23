@@ -43,7 +43,7 @@ export const CACHE_BUST_MIN_TOKENS = 2048;
 /** Cache accounting as the rail, the /cache command, and UsageInfo render it. */
 export interface CacheInfo {
   /** False until a completion reports `cached_tokens`. The console hides the
- * panel and bust detection stays off while false. */
+   * panel and bust detection stays off while false. */
   supported: boolean;
   /** Most recent completion: cached prompt tokens, and prompt − cached. */
   lastCached: number;
@@ -58,17 +58,17 @@ export interface CacheInfo {
   bustCount: number;
   bustTokens: number;
   /** Completions passed to `record()` this session, including ones with no
- * `cached_tokens` (which otherwise leave every other field at its prior
- * value). Lets a caller distinguish "no completions yet" (turns === 0) from
- * "provider reports no cache data" (turns > 0 but supported stays false) —
- * both of which look identical if you only look at `supported`. */
+   * `cached_tokens` (which otherwise leave every other field at its prior
+   * value). Lets a caller distinguish "no completions yet" (turns === 0) from
+   * "provider reports no cache data" (turns > 0 but supported stays false) —
+   * both of which look identical if you only look at `supported`. */
   turns: number;
 }
 
 export interface CacheStats {
   /** Record one MAIN-LOOP completion. Summarizer calls must NOT come here —
- * one-shot uncached prompts would smear the session ratio. Returns the bust
- * verdict for the caller to hand to the console. */
+   * one-shot uncached prompts would smear the session ratio. Returns the bust
+   * verdict for the caller to hand to the console. */
   record(usage: LLMUsage): { busted: boolean; rewritten: number };
   snapshot(): CacheInfo;
   /** Drop only the comparison baseline after an intentional structural rewrite. */
@@ -92,7 +92,7 @@ export function createCacheStats(): CacheStats {
   let bustTokens = 0;
   let turns = 0;
   /** Cached coverage of the previous SUPPORTED completion. Null means no
- * comparable baseline: first turn, structural rebaseline, or unsupported data. */
+   * comparable baseline: first turn, structural rebaseline, or unsupported data. */
   let prevCachedTokens: number | null = null;
 
   return {
@@ -100,8 +100,8 @@ export function createCacheStats(): CacheStats {
       turns++;
       const cached = usage.cached_tokens;
       if (cached === undefined) {
- // Provider reports nothing: contribute nothing, and drop the baseline so
- // a later supported turn can't bust against stale cached coverage.
+        // Provider reports nothing: contribute nothing, and drop the baseline so
+        // a later supported turn can't bust against stale cached coverage.
         prevCachedTokens = null;
         return { busted: false, rewritten: 0 };
       }

@@ -33,10 +33,14 @@ test('tracker: estimateAppended adds char/4 estimate', () => {
 
 test('tracker: recompute resets estimate from messages', () => {
   const t = createContextTracker(10000, 2000);
-  t.update({ prompt_tokens: 5000, completion_tokens: 1000, total_tokens: 6000 });
- // simulate compaction swap to a tiny history
+  t.update({
+    prompt_tokens: 5000,
+    completion_tokens: 1000,
+    total_tokens: 6000,
+  });
+  // simulate compaction swap to a tiny history
   t.recompute([{ role: 'system', content: 'summary' }]);
- // crude: 'summary'(7) + 'system'(6) + 4 = ~17 chars → ~5 tokens
+  // crude: 'summary'(7) + 'system'(6) + 4 = ~17 chars → ~5 tokens
   assert.ok(t.currentTokens < 1000, 'ratio should drop after recompute');
   assert.ok(t.currentTokens > 0);
 });
@@ -53,7 +57,11 @@ test('tracker: usableBudget floor of 1 when reserve >= window', () => {
 
 test('tracker: reset zeroes currentTokens', () => {
   const t = createContextTracker(10000, 2000);
-  t.update({ prompt_tokens: 4000, completion_tokens: 1000, total_tokens: 5000 });
+  t.update({
+    prompt_tokens: 4000,
+    completion_tokens: 1000,
+    total_tokens: 5000,
+  });
   t.estimateAppended('a'.repeat(100));
   assert.ok(t.currentTokens > 0);
   t.reset();

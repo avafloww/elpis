@@ -25,19 +25,33 @@ import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
 // classifies as 'ambient' there (wake.test.ts), which is the precondition for
 // the escape hatch to even consider promoting it to 'wake'.
 const FIXTURE_GUILD: GuildConfig = {
-  id: 'g1', slug: 'alpha', slashCommands: false, quietHours: null, timezone: null,
+  id: 'g1',
+  slug: 'alpha',
+  slashCommands: false,
+  quietHours: null,
+  timezone: null,
   channels: { '1002': 'social', '1003': 'social' },
 };
 
-function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; onCall: ((n: number) => void) | null } {
+function scriptedLLM(
+  responses: CompleteResult[],
+): LLM & { calls: number; onCall: ((n: number) => void) | null } {
   let i = 0;
   let calls = 0;
   let hook: ((n: number) => void) | null = null;
   return {
-    client: {} as unknown as LLM['client'], model: 'test', runTool: {} as unknown as LLM['runTool'],
-    get calls() { return calls; },
-    set onCall(fn) { hook = fn; },
-    get onCall() { return hook; },
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
+    get calls() {
+      return calls;
+    },
+    set onCall(fn) {
+      hook = fn;
+    },
+    get onCall() {
+      return hook;
+    },
     complete(): Promise<CompleteResult> {
       calls++;
       const n = calls;
@@ -46,16 +60,24 @@ function scriptedLLM(responses: CompleteResult[]): LLM & { calls: number; onCall
       i++;
       return Promise.resolve(r);
     },
-    summarize(): Promise<string> { return Promise.resolve('SUMMARY'); },
+    summarize(): Promise<string> {
+      return Promise.resolve('SUMMARY');
+    },
   } as LLM & { calls: number; onCall: ((n: number) => void) | null };
 }
 
 function stubMutes(muted: Record<string, MuteType>): MuteStore {
-  const row = (id: string, type: MuteType): MuteRow =>
-    ({ channelId: id, type, setBy: 'operator', reason: null, createdAt: '2026-01-01T00:00:00Z' });
+  const row = (id: string, type: MuteType): MuteRow => ({
+    channelId: id,
+    type,
+    setBy: 'operator',
+    reason: null,
+    createdAt: '2026-01-01T00:00:00Z',
+  });
   return {
     get: (id) => (muted[id] ? row(id, muted[id]) : null),
-    set: () => {}, clear: () => false,
+    set: () => {},
+    clear: () => false,
     all: () => Object.entries(muted).map(([id, type]) => row(id, type)),
   };
 }
@@ -77,8 +99,15 @@ function fakeChannel(name: string) {
  * through `unknown` — no discord.js `instanceof` checks exist on this path,
  * so a plain object satisfies it at runtime. */
 function fakeMessage(opts: {
-  id: string; guildId: string; channelId: string; content: string;
-  mentions?: { users?: { id: string; displayName?: string; username?: string }[]; roles?: { id: string; name: string }[]; channels?: { id: string; name: string }[] };
+  id: string;
+  guildId: string;
+  channelId: string;
+  content: string;
+  mentions?: {
+    users?: { id: string; displayName?: string; username?: string }[];
+    roles?: { id: string; name: string }[];
+    channels?: { id: string; name: string }[];
+  };
 }): Message {
   const channel = fakeChannel(opts.channelId);
   return {
@@ -93,7 +122,8 @@ function fakeMessage(opts: {
     mentions: {
       users: opts.mentions?.users ?? ([] as { id: string }[]),
       roles: opts.mentions?.roles ?? ([] as { id: string; name: string }[]),
-      channels: opts.mentions?.channels ?? ([] as { id: string; name: string }[]),
+      channels:
+        opts.mentions?.channels ?? ([] as { id: string; name: string }[]),
     },
     attachments: new Map(),
   } as unknown as Message;
@@ -114,9 +144,13 @@ test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social cha
   const { agent, tmpDir, config } = buildTestAgent({
     llm,
     config: {
- // makeConfig's default ambientTickMs is already 0 (the escape hatch),
- // but pin it explicitly since the whole test depends on it.
-      discord: { ...makeConfig().discord, guilds: [FIXTURE_GUILD], ambientTickMs: 0 },
+      // makeConfig's default ambientTickMs is already 0 (the escape hatch),
+      // but pin it explicitly since the whole test depends on it.
+      discord: {
+        ...makeConfig().discord,
+        guilds: [FIXTURE_GUILD],
+        ambientTickMs: 0,
+      },
     },
     agentDeps: { mutes },
     tmpPrefix: 'harness-discord-ingest-',
@@ -126,26 +160,56 @@ test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social cha
 
   void agent.loop();
 
- // Muted channel first: classifyInbound downgrades it to 'ambient' (social
- // tier, no mention), and the escape hatch's muteType recheck must refuse to
- // promote it to 'wake' even though ambientTickMs===0 would otherwise
- // promote every non-drop ambient message.
-  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-muted', guildId: 'g1', channelId: '1003', content: 'chatter' }));
+  // Muted channel first: classifyInbound downgrades it to 'ambient' (social
+  // tier, no mention), and the escape hatch's muteType recheck must refuse to
+  // promote it to 'wake' even though ambientTickMs===0 would otherwise
+  // promote every non-drop ambient message.
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-muted',
+      guildId: 'g1',
+      channelId: '1003',
+      content: 'chatter',
+    }),
+  );
   await flush();
 
-  assert.equal(llm.calls, 0, 'a muted channel must never wake the loop, escape hatch or not');
-  assert.equal(agent.inboundQueueLengthForTest, 1, 'the muted message still entered the queue as ambient — read, not spoken to');
+  assert.equal(
+    llm.calls,
+    0,
+    'a muted channel must never wake the loop, escape hatch or not',
+  );
+  assert.equal(
+    agent.inboundQueueLengthForTest,
+    1,
+    'the muted message still entered the queue as ambient — read, not spoken to',
+  );
 
- // Contrast: the SAME config, an UNMUTED social channel — proves the escape
- // hatch is actually armed (not merely inert) and that the muted case above
- // is being blocked by the recheck, not by some unrelated reason.
+  // Contrast: the SAME config, an UNMUTED social channel — proves the escape
+  // hatch is actually armed (not merely inert) and that the muted case above
+  // is being blocked by the recheck, not by some unrelated reason.
   const { promise: done, resolve: signal } = Promise.withResolvers<void>();
-  llm.onCall = (n) => { if (n === 1) signal(); };
-  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-unmuted', guildId: 'g1', channelId: '1002', content: 'chatter' }));
+  llm.onCall = (n) => {
+    if (n === 1) signal();
+  };
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-unmuted',
+      guildId: 'g1',
+      channelId: '1002',
+      content: 'chatter',
+    }),
+  );
   await done;
   await flush();
 
-  assert.equal(llm.calls, 1, 'an unmuted social-tier message wakes immediately under the ambient_tick_ms=0 escape hatch');
+  assert.equal(
+    llm.calls,
+    1,
+    'an unmuted social-tier message wakes immediately under the ambient_tick_ms=0 escape hatch',
+  );
   agent.stop();
 });
 
@@ -153,29 +217,47 @@ test('discord ingest: mention markup in the body is resolved to names before it 
   const llm = scriptedLLM([EMPTY_WAKE]);
   const { agent, tmpDir, config } = buildTestAgent({
     llm,
-    config: { discord: { ...makeConfig().discord, guilds: [FIXTURE_GUILD], ambientTickMs: 0 } },
+    config: {
+      discord: {
+        ...makeConfig().discord,
+        guilds: [FIXTURE_GUILD],
+        ambientTickMs: 0,
+      },
+    },
     tmpPrefix: 'harness-discord-mentions-',
   });
   void tmpDir;
   const { client } = createDiscord(config, agent);
 
- // Capture what the handler hands the agent — this is the exact body that
- // lands in the one history and the transcript.
+  // Capture what the handler hands the agent — this is the exact body that
+  // lands in the one history and the transcript.
   const seen: { content: string }[] = [];
   const realEnqueue = agent.enqueue.bind(agent);
-  (agent as unknown as { enqueue: (m: Parameters<typeof realEnqueue>[0]) => void }).enqueue = (m) => {
+  (
+    agent as unknown as {
+      enqueue: (m: Parameters<typeof realEnqueue>[0]) => void;
+    }
+  ).enqueue = (m) => {
     seen.push({ content: m.content });
   };
 
-  client.emit(Events.MessageCreate, fakeMessage({
-    id: 'm-mention', guildId: 'g1', channelId: '1002',
-    content: '<@111111111111111103> do mentions work too? ask <@&333333333333333333> in <#1002>',
-    mentions: {
-      users: [{ id: '111111111111111103', displayName: 'Echo', username: 'echo' }],
-      roles: [{ id: '333333333333333333', name: 'friends' }],
-      channels: [{ id: '1002', name: 'lounge' }],
-    },
-  }));
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-mention',
+      guildId: 'g1',
+      channelId: '1002',
+      content:
+        '<@111111111111111103> do mentions work too? ask <@&333333333333333333> in <#1002>',
+      mentions: {
+        users: [
+          { id: '111111111111111103', displayName: 'Echo', username: 'echo' },
+        ],
+        roles: [{ id: '333333333333333333', name: 'friends' }],
+        channels: [{ id: '1002', name: 'lounge' }],
+      },
+    }),
+  );
   await flush();
 
   assert.equal(seen.length, 1, 'the message reached the agent');
@@ -189,20 +271,53 @@ test('discord ingest: mention markup in the body is resolved to names before it 
 
 test('discord ingest: guild default tier admits unknown channels and explicit drop overrides it', async () => {
   const listenGuild: GuildConfig = {
-    id: 'g1', slug: 'alpha', slashCommands: false, quietHours: null, timezone: null,
-    defaultTier: 'social', allowSend: true, defaultAllowSend: false,
-    channels: { '1003': 'drop' }, channelAllowSend: { '1003': false },
+    id: 'g1',
+    slug: 'alpha',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    defaultTier: 'social',
+    allowSend: true,
+    defaultAllowSend: false,
+    channels: { '1003': 'drop' },
+    channelAllowSend: { '1003': false },
   };
   const { agent, config } = buildTestAgent({
-    config: { discord: { ...makeConfig().discord, guilds: [listenGuild], ambientTickMs: 60_000 } },
+    config: {
+      discord: {
+        ...makeConfig().discord,
+        guilds: [listenGuild],
+        ambientTickMs: 60_000,
+      },
+    },
     tmpPrefix: 'harness-discord-default-tier-',
   });
   const { client } = createDiscord(config, agent);
   const seen: string[] = [];
-  (agent as unknown as { enqueue: (m: { channelId: string }) => void }).enqueue = (m) => { seen.push(m.channelId); };
+  (
+    agent as unknown as { enqueue: (m: { channelId: string }) => void }
+  ).enqueue = (m) => {
+    seen.push(m.channelId);
+  };
 
-  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-default', guildId: 'g1', channelId: '9999', content: 'ambient digest material' }));
-  client.emit(Events.MessageCreate, fakeMessage({ id: 'm-drop', guildId: 'g1', channelId: '1003', content: 'must not enter' }));
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-default',
+      guildId: 'g1',
+      channelId: '9999',
+      content: 'ambient digest material',
+    }),
+  );
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-drop',
+      guildId: 'g1',
+      channelId: '1003',
+      content: 'must not enter',
+    }),
+  );
   await flush();
 
   assert.deepEqual(seen, ['9999']);

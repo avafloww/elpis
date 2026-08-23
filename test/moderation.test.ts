@@ -15,8 +15,14 @@ import type { GuildConfig } from '../src/config.js';
 import type { Agent } from '../src/agent.js';
 
 const guilds: GuildConfig[] = [
-  { id: 'g2', slug: 'friends-a', slashCommands: false, quietHours: null, timezone: null,
-    channels: { '2001': 'social' } },
+  {
+    id: 'g2',
+    slug: 'friends-a',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '2001': 'social' },
+  },
 ];
 
 function build() {
@@ -24,9 +30,12 @@ function build() {
   const built = buildTestAgent({
     config: { discord: { ...makeConfig().discord, guilds } },
     agentDeps: ({ tmpDir }) => {
- // The self-moderation notice names the agent from SOUL.md frontmatter —
- // written here (over the helper's bare '# Soul') to test the derivation.
-      fs.writeFileSync(path.join(tmpDir, 'SOUL.md'), '---\nname: Echo\n---\n\n# Soul\n');
+      // The self-moderation notice names the agent from SOUL.md frontmatter —
+      // written here (over the helper's bare '# Soul') to test the derivation.
+      fs.writeFileSync(
+        path.join(tmpDir, 'SOUL.md'),
+        '---\nname: Echo\n---\n\n# Soul\n',
+      );
       const db = openDatabase(tmpDir);
       const mutes = createMuteStore(db);
       mutesRef = mutes;
@@ -42,7 +51,10 @@ function build() {
 /** The last internal-provenance ([harness] ...) message drained into history. */
 function lastInternalNotice(agent: Agent): string {
   const users = agent.messagesForTest.filter(
-    (m) => m.role === 'user' && m.content.includes('channel="harness"') && m.content.includes('author="harness"'),
+    (m) =>
+      m.role === 'user' &&
+      m.content.includes('channel="harness"') &&
+      m.content.includes('author="harness"'),
   );
   return users[users.length - 1]?.content ?? '';
 }
@@ -56,7 +68,10 @@ test('moderate: self-mute writes a self row and appends an internal notice', asy
 
   void agent.loop();
   await new Promise((res) => setTimeout(res, 20));
-  assert.match(lastInternalNotice(agent), /friends-a\/lounge muted by Echo \(self\): asked to stop/);
+  assert.match(
+    lastInternalNotice(agent),
+    /friends-a\/lounge muted by Echo \(self\): asked to stop/,
+  );
   agent.stop();
   cleanup();
 });
@@ -65,7 +80,10 @@ test('moderate: send to a muted channel throws with reason and release note', as
   const { agent, cleanup } = build();
 
   agent.moderateChannel('2001', 'mute', 'self', 'asked to stop');
-  await assert.rejects(() => agent.send('2001', 'hi'), /muted.*asked to stop.*release is operator-only/s);
+  await assert.rejects(
+    () => agent.send('2001', 'hi'),
+    /muted.*asked to stop.*release is operator-only/s,
+  );
   agent.stop();
   cleanup();
 });
@@ -79,13 +97,23 @@ test('moderate: send to a muted channel throws with reason and release note', as
 test('moderate: a mute on a parent channel holds for a send into its thread', async () => {
   const { agent, mutes, sent, cleanup } = build();
 
- // A thread message as discord.ts builds it: the thread's own id/name for
- // provenance, the PARENT id for policy.
+  // A thread message as discord.ts builds it: the thread's own id/name for
+  // provenance, the PARENT id for policy.
   agent.enqueue({
-    id: 'm1', channelId: '2050', channelName: 'side-quest', author: 'ana', authorId: 'u1',
-    content: 'over here', createdAt: new Date().toISOString(),
-    replyTo: null, forwarded: null, mentions: [], attachments: [],
-    guildId: 'g2', wakeClass: 'ambient', policyChannelId: '2001',
+    id: 'm1',
+    channelId: '2050',
+    channelName: 'side-quest',
+    author: 'ana',
+    authorId: 'u1',
+    content: 'over here',
+    createdAt: new Date().toISOString(),
+    replyTo: null,
+    forwarded: null,
+    mentions: [],
+    attachments: [],
+    guildId: 'g2',
+    wakeClass: 'ambient',
+    policyChannelId: '2001',
   });
 
   agent.moderateChannel('2001', 'mute', 'operator', 'quiet please');
@@ -94,9 +122,13 @@ test('moderate: a mute on a parent channel holds for a send into its thread', as
     /parent.*muted.*quiet please.*release is operator-only/s,
   );
   assert.equal(sent.length, 0, 'nothing reached Discord');
-  assert.equal(mutes.get('2050'), null, 'the block comes from the parent — the thread has no row of its own');
+  assert.equal(
+    mutes.get('2050'),
+    null,
+    'the block comes from the parent — the thread has no row of its own',
+  );
 
- // Releasing the parent releases the thread with it.
+  // Releasing the parent releases the thread with it.
   agent.moderateChannel('2001', 'unmute', 'operator');
   await agent.send('2050', 'hi');
   assert.equal(sent.length, 1);
@@ -148,8 +180,14 @@ test('moderate: unmute clears a deafen row (deafen implies mute, one row either 
 
 test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, carrying guildSlug/tier/muteState', () => {
   const localGuilds: GuildConfig[] = [
-    { id: 'g3', slug: 'quiet-town', slashCommands: false, quietHours: null, timezone: null,
-      channels: { '3001': 'quiet' } },
+    {
+      id: 'g3',
+      slug: 'quiet-town',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      channels: { '3001': 'quiet' },
+    },
   ];
   const { agent, cleanup } = buildTestAgent({
     config: { discord: { ...makeConfig().discord, guilds: localGuilds } },
@@ -157,7 +195,7 @@ test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, car
       const db = openDatabase(tmpDir);
       const mutes = createMuteStore(db);
       const channels = createChannelDirectory(db, tmpDir, localGuilds);
- // deliberately never call channels.set('3001', ...) — it has never been spoken in
+      // deliberately never call channels.set('3001', ...) — it has never been spoken in
       return { mutes, channels };
     },
     tmpPrefix: 'harness-rooms-',
@@ -172,7 +210,10 @@ test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, car
   assert.equal(room!.count, 0);
 
   agent.moderateChannel('3001', 'deafen', 'operator');
-  assert.equal(agent.roomsSnapshot().find((r) => r.id === '3001')!.muteState, 'deafen');
+  assert.equal(
+    agent.roomsSnapshot().find((r) => r.id === '3001')!.muteState,
+    'deafen',
+  );
 
   const internal = rooms.find((r) => r.group === 'harness');
   assert.ok(internal, 'internal room present');
@@ -184,21 +225,36 @@ test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, car
 });
 
 test('config send deny blocks delivery and makes runtime mute redundant', async () => {
-  const lockedGuilds: GuildConfig[] = [{
-    id: 'g-lock', slug: 'locked', slashCommands: false, quietHours: null, timezone: null,
-    allowSend: true, defaultTier: 'drop', defaultAllowSend: false,
-    channels: { '4001': 'social' }, channelAllowSend: { '4001': false },
-  }];
+  const lockedGuilds: GuildConfig[] = [
+    {
+      id: 'g-lock',
+      slug: 'locked',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      allowSend: true,
+      defaultTier: 'drop',
+      defaultAllowSend: false,
+      channels: { '4001': 'social' },
+      channelAllowSend: { '4001': false },
+    },
+  ];
   const { agent, sent, cleanup } = buildTestAgent({
     config: { discord: { ...makeConfig().discord, guilds: lockedGuilds } },
     agentDeps: ({ tmpDir }) => {
       const db = openDatabase(tmpDir);
-      return { mutes: createMuteStore(db), channels: createChannelDirectory(db, tmpDir, lockedGuilds) };
+      return {
+        mutes: createMuteStore(db),
+        channels: createChannelDirectory(db, tmpDir, lockedGuilds),
+      };
     },
     tmpPrefix: 'harness-config-send-deny-',
   });
 
-  await assert.rejects(agent.send('4001', 'must not leave'), /sending.*disabled by configuration/i);
+  await assert.rejects(
+    agent.send('4001', 'must not leave'),
+    /sending.*disabled by configuration/i,
+  );
   assert.equal(sent.length, 0);
   const muted = agent.moderateChannel('4001', 'mute', 'self');
   assert.equal(muted.ok, false);
@@ -206,7 +262,12 @@ test('config send deny blocks delivery and makes runtime mute redundant', async 
   const room = agent.roomsSnapshot().find((r) => r.id === '4001');
   assert.equal(room?.allowSend, false);
   assert.equal(room?.sendDeniedBy, 'channel');
-  assert.equal((agent as unknown as { guildFullyMuted: (slug: string) => boolean }).guildFullyMuted('locked'), true,
-    'a guild with no config-permitted output room is structurally unspeakable');
+  assert.equal(
+    (
+      agent as unknown as { guildFullyMuted: (slug: string) => boolean }
+    ).guildFullyMuted('locked'),
+    true,
+    'a guild with no config-permitted output room is structurally unspeakable',
+  );
   cleanup();
 });

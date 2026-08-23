@@ -1,14 +1,14 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { openDatabase, runMigrations } from "../src/store/db.js";
-import { MindStore } from "../src/store/mind.js";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { openDatabase, runMigrations } from '../src/store/db.js';
+import { MindStore } from '../src/store/mind.js';
 import {
   resolveSecretarySession,
   secretaryControlTokenDigest,
-} from "../src/secretary/session.js";
+} from '../src/secretary/session.js';
 
 function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   const ledgerTriggers = db
@@ -87,20 +87,20 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
 
-test("v24 preserves v23 session and turn history while converting root to optional hint", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secretary-v24-"));
+test('v24 preserves v23 session and turn history while converting root to optional hint', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secretary-v24-'));
   const db = openDatabase(dir);
   const mind = new MindStore(db);
-  const root = mind.create({ title: "legacy exact root" });
+  const root = mind.create({ title: 'legacy exact root' });
   replaceWithV23Closure(db);
 
-  const sessionId = "sec-" + "m".repeat(22);
-  const turnId = "stn-" + "n".repeat(22);
-  const token = "z".repeat(43);
-  const request = JSON.stringify({ role: "user", content: "legacy question" });
+  const sessionId = 'sec-' + 'm'.repeat(22);
+  const turnId = 'stn-' + 'n'.repeat(22);
+  const token = 'z'.repeat(43);
+  const request = JSON.stringify({ role: 'user', content: 'legacy question' });
   const response = JSON.stringify({
-    role: "assistant",
-    content: "legacy durable answer",
+    role: 'assistant',
+    content: 'legacy durable answer',
   });
   db.prepare(
     `INSERT INTO secretary_sessions
@@ -118,18 +118,18 @@ test("v24 preserves v23 session and turn history while converting root to option
   runMigrations(db);
 
   const session = db
-    .prepare("SELECT * FROM secretary_sessions WHERE id=?")
+    .prepare('SELECT * FROM secretary_sessions WHERE id=?')
     .get(sessionId) as Record<string, unknown>;
   assert.equal(session.hint_mind_id, root.id);
-  assert.equal(Object.hasOwn(session, "root_mind_id"), false);
-  assert.equal(session.status, "closed");
-  assert.equal(session.pod_name, "pod-old");
-  assert.equal(session.pod_uid, "uid-old");
+  assert.equal(Object.hasOwn(session, 'root_mind_id'), false);
+  assert.equal(session.status, 'closed');
+  assert.equal(session.pod_name, 'pod-old');
+  assert.equal(session.pod_uid, 'uid-old');
   const turn = db
-    .prepare("SELECT * FROM secretary_turns WHERE id=?")
+    .prepare('SELECT * FROM secretary_turns WHERE id=?')
     .get(turnId) as Record<string, unknown>;
   assert.equal(turn.session_id, sessionId);
-  assert.equal(turn.status, "completed");
+  assert.equal(turn.status, 'completed');
   assert.equal(turn.request_json, request);
   assert.equal(turn.response_json, response);
   assert.equal(turn.claimed_at, 12);
@@ -137,10 +137,10 @@ test("v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     resolveSecretarySession(db, token),
     null,
-    "closed token stays revoked",
+    'closed token stays revoked',
   );
   assert.equal(
-    (db.prepare("PRAGMA user_version").get() as { user_version: number })
+    (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
     24,
   );
@@ -164,7 +164,7 @@ test("v24 preserves v23 session and turn history while converting root to option
     ).n,
     0,
   );
-  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });

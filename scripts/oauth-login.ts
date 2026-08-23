@@ -25,14 +25,18 @@ import {
   refreshOpenAICodexToken,
 } from '../src/llm/oauth/openai-codex.js';
 
-async function loginAnthropic(db: ReturnType<typeof openDatabase>): Promise<void> {
+async function loginAnthropic(
+  db: ReturnType<typeof openDatabase>,
+): Promise<void> {
   const { url, pkce, state } = startAnthropicLogin();
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   stdout.write('\nClaude subscription login (Pro/Max)\n');
   stdout.write('1. Open this URL in a browser and approve access:\n\n');
   stdout.write(`   ${url}\n\n`);
-  stdout.write('2. After approving, the page shows an authorization code (of the form `code#state`).\n');
+  stdout.write(
+    '2. After approving, the page shows an authorization code (of the form `code#state`).\n',
+  );
   const pasted = (await rl.question('   Paste it here: ')).trim();
   rl.close();
 
@@ -47,12 +51,20 @@ async function loginAnthropic(db: ReturnType<typeof openDatabase>): Promise<void
   const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
   store.write(creds);
 
-  const who = creds.email ? `${creds.email}${creds.orgName ? ` (${creds.orgName})` : ''}` : 'unknown account';
-  const grantExpiry = new Date((creds.authorizedAt ?? Date.now()) + ANTHROPIC_OAUTH_GRANT_TTL_MS);
+  const who = creds.email
+    ? `${creds.email}${creds.orgName ? ` (${creds.orgName})` : ''}`
+    : 'unknown account';
+  const grantExpiry = new Date(
+    (creds.authorizedAt ?? Date.now()) + ANTHROPIC_OAUTH_GRANT_TTL_MS,
+  );
   stdout.write(`\n✓ Logged in as ${who}\n`);
   stdout.write(`  credential: ${store.location}\n`);
-  stdout.write(`  the grant expires ~${grantExpiry.toISOString().slice(0, 10)} (≈30 days) — re-run this to renew.\n`);
-  stdout.write('\nSet `llm.provider_type: anthropic-oauth` (and llm.model) in config.yaml, then restart the harness.\n');
+  stdout.write(
+    `  the grant expires ~${grantExpiry.toISOString().slice(0, 10)} (≈30 days) — re-run this to renew.\n`,
+  );
+  stdout.write(
+    '\nSet `llm.provider_type: anthropic-oauth` (and llm.model) in config.yaml, then restart the harness.\n',
+  );
 }
 
 async function loginCodex(db: ReturnType<typeof openDatabase>): Promise<void> {
@@ -61,38 +73,61 @@ async function loginCodex(db: ReturnType<typeof openDatabase>): Promise<void> {
     onCode(url, code) {
       stdout.write('1. Open this URL in a browser:\n\n');
       stdout.write(`   ${url}\n\n`);
-      stdout.write('2. Sign in, enable device-code login if prompted, and enter this code:\n\n');
+      stdout.write(
+        '2. Sign in, enable device-code login if prompted, and enter this code:\n\n',
+      );
       stdout.write(`   ${code}\n\n`);
     },
     onProgress(message) {
       stdout.write(`${message}\n`);
     },
   });
-  const store = new OAuthStore(db, OPENAI_CODEX_CREDENTIAL_KEY, refreshOpenAICodexToken);
+  const store = new OAuthStore(
+    db,
+    OPENAI_CODEX_CREDENTIAL_KEY,
+    refreshOpenAICodexToken,
+  );
   store.write(creds);
-  const who = creds.email ? `${creds.email}${creds.orgName ? ` (${creds.orgName})` : ''}` : creds.accountId;
+  const who = creds.email
+    ? `${creds.email}${creds.orgName ? ` (${creds.orgName})` : ''}`
+    : creds.accountId;
   stdout.write(`\n✓ Logged in as ${who}\n`);
   stdout.write(`  credential: ${store.location}\n`);
-  stdout.write('\nSet `llm.provider_type: codex-oauth` (and llm.model) in config.yaml, then restart the harness.\n');
+  stdout.write(
+    '\nSet `llm.provider_type: codex-oauth` (and llm.model) in config.yaml, then restart the harness.\n',
+  );
 }
 
 async function main(): Promise<void> {
   const config = loadConfigFile();
   ensureDataDirectory(config.paths.dataDirectory);
-  const db = openDatabase(migrateDataLayout(config.paths.dataDirectory).layout.root);
-  const requested = (process.argv[2] ?? (config.llm.providerType === 'codex-oauth' ? 'codex' : 'anthropic')).toLowerCase();
+  const db = openDatabase(
+    migrateDataLayout(config.paths.dataDirectory).layout.root,
+  );
+  const requested = (
+    process.argv[2] ??
+    (config.llm.providerType === 'codex-oauth' ? 'codex' : 'anthropic')
+  ).toLowerCase();
   if (requested === 'anthropic' || requested === 'anthropic-oauth') {
     await loginAnthropic(db);
     return;
   }
-  if (requested === 'codex' || requested === 'codex-oauth' || requested === 'openai-codex') {
+  if (
+    requested === 'codex' ||
+    requested === 'codex-oauth' ||
+    requested === 'openai-codex'
+  ) {
     await loginCodex(db);
     return;
   }
-  throw new Error(`unknown OAuth provider ${JSON.stringify(requested)} — use anthropic or codex`);
+  throw new Error(
+    `unknown OAuth provider ${JSON.stringify(requested)} — use anthropic or codex`,
+  );
 }
 
 main().catch((e) => {
-  stdout.write(`\nlogin failed: ${e instanceof Error ? e.message : String(e)}\n`);
+  stdout.write(
+    `\nlogin failed: ${e instanceof Error ? e.message : String(e)}\n`,
+  );
   process.exitCode = 1;
 });

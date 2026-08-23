@@ -5,8 +5,10 @@ import type { Config } from '../config.js';
 import { resolveDataLayout } from '../store/data-layout.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const SECRET_HEADERS = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|chatgpt-account-id)$/i;
-const SECRET_FIELDS = /^(authorization|proxyAuthorization|cookie|setCookie|access[_-]?token|refresh[_-]?token|api[_-]?key|chatgpt[_-]?account[_-]?id)$/i;
+const SECRET_HEADERS =
+  /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|chatgpt-account-id)$/i;
+const SECRET_FIELDS =
+  /^(authorization|proxyAuthorization|cookie|setCookie|access[_-]?token|refresh[_-]?token|api[_-]?key|chatgpt[_-]?account[_-]?id)$/i;
 
 export interface WireRequestCapture {
   url: string;
@@ -21,7 +23,8 @@ export interface WireResponseCapture {
   headers: Record<string, string>;
   body: Uint8Array;
   bodyComplete?: boolean;
-  captureTrigger?: 'http-status' | 'stream-policy-event' | 'stream-policy-bytes';
+  captureTrigger?:
+    'http-status' | 'stream-policy-event' | 'stream-policy-bytes';
 }
 
 export interface PolicyDenialManifest {
@@ -44,7 +47,8 @@ export interface PolicyDenialManifest {
     bodyBytes: number;
     bodySha256: string;
     bodyComplete: boolean;
-    captureTrigger: 'http-status' | 'stream-policy-event' | 'stream-policy-bytes';
+    captureTrigger:
+      'http-status' | 'stream-policy-event' | 'stream-policy-bytes';
   };
   error: unknown;
   replay: {
@@ -63,7 +67,10 @@ function denialText(value: unknown, depth = 0): string {
   if (depth > 5 || value === null || value === undefined) return '';
   if (typeof value === 'string') return value;
   if (value instanceof Error) {
-    const cause = 'cause' in value ? (value as Error & { cause?: unknown }).cause : undefined;
+    const cause =
+      'cause' in value
+        ? (value as Error & { cause?: unknown }).cause
+        : undefined;
     return `${value.name} ${value.message} ${denialText(cause, depth + 1)}`;
   }
   if (typeof value !== 'object') return String(value);
@@ -75,18 +82,36 @@ function denialText(value: unknown, depth = 0): string {
 
 export function isPolicyDenial(value: unknown): boolean {
   const text = denialText(value);
-  return /flagged[\s\S]{0,240}usage policy|usage policy[\s\S]{0,240}flagged/i.test(text);
+  return /flagged[\s\S]{0,240}usage policy|usage policy[\s\S]{0,240}flagged/i.test(
+    text,
+  );
 }
 
 function safeClone(value: unknown, seen = new WeakSet<object>()): unknown {
-  if (value === null || value === undefined || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  )
+    return value;
   if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'function' || typeof value === 'symbol') return String(value);
+  if (typeof value === 'function' || typeof value === 'symbol')
+    return String(value);
   if (value instanceof Error) {
     const object = value as Error & Record<string, unknown>;
-    const out: Record<string, unknown> = { name: value.name, message: value.message, stack: value.stack };
-    for (const key of Object.keys(object)) out[key] = SECRET_FIELDS.test(key) ? '[redacted]' : safeClone(object[key], seen);
-    if ('cause' in value) out.cause = safeClone((value as Error & { cause?: unknown }).cause, seen);
+    const out: Record<string, unknown> = {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+    for (const key of Object.keys(object))
+      out[key] = SECRET_FIELDS.test(key)
+        ? '[redacted]'
+        : safeClone(object[key], seen);
+    if ('cause' in value)
+      out.cause = safeClone((value as Error & { cause?: unknown }).cause, seen);
     return out;
   }
   if (typeof value !== 'object') return String(value);
@@ -94,7 +119,8 @@ function safeClone(value: unknown, seen = new WeakSet<object>()): unknown {
   seen.add(value);
   if (Array.isArray(value)) return value.map((entry) => safeClone(entry, seen));
   const out: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) out[key] = SECRET_FIELDS.test(key) ? '[redacted]' : safeClone(entry, seen);
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>))
+    out[key] = SECRET_FIELDS.test(key) ? '[redacted]' : safeClone(entry, seen);
   return out;
 }
 
@@ -121,13 +147,22 @@ function prune(root: string, now = Date.now()): void {
     const directory = path.join(root, entry.name);
     let createdAt: number;
     try {
-      const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8')) as { createdAt?: unknown };
-      createdAt = typeof manifest.createdAt === 'string' ? Date.parse(manifest.createdAt) : Number.NaN;
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'),
+      ) as { createdAt?: unknown };
+      createdAt =
+        typeof manifest.createdAt === 'string'
+          ? Date.parse(manifest.createdAt)
+          : Number.NaN;
     } catch {
       continue;
     }
     if (Number.isFinite(createdAt) && now - createdAt > RETENTION_MS) {
-      try { fs.rmSync(directory, { recursive: true, force: true }); } catch { /* best effort */ }
+      try {
+        fs.rmSync(directory, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
     }
   }
 }
@@ -139,7 +174,11 @@ export function recordPolicyDenial(
   response: WireResponseCapture,
   error: unknown,
 ): PolicyDenialRecord | null {
-  if (!isPolicyDenial(error) && !isPolicyDenial(new TextDecoder().decode(response.body))) return null;
+  if (
+    !isPolicyDenial(error) &&
+    !isPolicyDenial(new TextDecoder().decode(response.body))
+  )
+    return null;
   const root = resolveDataLayout(config.paths.dataDirectory).policyDenials;
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.chmodSync(root, 0o700);
@@ -158,7 +197,11 @@ export function recordPolicyDenial(
     request: {
       url: request.url,
       method: request.method,
-      headers: Object.fromEntries(Object.entries(request.headers).filter(([key]) => !SECRET_HEADERS.test(key))),
+      headers: Object.fromEntries(
+        Object.entries(request.headers).filter(
+          ([key]) => !SECRET_HEADERS.test(key),
+        ),
+      ),
       bodyFile: 'request-body.bin',
       bodyBytes: request.body.byteLength,
       bodySha256: sha256(request.body),
@@ -166,7 +209,11 @@ export function recordPolicyDenial(
     response: {
       status: response.status,
       statusText: response.statusText,
-      headers: Object.fromEntries(Object.entries(response.headers).filter(([key]) => !SECRET_HEADERS.test(key))),
+      headers: Object.fromEntries(
+        Object.entries(response.headers).filter(
+          ([key]) => !SECRET_HEADERS.test(key),
+        ),
+      ),
       bodyFile: 'response-body.bin',
       bodyBytes: response.body.byteLength,
       bodySha256: sha256(response.body),

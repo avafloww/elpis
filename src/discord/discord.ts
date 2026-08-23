@@ -57,38 +57,38 @@ import {
   ComponentType,
   type Message,
   type Guild,
-} from "discord.js";
-import { mkdir } from "node:fs/promises";
-import * as path from "node:path";
-import { createWriteStream, readFileSync } from "node:fs";
-import type { Agent, InboundMessage } from "../agent.js";
-import type { Config } from "../config.js";
+} from 'discord.js';
+import { mkdir } from 'node:fs/promises';
+import * as path from 'node:path';
+import { createWriteStream, readFileSync } from 'node:fs';
+import type { Agent, InboundMessage } from '../agent.js';
+import type { Config } from '../config.js';
 import {
   classifyEmoji,
   type FeedbackStore,
   type Verdict,
-} from "../store/feedback.js";
-import type { ProviderUsageSnapshot } from "../llm/usage-tracker.js";
-import type { CacheInfo } from "../llm/cache-stats.js";
+} from '../store/feedback.js';
+import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
+import type { CacheInfo } from '../llm/cache-stats.js';
 import {
   buildGuildIndex,
   classifyInbound,
   resolveChannelPolicy,
   type WakeInput,
   type GuildIndex,
-} from "./wake.js";
-import type { MuteStore } from "../store/mutes.js";
-import type { EmoteRegistry } from "./emotes.js";
-import { restartHarnessService } from "../lib/lifecycle.js";
-import { sniffFileMediaType } from "../lib/image.js";
-import { ATTACHMENT_DIR } from "../types.js";
+} from './wake.js';
+import type { MuteStore } from '../store/mutes.js';
+import type { EmoteRegistry } from './emotes.js';
+import { restartHarnessService } from '../lib/lifecycle.js';
+import { sniffFileMediaType } from '../lib/image.js';
+import { ATTACHMENT_DIR } from '../types.js';
 import {
   PLURALKIT_BOT_ID,
   PluralKitResolver,
   isPluralKitCommand,
   pluralKitIdentity,
   type PluralKitMessage,
-} from "./pluralkit.js";
+} from './pluralkit.js';
 import {
   formatMindDetail,
   formatMindLine,
@@ -99,8 +99,8 @@ import {
   type MindService,
   type MindSort,
   type MindStatus,
-} from "../store/mind.js";
-import type { MindId } from "../store/mind-id.js";
+} from '../store/mind.js';
+import type { MindId } from '../store/mind-id.js';
 
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 MB Discord limit for non-nitro
 
@@ -111,10 +111,10 @@ export function attachmentLocalPath(
   name: string,
   index: number,
 ): string {
-  const baseName = name || "attachment";
+  const baseName = name || 'attachment';
   const ext = path.extname(baseName);
   const stem = ext ? baseName.slice(0, -ext.length) : baseName;
-  const safeName = `${stem}-${index}${ext || ""}`;
+  const safeName = `${stem}-${index}${ext || ''}`;
   return path.join(baseDir, safeName);
 }
 
@@ -133,7 +133,7 @@ export async function downloadAttachment(
 
   try {
     const res = await fetch(attachment.url, {
-      headers: { "User-Agent": "elpis/0.1" },
+      headers: { 'User-Agent': 'elpis/0.1' },
     });
     if (!res.ok || !res.body) {
       log.warn(`downloadAttachment: ${attachment.name} HTTP ${res.status}`);
@@ -151,7 +151,7 @@ export async function downloadAttachment(
     }
     await new Promise<void>((resolve, reject) => {
       file.end(() => resolve());
-      file.on("error", reject);
+      file.on('error', reject);
     });
     log.info(`downloadAttachment: saved ${attachment.name} to ${localPath}`);
     return localPath;
@@ -194,8 +194,8 @@ export function isInlinableAttachmentType(contentType: string | null): boolean {
  * mislabeled as text (NUL bytes). Returns the text to inline, or null to
  * fall back to path-only. Pure; exported for tests. */
 export function guardInlineText(text: string): string | null {
-  if (text.includes("</attachment-content>")) return null;
-  if (text.includes("\u0000")) return null;
+  if (text.includes('</attachment-content>')) return null;
+  if (text.includes('\u0000')) return null;
   return text;
 }
 
@@ -203,7 +203,7 @@ async function buildInboundAttachments(
   message: Message,
   inlineBudgetBytes: number,
   log: { warn: (...a: unknown[]) => void; info: (...a: unknown[]) => void },
-): Promise<import("../agent.js").InboundMessageAttachment[]> {
+): Promise<import('../agent.js').InboundMessageAttachment[]> {
   const attachments = [...message.attachments.values()];
   // The downloads themselves are independent network fetches, so run them
   // concurrently. The inline-budget decision below is NOT independent — it's
@@ -221,7 +221,7 @@ async function buildInboundAttachments(
     ),
   );
 
-  const out: import("../agent.js").InboundMessageAttachment[] = [];
+  const out: import('../agent.js').InboundMessageAttachment[] = [];
   // Per-MESSAGE budget: a message with several small text files inlines them
   // until the budget is spent; the rest stay path-only. Bounds the context
   // cost of any single inbound regardless of attachment count.
@@ -247,7 +247,7 @@ async function buildInboundAttachments(
       a.size <= inlineRemaining
     ) {
       try {
-        inlineText = guardInlineText(readFileSync(localPath, "utf8"));
+        inlineText = guardInlineText(readFileSync(localPath, 'utf8'));
         if (inlineText !== null) inlineRemaining -= a.size;
       } catch (e) {
         log.warn(
@@ -275,8 +275,8 @@ export function chunkText(text: string, max = CHUNK_MAX): string[] {
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > max) {
-    let cut = remaining.lastIndexOf("\n", max);
-    if (cut <= 0) cut = remaining.lastIndexOf(" ", max);
+    let cut = remaining.lastIndexOf('\n', max);
+    if (cut <= 0) cut = remaining.lastIndexOf(' ', max);
     if (cut <= 0) cut = max;
     chunks.push(remaining.slice(0, cut));
     remaining = remaining.slice(cut).trimStart();
@@ -300,19 +300,19 @@ export interface DiscordWiring {
 /** Names of every slash command this harness registers. Kept in sync with
  * buildCommandDefinitions and the InteractionCreate handler. */
 export const SLASH_COMMAND_NAMES = [
-  "clear",
-  "new",
-  "clear-thinking",
-  "compact",
-  "exec",
-  "restart",
-  "usage",
-  "cache",
-  "mute",
-  "unmute",
-  "deafen",
-  "undeafen",
-  "mind",
+  'clear',
+  'new',
+  'clear-thinking',
+  'compact',
+  'exec',
+  'restart',
+  'usage',
+  'cache',
+  'mute',
+  'unmute',
+  'deafen',
+  'undeafen',
+  'mind',
 ] as const;
 export type SlashCommandName = (typeof SLASH_COMMAND_NAMES)[number];
 
@@ -337,377 +337,377 @@ export function clearThinkingCancelCustomId(userId: string): string {
 export function buildCommandDefinitions() {
   return [
     new SlashCommandBuilder()
-      .setName("clear")
+      .setName('clear')
       .setDescription(
         "Wipe the agent's entire working memory (all channels) after a confirmation",
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("new")
+      .setName('new')
       .setDescription(
         "Alias of /clear — wipe the agent's entire working memory after a confirmation",
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("clear-thinking")
+      .setName('clear-thinking')
       .setDescription(
-        "Clear stored provider thinking payloads after a model/provider switch",
+        'Clear stored provider thinking payloads after a model/provider switch',
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("compact")
+      .setName('compact')
       .setDescription(
-        "Trigger a compaction cycle (non-destructive summarize of older context)",
+        'Trigger a compaction cycle (non-destructive summarize of older context)',
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("exec")
+      .setName('exec')
       .setDescription(
-        "Execute arbitrary JS in the agent sandbox (operator only)",
+        'Execute arbitrary JS in the agent sandbox (operator only)',
       )
       .addStringOption((option: SlashCommandStringOption) =>
         option
-          .setName("code")
-          .setDescription("JavaScript code to run")
+          .setName('code')
+          .setDescription('JavaScript code to run')
           .setRequired(true),
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("restart")
+      .setName('restart')
       .setDescription(
-        "Flush transcripts and restart the harness service (operator only)",
+        'Flush transcripts and restart the harness service (operator only)',
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("usage")
+      .setName('usage')
       .setDescription(
-        "Show provider subscription usage (5h / weekly windows) (operator only)",
+        'Show provider subscription usage (5h / weekly windows) (operator only)',
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("cache")
+      .setName('cache')
       .setDescription(
-        "Show prompt-cache hit rates and cache busts (operator only)",
+        'Show prompt-cache hit rates and cache busts (operator only)',
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("mind")
-      .setDescription("Read and tend the private dependency-aware work graph")
+      .setName('mind')
+      .setDescription('Read and tend the private dependency-aware work graph')
       .addSubcommand((s) =>
         s
-          .setName("list")
-          .setDescription("List work")
+          .setName('list')
+          .setDescription('List work')
           .addStringOption((o) =>
             o
-              .setName("view")
-              .setDescription("Which slice")
+              .setName('view')
+              .setDescription('Which slice')
               .addChoices(
-                { name: "ready", value: "ready" },
-                { name: "active", value: "active" },
-                { name: "blocked", value: "blocked" },
-                { name: "waiting", value: "waiting" },
-                { name: "done", value: "done" },
-                { name: "overdue", value: "overdue" },
-                { name: "inbox", value: "inbox" },
-                { name: "all", value: "all" },
+                { name: 'ready', value: 'ready' },
+                { name: 'active', value: 'active' },
+                { name: 'blocked', value: 'blocked' },
+                { name: 'waiting', value: 'waiting' },
+                { name: 'done', value: 'done' },
+                { name: 'overdue', value: 'overdue' },
+                { name: 'inbox', value: 'inbox' },
+                { name: 'all', value: 'all' },
               ),
           )
           .addStringOption((o) =>
             o
-              .setName("sort")
-              .setDescription("Ordering (default: recently updated)")
+              .setName('sort')
+              .setDescription('Ordering (default: recently updated)')
               .addChoices(
-                { name: "updated · newest first", value: "updated_desc" },
-                { name: "updated · oldest first", value: "updated_asc" },
-                { name: "created · newest first", value: "created_desc" },
-                { name: "created · oldest first", value: "created_asc" },
+                { name: 'updated · newest first', value: 'updated_desc' },
+                { name: 'updated · oldest first', value: 'updated_asc' },
+                { name: 'created · newest first', value: 'created_desc' },
+                { name: 'created · oldest first', value: 'created_asc' },
                 {
-                  name: "last comment · newest first",
-                  value: "last_comment_desc",
+                  name: 'last comment · newest first',
+                  value: 'last_comment_desc',
                 },
                 {
-                  name: "last comment · oldest first",
-                  value: "last_comment_asc",
+                  name: 'last comment · oldest first',
+                  value: 'last_comment_asc',
                 },
               ),
           )
           .addStringOption((o) =>
             o
-              .setName("query")
-              .setDescription("Search title, body, and comments"),
+              .setName('query')
+              .setDescription('Search title, body, and comments'),
           )
           .addIntegerOption((o) =>
             o
-              .setName("limit")
-              .setDescription("Maximum rows (1–30)")
+              .setName('limit')
+              .setDescription('Maximum rows (1–30)')
               .setMinValue(1)
               .setMaxValue(30),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("read")
+          .setName('read')
           .setDescription(
-            "Read one item with dependencies, comments, and reminders",
+            'Read one item with dependencies, comments, and reminders',
           )
           .addStringOption((o) =>
             o
-              .setName("id")
-              .setDescription("Item id (#12 or m-12)")
+              .setName('id')
+              .setDescription('Item id (#12 or m-12)')
               .setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("add")
-          .setDescription("Add an item")
+          .setName('add')
+          .setDescription('Add an item')
           .addStringOption((o) =>
             o
-              .setName("title")
-              .setDescription("Short action or idea")
+              .setName('title')
+              .setDescription('Short action or idea')
               .setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("details").setDescription("Body / acceptance notes"),
+            o.setName('details').setDescription('Body / acceptance notes'),
           )
           .addStringOption((o) =>
             o
-              .setName("kind")
-              .setDescription("Item kind")
+              .setName('kind')
+              .setDescription('Item kind')
               .addChoices(
-                { name: "task", value: "task" },
-                { name: "project", value: "project" },
-                { name: "idea", value: "idea" },
-                { name: "question", value: "question" },
-                { name: "reminder", value: "reminder" },
+                { name: 'task', value: 'task' },
+                { name: 'project', value: 'project' },
+                { name: 'idea', value: 'idea' },
+                { name: 'question', value: 'question' },
+                { name: 'reminder', value: 'reminder' },
               ),
           )
           .addIntegerOption((o) =>
             o
-              .setName("priority")
-              .setDescription("0 none · 1 low · 2 normal · 3 high · 4 urgent")
+              .setName('priority')
+              .setDescription('0 none · 1 low · 2 normal · 3 high · 4 urgent')
               .setMinValue(0)
               .setMaxValue(4),
           )
           .addStringOption((o) =>
             o
-              .setName("depends_on")
-              .setDescription("Comma-separated prerequisite ids"),
+              .setName('depends_on')
+              .setDescription('Comma-separated prerequisite ids'),
           )
           .addStringOption((o) =>
-            o.setName("parent").setDescription("Parent project/item id"),
+            o.setName('parent').setDescription('Parent project/item id'),
           )
           .addStringOption((o) =>
-            o.setName("due").setDescription("ISO date/time"),
+            o.setName('due').setDescription('ISO date/time'),
           )
           .addStringOption((o) =>
             o
-              .setName("remind")
-              .setDescription("ISO date/time for a scheduler wake"),
+              .setName('remind')
+              .setDescription('ISO date/time for a scheduler wake'),
           )
           .addStringOption((o) =>
-            o.setName("tags").setDescription("Comma-separated tags"),
+            o.setName('tags').setDescription('Comma-separated tags'),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("edit")
-          .setDescription("Edit an item")
+          .setName('edit')
+          .setDescription('Edit an item')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("title").setDescription("Replacement title"),
+            o.setName('title').setDescription('Replacement title'),
           )
           .addStringOption((o) =>
-            o.setName("details").setDescription("Replacement body"),
+            o.setName('details').setDescription('Replacement body'),
           )
           .addStringOption((o) =>
             o
-              .setName("status")
-              .setDescription("Workflow status")
+              .setName('status')
+              .setDescription('Workflow status')
               .addChoices(
-                { name: "inbox", value: "inbox" },
-                { name: "open", value: "open" },
-                { name: "in progress", value: "in_progress" },
-                { name: "waiting", value: "waiting" },
-                { name: "done", value: "done" },
-                { name: "cancelled", value: "cancelled" },
+                { name: 'inbox', value: 'inbox' },
+                { name: 'open', value: 'open' },
+                { name: 'in progress', value: 'in_progress' },
+                { name: 'waiting', value: 'waiting' },
+                { name: 'done', value: 'done' },
+                { name: 'cancelled', value: 'cancelled' },
               ),
           )
           .addIntegerOption((o) =>
             o
-              .setName("priority")
-              .setDescription("0–4")
+              .setName('priority')
+              .setDescription('0–4')
               .setMinValue(0)
               .setMaxValue(4),
           )
           .addStringOption((o) =>
-            o.setName("due").setDescription("ISO date/time, or clear"),
+            o.setName('due').setDescription('ISO date/time, or clear'),
           )
           .addStringOption((o) =>
             o
-              .setName("tags")
-              .setDescription("Replacement comma-separated tags"),
+              .setName('tags')
+              .setDescription('Replacement comma-separated tags'),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("done")
-          .setDescription("Complete an item")
+          .setName('done')
+          .setDescription('Complete an item')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("comment").setDescription("Closing note"),
+            o.setName('comment').setDescription('Closing note'),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("start")
-          .setDescription("Mark an item in progress")
+          .setName('start')
+          .setDescription('Mark an item in progress')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("wait")
-          .setDescription("Mark an item waiting")
+          .setName('wait')
+          .setDescription('Mark an item waiting')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("comment").setDescription("What it is waiting on"),
+            o.setName('comment').setDescription('What it is waiting on'),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("comment")
-          .setDescription("Append a comment")
+          .setName('comment')
+          .setDescription('Append a comment')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("text").setDescription("Comment").setRequired(true),
+            o.setName('text').setDescription('Comment').setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("link")
-          .setDescription("Make one item depend on another")
+          .setName('link')
+          .setDescription('Make one item depend on another')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Blocked item").setRequired(true),
+            o.setName('id').setDescription('Blocked item').setRequired(true),
           )
           .addStringOption((o) =>
             o
-              .setName("depends_on")
-              .setDescription("Prerequisite item")
+              .setName('depends_on')
+              .setDescription('Prerequisite item')
               .setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("unlink")
-          .setDescription("Remove a dependency")
+          .setName('unlink')
+          .setDescription('Remove a dependency')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Dependent item").setRequired(true),
+            o.setName('id').setDescription('Dependent item').setRequired(true),
           )
           .addStringOption((o) =>
             o
-              .setName("depends_on")
-              .setDescription("Prerequisite item")
+              .setName('depends_on')
+              .setDescription('Prerequisite item')
               .setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("remind")
-          .setDescription("Schedule a wake for an item")
+          .setName('remind')
+          .setDescription('Schedule a wake for an item')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           )
           .addStringOption((o) =>
-            o.setName("when").setDescription("ISO date/time").setRequired(true),
+            o.setName('when').setDescription('ISO date/time').setRequired(true),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("graph")
-          .setDescription("Show the nearby dependency/hierarchy graph")
+          .setName('graph')
+          .setDescription('Show the nearby dependency/hierarchy graph')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Root item").setRequired(true),
+            o.setName('id').setDescription('Root item').setRequired(true),
           )
           .addIntegerOption((o) =>
             o
-              .setName("depth")
-              .setDescription("Traversal depth (1–8)")
+              .setName('depth')
+              .setDescription('Traversal depth (1–8)')
               .setMinValue(1)
               .setMaxValue(8),
           ),
       )
       .addSubcommand((s) =>
         s
-          .setName("archive")
-          .setDescription("Soft-archive an item")
+          .setName('archive')
+          .setDescription('Soft-archive an item')
           .addStringOption((o) =>
-            o.setName("id").setDescription("Item id").setRequired(true),
+            o.setName('id').setDescription('Item id').setRequired(true),
           ),
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("mute")
+      .setName('mute')
       .setDescription(
-        "Operator: mute a channel — the agent keeps hearing it but cannot speak there",
+        'Operator: mute a channel — the agent keeps hearing it but cannot speak there',
       )
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("channel")
-          .setDescription("Qualified ref (friends-a/lounge) or raw id")
+          .setName('channel')
+          .setDescription('Qualified ref (friends-a/lounge) or raw id')
           .setRequired(true),
       )
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("reason")
-          .setDescription("Why — logged and shown to the agent")
+          .setName('reason')
+          .setDescription('Why — logged and shown to the agent')
           .setRequired(false),
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("unmute")
-      .setDescription("Operator: release a mute")
+      .setName('unmute')
+      .setDescription('Operator: release a mute')
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("channel")
-          .setDescription("Qualified ref (friends-a/lounge) or raw id")
+          .setName('channel')
+          .setDescription('Qualified ref (friends-a/lounge) or raw id')
           .setRequired(true),
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("deafen")
+      .setName('deafen')
       .setDescription(
         "Operator: deafen a channel — it stops entering the agent's context entirely (implies mute)",
       )
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("channel")
-          .setDescription("Qualified ref (friends-a/lounge) or raw id")
+          .setName('channel')
+          .setDescription('Qualified ref (friends-a/lounge) or raw id')
           .setRequired(true),
       )
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("reason")
-          .setDescription("Why — logged and shown to the agent")
+          .setName('reason')
+          .setDescription('Why — logged and shown to the agent')
           .setRequired(false),
       )
       .toJSON(),
     new SlashCommandBuilder()
-      .setName("undeafen")
-      .setDescription("Operator: release a deafen")
+      .setName('undeafen')
+      .setDescription('Operator: release a deafen')
       .addStringOption((o: SlashCommandStringOption) =>
         o
-          .setName("channel")
-          .setDescription("Qualified ref (friends-a/lounge) or raw id")
+          .setName('channel')
+          .setDescription('Qualified ref (friends-a/lounge) or raw id')
           .setRequired(true),
       )
       .toJSON(),
@@ -814,11 +814,11 @@ export function resolveTypingGuildId(
  * absent (uncached partial, DM, or a null parent). Pure; exported for tests. */
 export function channelDisplayName(ch: unknown): string {
   return ch !== null &&
-    typeof ch === "object" &&
-    "name" in ch &&
-    typeof (ch as { name?: unknown }).name === "string"
+    typeof ch === 'object' &&
+    'name' in ch &&
+    typeof (ch as { name?: unknown }).name === 'string'
     ? (ch as { name: string }).name
-    : "unknown";
+    : 'unknown';
 }
 
 /** Names Discord already attached to an inbound message, keyed by id — the
@@ -843,11 +843,11 @@ export function resolveMentions(content: string, names: MentionNames): string {
   return content.replace(
     /<(@[!&]?|#)(\d+)>/g,
     (raw: string, kind: string, id: string) => {
-      if (kind === "#") {
+      if (kind === '#') {
         const name = names.channels?.get(id);
         return name ? `#${name}` : raw;
       }
-      if (kind === "@&") {
+      if (kind === '@&') {
         const name = names.roles?.get(id);
         return name ? `@${name}` : raw;
       }
@@ -913,7 +913,7 @@ function nameMap<T extends { id: string }>(
   const items = coll as
     | { map?: (fn: (x: T) => [string, string]) => [string, string][] }
     | undefined;
-  if (!items || typeof items.map !== "function") return new Map();
+  if (!items || typeof items.map !== 'function') return new Map();
   return new Map(items.map((x: T): [string, string] => [x.id, name(x)]));
 }
 
@@ -926,7 +926,7 @@ function mentionNamesFor(message: Message): MentionNames {
   return {
     users: nameMap<{ id: string; displayName?: string; username?: string }>(
       m.users,
-      (u) => u.displayName || u.username || "unknown",
+      (u) => u.displayName || u.username || 'unknown',
     ),
     roles: nameMap<{ id: string; name: string }>(m.roles, (r) => r.name),
     channels: nameMap<{ id: string }>(m.channels, (c) => channelDisplayName(c)),
@@ -949,7 +949,7 @@ export function isAuthorizedOperator(config: Config, userId: string): boolean {
  * by all eleven slash commands. Pure; exported for tests. */
 export function operatorGateReason(config: Config, name: string): string {
   return config.operator.discordId
-    ? "You are not authorized to use this command."
+    ? 'You are not authorized to use this command.'
     : `/${name} is disabled (operator.discord_id not set).`;
 }
 
@@ -959,8 +959,8 @@ interface ModerationAgent {
   resolveChannelRef(ref: string): string | null;
   moderateChannel(
     channelId: string,
-    action: "mute" | "unmute" | "deafen" | "undeafen",
-    actor: "operator",
+    action: 'mute' | 'unmute' | 'deafen' | 'undeafen',
+    actor: 'operator',
     reason?: string,
   ): { ok: boolean; note: string };
 }
@@ -979,7 +979,7 @@ interface ModerationAgent {
  * Pure over the two injected agent calls; exported for tests. */
 export function resolveModerationCommand(
   agent: ModerationAgent,
-  action: "mute" | "unmute" | "deafen" | "undeafen",
+  action: 'mute' | 'unmute' | 'deafen' | 'undeafen',
   ref: string,
   reason?: string,
 ): { ok: boolean; note: string } {
@@ -999,7 +999,7 @@ export function resolveModerationCommand(
         `unknown channel "${ref}" — use a qualified ref like friends-a/lounge or a raw id`,
     };
   }
-  return agent.moderateChannel(channelId, action, "operator", reason);
+  return agent.moderateChannel(channelId, action, 'operator', reason);
 }
 
 /** Decide whether a Discord reaction is feedback, and its verdict. Returns null
@@ -1029,7 +1029,7 @@ const FENCE = String.fromCharCode(96, 96, 96);
  * concern, the cell math is identical at both sites. */
 function tenCellBar(ratio: number): string {
   const filled = Math.max(0, Math.min(10, Math.round(ratio * 10)));
-  return "▓".repeat(filled) + "░".repeat(10 - filled);
+  return '▓'.repeat(filled) + '░'.repeat(10 - filled);
 }
 
 /** Format a sandbox RunResult for the /exec ephemeral reply. */
@@ -1041,22 +1041,22 @@ function formatExecResult(result: {
   error?: string;
 }): string {
   const parts: string[] = [];
-  parts.push(result.ok ? "✅ ok" : "❌ error");
+  parts.push(result.ok ? '✅ ok' : '❌ error');
   if (result.preview !== undefined) {
-    parts.push(FENCE + "\n" + result.preview + "\n" + FENCE);
+    parts.push(FENCE + '\n' + result.preview + '\n' + FENCE);
   }
   if (result.savedAs) {
-    parts.push("saved as: " + result.savedAs);
+    parts.push('saved as: ' + result.savedAs);
   }
   if (result.logs) {
-    parts.push("logs:" + "\n" + FENCE + "\n" + result.logs + "\n" + FENCE);
+    parts.push('logs:' + '\n' + FENCE + '\n' + result.logs + '\n' + FENCE);
   }
   if (result.error) {
-    parts.push("error:" + "\n" + FENCE + "\n" + result.error + "\n" + FENCE);
+    parts.push('error:' + '\n' + FENCE + '\n' + result.error + '\n' + FENCE);
   }
-  const joined = parts.join("\n\n");
+  const joined = parts.join('\n\n');
   if (joined.length <= 1900) return joined;
-  return joined.slice(0, 1900 - 3) + "...";
+  return joined.slice(0, 1900 - 3) + '...';
 }
 
 /** Humanize a millisecond delta for reset countdowns ("6d 18h", "5h 0m", "3m"). */
@@ -1068,7 +1068,7 @@ function formatDelta(ms: number): string {
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m`;
-  return "<1m";
+  return '<1m';
 }
 
 /** Render a ProviderUsageSnapshot as monospace text bars for the /usage reply.
@@ -1077,24 +1077,24 @@ export function formatUsageBars(
   snap: ProviderUsageSnapshot | null,
   now: number = Date.now(),
 ): string {
-  if (!snap) return "usage tracking not active for the current endpoint.";
+  if (!snap) return 'usage tracking not active for the current endpoint.';
   const lines: string[] = [
-    `${snap.label} usage${snap.error ? " (stale, fetch failed)" : ""}`,
+    `${snap.label} usage${snap.error ? ' (stale, fetch failed)' : ''}`,
   ];
-  if (snap.windows.length === 0) lines.push("no usage data available.");
+  if (snap.windows.length === 0) lines.push('no usage data available.');
   for (const w of snap.windows) {
     const pct = Math.round(w.usedPct);
     const bar = tenCellBar(w.usedPct / 100);
-    let reset = "";
+    let reset = '';
     if (w.resetAt) {
       const dt = Date.parse(w.resetAt) - now;
-      reset = dt <= 0 ? "   resetting…" : `   resets in ${formatDelta(dt)}`;
+      reset = dt <= 0 ? '   resetting…' : `   resets in ${formatDelta(dt)}`;
     }
     lines.push(
       `${w.label.padEnd(4)} ${bar} ${String(pct).padStart(3)}%${reset}`,
     );
   }
-  return FENCE + "\n" + lines.join("\n") + "\n" + FENCE;
+  return FENCE + '\n' + lines.join('\n') + '\n' + FENCE;
 }
 
 /** Render CacheInfo as monospace text bars for the /cache reply. Pure — cache
@@ -1104,22 +1104,22 @@ export function formatUsageBars(
  * labeled and the commands are separate, so this is documented, not designed
  * around. */
 export function formatCacheBars(cache: CacheInfo | null): string {
-  const wrap = (body: string) => FENCE + "\n" + body + "\n" + FENCE;
+  const wrap = (body: string) => FENCE + '\n' + body + '\n' + FENCE;
   if (!cache) {
-    return wrap("prompt cache: not reported by the current endpoint.");
+    return wrap('prompt cache: not reported by the current endpoint.');
   }
   if (cache.turns === 0) {
-    return wrap("prompt cache: no completions recorded yet.");
+    return wrap('prompt cache: no completions recorded yet.');
   }
   if (!cache.supported) {
-    return wrap("prompt cache: not reported by the current endpoint.");
+    return wrap('prompt cache: not reported by the current endpoint.');
   }
   const bar = tenCellBar;
-  const exact = (n: number) => n.toLocaleString("en-US");
+  const exact = (n: number) => n.toLocaleString('en-US');
   /** Session sums run to millions; abbreviate them like the console rail does. */
   const brief = (n: number) => {
-    if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
-    if (n >= 1e4) return Math.round(n / 1e3) + "k";
+    if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+    if (n >= 1e4) return Math.round(n / 1e3) + 'k';
     return exact(n);
   };
   const row = (
@@ -1132,16 +1132,16 @@ export function formatCacheBars(cache: CacheInfo | null): string {
     `${label.padEnd(4)} ${bar(r)} ${String(Math.round(r * 100)).padStart(3)}%   ` +
     `cached ${fmt(cached)} · new ${fmt(fresh)}`;
   const lines = [
-    "prompt cache",
-    row("last", cache.lastRatio, cache.lastCached, cache.lastNew, exact),
-    row("sess", cache.totalRatio, cache.totalCached, cache.totalNew, brief),
+    'prompt cache',
+    row('last', cache.lastRatio, cache.lastCached, cache.lastNew, exact),
+    row('sess', cache.totalRatio, cache.totalCached, cache.totalNew, brief),
   ];
   if (cache.bustCount > 0) {
     lines.push(
-      `${cache.bustCount} bust${cache.bustCount === 1 ? "" : "s"} · ${cache.bustTokens.toLocaleString("en-US")} rewritten`,
+      `${cache.bustCount} bust${cache.bustCount === 1 ? '' : 's'} · ${cache.bustTokens.toLocaleString('en-US')} rewritten`,
     );
   }
-  return wrap(lines.join("\n"));
+  return wrap(lines.join('\n'));
 }
 
 /** Run an interaction reply/editReply/deferReply call, logging (rather than
@@ -1167,7 +1167,7 @@ async function safeReply(
 
 export function isMindHomeGuild(config: Config, guildId: string): boolean {
   return config.discord.guilds.some(
-    (guild) => guild.id === guildId && guild.slug === "home",
+    (guild) => guild.id === guildId && guild.slug === 'home',
   );
 }
 
@@ -1180,22 +1180,22 @@ function parseDiscordMindTime(value: string, field: string): number {
 
 function parseDiscordMindIds(value: string | null): MindId[] {
   if (!value?.trim()) return [];
-  return value.split(",").map((part) => parseMindId(part.trim()));
+  return value.split(',').map((part) => parseMindId(part.trim()));
 }
 
 function truncateMindReply(value: string): string {
   return value.length <= 1950
     ? value
-    : value.slice(0, 1920) + "\n… (open the dashboard for the full record)";
+    : value.slice(0, 1920) + '\n… (open the dashboard for the full record)';
 }
 
 export function formatMindList(
-  items: ReturnType<MindService["list"]>,
-  heading = "mind",
+  items: ReturnType<MindService['list']>,
+  heading = 'mind',
 ): string {
   if (items.length === 0) return `${heading}: nothing here.`;
   return truncateMindReply(
-    `${heading} · ${items.length}\n${items.map(formatMindLine).join("\n")}`,
+    `${heading} · ${items.length}\n${items.map(formatMindLine).join('\n')}`,
   );
 }
 
@@ -1217,8 +1217,8 @@ export function mindAddAmbientNotice(
     channelName: source.channelName,
     guildId: source.guildId,
     guildSlug: source.guildSlug,
-    author: "mind",
-    authorId: "mind",
+    author: 'mind',
+    authorId: 'mind',
     bot: true,
     content: `[mind item added via /mind]\n${formatMindLine(item)}`,
     createdAt: source.createdAt ?? new Date().toISOString(),
@@ -1226,7 +1226,7 @@ export function mindAddAmbientNotice(
     forwarded: null,
     mentions: [],
     attachments: [],
-    wakeClass: "ambient",
+    wakeClass: 'ambient',
   };
 }
 
@@ -1284,7 +1284,7 @@ export function createDiscord(
   });
 
   client.on(Events.ClientReady, () => {
-    log.info(`discord client ready: ${client.user?.tag ?? "unknown"}`);
+    log.info(`discord client ready: ${client.user?.tag ?? 'unknown'}`);
   });
 
   // ---- typing indicator (the ONE implementation — see docs/architecture.md's
@@ -1307,8 +1307,8 @@ export function createDiscord(
   const threadParentOf = (channelId: string): string | null => {
     const ch = client.channels.cache.get(channelId);
     return ch &&
-      "isThread" in ch &&
-      typeof (ch as { isThread?: () => boolean }).isThread === "function" &&
+      'isThread' in ch &&
+      typeof (ch as { isThread?: () => boolean }).isThread === 'function' &&
       (ch as { isThread: () => boolean }).isThread()
       ? ((ch as { parentId: string | null }).parentId ?? null)
       : null;
@@ -1320,10 +1320,10 @@ export function createDiscord(
     try {
       if (
         ch &&
-        typeof ch === "object" &&
-        "isTextBased" in ch &&
+        typeof ch === 'object' &&
+        'isTextBased' in ch &&
         (ch as { isTextBased: () => boolean }).isTextBased() &&
-        "sendTyping" in ch
+        'sendTyping' in ch
       ) {
         await (ch as { sendTyping: () => Promise<void> }).sendTyping();
       }
@@ -1397,7 +1397,7 @@ export function createDiscord(
       policyChannelId,
       guildIndex,
     );
-    if (!policy || policy.tier === "drop") {
+    if (!policy || policy.tier === 'drop') {
       const key = `${policyChannelId}:config-drop`;
       if (!droppedLogged.has(key)) {
         droppedLogged.add(key);
@@ -1455,7 +1455,7 @@ export function createDiscord(
       try {
         const ch = message.channel;
         const ref =
-          ch.isTextBased() && "messages" in ch
+          ch.isTextBased() && 'messages' in ch
             ? await ch.messages.fetch(replyToId)
             : null;
         if (!ref || isIgnoredAuthor(ignoredUserIds, ref.author.id)) return null;
@@ -1492,7 +1492,7 @@ export function createDiscord(
       client.user?.id,
     );
     let cls = classifyInbound(input, guildIndex, muteType);
-    if (cls === "drop") {
+    if (cls === 'drop') {
       // classifyInbound returns 'drop' for two different reasons: a
       // killswitch deafen on the resolved channel, or the channel being
       // configured under a DIFFERENT guild than this message's guildId
@@ -1501,7 +1501,7 @@ export function createDiscord(
       // not be mislabeled "deafened" when it does fire). Match the unlisted
       // line's readable format and report the actual reason.
       const wrongGuild = policy.guild.id !== message.guildId;
-      const key = `${policyChannelId}:${wrongGuild ? "wrong-guild" : "deafened"}`;
+      const key = `${policyChannelId}:${wrongGuild ? 'wrong-guild' : 'deafened'}`;
       if (!droppedLogged.has(key)) {
         droppedLogged.add(key);
         if (wrongGuild) {
@@ -1523,10 +1523,10 @@ export function createDiscord(
     // downgrade alone.
     if (
       config.discord.ambientTickMs === 0 &&
-      cls === "ambient" &&
+      cls === 'ambient' &&
       muteType(policyChannelId) === null
     ) {
-      cls = "wake";
+      cls = 'wake';
     }
 
     // enqueue onto the agent's inbound queue (the loop drains it — we do NOT
@@ -1560,10 +1560,10 @@ export function createDiscord(
         return snap
           ? {
               author:
-                snap.author?.displayName || snap.author?.username || "unknown",
+                snap.author?.displayName || snap.author?.username || 'unknown',
               channelName: snap.channel?.name || null,
               content: resolveMentions(
-                snap.content ?? "",
+                snap.content ?? '',
                 mentionNamesFor(snap as unknown as Message),
               ),
             }
@@ -1600,7 +1600,7 @@ export function createDiscord(
       guildId: message.guildId,
       guildSlug: policy.guild.slug,
       bot: authorIsBot,
-      kind: "discord",
+      kind: 'discord',
       wakeClass: cls,
       // The resolved POLICY channel (a thread's parent) — Agent.fireAmbientTick
       // checks countsForTick against this, never the message's own channelId,
@@ -1617,7 +1617,7 @@ export function createDiscord(
     // the channel object already in hand (no cache/fetch needed) and the SAME
     // gate constant (typingGuildId) the repeating typing above uses.
     if (
-      cls === "wake" &&
+      cls === 'wake' &&
       policy.guild.id === typingGuildId &&
       policy.allowSend
     ) {
@@ -1663,20 +1663,20 @@ export function createDiscord(
       if (!deps?.feedback) return;
       const channel = msg.channel;
       const channelName =
-        "name" in channel && typeof channel.name === "string"
+        'name' in channel && typeof channel.name === 'string'
           ? channel.name
           : null;
       deps.feedback.recordReaction({
         verdict,
         reactedAt: new Date().toISOString(),
-        emoji: reaction.emoji.name ?? "",
+        emoji: reaction.emoji.name ?? '',
         reactorId: user.id,
         reactorName: user.displayName || user.username || null,
         isOwner: isAuthorizedOperator(config, user.id),
         discordMessageId: msg.id,
         channelId: msg.channelId,
         channelName,
-        messageContent: msg.content ?? "",
+        messageContent: msg.content ?? '',
       });
       log.info(
         `feedback ${verdict} on #${msg.channelId} msg ${msg.id} from <${user.id}>`,
@@ -1721,11 +1721,11 @@ export function createDiscord(
       return;
     }
 
-    if (name === "mind") {
+    if (name === 'mind') {
       if (!isMindHomeGuild(config, interaction.guildId)) {
         await safeReply(log, name, () =>
           interaction.reply({
-            content: "Mind is private to the home guild.",
+            content: 'Mind is private to the home guild.',
             flags: MessageFlags.Ephemeral,
           }),
         );
@@ -1734,7 +1734,7 @@ export function createDiscord(
       if (!deps?.mind) {
         await safeReply(log, name, () =>
           interaction.reply({
-            content: "Mind is not wired in this harness.",
+            content: 'Mind is not wired in this harness.',
             flags: MessageFlags.Ephemeral,
           }),
         );
@@ -1744,53 +1744,53 @@ export function createDiscord(
       const actor = `discord:${interaction.user.username}`;
       try {
         const sub = interaction.options.getSubcommand(true);
-        const id = () => parseMindId(interaction.options.getString("id", true));
+        const id = () => parseMindId(interaction.options.getString('id', true));
         let content: string;
-        if (sub === "list") {
-          const view = interaction.options.getString("view") ?? "ready";
+        if (sub === 'list') {
+          const view = interaction.options.getString('view') ?? 'ready';
           const filter: MindListFilter = {
-            query: interaction.options.getString("query") ?? undefined,
-            sort: (interaction.options.getString("sort") ??
-              "updated_desc") as MindSort,
-            limit: interaction.options.getInteger("limit") ?? 20,
+            query: interaction.options.getString('query') ?? undefined,
+            sort: (interaction.options.getString('sort') ??
+              'updated_desc') as MindSort,
+            limit: interaction.options.getInteger('limit') ?? 20,
           };
-          if (view === "ready") filter.ready = true;
-          else if (view === "blocked") filter.blocked = true;
-          else if (view === "waiting") filter.statuses = ["waiting"];
-          else if (view === "done") filter.statuses = ["done"];
-          else if (view === "overdue") filter.overdue = true;
-          else if (view === "inbox") filter.statuses = ["inbox"];
-          else if (view === "active")
-            filter.statuses = ["inbox", "open", "in_progress", "waiting"];
-          else if (view === "all") filter.includeArchived = true;
+          if (view === 'ready') filter.ready = true;
+          else if (view === 'blocked') filter.blocked = true;
+          else if (view === 'waiting') filter.statuses = ['waiting'];
+          else if (view === 'done') filter.statuses = ['done'];
+          else if (view === 'overdue') filter.overdue = true;
+          else if (view === 'inbox') filter.statuses = ['inbox'];
+          else if (view === 'active')
+            filter.statuses = ['inbox', 'open', 'in_progress', 'waiting'];
+          else if (view === 'all') filter.includeArchived = true;
           content = formatMindList(mind.list(filter), `mind · ${view}`);
-        } else if (sub === "read") {
+        } else if (sub === 'read') {
           const item = mind.get(id());
-          if (!item) throw new Error("item not found");
+          if (!item) throw new Error('item not found');
           content = truncateMindReply(formatMindDetail(item));
-        } else if (sub === "add") {
-          const dueRaw = interaction.options.getString("due");
-          const remindRaw = interaction.options.getString("remind");
+        } else if (sub === 'add') {
+          const dueRaw = interaction.options.getString('due');
+          const remindRaw = interaction.options.getString('remind');
           const item = mind.create({
-            title: interaction.options.getString("title", true),
-            body: interaction.options.getString("details") ?? undefined,
-            kind: (interaction.options.getString("kind") ?? undefined) as
+            title: interaction.options.getString('title', true),
+            body: interaction.options.getString('details') ?? undefined,
+            kind: (interaction.options.getString('kind') ?? undefined) as
               MindKind | undefined,
-            priority: interaction.options.getInteger("priority") ?? undefined,
-            parentId: interaction.options.getString("parent")
-              ? parseMindId(interaction.options.getString("parent")!)
+            priority: interaction.options.getInteger('priority') ?? undefined,
+            parentId: interaction.options.getString('parent')
+              ? parseMindId(interaction.options.getString('parent')!)
               : undefined,
             dependsOn: parseDiscordMindIds(
-              interaction.options.getString("depends_on"),
+              interaction.options.getString('depends_on'),
             ),
-            dueAt: dueRaw ? parseDiscordMindTime(dueRaw, "due") : undefined,
+            dueAt: dueRaw ? parseDiscordMindTime(dueRaw, 'due') : undefined,
             remindAt: remindRaw
-              ? parseDiscordMindTime(remindRaw, "remind")
+              ? parseDiscordMindTime(remindRaw, 'remind')
               : undefined,
             reminderChannelId: interaction.channelId,
             tags: interaction.options
-              .getString("tags")
-              ?.split(",")
+              .getString('tags')
+              ?.split(',')
               .map((x) => x.trim())
               .filter(Boolean),
             actor,
@@ -1811,79 +1811,79 @@ export function createDiscord(
             }),
           );
           content = `added\n${formatMindLine(item)}`;
-        } else if (sub === "edit") {
-          const patch: Parameters<MindService["update"]>[1] = {};
-          const title = interaction.options.getString("title");
+        } else if (sub === 'edit') {
+          const patch: Parameters<MindService['update']>[1] = {};
+          const title = interaction.options.getString('title');
           if (title !== null) patch.title = title;
-          const details = interaction.options.getString("details");
+          const details = interaction.options.getString('details');
           if (details !== null) patch.body = details;
-          const status = interaction.options.getString("status");
+          const status = interaction.options.getString('status');
           if (status !== null) patch.status = status as MindStatus;
-          const priority = interaction.options.getInteger("priority");
+          const priority = interaction.options.getInteger('priority');
           if (priority !== null) patch.priority = priority;
-          const due = interaction.options.getString("due");
+          const due = interaction.options.getString('due');
           if (due !== null)
             patch.dueAt =
-              due.toLowerCase() === "clear"
+              due.toLowerCase() === 'clear'
                 ? null
-                : parseDiscordMindTime(due, "due");
-          const tags = interaction.options.getString("tags");
+                : parseDiscordMindTime(due, 'due');
+          const tags = interaction.options.getString('tags');
           if (tags !== null)
             patch.tags = tags
-              .split(",")
+              .split(',')
               .map((x) => x.trim())
               .filter(Boolean);
           content = `updated\n${formatMindLine(mind.update(id(), patch, actor))}`;
-        } else if (sub === "done" || sub === "start" || sub === "wait") {
+        } else if (sub === 'done' || sub === 'start' || sub === 'wait') {
           const itemId = id();
-          const comment = interaction.options.getString("comment");
+          const comment = interaction.options.getString('comment');
           if (comment) mind.addComment(itemId, comment, actor);
           const status: MindStatus =
-            sub === "done"
-              ? "done"
-              : sub === "start"
-                ? "in_progress"
-                : "waiting";
+            sub === 'done'
+              ? 'done'
+              : sub === 'start'
+                ? 'in_progress'
+                : 'waiting';
           content = `${sub}\n${formatMindLine(mind.setStatus(itemId, status, actor))}`;
-        } else if (sub === "comment") {
+        } else if (sub === 'comment') {
           const itemId = id();
           const comment = mind.addComment(
             itemId,
-            interaction.options.getString("text", true),
+            interaction.options.getString('text', true),
             actor,
           );
           content = `comment c#${comment.id} added to #${itemId}`;
-        } else if (sub === "link" || sub === "unlink") {
+        } else if (sub === 'link' || sub === 'unlink') {
           const itemId = id();
           const dep = parseMindId(
-            interaction.options.getString("depends_on", true),
+            interaction.options.getString('depends_on', true),
           );
           const item =
-            sub === "link"
+            sub === 'link'
               ? mind.addDependency(itemId, dep, actor)
               : mind.removeDependency(itemId, dep, actor);
-          content = `${sub === "link" ? "linked" : "unlinked"}\n${formatMindLine(item)}`;
-        } else if (sub === "remind") {
+          content = `${sub === 'link' ? 'linked' : 'unlinked'}\n${formatMindLine(item)}`;
+        } else if (sub === 'remind') {
           const itemId = id();
           const reminder = mind.addReminder(
             itemId,
             parseDiscordMindTime(
-              interaction.options.getString("when", true),
-              "when",
+              interaction.options.getString('when', true),
+              'when',
             ),
             actor,
             interaction.channelId,
           );
           content = `reminder r#${reminder.id} scheduled for #${itemId} at ${new Date(reminder.fireAt).toISOString()}`;
-        } else if (sub === "graph") {
+        } else if (sub === 'graph') {
           const graph = mind.graph(
             id(),
-            interaction.options.getInteger("depth") ?? 4,
+            interaction.options.getInteger('depth') ?? 4,
           );
           content = truncateMindReply(
-            `mind graph · root #${graph.rootId}\n${graph.nodes.map(formatMindLine).join("\n")}\n\nedges\n${graph.edges.map((e) => `#${e.from} —${e.type}→ #${e.to}`).join("\n") || "(none)"}`,
+            `mind graph · root #${graph.rootId}\n${graph.nodes.map(formatMindLine).join('\n')}\n\nedges\n${graph.edges.map((e) => `#${e.from} —${e.type}→ #${e.to}`).join('\n') || '(none)'}`,
           );
-        } else if (sub === "archive") {
+        } else if (sub === 'archive') {
           content = `archived\n${formatMindLine(mind.archive(id(), actor))}`;
         } else {
           throw new Error(`unknown mind subcommand ${sub}`);
@@ -1904,22 +1904,22 @@ export function createDiscord(
     // explicit confirmation: an ephemeral embed + Confirm/Cancel buttons. The
     // button press is re-checked against the invoking user id; a ~30s collector
     // timeout auto-cancels. Only on confirm: agent.clearContext.
-    if (name === "clear" || name === "new") {
+    if (name === 'clear' || name === 'new') {
       const uid = interaction.user.id;
       const embed = new EmbedBuilder()
         .setTitle("Wipe the agent's working memory?")
         .setDescription(
           "This wipes the agent's entire working memory across ALL servers and channels — not just this " +
-            "one. It is one continuous history. Files (MEMORY.md, people/, ponder/, NOW.md) survive; " +
-            "the live conversation does not.",
+            'one. It is one continuous history. Files (MEMORY.md, people/, ponder/, NOW.md) survive; ' +
+            'the live conversation does not.',
         );
       const confirm = new ButtonBuilder()
         .setCustomId(clearConfirmCustomId(uid))
-        .setLabel("Wipe")
+        .setLabel('Wipe')
         .setStyle(ButtonStyle.Danger);
       const cancel = new ButtonBuilder()
         .setCustomId(clearCancelCustomId(uid))
-        .setLabel("Cancel")
+        .setLabel('Cancel')
         .setStyle(ButtonStyle.Secondary);
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         confirm,
@@ -1948,19 +1948,19 @@ export function createDiscord(
         if (press && press.customId === clearConfirmCustomId(uid)) {
           agent.clearContext();
           await press.update({
-            content: "Working memory wiped.",
+            content: 'Working memory wiped.',
             embeds: [],
             components: [disabledRow],
           });
         } else if (press) {
           await press.update({
-            content: "Cancelled — nothing was wiped.",
+            content: 'Cancelled — nothing was wiped.',
             embeds: [],
             components: [disabledRow],
           });
         } else {
           await interaction.editReply({
-            content: "Confirmation timed out — nothing was wiped.",
+            content: 'Confirmation timed out — nothing was wiped.',
             embeds: [],
             components: [disabledRow],
           });
@@ -1978,23 +1978,23 @@ export function createDiscord(
     // history — the escape hatch after a model/provider switch, whose old
     // signatures/blobs would otherwise 400 on replay. Same confirm-button flow
     // as /clear; non-destructive to the conversation.
-    if (name === "clear-thinking") {
+    if (name === 'clear-thinking') {
       const uid = interaction.user.id;
       const embed = new EmbedBuilder()
-        .setTitle("Clear stored provider thinking?")
+        .setTitle('Clear stored provider thinking?')
         .setDescription(
           "This removes the agent's stored native thinking payloads (Anthropic thinking blocks and " +
-            "OpenAI/Codex encrypted reasoning items) from the whole history, in memory and on disk. The " +
-            "conversation, memory, readable reasoning, and tool history are untouched. Use it after switching " +
-            "models or providers, when old signatures are no longer valid.",
+            'OpenAI/Codex encrypted reasoning items) from the whole history, in memory and on disk. The ' +
+            'conversation, memory, readable reasoning, and tool history are untouched. Use it after switching ' +
+            'models or providers, when old signatures are no longer valid.',
         );
       const confirm = new ButtonBuilder()
         .setCustomId(clearThinkingConfirmCustomId(uid))
-        .setLabel("Clear thinking")
+        .setLabel('Clear thinking')
         .setStyle(ButtonStyle.Danger);
       const cancel = new ButtonBuilder()
         .setCustomId(clearThinkingCancelCustomId(uid))
-        .setLabel("Cancel")
+        .setLabel('Cancel')
         .setStyle(ButtonStyle.Secondary);
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         confirm,
@@ -2023,19 +2023,19 @@ export function createDiscord(
         if (press && press.customId === clearThinkingConfirmCustomId(uid)) {
           const n = agent.clearThinking();
           await press.update({
-            content: `Provider thinking cleared (${n} message${n === 1 ? "" : "s"} affected).`,
+            content: `Provider thinking cleared (${n} message${n === 1 ? '' : 's'} affected).`,
             embeds: [],
             components: [disabledRow],
           });
         } else if (press) {
           await press.update({
-            content: "Cancelled — nothing was cleared.",
+            content: 'Cancelled — nothing was cleared.',
             embeds: [],
             components: [disabledRow],
           });
         } else {
           await interaction.editReply({
-            content: "Confirmation timed out — nothing was cleared.",
+            content: 'Confirmation timed out — nothing was cleared.',
             embeds: [],
             components: [disabledRow],
           });
@@ -2051,7 +2051,7 @@ export function createDiscord(
     // /compact triggers a compaction cycle (non-destructive). Consumed at the
     // loop-top checkpoint (or immediately when idle) — never started here
     // directly (that could orphan pending tool results, review B2).
-    if (name === "compact") {
+    if (name === 'compact') {
       const { tokens } = agent.compactNow();
       await safeReply(log, name, () =>
         interaction.reply({
@@ -2069,18 +2069,18 @@ export function createDiscord(
     // the channel ref and forwards to it — see docs/architecture.md's "the
     // killswitch" section.
     if (
-      name === "mute" ||
-      name === "unmute" ||
-      name === "deafen" ||
-      name === "undeafen"
+      name === 'mute' ||
+      name === 'unmute' ||
+      name === 'deafen' ||
+      name === 'undeafen'
     ) {
-      const ref = interaction.options.getString("channel", true);
+      const ref = interaction.options.getString('channel', true);
       // Only mute/deafen declare a `reason` option — unmute/undeafen don't, so
       // don't read it for them (reading an undeclared option happens to return
       // null today, but that's incidental, not a contract to lean on).
       const reason =
-        name === "mute" || name === "deafen"
-          ? (interaction.options.getString("reason") ?? undefined)
+        name === 'mute' || name === 'deafen'
+          ? (interaction.options.getString('reason') ?? undefined)
           : undefined;
       const result = resolveModerationCommand(agent, name, ref, reason);
       await safeReply(log, name, () =>
@@ -2093,7 +2093,7 @@ export function createDiscord(
     }
 
     // /exec, /restart, /usage and /cache — operator gate already applied above.
-    if (name === "usage") {
+    if (name === 'usage') {
       await safeReply(log, name, async () => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const snap = deps?.usage ? await deps.usage() : null;
@@ -2102,7 +2102,7 @@ export function createDiscord(
       return;
     }
 
-    if (name === "cache") {
+    if (name === 'cache') {
       await safeReply(log, name, () =>
         interaction.reply({
           content: formatCacheBars(agent.usageSnapshot().cache),
@@ -2112,19 +2112,19 @@ export function createDiscord(
       return;
     }
 
-    if (name === "exec") {
-      const code = interaction.options.getString("code") ?? "";
+    if (name === 'exec') {
+      const code = interaction.options.getString('code') ?? '';
       if (!code.trim()) {
         await safeReply(log, name, () =>
           interaction.reply({
-            content: "No code provided.",
+            content: 'No code provided.',
             flags: MessageFlags.Ephemeral,
           }),
         );
         return;
       }
       log.debug(
-        `/exec code: ${code.split("\n").slice(0, 3).join(" | ").slice(0, 200)}`,
+        `/exec code: ${code.split('\n').slice(0, 3).join(' | ').slice(0, 200)}`,
       );
       const result = await agent.execSandbox(code);
       const out = formatExecResult(result);
@@ -2134,17 +2134,17 @@ export function createDiscord(
       return;
     }
 
-    if (name === "restart") {
+    if (name === 'restart') {
       // Flush the transcript so the on-disk record is complete before the
       // process is killed. The reply is sent first (ephemeral) so the operator
       // sees confirmation before the connection drops.
       await safeReply(log, name, () =>
         interaction.reply({
-          content: "Restarting harness — back in a moment…",
+          content: 'Restarting harness — back in a moment…',
           flags: MessageFlags.Ephemeral,
         }),
       );
-      log.info("/restart: flushing transcripts and triggering service restart");
+      log.info('/restart: flushing transcripts and triggering service restart');
       try {
         agent.flushTranscripts();
       } catch (e) {
@@ -2177,20 +2177,20 @@ export function createDiscord(
   ) => {
     log.debug(`outbound send #${channelId} (${text.length} chars)`);
     const channel = await client.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased() || !("send" in channel)) return;
+    if (!channel || !channel.isTextBased() || !('send' in channel)) return;
     const isThread =
-      "isThread" in channel &&
-      typeof channel.isThread === "function" &&
+      'isThread' in channel &&
+      typeof channel.isThread === 'function' &&
       channel.isThread();
     const parentId =
-      isThread && "parentId" in channel ? channel.parentId : null;
+      isThread && 'parentId' in channel ? channel.parentId : null;
     const policyChannelId = resolvePolicyChannelId(
       channelId,
       isThread,
-      typeof parentId === "string" ? parentId : null,
+      typeof parentId === 'string' ? parentId : null,
     );
     const guildId =
-      "guildId" in channel && typeof channel.guildId === "string"
+      'guildId' in channel && typeof channel.guildId === 'string'
         ? channel.guildId
         : null;
     const configPolicy = resolveChannelPolicy(
@@ -2207,7 +2207,7 @@ export function createDiscord(
     // (a DM/uncached channel has no 'guild' — outboundMentionDirectory(null)
     // is a no-op map, so text passes through unchanged).
     const guild =
-      "guild" in channel ? (channel.guild as Guild | undefined) : undefined;
+      'guild' in channel ? (channel.guild as Guild | undefined) : undefined;
     const outboundText = applyOutboundMentions(
       text,
       outboundMentionDirectory(guild),
@@ -2246,9 +2246,9 @@ export function createDiscord(
 function defaultRestartHook(config: Config): () => void {
   const log = config.logger;
   return () => {
-    log.info("/restart: executing systemctl --user restart elpis-harness");
+    log.info('/restart: executing systemctl --user restart elpis-harness');
     const child = restartHarnessService();
-    child.on("error", (e: Error) => {
+    child.on('error', (e: Error) => {
       log.error(`/restart: systemctl spawn failed: ${e.message}`);
     });
   };
@@ -2261,11 +2261,11 @@ function defaultRestartHook(config: Config): () => void {
  */
 async function registerSlashCommands(config: Config): Promise<void> {
   const commands = buildCommandDefinitions();
-  const rest = new REST({ version: "10" }).setToken(config.discord.botToken);
+  const rest = new REST({ version: '10' }).setToken(config.discord.botToken);
   const optedIn = config.discord.guilds.filter((x) => x.slashCommands);
   if (optedIn.length === 0) {
     config.logger.info(
-      "slash command registration: no guild has `slash_commands: true` set — skipping registration entirely",
+      'slash command registration: no guild has `slash_commands: true` set — skipping registration entirely',
     );
     return;
   }
@@ -2276,7 +2276,7 @@ async function registerSlashCommands(config: Config): Promise<void> {
         { body: commands },
       );
       config.logger.info(
-        `registered slash commands: ${SLASH_COMMAND_NAMES.join(", ")} (guild ${g.id})`,
+        `registered slash commands: ${SLASH_COMMAND_NAMES.join(', ')} (guild ${g.id})`,
       );
     } catch (e) {
       config.logger.warn(

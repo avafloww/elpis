@@ -26,8 +26,8 @@ import { blankLiterals } from '../lib/jslex.js';
 
 export interface TransformResult {
   /** On success: the rewritten source. On parse failure: the heredoc-expanded
- * source acorn was given (identical to the input when no heredocs), so
- * error line:col positions map onto it for the code frame. */
+   * source acorn was given (identical to the input when no heredocs), so
+   * error line:col positions map onto it for the code frame. */
   code: string;
   /** true when the input parsed cleanly. */
   parsed: boolean;
@@ -61,7 +61,7 @@ function boundNames(pattern: Pattern, out: string[] = []): string[] {
       boundNames(pattern.left as Pattern, out);
       break;
     case 'MemberExpression':
- // destructuring target like a[0] — not a binding name
+      // destructuring target like a[0] — not a binding name
       break;
   }
   return out;
@@ -88,40 +88,41 @@ function rewriteTopLevel(node: Statement, s: MagicString): void {
           if (initText !== undefined) {
             parts.push(`globalThis.${name} = (${initText})`);
           } else {
- // no initializer: idempotent keep-defined. Use the prior value if any.
+            // no initializer: idempotent keep-defined. Use the prior value if any.
             parts.push(`globalThis.${name} = globalThis.${name}`);
           }
         } else {
- // destructuring
+          // destructuring
           const names = boundNames(d.id as Pattern);
           const targetText = nodeSource(s, d.id);
           if (initText !== undefined) {
             const tmp = `__d${i}`;
             parts.push(`${tmp} = (${initText})`);
- // ({ a, b } = tmp) — parens mandatory or it parses as a block
+            // ({ a, b } = tmp) — parens mandatory or it parses as a block
             parts.push(`(${targetText} = ${tmp})`);
             for (const n of names) parts.push(`globalThis.${n} = ${n}`);
           } else {
- // no init destructuring: nothing meaningful to persist
+            // no init destructuring: nothing meaningful to persist
             parts.push(`(${targetText} = void 0)`);
-            for (const n of names) parts.push(`globalThis.${n} = globalThis.${n}`);
+            for (const n of names)
+              parts.push(`globalThis.${n} = globalThis.${n}`);
           }
         }
       });
- // Replace the entire declaration node with a sequence of assignments.
- // End with ';' so the next statement is cleanly separated regardless of
- // whether acorn's node.end includes the trailing semicolon (double ;; is
- // a harmless empty statement).
+      // Replace the entire declaration node with a sequence of assignments.
+      // End with ';' so the next statement is cleanly separated regardless of
+      // whether acorn's node.end includes the trailing semicolon (double ;; is
+      // a harmless empty statement).
       s.overwrite(node.start, node.end, parts.join('; ') + ';');
       break;
     }
 
     case 'FunctionDeclaration': {
- // Rewrite `function f{}` → `globalThis.f = function f{}` (inline,
- // same as classes). Keeps the named-function-expression semantics so the
- // body can recurse on its own name, and persists onto globalThis.
- // (Hoisting is lost vs. a declaration, but the agent defines in one run
- // and calls in the next; defining-before-use within a run is normal.)
+      // Rewrite `function f{}` → `globalThis.f = function f{}` (inline,
+      // same as classes). Keeps the named-function-expression semantics so the
+      // body can recurse on its own name, and persists onto globalThis.
+      // (Hoisting is lost vs. a declaration, but the agent defines in one run
+      // and calls in the next; defining-before-use within a run is normal.)
       const name = node.id?.name;
       if (name) {
         const fnStart = node.start;
@@ -132,8 +133,8 @@ function rewriteTopLevel(node: Statement, s: MagicString): void {
     }
 
     case 'ClassDeclaration': {
- // Class declarations don't persist and don't hoist usefully here.
- // Rewrite `class C {}` → `globalThis.C = class C {}`
+      // Class declarations don't persist and don't hoist usefully here.
+      // Rewrite `class C {}` → `globalThis.C = class C {}`
       const name = node.id?.name;
       if (name) {
         const classStart = node.start;
@@ -144,7 +145,7 @@ function rewriteTopLevel(node: Statement, s: MagicString): void {
     }
 
     default:
- // Import/export/other — leave untouched.
+      // Import/export/other — leave untouched.
       break;
   }
 }
@@ -156,13 +157,19 @@ function rewriteTopLevel(node: Statement, s: MagicString): void {
 function reservedBindingNames(node: Statement): string[] {
   const out: string[] = [];
   const pushIfReserved = (name: string | undefined) => {
-    if (name && (RESERVED_GLOBALS as Record<string, true>)[name]) out.push(name);
+    if (name && (RESERVED_GLOBALS as Record<string, true>)[name])
+      out.push(name);
   };
   switch (node.type) {
     case 'VariableDeclaration':
       for (const d of (node as VariableDeclaration).declarations) {
         if (d.id.type === 'Identifier') pushIfReserved(d.id.name);
-        else out.push(...boundNames(d.id as Pattern).filter((n) => (RESERVED_GLOBALS as Record<string, true>)[n]));
+        else
+          out.push(
+            ...boundNames(d.id as Pattern).filter(
+              (n) => (RESERVED_GLOBALS as Record<string, true>)[n],
+            ),
+          );
       }
       break;
     case 'FunctionDeclaration':
@@ -222,9 +229,9 @@ export function expandHeredocs(code: string): { code: string; error?: string } {
     );
     const tm = term.exec(rest);
     if (!tm) {
- // Common cause: the body was written on ONE physical line using literal
- // `\n` escapes (so no real line ever contains just the tag). Heredoc
- // bodies are verbatim — they take REAL newlines, not escapes.
+      // Common cause: the body was written on ONE physical line using literal
+      // `\n` escapes (so no real line ever contains just the tag). Heredoc
+      // bodies are verbatim — they take REAL newlines, not escapes.
       const escapedBody = /\\[nrt]/.test(rest.slice(0, 400));
       const hint = escapedBody
         ? ` — the body looks like it uses literal \\n/\\t escapes on one line; a heredoc body takes REAL newlines (the whole block is verbatim, no escaping), so put ${tag} on its own real line`
@@ -234,16 +241,20 @@ export function expandHeredocs(code: string): { code: string; error?: string } {
         error: `heredoc <<<${tag} opened at line ${openLine} has no terminator${hint}`,
       };
     }
-    const trailer = tm[1] ?? '';           // verbatim same-line JavaScript continuation
+    const trailer = tm[1] ?? ''; // verbatim same-line JavaScript continuation
     const content = rest.slice(0, tm.index); // verbatim, incl. final newline
     const end = contentStart + tm.index + tm[0].length;
-    code = code.slice(0, m.index) + JSON.stringify(content) + trailer + code.slice(end);
+    code =
+      code.slice(0, m.index) +
+      JSON.stringify(content) +
+      trailer +
+      code.slice(end);
   }
   return { code, error: `too many heredocs in one run (max ${HEREDOC_MAX})` };
 }
 
 export function transform(code: string): TransformResult {
- // Heredoc blocks are expanded before parsing — they are not JS syntax.
+  // Heredoc blocks are expanded before parsing — they are not JS syntax.
   const expanded = expandHeredocs(code);
   if (expanded.error) {
     return { code, parsed: false, error: expanded.error };
@@ -265,9 +276,9 @@ export function transform(code: string): TransformResult {
     };
   }
 
- // Reserved-name guard: a top-level declaration binding a harness global would
- // silently, permanently replace it (the transform rewrites the decl to a
- // `globalThis.<name> =` assignment). Catch it here, before any rewriting.
+  // Reserved-name guard: a top-level declaration binding a harness global would
+  // silently, permanently replace it (the transform rewrites the decl to a
+  // `globalThis.<name> =` assignment). Catch it here, before any rewriting.
   for (const node of ast.body as Statement[]) {
     const clashes = reservedBindingNames(node);
     if (clashes.length > 0) {
@@ -281,9 +292,9 @@ export function transform(code: string): TransformResult {
   }
 
   const s = new MagicString(code);
- // Wrap: prepend async IIFE opener, append return + closer.
- // Use a LOCAL `_completion` so the completion value flows to `return`
- // without polluting globalThis (and without being shadowed by it).
+  // Wrap: prepend async IIFE opener, append return + closer.
+  // Use a LOCAL `_completion` so the completion value flows to `return`
+  // without polluting globalThis (and without being shadowed by it).
   s.prepend('(async () => {\nlet _completion = undefined;\n');
   s.append('\nreturn _completion;\n})()');
 
@@ -292,7 +303,7 @@ export function transform(code: string): TransformResult {
 
   for (const node of body as Statement[]) {
     if (node === last && node.type === 'ExpressionStatement') {
- // rewrite EXPR → _completion = (EXPR); (assigns the local, returned at end)
+      // rewrite EXPR → _completion = (EXPR); (assigns the local, returned at end)
       const expr = (node as ExpressionStatement).expression as Expression;
       s.appendLeft(expr.start, '_completion = (');
       s.appendLeft(expr.end, ')');

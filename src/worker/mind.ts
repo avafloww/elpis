@@ -1,21 +1,21 @@
-import type { Database } from "../store/db.js";
+import type { Database } from '../store/db.js';
 import type {
   CreateMindItem,
   MindDetail,
   MindComment,
   MindService,
   MindStatus,
-} from "../store/mind.js";
-import type { MindId } from "../store/mind-id.js";
-import { resolveWorkerSession, type WorkerSessionBinding } from "./session.js";
+} from '../store/mind.js';
+import type { MindId } from '../store/mind-id.js';
+import { resolveWorkerSession, type WorkerSessionBinding } from './session.js';
 
 export class WorkerMindError extends Error {
   constructor(
-    public readonly code: "unauthorized" | "outside_scope" | "not_found",
+    public readonly code: 'unauthorized' | 'outside_scope' | 'not_found',
     message: string,
   ) {
     super(message);
-    this.name = "WorkerMindError";
+    this.name = 'WorkerMindError';
   }
 }
 
@@ -29,8 +29,8 @@ export class WorkerMindBroker {
     const binding = resolveWorkerSession(this.db, token);
     if (!binding)
       throw new WorkerMindError(
-        "unauthorized",
-        "worker session is unavailable",
+        'unauthorized',
+        'worker session is unavailable',
       );
     return binding;
   }
@@ -45,8 +45,8 @@ export class WorkerMindBroker {
       .get(binding.mindId, id);
     if (!row)
       throw new WorkerMindError(
-        "outside_scope",
-        "Mind item is outside worker scope",
+        'outside_scope',
+        'Mind item is outside worker scope',
       );
   }
 
@@ -59,13 +59,13 @@ export class WorkerMindBroker {
     this.scoped(binding, target);
     const item = this.mind.get(target);
     if (!item)
-      throw new WorkerMindError("not_found", "Mind item does not exist");
+      throw new WorkerMindError('not_found', 'Mind item does not exist');
     return { binding, item };
   }
 
   createChild(
     token: string,
-    input: Omit<CreateMindItem, "parentId" | "actor" | "dependsOn"> & {
+    input: Omit<CreateMindItem, 'parentId' | 'actor' | 'dependsOn'> & {
       parentId?: MindId;
     },
   ): MindDetail {

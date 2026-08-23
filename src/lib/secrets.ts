@@ -12,7 +12,12 @@ import type { Config } from '../config.js';
  * reading the env here would silently yield [] — turning redactSecrets into a
  * no-op with no boot warning. */
 export function collectSecretValues(config: Config): string[] {
-  const candidates = [config.llm.apiKey, config.discord.botToken, config.kagi.apiKey, config.bluesky?.appPassword];
+  const candidates = [
+    config.llm.apiKey,
+    config.discord.botToken,
+    config.kagi.apiKey,
+    config.bluesky?.appPassword,
+  ];
   const out: string[] = [];
   for (const v of candidates) {
     if (v && v.length >= 8) out.push(v);

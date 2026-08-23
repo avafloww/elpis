@@ -1,8 +1,8 @@
-import type { MindId } from "../store/mind-id.js";
+import type { MindId } from '../store/mind-id.js';
 
 export interface SandboxExecutionMetadata {
-  kind: "ephemeral" | "persistent";
-  lifecycle?: "ephemeral" | "ready" | "busy" | "detached" | "reset" | "retired";
+  kind: 'ephemeral' | 'persistent';
+  lifecycle?: 'ephemeral' | 'ready' | 'busy' | 'detached' | 'reset' | 'retired';
   alias?: string;
   mindId?: MindId;
   mindTitle?: string;
@@ -22,14 +22,14 @@ export interface SandboxExecutionMetadata {
 }
 
 export interface RunWakeMetadata {
-  kind: "after" | "at" | "auto";
-  state: "armed" | "elapsed" | "rejected" | "preempted" | "fired";
+  kind: 'after' | 'at' | 'auto';
+  state: 'armed' | 'elapsed' | 'rejected' | 'preempted' | 'fired';
   requestedAt: number;
   targetAt?: number;
   taskId?: number;
   note?: string;
   advice?: {
-    source: "classifier" | "fallback";
+    source: 'classifier' | 'fallback';
     delayMs: number;
     reason: string;
   };
@@ -39,7 +39,7 @@ export interface RunMessageMetadata {
   toolContractVersion: string;
   ok: boolean;
   detail?: string;
-  failureKind?: "preparse" | "runtime";
+  failureKind?: 'preparse' | 'runtime';
   execution?: SandboxExecutionMetadata;
   detached?: boolean;
   bgId?: string;
@@ -47,13 +47,13 @@ export interface RunMessageMetadata {
 }
 
 function boundedString(value: unknown, max = 512): string | undefined {
-  return typeof value === "string" && value.length > 0 && value.length <= max
+  return typeof value === 'string' && value.length > 0 && value.length <= max
     ? value
     : undefined;
 }
 
 function finiteInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value)
+  return typeof value === 'number' && Number.isSafeInteger(value)
     ? value
     : undefined;
 }
@@ -61,10 +61,10 @@ function finiteInteger(value: unknown): number | undefined {
 export function parseRunMessageMetadata(
   raw: unknown,
 ): RunMessageMetadata | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
   const toolContractVersion = boundedString(value.toolContractVersion, 128);
-  if (!toolContractVersion || typeof value.ok !== "boolean") return undefined;
+  if (!toolContractVersion || typeof value.ok !== 'boolean') return undefined;
   const parsed: RunMessageMetadata = { toolContractVersion, ok: value.ok };
   const detail = boundedString(value.detail, 120);
   if (
@@ -73,33 +73,33 @@ export function parseRunMessageMetadata(
     detail.trim().split(/\s+/).length <= 10
   )
     parsed.detail = detail.trim();
-  if (value.failureKind === "preparse" || value.failureKind === "runtime")
+  if (value.failureKind === 'preparse' || value.failureKind === 'runtime')
     parsed.failureKind = value.failureKind;
-  if (typeof value.detached === "boolean") parsed.detached = value.detached;
+  if (typeof value.detached === 'boolean') parsed.detached = value.detached;
   const bgId = boundedString(value.bgId, 128);
   if (bgId) parsed.bgId = bgId;
 
   if (
     value.execution &&
-    typeof value.execution === "object" &&
+    typeof value.execution === 'object' &&
     !Array.isArray(value.execution)
   ) {
     const source = value.execution as Record<string, unknown>;
-    if (source.kind === "ephemeral" || source.kind === "persistent") {
+    if (source.kind === 'ephemeral' || source.kind === 'persistent') {
       const execution: SandboxExecutionMetadata = { kind: source.kind };
       if (
-        source.lifecycle === "ephemeral" ||
-        source.lifecycle === "ready" ||
-        source.lifecycle === "busy" ||
-        source.lifecycle === "detached" ||
-        source.lifecycle === "reset" ||
-        source.lifecycle === "retired"
+        source.lifecycle === 'ephemeral' ||
+        source.lifecycle === 'ready' ||
+        source.lifecycle === 'busy' ||
+        source.lifecycle === 'detached' ||
+        source.lifecycle === 'reset' ||
+        source.lifecycle === 'retired'
       )
         execution.lifecycle = source.lifecycle;
       const alias = boundedString(source.alias, 256);
       if (alias) execution.alias = alias;
       const mindId = boundedString(source.mindId, 32);
-      if (mindId?.startsWith("elm-")) execution.mindId = mindId as MindId;
+      if (mindId?.startsWith('elm-')) execution.mindId = mindId as MindId;
       const mindTitle = boundedString(source.mindTitle, 512);
       if (mindTitle) execution.mindTitle = mindTitle;
       const mindStatus = boundedString(source.mindStatus, 64);
@@ -124,13 +124,13 @@ export function parseRunMessageMetadata(
       const retirementWarning = boundedString(source.retirementWarning, 512);
       if (retirementWarning) execution.retirementWarning = retirementWarning;
       for (const key of [
-        "coldStart",
-        "created",
-        "retiring",
-        "statusReminder",
-        "classifierReminder",
+        'coldStart',
+        'created',
+        'retiring',
+        'statusReminder',
+        'classifierReminder',
       ] as const) {
-        if (typeof source[key] === "boolean") execution[key] = source[key];
+        if (typeof source[key] === 'boolean') execution[key] = source[key];
       }
       parsed.execution = execution;
     }
@@ -138,23 +138,23 @@ export function parseRunMessageMetadata(
 
   if (
     value.wake &&
-    typeof value.wake === "object" &&
+    typeof value.wake === 'object' &&
     !Array.isArray(value.wake)
   ) {
     const source = value.wake as Record<string, unknown>;
     const kind =
-      source.kind === "after" || source.kind === "at" || source.kind === "auto"
+      source.kind === 'after' || source.kind === 'at' || source.kind === 'auto'
         ? source.kind
         : undefined;
-    const states: RunWakeMetadata["state"][] = [
-      "armed",
-      "elapsed",
-      "rejected",
-      "preempted",
-      "fired",
+    const states: RunWakeMetadata['state'][] = [
+      'armed',
+      'elapsed',
+      'rejected',
+      'preempted',
+      'fired',
     ];
-    const state = states.includes(source.state as RunWakeMetadata["state"])
-      ? (source.state as RunWakeMetadata["state"])
+    const state = states.includes(source.state as RunWakeMetadata['state'])
+      ? (source.state as RunWakeMetadata['state'])
       : undefined;
     const requestedAt = finiteInteger(source.requestedAt);
     if (kind && state && requestedAt !== undefined) {
@@ -167,15 +167,15 @@ export function parseRunMessageMetadata(
       if (note) wake.note = note;
       if (
         source.advice &&
-        typeof source.advice === "object" &&
+        typeof source.advice === 'object' &&
         !Array.isArray(source.advice)
       ) {
         const rawAdvice = source.advice as Record<string, unknown>;
         const reason = boundedString(rawAdvice.reason, 64);
         const delayMs = finiteInteger(rawAdvice.delayMs);
         if (
-          (rawAdvice.source === "classifier" ||
-            rawAdvice.source === "fallback") &&
+          (rawAdvice.source === 'classifier' ||
+            rawAdvice.source === 'fallback') &&
           reason &&
           delayMs !== undefined &&
           delayMs > 0 &&

@@ -1,19 +1,19 @@
-import type { Config } from "../config.js";
-import type { Logger } from "../lib/log.js";
-import { createLLM } from "../llm/llm.js";
-import type { MindService } from "../store/mind.js";
-import { SecretaryCompletionBroker } from "./completion.js";
+import type { Config } from '../config.js';
+import type { Logger } from '../lib/log.js';
+import { createLLM } from '../llm/llm.js';
+import type { MindService } from '../store/mind.js';
+import { SecretaryCompletionBroker } from './completion.js';
 import {
   SecretaryConversationBroker,
   SecretaryConversationStore,
-} from "./conversation.js";
-import { SecretaryMindBroker } from "./mind.js";
-import type { Database } from "../store/db.js";
+} from './conversation.js';
+import { SecretaryMindBroker } from './mind.js';
+import type { Database } from '../store/db.js';
 import {
   KubectlSecretaryRuntime,
   type KubernetesSecretaryRuntimeOptions,
-} from "./kubernetes.js";
-import { SecretarySpawnBroker, type SecretaryPodRuntime } from "./spawn.js";
+} from './kubernetes.js';
+import { SecretarySpawnBroker, type SecretaryPodRuntime } from './spawn.js';
 
 export interface SecretarySupervisorRuntime {
   broker: SecretarySpawnBroker;
@@ -35,7 +35,7 @@ export interface SecretarySupervisorOptions {
 function kubernetesOptions(config: Config): KubernetesSecretaryRuntimeOptions {
   const kubernetes = config.secretary.kubernetes;
   if (!kubernetes.brokerUrl)
-    throw new Error("secretary Kubernetes broker URL is unavailable");
+    throw new Error('secretary Kubernetes broker URL is unavailable');
   return {
     namespace: kubernetes.namespace,
     template: kubernetes.template,
@@ -66,7 +66,7 @@ export async function startSecretarySupervisor(
   });
   const sessions = await broker.recover();
   const active = sessions.filter(
-    (session) => session.status === "starting" || session.status === "ready",
+    (session) => session.status === 'starting' || session.status === 'ready',
   ).length;
   const completion = new SecretaryCompletionBroker({
     db: options.db,

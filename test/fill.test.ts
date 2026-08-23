@@ -12,16 +12,25 @@ test('fill: a placeholder used more than once is filled every time', () => {
 });
 
 test('fill: throws naming a placeholder with no matching key', () => {
-  assert.throws(() => fill('{{a}}/{{b}}', { a: 1 }), /fill: no value for \{\{b\}\}/);
+  assert.throws(
+    () => fill('{{a}}/{{b}}', { a: 1 }),
+    /fill: no value for \{\{b\}\}/,
+  );
 });
 
 test('fill: throws naming a vars key no placeholder used (typo guard)', () => {
-  assert.throws(() => fill('{{a}}', { a: 1, tiemout: 5 }), /fill: unused key "tiemout"/);
+  assert.throws(
+    () => fill('{{a}}', { a: 1, tiemout: 5 }),
+    /fill: unused key "tiemout"/,
+  );
 });
 
 test('fill: leaves non-identifier double-brace content literal', () => {
- // `{{ x }}` (inner spaces) and `{{}}` are NOT placeholders; carry them verbatim.
-  assert.equal(fill('{{ x }} {{}} end {{k}}', { k: 'K' }), '{{ x }} {{}} end K');
+  // `{{ x }}` (inner spaces) and `{{}}` are NOT placeholders; carry them verbatim.
+  assert.equal(
+    fill('{{ x }} {{}} end {{k}}', { k: 'K' }),
+    '{{ x }} {{}} end K',
+  );
 });
 
 test('fill: carries source-code payload verbatim except real placeholders', () => {

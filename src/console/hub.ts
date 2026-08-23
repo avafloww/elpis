@@ -22,11 +22,19 @@
 import type { ChatMessage } from '../llm/llm.js';
 import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import { parseEnvelope } from '../lib/envelope.js';
-import { protectDisplayHeredocs, type DisplayHeredoc } from '../lib/heredoc-display.js';
+import {
+  protectDisplayHeredocs,
+  type DisplayHeredoc,
+} from '../lib/heredoc-display.js';
 import type { LogLevel } from '../lib/log.js';
 import type { ProviderUsageSnapshot } from '../llm/usage-tracker.js';
 import type { CacheInfo } from '../llm/cache-stats.js';
-import { parseMindId, type MindKind, type MindService, type MindStatus } from '../store/mind.js';
+import {
+  parseMindId,
+  type MindKind,
+  type MindService,
+  type MindStatus,
+} from '../store/mind.js';
 import { isMindId } from '../store/mind-id.js';
 import { parseLlmModelRef } from '../llm/model-registry.js';
 import type { SandboxDeps } from '../types.js';
@@ -44,7 +52,7 @@ export interface RoomFact {
   presence: number;
   group: 'discord' | 'harness';
   /** The configured guild's slug, or null for the internal room / an
- * unconfigured (legacy, NULL-guild) directory channel. */
+   * unconfigured (legacy, NULL-guild) directory channel. */
   guildSlug: string | null;
   /** The channel's effective receive mode, or null when unconfigured / internal. */
   tier: 'drop' | 'direct' | 'social' | 'quiet' | null;
@@ -77,7 +85,8 @@ export function withColors(rooms: RoomFact[]): RoomInfo[] {
   let i = 0;
   return rooms.map((r) => ({
     ...r,
-    color: r.group === 'harness' ? 'green' : ROOM_PALETTE[i++ % ROOM_PALETTE.length],
+    color:
+      r.group === 'harness' ? 'green' : ROOM_PALETTE[i++ % ROOM_PALETTE.length],
   }));
 }
 
@@ -93,8 +102,8 @@ export interface UsageInfo {
   prompt: number;
   completion: number;
   /** Prompt-cache accounting for the rail panel. Nested here rather than given
- * its own frame: the `usage` frame + connect snapshot already carry UsageInfo
- * and already refresh on every message append. */
+   * its own frame: the `usage` frame + connect snapshot already carry UsageInfo
+   * and already refresh on every message append. */
   cache: CacheInfo;
 }
 
@@ -130,13 +139,29 @@ export interface LogLine {
  * append-only index (negative for on-disk archived backfill). */
 export interface StreamEntry {
   id: number;
-  kind: 'user' | 'assistant' | 'tool' | 'think-result' | 'summary' | 'notice' | 'system' | 'compaction' | 'cleared' | 'cachebust' | 'yieldnudge';
+  kind:
+    | 'user'
+    | 'assistant'
+    | 'tool'
+    | 'think-result'
+    | 'summary'
+    | 'notice'
+    | 'system'
+    | 'compaction'
+    | 'cleared'
+    | 'cachebust'
+    | 'yieldnudge';
   role: string;
   channel: string;
   content: string;
   reasoning_content?: string;
   /** For assistant turns: executable run calls remain action cards. */
-  toolCalls?: { id: string; code: string; detail?: string; display?: { code: string; heredocs: DisplayHeredoc[] } }[];
+  toolCalls?: {
+    id: string;
+    code: string;
+    detail?: string;
+    display?: { code: string; heredocs: DisplayHeredoc[] };
+  }[];
   tool_call_id?: string;
   /** Harness-only run attribution for the private operator console. */
   run?: RunMessageMetadata;
@@ -144,7 +169,7 @@ export interface StreamEntry {
   /** Author + display fields parsed from a user envelope, when present. */
   author?: string;
   /** Epoch ms; live entries are stamped now, historical ones parsed from the
- * envelope `(ISO)` header when available, else null. */
+   * envelope `(ISO)` header when available, else null. */
   ts: number | null;
   /** Compaction dividers carry the folded count. */
   replaced?: number;
@@ -177,24 +202,31 @@ export interface HubSources {
   participants: () => number;
   meta: () => Promise<MetaInfo> | MetaInfo;
   /** Read a page of archived (pre-process, on-disk) history strictly older than
- * the mirror's oldest live entry. `beforeArchivedId` is the negative id the
- * client last received (or 0 for the first archived page). */
+   * the mirror's oldest live entry. `beforeArchivedId` is the negative id the
+   * client last received (or 0 for the first archived page). */
   archived: (beforeArchivedId: number, limit: number) => StreamEntry[];
   /** Provider subscription-usage snapshot (rail bars); null when inactive. */
   subUsage: () => ProviderUsageSnapshot | null;
   /** The current context window as the next LLM call would send it (the
- * context-explorer view). On-demand and read-only, like the other sources;
- * absent when unwired (the op then answers with context: null). */
+   * context-explorer view). On-demand and read-only, like the other sources;
+   * absent when unwired (the op then answers with context: null). */
   context?: () => ContextSnapshot;
   /** The console's write operation: the killswitch, delegated to
- * Agent.moderateChannel with actor 'operator'. Absent when moderation isn't
- * wired (e.g. no mute store) — the op handler then no-ops. */
-  moderate?: (channelId: string, action: 'mute' | 'deafen' | 'unmute' | 'undeafen', reason?: string) => { ok: boolean; note: string };
+   * Agent.moderateChannel with actor 'operator'. Absent when moderation isn't
+   * wired (e.g. no mute store) — the op handler then no-ops. */
+  moderate?: (
+    channelId: string,
+    action: 'mute' | 'deafen' | 'unmute' | 'undeafen',
+    reason?: string,
+  ) => { ok: boolean; note: string };
   /** Durable dependency-aware work graph. Unlike the conversation mirror this
- * is intentionally mutable through same-origin console operations. */
+   * is intentionally mutable through same-origin console operations. */
   mind?: MindService;
   /** Enqueue operator-authored console speech into the one agent history. */
-  chat?: (input: { nonce: string; content: string }) => { ok: boolean; note: string };
+  chat?: (input: { nonce: string; content: string }) => {
+    ok: boolean;
+    note: string;
+  };
   /** Fixed, typed resident worker authority; null/absent means unavailable. */
   worker?: ConsoleWorkerControl | null;
   /** Fixed secretary spawn + durable-conversation authority. */
@@ -229,7 +261,7 @@ export class ConsoleHub {
   private clients = new Set<HubClient>();
   private sources: HubSources | null = null;
   /** Monotonic id for the active streaming turn (one at a time — the loop is
- * serial). Bumped at each stream start. */
+   * serial). Bumped at each stream start. */
   private streamId = 0;
   private streamActive = false;
   private streamContent = '';
@@ -244,7 +276,7 @@ export class ConsoleHub {
   }
 
   /** Append a serialized entry with the next monotonic id, evicting the oldest
- * when the mirror exceeds MIRROR_CAP. Overwrites the entry's id. Returns it. */
+   * when the mirror exceeds MIRROR_CAP. Overwrites the entry's id. Returns it. */
   private pushEntry(entry: StreamEntry): StreamEntry {
     entry.id = this.nextId++;
     this.mirror.push(entry);
@@ -259,32 +291,41 @@ export class ConsoleHub {
 
   /** Whether any pre-boot archived history exists (cheap 1-item probe). */
   private archivedAny(): boolean {
-    try { return (this.sources?.archived(0, 1).length ?? 0) > 0; } catch { return false; }
+    try {
+      return (this.sources?.archived(0, 1).length ?? 0) > 0;
+    } catch {
+      return false;
+    }
   }
 
   attach(sources: HubSources): void {
     this.sources = sources;
   }
 
- // ---- inbound events (from agent / llm / logger) ----
+  // ---- inbound events (from agent / llm / logger) ----
 
   /** A message was pushed to the one history. Mirror + broadcast. */
   messageAppended(msg: ChatMessage): void {
     const entry = this.pushEntry(this.serialize(msg, 0, Date.now()));
     this.lastContext = null;
     this.broadcast({ t: 'message', msg: entry });
- // A completed pair / new content changes the fill + per-room counts; refresh
- // both so the meter and the Rooms rail don't go stale between inbound drains.
+    // A completed pair / new content changes the fill + per-room counts; refresh
+    // both so the meter and the Rooms rail don't go stale between inbound drains.
     this.usageChanged();
     this.roomsChanged();
   }
 
   /** A compaction cycle just applied — insert an inline divider and refresh the
- * meter (the fold dropped real context). Folded messages stay visible. */
+   * meter (the fold dropped real context). Folded messages stay visible. */
   compactionApplied(replaced: number): void {
     const entry = this.pushEntry({
-      id: 0, kind: 'compaction', role: 'system', channel: 'internal',
-      content: '', ts: Date.now(), replaced,
+      id: 0,
+      kind: 'compaction',
+      role: 'system',
+      channel: 'internal',
+      content: '',
+      ts: Date.now(),
+      replaced,
     });
     this.lastContext = null;
     this.broadcast({ t: 'message', msg: entry });
@@ -292,35 +333,49 @@ export class ConsoleHub {
   }
 
   /** A turn lost cached prefix — insert an inline divider so the operator can see
- * which turn paid for it. Same idiom as compactionApplied: mirror-only (never
- * transcript-persisted), so busts do not survive a restart or appear in
- * archived backfill. Does NOT refresh the meter — no context was added. */
+   * which turn paid for it. Same idiom as compactionApplied: mirror-only (never
+   * transcript-persisted), so busts do not survive a restart or appear in
+   * archived backfill. Does NOT refresh the meter — no context was added. */
   cacheBusted(rewritten: number): void {
     const entry = this.pushEntry({
-      id: 0, kind: 'cachebust', role: 'system', channel: 'internal',
-      content: '', ts: Date.now(), rewritten,
+      id: 0,
+      kind: 'cachebust',
+      role: 'system',
+      channel: 'internal',
+      content: '',
+      ts: Date.now(),
+      rewritten,
     });
     this.broadcast({ t: 'message', msg: entry });
   }
 
   /** The model returned a response with no run call and was nudged. Mirror-only,
- * same idiom as cacheBusted: never transcript-persisted, so it does not appear
- * in archived backfill. Does NOT refresh the meter. */
+   * same idiom as cacheBusted: never transcript-persisted, so it does not appear
+   * in archived backfill. Does NOT refresh the meter. */
   yieldNudge(count: number): void {
     const entry = this.pushEntry({
-      id: 0, kind: 'yieldnudge', role: 'system', channel: 'internal',
-      content: '', ts: Date.now(), count,
+      id: 0,
+      kind: 'yieldnudge',
+      role: 'system',
+      channel: 'internal',
+      content: '',
+      ts: Date.now(),
+      count,
     });
     this.broadcast({ t: 'message', msg: entry });
   }
 
   /** The one history was wiped (/clear, /new). Insert a "context cleared" divider
- * so the operator's view stays honest (rail counts drop to zero); the mirror
- * keeps the prior entries visible above the divider as an archaeological tail. */
+   * so the operator's view stays honest (rail counts drop to zero); the mirror
+   * keeps the prior entries visible above the divider as an archaeological tail. */
   contextCleared(): void {
     const entry = this.pushEntry({
-      id: 0, kind: 'cleared', role: 'system', channel: 'internal',
-      content: '', ts: Date.now(),
+      id: 0,
+      kind: 'cleared',
+      role: 'system',
+      channel: 'internal',
+      content: '',
+      ts: Date.now(),
     });
     this.lastContext = null;
     this.broadcast({ t: 'message', msg: entry });
@@ -329,38 +384,53 @@ export class ConsoleHub {
   }
 
   compactionStarted(tokens: number): void {
-    this.broadcast({ t: 'compaction', phase: 'started', tokens, at: Date.now() });
+    this.broadcast({
+      t: 'compaction',
+      phase: 'started',
+      tokens,
+      at: Date.now(),
+    });
   }
 
   /** The channel the current turn streams into — set by the agent before each
- * LLM call so the LLM can push deltas without knowing Discord provenance. */
+   * LLM call so the LLM can push deltas without knowing Discord provenance. */
   private streamChannel = 'internal';
   setStreamChannel(channel: string): void {
     this.streamChannel = channel || 'internal';
   }
 
   /** Begin the live streaming bubble. Bumps the
- * stream id so the client discards any partial from a prior attempt. */
+   * stream id so the client discards any partial from a prior attempt. */
   streamStart(): void {
     this.streamId++;
     this.streamActive = true;
     this.streamContent = '';
     this.streamReasoning = '';
-    this.broadcast({ t: 'streamStart', streamId: this.streamId, channel: this.streamChannel });
+    this.broadcast({
+      t: 'streamStart',
+      streamId: this.streamId,
+      channel: this.streamChannel,
+    });
   }
 
   /** Streaming assistant delta (content or reasoning). Best-effort — the LLM path
- * guards the call, so a broken client never interrupts generation. */
+   * guards the call, so a broken client never interrupts generation. */
   streamDelta(kind: 'content' | 'reasoning', text: string): void {
     if (!text) return;
     if (kind === 'content') this.streamContent += text;
     else this.streamReasoning += text;
-    this.broadcast({ t: 'delta', streamId: this.streamId, channel: this.streamChannel, kind, text });
+    this.broadcast({
+      t: 'delta',
+      streamId: this.streamId,
+      channel: this.streamChannel,
+      kind,
+      text,
+    });
   }
 
   /** The streamed turn finished (naturally, aborted, or errored). Lets the client
- * drop a dangling "streaming…" bubble even when no assistant message follows
- * (e.g. a terminal LLM error). Emitted from a `finally` in the LLM path. */
+   * drop a dangling "streaming…" bubble even when no assistant message follows
+   * (e.g. a terminal LLM error). Emitted from a `finally` in the LLM path. */
   streamEnd(): void {
     this.streamActive = false;
     this.streamContent = '';
@@ -369,28 +439,32 @@ export class ConsoleHub {
   }
 
   /** Context usage changed (after an authoritative completion or a compaction).
- * With no connected clients there's no one to render the meter for — skip
- * the source snapshot (`sources.usage` can walk agent state) as well as
- * the broadcast; a later-connecting client gets a correct usage figure from
- * `sendSnapshot`, which calls `sources.usage` itself. */
+   * With no connected clients there's no one to render the meter for — skip
+   * the source snapshot (`sources.usage` can walk agent state) as well as
+   * the broadcast; a later-connecting client gets a correct usage figure from
+   * `sendSnapshot`, which calls `sources.usage` itself. */
   usageChanged(): void {
     if (!this.sources || this.clients.size === 0) return;
     this.broadcast({ t: 'usage', usage: this.sources.usage() });
   }
 
   /** The provider subscription-usage snapshot changed (a poll completed). Same
- * zero-client skip as usageChanged — a later-connecting client's snapshot
- * calls `sources.subUsage` directly. */
+   * zero-client skip as usageChanged — a later-connecting client's snapshot
+   * calls `sources.subUsage` directly. */
   subUsageChanged(): void {
     if (!this.sources || this.clients.size === 0) return;
     this.broadcast({ t: 'subUsage', usage: this.sources.subUsage() });
   }
 
   /** Same zero-client skip: `sources.rooms()`/`sources.participants()` are the
- * cost, and a later-connecting client's snapshot recomputes them fresh. */
+   * cost, and a later-connecting client's snapshot recomputes them fresh. */
   roomsChanged(): void {
     if (!this.sources || this.clients.size === 0) return;
-    this.broadcast({ t: 'rooms', rooms: withColors(this.sources.rooms()), participants: this.sources.participants() });
+    this.broadcast({
+      t: 'rooms',
+      rooms: withColors(this.sources.rooms()),
+      participants: this.sources.participants(),
+    });
   }
 
   logLine(level: Exclude<LogLevel, 'silent'>, msg: string): void {
@@ -400,7 +474,7 @@ export class ConsoleHub {
     this.broadcast({ t: 'log', line });
   }
 
- // ---- client lifecycle ----
+  // ---- client lifecycle ----
 
   async addClient(client: HubClient): Promise<void> {
     this.clients.add(client);
@@ -414,7 +488,11 @@ export class ConsoleHub {
   /** Handle a client→server frame on the one multiplexed console socket. */
   handleClientMessage(client: HubClient, raw: string): void {
     let m: any;
-    try { m = JSON.parse(raw); } catch { return; }
+    try {
+      m = JSON.parse(raw);
+    } catch {
+      return;
+    }
     if (!m || typeof m !== 'object') return;
     if (m.t === 'backfill') this.sendBackfill(client, m);
     if (m.t === 'moderate') this.handleModerate(client, m);
@@ -427,21 +505,50 @@ export class ConsoleHub {
   /** Dispatch one request-correlated control frame. This method owns every
    * await and catches every rejection so a runtime failure cannot escape the
    * WebSocket message callback as an unhandled rejection. */
-  private async handleControl(client: HubClient, m: Record<string, unknown>): Promise<void> {
-    const reqId = Number.isSafeInteger(m.reqId) && Number(m.reqId) >= 0 ? Number(m.reqId) : 0;
+  private async handleControl(
+    client: HubClient,
+    m: Record<string, unknown>,
+  ): Promise<void> {
+    const reqId =
+      Number.isSafeInteger(m.reqId) && Number(m.reqId) >= 0
+        ? Number(m.reqId)
+        : 0;
     const op = typeof m.op === 'string' ? m.op.slice(0, 64) : '';
     const lane = m.lane === 'worker' || m.lane === 'secretary' ? m.lane : null;
     if (!lane) {
-      this.safeSend(client, { t: 'controlResult', lane: 'worker', reqId, op, ok: false, error: 'invalid control lane' });
+      this.safeSend(client, {
+        t: 'controlResult',
+        lane: 'worker',
+        reqId,
+        op,
+        ok: false,
+        error: 'invalid control lane',
+      });
       return;
     }
     const reply = (ok: boolean, value: unknown): void => {
-      this.safeSend(client, ok
-        ? { t: 'controlResult', lane, reqId, op, ok: true, result: value }
-        : { t: 'controlResult', lane, reqId, op, ok: false, error: boundedControlError(value) });
+      this.safeSend(
+        client,
+        ok
+          ? { t: 'controlResult', lane, reqId, op, ok: true, result: value }
+          : {
+              t: 'controlResult',
+              lane,
+              reqId,
+              op,
+              ok: false,
+              error: boundedControlError(value),
+            },
+      );
     };
-    if (!Number.isSafeInteger(m.reqId) || Number(m.reqId) < 0) { reply(false, 'reqId must be a non-negative safe integer'); return; }
-    if (typeof m.op !== 'string' || m.op.length < 1 || m.op.length > 64) { reply(false, 'op must contain 1 to 64 characters'); return; }
+    if (!Number.isSafeInteger(m.reqId) || Number(m.reqId) < 0) {
+      reply(false, 'reqId must be a non-negative safe integer');
+      return;
+    }
+    if (typeof m.op !== 'string' || m.op.length < 1 || m.op.length > 64) {
+      reply(false, 'op must contain 1 to 64 characters');
+      return;
+    }
     try {
       if (lane === 'worker') reply(true, await this.runWorkerControl(op, m));
       else reply(true, await this.runSecretaryControl(op, m));
@@ -450,28 +557,40 @@ export class ConsoleHub {
     }
   }
 
-  private async runWorkerControl(op: string, m: Record<string, unknown>): Promise<unknown> {
+  private async runWorkerControl(
+    op: string,
+    m: Record<string, unknown>,
+  ): Promise<unknown> {
     if (op === 'snapshot' || op === 'list') return this.workerSnapshot();
     if (op !== 'status' && op !== 'start' && op !== 'send' && op !== 'dismiss')
       throw new Error(`unknown worker operation ${JSON.stringify(op)}`);
     const worker = this.sources?.worker;
     if (!worker) throw new Error('worker control unavailable');
-    if (op === 'status') return publicWorkerStatus(await worker.status(controlWorkerRef(m.ref)));
+    if (op === 'status')
+      return publicWorkerStatus(await worker.status(controlWorkerRef(m.ref)));
     if (op === 'start') {
-      if (!isMindId(m.mindId)) throw new Error('mindId must be an exact canonical elm- identity');
+      if (!isMindId(m.mindId))
+        throw new Error('mindId must be an exact canonical elm- identity');
       let options: { modelRef: string } | undefined;
       if (m.modelRef !== undefined) {
-        if (typeof m.modelRef !== 'string' || m.modelRef.length > 256) throw new Error('modelRef must be a canonical configured model reference');
+        if (typeof m.modelRef !== 'string' || m.modelRef.length > 256)
+          throw new Error(
+            'modelRef must be a canonical configured model reference',
+          );
         parseLlmModelRef(m.modelRef, 'worker model ref');
         options = { modelRef: m.modelRef };
       }
-      return publicWorkerSession(options
-        ? await worker.start(m.mindId, options)
-        : await worker.start(m.mindId));
+      return publicWorkerSession(
+        options
+          ? await worker.start(m.mindId, options)
+          : await worker.start(m.mindId),
+      );
     }
     if (op === 'send') {
       const text = boundedControlText(m.content ?? m.text, 'content');
-      return publicWorkerMessage(await worker.send(controlWorkerRef(m.ref), text));
+      return publicWorkerMessage(
+        await worker.send(controlWorkerRef(m.ref), text),
+      );
     }
     return publicWorkerSession(await worker.dismiss(controlWorkerRef(m.ref)));
   }
@@ -481,16 +600,33 @@ export class ConsoleHub {
     if (!worker) return { available: false, sessions: [] };
     try {
       const listed = await worker.list();
-      const active = listed.filter((session) => session.status === 'spawning' || session.status === 'running' || session.status === 'idle');
-      const inactive = listed.filter((session) => session.status !== 'spawning' && session.status !== 'running' && session.status !== 'idle');
+      const active = listed.filter(
+        (session) =>
+          session.status === 'spawning' ||
+          session.status === 'running' ||
+          session.status === 'idle',
+      );
+      const inactive = listed.filter(
+        (session) =>
+          session.status !== 'spawning' &&
+          session.status !== 'running' &&
+          session.status !== 'idle',
+      );
       const sessions = [...active, ...inactive].slice(0, CONTROL_SESSION_LIMIT);
       return { available: true, sessions: sessions.map(publicWorkerSession) };
     } catch (error) {
-      return { available: false, sessions: [], error: boundedControlError(error) };
+      return {
+        available: false,
+        sessions: [],
+        error: boundedControlError(error),
+      };
     }
   }
 
-  private async runSecretaryControl(op: string, m: Record<string, unknown>): Promise<unknown> {
+  private async runSecretaryControl(
+    op: string,
+    m: Record<string, unknown>,
+  ): Promise<unknown> {
     if (op === 'snapshot' || op === 'list') return this.secretarySnapshot();
     if (op !== 'start' && op !== 'enqueue' && op !== 'close')
       throw new Error(`unknown secretary operation ${JSON.stringify(op)}`);
@@ -499,14 +635,23 @@ export class ConsoleHub {
     if (op === 'start') {
       if (m.hintMindId !== undefined && !isMindId(m.hintMindId))
         throw new Error('hintMindId must be an exact canonical elm- identity');
-      return publicSecretarySession(await secretary.broker.start(m.hintMindId ?? null));
+      return publicSecretarySession(
+        await secretary.broker.start(m.hintMindId ?? null),
+      );
     }
     if (op === 'enqueue') {
       const sessionId = controlSecretaryId(m.sessionId);
       const content = boundedControlText(m.content, 'content');
-      return publicSecretaryTurn(await secretary.conversation.enqueue(sessionId, { role: 'user', content }));
+      return publicSecretaryTurn(
+        await secretary.conversation.enqueue(sessionId, {
+          role: 'user',
+          content,
+        }),
+      );
     }
-    return publicSecretarySession(await secretary.broker.close(controlSecretaryId(m.sessionId)));
+    return publicSecretarySession(
+      await secretary.broker.close(controlSecretaryId(m.sessionId)),
+    );
   }
 
   private async secretarySnapshot(): Promise<Record<string, unknown>> {
@@ -514,40 +659,82 @@ export class ConsoleHub {
     if (!secretary) return { available: false, sessions: [] };
     try {
       const listed = await secretary.broker.list();
-      const active = listed.filter((session) => session.status === 'starting' || session.status === 'ready');
-      const inactive = listed.filter((session) => session.status !== 'starting' && session.status !== 'ready');
+      const active = listed.filter(
+        (session) =>
+          session.status === 'starting' || session.status === 'ready',
+      );
+      const inactive = listed.filter(
+        (session) =>
+          session.status !== 'starting' && session.status !== 'ready',
+      );
       const selected = [...active, ...inactive].slice(0, CONTROL_SESSION_LIMIT);
-      const sessions = await Promise.all(selected.map(async (session) => ({
-        ...publicSecretarySession(session),
-        turns: (await secretary.conversation.list(session.id)).slice(-CONTROL_TURN_LIMIT).map(publicSecretaryTurn),
-      })));
+      const sessions = await Promise.all(
+        selected.map(async (session) => ({
+          ...publicSecretarySession(session),
+          turns: (await secretary.conversation.list(session.id))
+            .slice(-CONTROL_TURN_LIMIT)
+            .map(publicSecretaryTurn),
+        })),
+      );
       return { available: true, sessions };
     } catch (error) {
-      return { available: false, sessions: [], error: boundedControlError(error) };
+      return {
+        available: false,
+        sessions: [],
+        error: boundedControlError(error),
+      };
     }
   }
 
-  private handleChat(client: HubClient, m: { nonce?: unknown; content?: unknown }): void {
+  private handleChat(
+    client: HubClient,
+    m: { nonce?: unknown; content?: unknown },
+  ): void {
     const nonce = typeof m.nonce === 'string' ? m.nonce : '';
     const content = typeof m.content === 'string' ? m.content : '';
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(nonce)) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: false, note: 'invalid message nonce' });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: false,
+        note: 'invalid message nonce',
+      });
       return;
     }
     if (!content.trim()) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: false, note: 'message is empty' });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: false,
+        note: 'message is empty',
+      });
       return;
     }
     if (Buffer.byteLength(content, 'utf8') > 32768) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: false, note: 'message exceeds 32 KiB' });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: false,
+        note: 'message exceeds 32 KiB',
+      });
       return;
     }
     if (this.chatNonces.has(nonce)) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: true, note: 'message already accepted' });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: true,
+        note: 'message already accepted',
+      });
       return;
     }
     if (!this.sources?.chat) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: false, note: 'console chat unavailable' });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: false,
+        note: 'console chat unavailable',
+      });
       return;
     }
     try {
@@ -562,55 +749,73 @@ export class ConsoleHub {
       }
       this.safeSend(client, { t: 'chatResult', nonce, ...result });
     } catch (error) {
-      this.safeSend(client, { t: 'chatResult', nonce, ok: false, note: error instanceof Error ? error.message : String(error) });
+      this.safeSend(client, {
+        t: 'chatResult',
+        nonce,
+        ok: false,
+        note: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   /** The most recent context snapshot + when it was built — the CONTEXT_THROTTLE_MS
- * cache. Unlike backfill (bounded by page size), a context build walks the
- * whole history and reads SOUL.md synchronously on the agent's event loop, and
- * the SPA auto-refires the request on every reconnect while the explorer is
- * open — so a flapping socket must not amplify into a build per flap. */
-  private lastContext: { at: number; context: ContextSnapshot | null } | null = null;
+   * cache. Unlike backfill (bounded by page size), a context build walks the
+   * whole history and reads SOUL.md synchronously on the agent's event loop, and
+   * the SPA auto-refires the request on every reconnect while the explorer is
+   * open — so a flapping socket must not amplify into a build per flap. */
+  private lastContext: { at: number; context: ContextSnapshot | null } | null =
+    null;
 
   /** Answer a context-explorer request with the current context window as the
- * next LLM call would send it. Pure read (request/response on this socket,
- * like backfill — the view refreshes on demand, not via broadcast). The
- * source walks live agent state and reads SOUL.md, so a failure degrades to
- * `context: null` rather than ever reaching the loop; requests within
- * CONTEXT_THROTTLE_MS of the last build are answered from that build. */
+   * next LLM call would send it. Pure read (request/response on this socket,
+   * like backfill — the view refreshes on demand, not via broadcast). The
+   * source walks live agent state and reads SOUL.md, so a failure degrades to
+   * `context: null` rather than ever reaching the loop; requests within
+   * CONTEXT_THROTTLE_MS of the last build are answered from that build. */
   private sendContext(client: HubClient, req: { reqId?: number }): void {
     const now = Date.now();
     let context: ContextSnapshot | null;
     if (this.lastContext && now - this.lastContext.at < CONTEXT_THROTTLE_MS) {
       context = this.lastContext.context;
     } else {
-      try { context = this.sources?.context?.() ?? null; } catch { context = null; }
+      try {
+        context = this.sources?.context?.() ?? null;
+      } catch {
+        context = null;
+      }
       this.lastContext = { at: now, context };
     }
     this.safeSend(client, { t: 'context', reqId: req.reqId ?? 0, context });
   }
 
   /** The console's write operation: killswitch moderation, delegated to
- * the same Agent.moderateChannel the slash commands use. Everything else on
- * this socket remains observation. */
-  private handleModerate(client: HubClient, m: { channelId?: unknown; action?: unknown; reason?: unknown }): void {
+   * the same Agent.moderateChannel the slash commands use. Everything else on
+   * this socket remains observation. */
+  private handleModerate(
+    client: HubClient,
+    m: { channelId?: unknown; action?: unknown; reason?: unknown },
+  ): void {
     const ACTIONS = ['mute', 'deafen', 'unmute', 'undeafen'] as const;
     const action = ACTIONS.find((a) => a === m.action);
- // A malformed frame (unknown action, missing/non-string channelId) stays
- // silent — the client sent garbage, not a real request. Moderation being
- // unwired is different: it's a well-formed request the operator sent
- // through a live button, so it gets a reply (Fix 4).
+    // A malformed frame (unknown action, missing/non-string channelId) stays
+    // silent — the client sent garbage, not a real request. Moderation being
+    // unwired is different: it's a well-formed request the operator sent
+    // through a live button, so it gets a reply (Fix 4).
     if (!action || typeof m.channelId !== 'string') return;
     if (!this.sources?.moderate) {
-      this.safeSend(client, { t: 'moderateResult', ok: false, note: 'moderation unavailable' });
+      this.safeSend(client, {
+        t: 'moderateResult',
+        ok: false,
+        note: 'moderation unavailable',
+      });
       return;
     }
-    const reason = typeof m.reason === 'string' && m.reason !== '' ? m.reason : undefined;
+    const reason =
+      typeof m.reason === 'string' && m.reason !== '' ? m.reason : undefined;
     const r = this.sources.moderate(m.channelId, action, reason);
     this.safeSend(client, { t: 'moderateResult', ok: r.ok, note: r.note });
- // No roomsChanged here: Agent.moderateChannel already broadcasts on a
- // successful transition, and a refused one changed nothing.
+    // No roomsChanged here: Agent.moderateChannel already broadcasts on a
+    // successful transition, and a refused one changed nothing.
   }
 
   /** Broadcast the authoritative work-graph list after any adapter mutates it. */
@@ -621,11 +826,31 @@ export class ConsoleHub {
 
   private mindSnapshotPayload(reqId = 0): Record<string, unknown> {
     const mind = this.sources?.mind;
-    if (!mind) return { t: 'mindSnapshot', reqId, available: false, stats: null, items: [] };
+    if (!mind)
+      return {
+        t: 'mindSnapshot',
+        reqId,
+        available: false,
+        stats: null,
+        items: [],
+      };
     try {
-      return { t: 'mindSnapshot', reqId, available: true, stats: mind.stats(), items: mind.list({ includeArchived: true, limit: 500 }) };
+      return {
+        t: 'mindSnapshot',
+        reqId,
+        available: true,
+        stats: mind.stats(),
+        items: mind.list({ includeArchived: true, limit: 500 }),
+      };
     } catch (error) {
-      return { t: 'mindSnapshot', reqId, available: false, stats: null, items: [], error: error instanceof Error ? error.message : String(error) };
+      return {
+        t: 'mindSnapshot',
+        reqId,
+        available: false,
+        stats: null,
+        items: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
@@ -633,9 +858,21 @@ export class ConsoleHub {
     const mind = this.sources?.mind;
     const reqId = typeof m.reqId === 'number' ? m.reqId : 0;
     const op = typeof m.op === 'string' ? m.op : '';
-    if (!mind) { this.safeSend(client, { t: 'mindResult', reqId, op, ok: false, error: 'mind unavailable' }); return; }
+    if (!mind) {
+      this.safeSend(client, {
+        t: 'mindResult',
+        reqId,
+        op,
+        ok: false,
+        error: 'mind unavailable',
+      });
+      return;
+    }
     try {
-      if (op === 'snapshot') { this.safeSend(client, this.mindSnapshotPayload(reqId)); return; }
+      if (op === 'snapshot') {
+        this.safeSend(client, this.mindSnapshotPayload(reqId));
+        return;
+      }
       if (op === 'get') {
         const item = mind.get(parseMindId(m.id));
         if (!item) throw new Error(`no item #${parseMindId(m.id)}`);
@@ -644,57 +881,149 @@ export class ConsoleHub {
       }
       let result: unknown;
       if (op === 'create') {
-        const item = typeof m.item === 'object' && m.item !== null ? m.item as Record<string, unknown> : {};
+        const item =
+          typeof m.item === 'object' && m.item !== null
+            ? (m.item as Record<string, unknown>)
+            : {};
         result = mind.create({
-          title: item.title as string, body: item.body as string | undefined, kind: item.kind as MindKind | undefined,
-          status: item.status as MindStatus | undefined, priority: item.priority as number | undefined,
+          title: item.title as string,
+          body: item.body as string | undefined,
+          kind: item.kind as MindKind | undefined,
+          status: item.status as MindStatus | undefined,
+          priority: item.priority as number | undefined,
           parentId: item.parentId == null ? null : parseMindId(item.parentId),
           dueAt: item.dueAt == null ? null : Number(item.dueAt),
           tags: Array.isArray(item.tags) ? item.tags.map(String) : undefined,
-          dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(parseMindId) : undefined,
+          dependsOn: Array.isArray(item.dependsOn)
+            ? item.dependsOn.map(parseMindId)
+            : undefined,
           remindAt: item.remindAt == null ? null : Number(item.remindAt),
-          reminderChannelId: typeof item.channelId === 'string' ? item.channelId : null,
+          reminderChannelId:
+            typeof item.channelId === 'string' ? item.channelId : null,
           actor: 'console',
         });
       } else if (op === 'update') {
-        const patch = typeof m.patch === 'object' && m.patch !== null ? m.patch as Record<string, unknown> : {};
-        result = mind.update(parseMindId(m.id), {
-          ...(patch.title !== undefined ? { title: String(patch.title) } : {}),
-          ...(patch.body !== undefined ? { body: String(patch.body) } : {}),
-          ...(patch.kind !== undefined ? { kind: patch.kind as MindKind } : {}),
-          ...(patch.status !== undefined ? { status: patch.status as MindStatus } : {}),
-          ...(patch.priority !== undefined ? { priority: Number(patch.priority) } : {}),
-          ...(patch.parentId !== undefined ? { parentId: patch.parentId == null ? null : parseMindId(patch.parentId) } : {}),
-          ...(patch.dueAt !== undefined ? { dueAt: patch.dueAt == null ? null : Number(patch.dueAt) } : {}),
-          ...(patch.tags !== undefined ? { tags: Array.isArray(patch.tags) ? patch.tags.map(String) : [] } : {}),
-        }, 'console');
-      } else if (op === 'status') result = mind.setStatus(parseMindId(m.id), String(m.status) as MindStatus, 'console');
-      else if (op === 'archive') result = mind.archive(parseMindId(m.id), 'console');
-      else if (op === 'restore') result = mind.restore(parseMindId(m.id), 'console');
-      else if (op === 'comment') result = mind.addComment(parseMindId(m.id), String(m.body ?? ''), 'console');
-      else if (op === 'updateComment') result = mind.updateComment(Number(m.commentId), String(m.body ?? ''), 'console');
-      else if (op === 'deleteComment') result = mind.deleteComment(Number(m.commentId), 'console');
-      else if (op === 'link') result = mind.addDependency(parseMindId(m.id), parseMindId(m.dependsOn), 'console');
-      else if (op === 'unlink') result = mind.removeDependency(parseMindId(m.id), parseMindId(m.dependsOn), 'console');
-      else if (op === 'remind') result = mind.addReminder(parseMindId(m.id), Number(m.at), 'console', typeof m.channelId === 'string' ? m.channelId : null);
-      else if (op === 'snoozeReminder') result = mind.snoozeReminder(Number(m.reminderId), Number(m.at), 'console');
-      else if (op === 'cancelReminder') result = mind.cancelReminder(Number(m.reminderId), 'console');
-      else if (op === 'graph') result = mind.graph(parseMindId(m.id), typeof m.depth === 'number' ? m.depth : undefined);
+        const patch =
+          typeof m.patch === 'object' && m.patch !== null
+            ? (m.patch as Record<string, unknown>)
+            : {};
+        result = mind.update(
+          parseMindId(m.id),
+          {
+            ...(patch.title !== undefined
+              ? { title: String(patch.title) }
+              : {}),
+            ...(patch.body !== undefined ? { body: String(patch.body) } : {}),
+            ...(patch.kind !== undefined
+              ? { kind: patch.kind as MindKind }
+              : {}),
+            ...(patch.status !== undefined
+              ? { status: patch.status as MindStatus }
+              : {}),
+            ...(patch.priority !== undefined
+              ? { priority: Number(patch.priority) }
+              : {}),
+            ...(patch.parentId !== undefined
+              ? {
+                  parentId:
+                    patch.parentId == null ? null : parseMindId(patch.parentId),
+                }
+              : {}),
+            ...(patch.dueAt !== undefined
+              ? { dueAt: patch.dueAt == null ? null : Number(patch.dueAt) }
+              : {}),
+            ...(patch.tags !== undefined
+              ? {
+                  tags: Array.isArray(patch.tags) ? patch.tags.map(String) : [],
+                }
+              : {}),
+          },
+          'console',
+        );
+      } else if (op === 'status')
+        result = mind.setStatus(
+          parseMindId(m.id),
+          String(m.status) as MindStatus,
+          'console',
+        );
+      else if (op === 'archive')
+        result = mind.archive(parseMindId(m.id), 'console');
+      else if (op === 'restore')
+        result = mind.restore(parseMindId(m.id), 'console');
+      else if (op === 'comment')
+        result = mind.addComment(
+          parseMindId(m.id),
+          String(m.body ?? ''),
+          'console',
+        );
+      else if (op === 'updateComment')
+        result = mind.updateComment(
+          Number(m.commentId),
+          String(m.body ?? ''),
+          'console',
+        );
+      else if (op === 'deleteComment')
+        result = mind.deleteComment(Number(m.commentId), 'console');
+      else if (op === 'link')
+        result = mind.addDependency(
+          parseMindId(m.id),
+          parseMindId(m.dependsOn),
+          'console',
+        );
+      else if (op === 'unlink')
+        result = mind.removeDependency(
+          parseMindId(m.id),
+          parseMindId(m.dependsOn),
+          'console',
+        );
+      else if (op === 'remind')
+        result = mind.addReminder(
+          parseMindId(m.id),
+          Number(m.at),
+          'console',
+          typeof m.channelId === 'string' ? m.channelId : null,
+        );
+      else if (op === 'snoozeReminder')
+        result = mind.snoozeReminder(
+          Number(m.reminderId),
+          Number(m.at),
+          'console',
+        );
+      else if (op === 'cancelReminder')
+        result = mind.cancelReminder(Number(m.reminderId), 'console');
+      else if (op === 'graph')
+        result = mind.graph(
+          parseMindId(m.id),
+          typeof m.depth === 'number' ? m.depth : undefined,
+        );
       else throw new Error(`unknown mind operation ${JSON.stringify(op)}`);
       this.safeSend(client, { t: 'mindResult', reqId, op, ok: true, result });
     } catch (error) {
-      this.safeSend(client, { t: 'mindResult', reqId, op, ok: false, error: error instanceof Error ? error.message : String(error) });
+      this.safeSend(client, {
+        t: 'mindResult',
+        reqId,
+        op,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
- // ---- snapshot + backfill ----
+  // ---- snapshot + backfill ----
 
   private async sendSnapshot(client: HubClient): Promise<void> {
     const start = Math.max(0, this.mirror.length - SNAPSHOT_MESSAGES);
     const messages = this.mirror.slice(start);
     let meta: MetaInfo | null = null;
-    try { meta = this.sources ? await this.sources.meta() : null; } catch { meta = null; }
-    const [workers, secretary] = await Promise.all([this.workerSnapshot(), this.secretarySnapshot()]);
+    try {
+      meta = this.sources ? await this.sources.meta() : null;
+    } catch {
+      meta = null;
+    }
+    const [workers, secretary] = await Promise.all([
+      this.workerSnapshot(),
+      this.secretarySnapshot(),
+    ]);
     this.safeSend(client, {
       t: 'snapshot',
       usage: this.sources?.usage() ?? null,
@@ -703,13 +1032,17 @@ export class ConsoleHub {
       participants: this.sources?.participants() ?? 0,
       meta,
       messages,
-      stream: this.streamActive ? {
-        streamId: this.streamId, channel: this.streamChannel,
-        content: this.streamContent, reasoning: this.streamReasoning,
-      } : null,
+      stream: this.streamActive
+        ? {
+            streamId: this.streamId,
+            channel: this.streamChannel,
+            content: this.streamContent,
+            reasoning: this.streamReasoning,
+          }
+        : null,
       oldestId: messages.length > 0 ? messages[0].id : this.nextId,
- // hasMore reflects BOTH earlier mirror entries AND on-disk archived history,
- // so a small mirror (e.g. right after a restart) still offers scroll-back.
+      // hasMore reflects BOTH earlier mirror entries AND on-disk archived history,
+      // so a small mirror (e.g. right after a restart) still offers scroll-back.
       hasMore: start > 0 || this.archivedAny(),
       logs: this.logs,
       mind: this.sources?.mind ? this.mindSnapshotPayload() : null,
@@ -718,62 +1051,91 @@ export class ConsoleHub {
     });
   }
 
-  private sendBackfill(client: HubClient, req: { reqId?: number; beforeId?: number }): void {
+  private sendBackfill(
+    client: HubClient,
+    req: { reqId?: number; beforeId?: number },
+  ): void {
     const base = this.mirrorBase();
-    const beforeId = typeof req.beforeId === 'number' ? req.beforeId : this.nextId;
+    const beforeId =
+      typeof req.beforeId === 'number' ? req.beforeId : this.nextId;
     let messages: StreamEntry[];
     let oldestId: number;
     let hasMore: boolean;
     if (beforeId > base) {
- // Inside the retained mirror. ids are monotonic; map id → array position
- // via the base offset (eviction shifts the base, not the ids).
+      // Inside the retained mirror. ids are monotonic; map id → array position
+      // via the base offset (eviction shifts the base, not the ids).
       const end = Math.min(beforeId - base, this.mirror.length);
       const start = Math.max(0, end - BACKFILL_PAGE);
       messages = this.mirror.slice(start, end);
       oldestId = messages.length > 0 ? messages[0].id : beforeId;
       hasMore = start > 0 || this.archivedAny();
     } else {
- // At/below the retained window: page into on-disk archived history (negative
- // ids). A positive beforeId here means the caller reached the mirror's base
- // (or an evicted gap) — start from the newest archived page (arg 0).
+      // At/below the retained window: page into on-disk archived history (negative
+      // ids). A positive beforeId here means the caller reached the mirror's base
+      // (or an evicted gap) — start from the newest archived page (arg 0).
       const archBefore = beforeId <= 0 ? beforeId : 0;
       messages = this.sources?.archived(archBefore, BACKFILL_PAGE) ?? [];
       oldestId = messages.length > 0 ? messages[0].id : beforeId;
       hasMore = messages.length === BACKFILL_PAGE;
     }
-    this.safeSend(client, { t: 'history', reqId: req.reqId ?? 0, messages, oldestId, hasMore });
+    this.safeSend(client, {
+      t: 'history',
+      reqId: req.reqId ?? 0,
+      messages,
+      oldestId,
+      hasMore,
+    });
   }
 
-  private serialize(msg: ChatMessage, id: number, ts: number | null): StreamEntry {
+  private serialize(
+    msg: ChatMessage,
+    id: number,
+    ts: number | null,
+  ): StreamEntry {
     const entry = serializeMessage(msg, id, ts);
     for (const call of msg.tool_calls ?? []) {
       if (call.function.name === 'think') this.thinkCallIds.add(call.id);
     }
-    if (msg.role === 'tool' && msg.tool_call_id && this.thinkCallIds.delete(msg.tool_call_id)) {
+    if (
+      msg.role === 'tool' &&
+      msg.tool_call_id &&
+      this.thinkCallIds.delete(msg.tool_call_id)
+    ) {
       entry.kind = 'think-result';
     }
     return entry;
   }
 
- // ---- fan-out ----
+  // ---- fan-out ----
 
   private broadcast(payload: unknown): void {
- // Nothing to fan out to and no fan-out state to update (the loop below
- // only ever prunes disconnected clients out of `clients`, which is already
- // empty) — skip serializing the payload. Every caller's own state that
- // must keep advancing regardless of clients (mirror entries, `nextId`, the
- // log ring, `streamId`) is updated by the caller BEFORE it calls broadcast,
- // so this early return never skips anything besides the wire write.
+    // Nothing to fan out to and no fan-out state to update (the loop below
+    // only ever prunes disconnected clients out of `clients`, which is already
+    // empty) — skip serializing the payload. Every caller's own state that
+    // must keep advancing regardless of clients (mirror entries, `nextId`, the
+    // log ring, `streamId`) is updated by the caller BEFORE it calls broadcast,
+    // so this early return never skips anything besides the wire write.
     if (this.clients.size === 0) return;
     const data = JSON.stringify(payload);
     for (const c of this.clients) {
-      if (c.closed) { this.clients.delete(c); continue; }
-      try { c.send(data); } catch { this.clients.delete(c); }
+      if (c.closed) {
+        this.clients.delete(c);
+        continue;
+      }
+      try {
+        c.send(data);
+      } catch {
+        this.clients.delete(c);
+      }
     }
   }
 
   private safeSend(client: HubClient, payload: unknown): void {
-    try { client.send(JSON.stringify(payload)); } catch { this.clients.delete(client); }
+    try {
+      client.send(JSON.stringify(payload));
+    } catch {
+      this.clients.delete(client);
+    }
   }
 }
 
@@ -790,8 +1152,10 @@ function boundedControlError(error: unknown): string {
 }
 
 function boundedControlText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be non-empty text`);
-  if (Buffer.byteLength(value, 'utf8') > CONTROL_TEXT_BYTES) throw new Error(`${label} exceeds 32 KiB`);
+  if (typeof value !== 'string' || value.trim().length === 0)
+    throw new Error(`${label} must be non-empty text`);
+  if (Buffer.byteLength(value, 'utf8') > CONTROL_TEXT_BYTES)
+    throw new Error(`${label} exceeds 32 KiB`);
   return value;
 }
 
@@ -805,60 +1169,131 @@ function boundedControlPreview(value: unknown): unknown {
 }
 
 function controlWorkerRef(value: unknown): string {
-  if (typeof value !== 'string' || !WORKER_REF_RE.test(value)) throw new Error('ref must be a bounded worker identity');
+  if (typeof value !== 'string' || !WORKER_REF_RE.test(value))
+    throw new Error('ref must be a bounded worker identity');
   return value;
 }
 
 function controlSecretaryId(value: unknown): string {
-  if (!isSecretarySessionId(value)) throw new Error('sessionId must be an exact canonical sec- identity');
+  if (!isSecretarySessionId(value))
+    throw new Error('sessionId must be an exact canonical sec- identity');
   return value;
 }
 
-function picked(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('runtime returned an invalid control result');
+function picked(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('runtime returned an invalid control result');
   const source = value as Record<string, unknown>;
   const result: Record<string, unknown> = {};
-  for (const key of keys) if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key];
+  for (const key of keys)
+    if (Object.prototype.hasOwnProperty.call(source, key))
+      result[key] = source[key];
   return result;
 }
 
 const WORKER_SESSION_FIELDS = [
-  'id', 'slug', 'worker', 'status', 'modelRef', 'mindId', 'runtime',
-  'sourceRevision', 'sourceSha256', 'sourceBytes', 'createdAt', 'updatedAt', 'lastError',
+  'id',
+  'slug',
+  'worker',
+  'status',
+  'modelRef',
+  'mindId',
+  'runtime',
+  'sourceRevision',
+  'sourceSha256',
+  'sourceBytes',
+  'createdAt',
+  'updatedAt',
+  'lastError',
 ] as const;
-function publicWorkerSession(value: unknown): Record<string, unknown> { return picked(value, WORKER_SESSION_FIELDS); }
+function publicWorkerSession(value: unknown): Record<string, unknown> {
+  return picked(value, WORKER_SESSION_FIELDS);
+}
 function publicWorkerMessage(value: unknown): Record<string, unknown> {
-  const message = picked(value, ['id', 'sessionId', 'direction', 'kind', 'messageKey', 'sender', 'body', 'createdAt', 'acknowledgedAt']);
-  if (message.body !== undefined) message.body = boundedControlPreview(message.body);
+  const message = picked(value, [
+    'id',
+    'sessionId',
+    'direction',
+    'kind',
+    'messageKey',
+    'sender',
+    'body',
+    'createdAt',
+    'acknowledgedAt',
+  ]);
+  if (message.body !== undefined)
+    message.body = boundedControlPreview(message.body);
   return message;
 }
 function publicWorkerArtifact(value: unknown): Record<string, unknown> {
   // relativePath/localPath are intentionally absent: this lane exposes receipts, not files.
-  return picked(value, ['id', 'sessionId', 'key', 'kind', 'sourceSha256', 'sha256', 'sizeBytes', 'createdAt']);
+  return picked(value, [
+    'id',
+    'sessionId',
+    'key',
+    'kind',
+    'sourceSha256',
+    'sha256',
+    'sizeBytes',
+    'createdAt',
+  ]);
 }
 function publicWorkerStatus(value: unknown): Record<string, unknown> {
   const status = picked(value, ['session', 'messages', 'artifacts']);
-  if (!Array.isArray(status.messages) || !Array.isArray(status.artifacts)) throw new Error('worker status returned invalid collections');
+  if (!Array.isArray(status.messages) || !Array.isArray(status.artifacts))
+    throw new Error('worker status returned invalid collections');
   return {
     session: publicWorkerSession(status.session),
-    messages: status.messages.slice(-CONTROL_MESSAGE_LIMIT).map(publicWorkerMessage),
-    artifacts: status.artifacts.slice(-CONTROL_MESSAGE_LIMIT).map(publicWorkerArtifact),
+    messages: status.messages
+      .slice(-CONTROL_MESSAGE_LIMIT)
+      .map(publicWorkerMessage),
+    artifacts: status.artifacts
+      .slice(-CONTROL_MESSAGE_LIMIT)
+      .map(publicWorkerArtifact),
   };
 }
 
 const SECRETARY_SESSION_FIELDS = [
-  'id', 'hintMindId', 'status', 'modelRef', 'runtime', 'createdAt', 'updatedAt', 'lastError',
+  'id',
+  'hintMindId',
+  'status',
+  'modelRef',
+  'runtime',
+  'createdAt',
+  'updatedAt',
+  'lastError',
 ] as const;
-function publicSecretarySession(value: unknown): Record<string, unknown> { return picked(value, SECRETARY_SESSION_FIELDS); }
+function publicSecretarySession(value: unknown): Record<string, unknown> {
+  return picked(value, SECRETARY_SESSION_FIELDS);
+}
 function publicSecretaryTurn(value: unknown): Record<string, unknown> {
-  const turn = picked(value, ['id', 'sessionId', 'sequence', 'status', 'request', 'response', 'createdAt', 'updatedAt', 'claimedAt', 'completedAt', 'lastError']);
+  const turn = picked(value, [
+    'id',
+    'sessionId',
+    'sequence',
+    'status',
+    'request',
+    'response',
+    'createdAt',
+    'updatedAt',
+    'claimedAt',
+    'completedAt',
+    'lastError',
+  ]);
   if (turn.request !== undefined) {
     turn.request = picked(turn.request, ['role', 'content']);
-    (turn.request as Record<string, unknown>).content = boundedControlPreview((turn.request as Record<string, unknown>).content);
+    (turn.request as Record<string, unknown>).content = boundedControlPreview(
+      (turn.request as Record<string, unknown>).content,
+    );
   }
   if (turn.response !== undefined && turn.response !== null) {
     turn.response = picked(turn.response, ['role', 'content']);
-    (turn.response as Record<string, unknown>).content = boundedControlPreview((turn.response as Record<string, unknown>).content);
+    (turn.response as Record<string, unknown>).content = boundedControlPreview(
+      (turn.response as Record<string, unknown>).content,
+    );
   }
   return turn;
 }
@@ -868,11 +1303,19 @@ const NOTICE_MARK = '[harness: context compacted';
 
 /** Serialize one ChatMessage into a StreamEntry with a fixed id + timestamp.
  * Shared by the live mirror and the on-disk archived reader (history.ts). */
-export function serializeMessage(msg: ChatMessage, id: number, ts: number | null): StreamEntry {
+export function serializeMessage(
+  msg: ChatMessage,
+  id: number,
+  ts: number | null,
+): StreamEntry {
   const kind = classifyMessage(msg);
   const entry: StreamEntry = {
-    id, kind, role: msg.role, channel: msg.channel ?? 'internal',
-    content: msg.content ?? '', ts,
+    id,
+    kind,
+    role: msg.role,
+    channel: msg.channel ?? 'internal',
+    content: msg.content ?? '',
+    ts,
   };
   const thoughtParts: string[] = [];
   if (msg.reasoning_content) thoughtParts.push(msg.reasoning_content);
@@ -881,22 +1324,34 @@ export function serializeMessage(msg: ChatMessage, id: number, ts: number | null
     for (const tc of msg.tool_calls) {
       if (tc.function.name === 'think') {
         try {
-          const parsed = JSON.parse(tc.function.arguments || '{}') as { thoughts?: unknown };
-          if (typeof parsed.thoughts === 'string' && parsed.thoughts) thoughtParts.push(parsed.thoughts);
-        } catch { /* malformed args remain absent; sanitizer normally rejects them */ }
+          const parsed = JSON.parse(tc.function.arguments || '{}') as {
+            thoughts?: unknown;
+          };
+          if (typeof parsed.thoughts === 'string' && parsed.thoughts)
+            thoughtParts.push(parsed.thoughts);
+        } catch {
+          /* malformed args remain absent; sanitizer normally rejects them */
+        }
       } else if (tc.function.name === 'run') {
         const detail = extractDetail(tc.function.arguments);
         const code = extractCode(tc.function.arguments);
         const protectedCode = protectDisplayHeredocs(code);
-        const display = !protectedCode.error && protectedCode.heredocs.length > 0
-          ? { code: protectedCode.code, heredocs: protectedCode.heredocs }
-          : undefined;
-        runCalls.push({ id: tc.id, code, ...(detail ? { detail } : {}), ...(display ? { display } : {}) });
+        const display =
+          !protectedCode.error && protectedCode.heredocs.length > 0
+            ? { code: protectedCode.code, heredocs: protectedCode.heredocs }
+            : undefined;
+        runCalls.push({
+          id: tc.id,
+          code,
+          ...(detail ? { detail } : {}),
+          ...(display ? { display } : {}),
+        });
       }
     }
     if (runCalls.length > 0) entry.toolCalls = runCalls;
   }
-  if (thoughtParts.length > 0) entry.reasoning_content = thoughtParts.join('\n\n');
+  if (thoughtParts.length > 0)
+    entry.reasoning_content = thoughtParts.join('\n\n');
   if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
   if (msg.run) entry.run = msg.run;
   if (msg.sends && msg.sends.length > 0) entry.sends = msg.sends;
@@ -915,7 +1370,7 @@ export function classifyMessage(msg: ChatMessage): StreamEntry['kind'] {
   if (msg.role === 'system') {
     return msg.content.startsWith(SUMMARY_PREFIX) ? 'summary' : 'system';
   }
- // user
+  // user
   if (msg.content.startsWith(NOTICE_MARK)) return 'notice';
   return 'user';
 }
@@ -927,7 +1382,7 @@ export function extractCode(argumentsJson: string): string {
     const parsed = JSON.parse(argumentsJson || '{}');
     if (parsed && typeof parsed.code === 'string') return parsed.code;
   } catch {
- // fall through
+    // fall through
   }
   return argumentsJson || '';
 }
@@ -937,7 +1392,7 @@ export function extractDetail(argumentsJson: string): string {
     const parsed = JSON.parse(argumentsJson || '{}');
     if (parsed && typeof parsed.detail === 'string') return parsed.detail;
   } catch {
- // malformed legacy calls have no usable detail
+    // malformed legacy calls have no usable detail
   }
   return '';
 }

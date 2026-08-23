@@ -1,10 +1,10 @@
 export const LLM_PROVIDER_TYPES = [
-  "openai-compatible",
-  "anthropic-oauth",
-  "codex-oauth",
+  'openai-compatible',
+  'anthropic-oauth',
+  'codex-oauth',
 ] as const;
 export type LlmProviderType = (typeof LLM_PROVIDER_TYPES)[number];
-export type LlmRole = "main" | "classifier" | "motor" | "secretary";
+export type LlmRole = 'main' | 'classifier' | 'motor' | 'secretary';
 
 export interface LlmModelDefinition {
   name: string;
@@ -18,7 +18,7 @@ export interface LlmProviderDefinition {
   providerType: LlmProviderType;
   apiKey: string;
   baseUrl: string;
-  api: "auto" | "responses" | "chat";
+  api: 'auto' | 'responses' | 'chat';
   externalThinking: boolean;
   streamIdleTimeoutMs: number;
   callTimeoutMs: number;
@@ -44,7 +44,7 @@ export interface ResolvedLlmTarget extends LlmModelDefinition {
 
 export interface LlmModelRegistry {
   providers: Record<string, LlmProviderDefinition>;
-  roles: LlmRegistryInput["roles"] & { secretary: string | null };
+  roles: LlmRegistryInput['roles'] & { secretary: string | null };
   targets: {
     main: ResolvedLlmTarget;
     classifier: ResolvedLlmTarget;
@@ -64,11 +64,11 @@ function requireId(value: string, label: string): void {
 
 export function parseLlmModelRef(
   value: string,
-  label = "model ref",
+  label = 'model ref',
 ): { providerId: string; modelId: string } {
-  if (typeof value !== "string")
+  if (typeof value !== 'string')
     throw new Error(`${label} must be a string in provider/model-id form`);
-  const parts = value.split("/");
+  const parts = value.split('/');
   if (parts.length !== 2)
     throw new Error(
       `${label} must be in provider/model-id form (got ${JSON.stringify(value)})`,
@@ -80,9 +80,9 @@ export function parseLlmModelRef(
 }
 
 export function resolveLlmModelTarget(
-  registry: Pick<LlmModelRegistry, "providers">,
+  registry: Pick<LlmModelRegistry, 'providers'>,
   ref: string,
-  label = "model ref",
+  label = 'model ref',
 ): ResolvedLlmTarget {
   const { providerId, modelId } = parseLlmModelRef(ref, label);
   const provider = registry.providers[providerId];
@@ -99,9 +99,9 @@ export function resolveLlmModelTarget(
 }
 
 function validateModel(model: LlmModelDefinition, path: string): void {
-  if (!model || typeof model !== "object")
+  if (!model || typeof model !== 'object')
     throw new Error(`${path} must be a model mapping`);
-  if (typeof model.name !== "string" || model.name.length === 0)
+  if (typeof model.name !== 'string' || model.name.length === 0)
     throw new Error(`${path}.name must be a non-empty string`);
   if (
     model.contextSize !== null &&
@@ -110,41 +110,41 @@ function validateModel(model: LlmModelDefinition, path: string): void {
     throw new Error(`${path}.context_size must be a positive integer or null`);
   }
   for (const key of [
-    "reasoningEffort",
-    "reasoningSummary",
-    "reasoningContext",
+    'reasoningEffort',
+    'reasoningSummary',
+    'reasoningContext',
   ] as const) {
-    if (model[key] !== null && typeof model[key] !== "string")
+    if (model[key] !== null && typeof model[key] !== 'string')
       throw new Error(`${path}.${key} must be a string or null`);
   }
 }
 
 function validateProvider(provider: LlmProviderDefinition, path: string): void {
-  if (!provider || typeof provider !== "object")
+  if (!provider || typeof provider !== 'object')
     throw new Error(`${path} must be a provider mapping`);
   if (!LLM_PROVIDER_TYPES.includes(provider.providerType))
     throw new Error(`${path}.provider_type is invalid`);
-  if (typeof provider.baseUrl !== "string" || provider.baseUrl.length === 0)
+  if (typeof provider.baseUrl !== 'string' || provider.baseUrl.length === 0)
     throw new Error(`${path}.base_url must be a non-empty string`);
   if (
-    provider.providerType === "openai-compatible" &&
-    (typeof provider.apiKey !== "string" || provider.apiKey.length === 0)
+    provider.providerType === 'openai-compatible' &&
+    (typeof provider.apiKey !== 'string' || provider.apiKey.length === 0)
   ) {
     throw new Error(
       `${path}.api_key must be a non-empty string for openai-compatible`,
     );
   }
-  if (!["auto", "responses", "chat"].includes(provider.api))
+  if (!['auto', 'responses', 'chat'].includes(provider.api))
     throw new Error(`${path}.api must be auto, responses, or chat`);
-  if (provider.providerType === "codex-oauth" && provider.api === "chat")
+  if (provider.providerType === 'codex-oauth' && provider.api === 'chat')
     throw new Error(`${path}.api=chat is not supported for codex-oauth`);
-  if (typeof provider.externalThinking !== "boolean")
+  if (typeof provider.externalThinking !== 'boolean')
     throw new Error(`${path}.external_thinking must be boolean`);
-  if (provider.externalThinking && provider.providerType !== "codex-oauth")
+  if (provider.externalThinking && provider.providerType !== 'codex-oauth')
     throw new Error(`${path}.external_thinking requires codex-oauth`);
   for (const [key, value] of [
-    ["stream_idle_timeout_ms", provider.streamIdleTimeoutMs],
-    ["call_timeout_ms", provider.callTimeoutMs],
+    ['stream_idle_timeout_ms', provider.streamIdleTimeoutMs],
+    ['call_timeout_ms', provider.callTimeoutMs],
   ] as const) {
     if (!Number.isFinite(value) || value < 0)
       throw new Error(`${path}.${key} must be a non-negative finite number`);
@@ -168,7 +168,7 @@ export interface LegacyLlmDefinition {
   externalThinking: boolean;
   streamIdleTimeoutMs: number;
   callTimeoutMs: number;
-  api: "auto" | "responses" | "chat";
+  api: 'auto' | 'responses' | 'chat';
   reasoningSummary: string | null;
   reasoningContext: string | null;
 }
@@ -177,7 +177,7 @@ export function legacyLlmModelRegistry(
   legacy: LegacyLlmDefinition,
   opts: { motorEnabled?: boolean } = {},
 ): LlmModelRegistry {
-  const ref = "legacy/main";
+  const ref = 'legacy/main';
   return createLlmModelRegistry(
     {
       providers: {
@@ -217,9 +217,9 @@ export function createLlmModelRegistry(
 ): LlmModelRegistry {
   const providers = Object.entries(input.providers ?? {});
   if (providers.length === 0)
-    throw new Error("llm.providers must contain at least one provider");
+    throw new Error('llm.providers must contain at least one provider');
   for (const [providerId, provider] of providers) {
-    requireId(providerId, "llm provider id");
+    requireId(providerId, 'llm provider id');
     validateProvider(provider, `llm.providers.${providerId}`);
   }
   const resolve = (
@@ -233,21 +233,21 @@ export function createLlmModelRegistry(
           ref,
           `llm.roles.${role}`,
         );
-  if (!input.roles?.main) throw new Error("llm.roles.main is required");
+  if (!input.roles?.main) throw new Error('llm.roles.main is required');
   if (!input.roles?.classifier)
-    throw new Error("llm.roles.classifier is required");
+    throw new Error('llm.roles.classifier is required');
   if (opts.requireMotor && !input.roles.motor)
     throw new Error(
-      "llm.roles.motor is required while the motor module is active",
+      'llm.roles.motor is required while the motor module is active',
     );
   return {
     providers: input.providers,
     roles: { ...input.roles, secretary: input.roles.secretary ?? null },
     targets: {
-      main: resolve("main", input.roles.main)!,
-      classifier: resolve("classifier", input.roles.classifier)!,
-      motor: resolve("motor", input.roles.motor),
-      secretary: resolve("secretary", input.roles.secretary),
+      main: resolve('main', input.roles.main)!,
+      classifier: resolve('classifier', input.roles.classifier)!,
+      motor: resolve('motor', input.roles.motor),
+      secretary: resolve('secretary', input.roles.secretary),
     },
   };
 }

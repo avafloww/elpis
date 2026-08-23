@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { gzipSync } from "node:zlib";
-import type { WorkerWorkspaceSource } from "./client.js";
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
+import type { WorkerWorkspaceSource } from './client.js';
 
 const MAX_COMMAND_OUTPUT = 16 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 60_000;
@@ -16,20 +16,20 @@ interface CommandResult {
 }
 
 function bounded(value: Buffer): string {
-  return value.toString("utf8").trim().slice(0, 500) || "no diagnostic";
+  return value.toString('utf8').trim().slice(0, 500) || 'no diagnostic';
 }
 
 function emptyDirectory(directory: string): void {
   if (!fs.existsSync(directory))
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (!fs.statSync(directory).isDirectory())
-    throw new Error("worker workspace must be a directory");
+    throw new Error('worker workspace must be a directory');
   if (fs.readdirSync(directory).length !== 0)
-    throw new Error("worker workspace must be empty before source checkout");
+    throw new Error('worker workspace must be empty before source checkout');
 }
 
 function verifySource(source: WorkerWorkspaceSource): void {
-  const sha256 = createHash("sha256").update(source.data).digest("hex");
+  const sha256 = createHash('sha256').update(source.data).digest('hex');
   if (
     !/^[0-9a-f]{40,64}$/.test(source.revision) ||
     !/^[0-9a-f]{64}$/.test(source.sha256) ||
@@ -38,7 +38,7 @@ function verifySource(source: WorkerWorkspaceSource): void {
     source.data.length !== source.sizeBytes ||
     sha256 !== source.sha256
   )
-    throw new Error("worker source archive failed verification");
+    throw new Error('worker source archive failed verification');
 }
 
 async function command(
@@ -50,14 +50,14 @@ async function command(
     const child = spawn(binary, args, {
       cwd: options.cwd,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         PATH: process.env.PATH,
         HOME: os.tmpdir(),
-        LC_ALL: "C",
-        LANG: "C",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_TERMINAL_PROMPT: "0",
+        LC_ALL: 'C',
+        LANG: 'C',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_TERMINAL_PROMPT: '0',
       },
     });
     const stdout: Buffer[] = [];
@@ -68,14 +68,14 @@ async function command(
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
+      child.kill('SIGKILL');
       reject(error);
     };
     const timer = setTimeout(
       () => fail(new Error(`worker workspace command timed out: ${binary}`)),
       COMMAND_TIMEOUT_MS,
     );
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on('data', (chunk) => {
       const bytes = Buffer.from(chunk);
       stdoutBytes += bytes.length;
       if (stdoutBytes > MAX_COMMAND_OUTPUT)
@@ -84,7 +84,7 @@ async function command(
         );
       else stdout.push(bytes);
     });
-    child.stderr.on("data", (chunk) => {
+    child.stderr.on('data', (chunk) => {
       const bytes = Buffer.from(chunk);
       stderrBytes += bytes.length;
       if (stderrBytes > MAX_COMMAND_OUTPUT)
@@ -95,8 +95,8 @@ async function command(
         );
       else stderr.push(bytes);
     });
-    child.once("error", fail);
-    child.once("close", (code) => {
+    child.once('error', fail);
+    child.once('close', (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -126,39 +126,39 @@ async function extractSource(
   verifySource(source);
   emptyDirectory(destination);
   fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-  const archive = path.join(scratch, "source.tar.gz");
+  const archive = path.join(scratch, 'source.tar.gz');
   fs.writeFileSync(archive, source.data, { mode: 0o600 });
   try {
-    const listing = await command("tar", ["-tzf", archive]);
-    const paths = listing.stdout.toString("utf8").split("\n").filter(Boolean);
+    const listing = await command('tar', ['-tzf', archive]);
+    const paths = listing.stdout.toString('utf8').split('\n').filter(Boolean);
     if (
       paths.some((entry) => {
         const normalized = path.posix.normalize(entry);
         return (
-          entry.includes("\0") ||
+          entry.includes('\0') ||
           path.posix.isAbsolute(entry) ||
-          normalized === ".." ||
-          normalized.startsWith("../") ||
-          normalized === ".git" ||
-          normalized.startsWith(".git/")
+          normalized === '..' ||
+          normalized.startsWith('../') ||
+          normalized === '.git' ||
+          normalized.startsWith('.git/')
         );
       })
     )
-      throw new Error("worker source archive contains an unsafe path");
-    const verbose = await command("tar", ["-tvzf", archive]);
+      throw new Error('worker source archive contains an unsafe path');
+    const verbose = await command('tar', ['-tvzf', archive]);
     const unsafeType = verbose.stdout
-      .toString("utf8")
-      .split("\n")
+      .toString('utf8')
+      .split('\n')
       .filter(Boolean)
-      .find((line) => line[0] !== "-" && line[0] !== "d");
+      .find((line) => line[0] !== '-' && line[0] !== 'd');
     if (unsafeType)
-      throw new Error("worker source archive contains a non-file entry");
-    await command("tar", [
-      "-xzf",
+      throw new Error('worker source archive contains a non-file entry');
+    await command('tar', [
+      '-xzf',
       archive,
-      "--no-same-owner",
-      "--no-same-permissions",
-      "-C",
+      '--no-same-owner',
+      '--no-same-permissions',
+      '-C',
       destination,
     ]);
   } finally {
@@ -171,7 +171,7 @@ export async function checkoutWorkerSource(
   workspace: string,
   scratchRoot: string,
 ): Promise<void> {
-  const scratch = fs.mkdtempSync(path.join(scratchRoot, "elpis-checkout-"));
+  const scratch = fs.mkdtempSync(path.join(scratchRoot, 'elpis-checkout-'));
   try {
     await extractSource(source, workspace, scratch);
   } finally {
@@ -184,47 +184,47 @@ export async function createWorkerPatch(
   workspace: string,
   scratchRoot: string,
 ): Promise<Buffer> {
-  const scratch = fs.mkdtempSync(path.join(scratchRoot, "elpis-patch-"));
-  const baseline = path.join(scratch, "baseline");
+  const scratch = fs.mkdtempSync(path.join(scratchRoot, 'elpis-patch-'));
+  const baseline = path.join(scratch, 'baseline');
   fs.mkdirSync(baseline, { mode: 0o700 });
   try {
-    await extractSource(source, baseline, path.join(scratch, "archive"));
-    await command("git", ["init", "-q"], { cwd: baseline });
-    await command("git", ["add", "-A"], { cwd: baseline });
+    await extractSource(source, baseline, path.join(scratch, 'archive'));
+    await command('git', ['init', '-q'], { cwd: baseline });
+    await command('git', ['add', '-A'], { cwd: baseline });
     await command(
-      "git",
+      'git',
       [
-        "-c",
-        "user.name=Elpis Worker Baseline",
-        "-c",
-        "user.email=worker@invalid",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "commit",
-        "-qm",
+        '-c',
+        'user.name=Elpis Worker Baseline',
+        '-c',
+        'user.email=worker@invalid',
+        '-c',
+        'core.hooksPath=/dev/null',
+        'commit',
+        '-qm',
         `baseline ${source.revision}`,
       ],
       { cwd: baseline },
     );
-    const gitDirectory = path.join(baseline, ".git");
+    const gitDirectory = path.join(baseline, '.git');
     const common = [
       `--git-dir=${gitDirectory}`,
       `--work-tree=${workspace}`,
-      "-c",
-      "core.hooksPath=/dev/null",
+      '-c',
+      'core.hooksPath=/dev/null',
     ];
-    await command("git", [...common, "add", "-A"]);
-    const patch = await command("git", [
+    await command('git', [...common, 'add', '-A']);
+    const patch = await command('git', [
       ...common,
-      "diff",
-      "--cached",
-      "--binary",
-      "--full-index",
-      "--no-ext-diff",
-      "--src-prefix=a/",
-      "--dst-prefix=b/",
-      "HEAD",
-      "--",
+      'diff',
+      '--cached',
+      '--binary',
+      '--full-index',
+      '--no-ext-diff',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      'HEAD',
+      '--',
     ]);
     return gzipSync(patch.stdout, { level: 9 });
   } finally {

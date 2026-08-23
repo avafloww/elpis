@@ -10,18 +10,27 @@ function payload(reason?: string): string {
   return JSON.stringify({
     protocol: 1,
     at: new Date().toISOString(),
-    reason: typeof reason === 'string' ? reason.slice(0, MAX_REASON_CHARS) : null,
+    reason:
+      typeof reason === 'string' ? reason.slice(0, MAX_REASON_CHARS) : null,
   });
 }
 
-export async function requestRestrictedRestart(reason?: string, options: RestartRequestOptions = {}): Promise<void> {
+export async function requestRestrictedRestart(
+  reason?: string,
+  options: RestartRequestOptions = {},
+): Promise<void> {
   const endpoint = options.endpoint ?? BOOT_RESTART_ENDPOINT;
   if (!endpoint) throw new Error('ELPIS_RESTART_ENDPOINT is not configured');
   const url = new URL(endpoint);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`unsupported restart endpoint protocol: ${url.protocol}`);
-  if (url.username || url.password || url.hash) throw new Error('restart endpoint must not contain credentials or a fragment');
+  if (!['http:', 'https:'].includes(url.protocol))
+    throw new Error(`unsupported restart endpoint protocol: ${url.protocol}`);
+  if (url.username || url.password || url.hash)
+    throw new Error(
+      'restart endpoint must not contain credentials or a fragment',
+    );
   const timeoutMs = options.timeoutMs ?? 5000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('restart timeout must be a positive finite number');
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new Error('restart timeout must be a positive finite number');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -33,7 +42,8 @@ export async function requestRestrictedRestart(reason?: string, options: Restart
       signal: controller.signal,
     });
     await response.body?.cancel();
-    if (!response.ok) throw new Error(`restart broker returned HTTP ${response.status}`);
+    if (!response.ok)
+      throw new Error(`restart broker returned HTTP ${response.status}`);
   } finally {
     clearTimeout(timer);
   }

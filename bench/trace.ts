@@ -1,7 +1,17 @@
-import { parseRunMessageMetadata, type RunMessageMetadata } from '../src/sandbox/metadata.js';
-import { SCHEMA_VERSION, type TraceEvent, type TraceMetrics } from './schema.js';
+import {
+  parseRunMessageMetadata,
+  type RunMessageMetadata,
+} from '../src/sandbox/metadata.js';
+import {
+  SCHEMA_VERSION,
+  type TraceEvent,
+  type TraceMetrics,
+} from './schema.js';
 
-export function runResultTraceData(raw: unknown, content: string): { ok: boolean; data: Record<string, unknown> } {
+export function runResultTraceData(
+  raw: unknown,
+  content: string,
+): { ok: boolean; data: Record<string, unknown> } {
   const metadata = parseRunMessageMetadata(raw);
   return {
     ok: metadata?.ok ?? /^\[run ok/m.test(content),
@@ -19,31 +29,56 @@ export function heartbeatDecisionSatisfied(
   events: readonly TraceEvent[],
   sends: number,
 ): boolean {
-  const effect = sends > 0 || events.some((event) =>
-    event.kind === 'tool-call' && Boolean(event.code?.trim()) && event.code?.trim() !== 'void 0');
+  const effect =
+    sends > 0 ||
+    events.some(
+      (event) =>
+        event.kind === 'tool-call' &&
+        Boolean(event.code?.trim()) &&
+        event.code?.trim() !== 'void 0',
+    );
   if (decision === 'effect') return effect;
   if (effect) return false;
-  const terminal = [...events].reverse().find((event) => event.kind === 'tool-result');
+  const terminal = [...events]
+    .reverse()
+    .find((event) => event.kind === 'tool-result');
   if (!terminal?.ok || !terminal.end) return false;
   const wake = terminal.data?.wake;
   if (!wake || typeof wake !== 'object' || Array.isArray(wake)) return false;
   const kind = (wake as Record<string, unknown>).kind;
   const state = (wake as Record<string, unknown>).state;
   if (state !== 'armed' && state !== 'elapsed') return false;
-  return decision === 'wait' ? kind === 'after' || kind === 'at' : kind === 'auto';
+  return decision === 'wait'
+    ? kind === 'after' || kind === 'at'
+    : kind === 'auto';
 }
 
 export class TraceRecorder {
   private readonly events: TraceEvent[];
   private seq: number;
-  constructor(initial: readonly TraceEvent[] = []) { this.events = initial.map((e) => ({ ...e })); this.seq = this.events.reduce((n, e) => Math.max(n, e.seq + 1), 0); }
-  add(event: Omit<TraceEvent, 'schemaVersion' | 'seq' | 'at'> & { at?: string }): TraceEvent {
+  constructor(initial: readonly TraceEvent[] = []) {
+    this.events = initial.map((e) => ({ ...e }));
+    this.seq = this.events.reduce((n, e) => Math.max(n, e.seq + 1), 0);
+  }
+  add(
+    event: Omit<TraceEvent, 'schemaVersion' | 'seq' | 'at'> & { at?: string },
+  ): TraceEvent {
     const { at, ...rest } = event;
-    const recorded = { schemaVersion: SCHEMA_VERSION, seq: this.seq++, at: at ?? new Date().toISOString(), ...rest } as TraceEvent;
+    const recorded = {
+      schemaVersion: SCHEMA_VERSION,
+      seq: this.seq++,
+      at: at ?? new Date().toISOString(),
+      ...rest,
+    } as TraceEvent;
     this.events.push(recorded);
     return recorded;
   }
-  snapshot(): TraceEvent[] { return this.events.map((e) => ({ ...e, data: e.data ? { ...e.data } : undefined })); }
+  snapshot(): TraceEvent[] {
+    return this.events.map((e) => ({
+      ...e,
+      data: e.data ? { ...e.data } : undefined,
+    }));
+  }
 }
 
 function normalizedWork(event: TraceEvent): string | null {
@@ -51,21 +86,34 @@ function normalizedWork(event: TraceEvent): string | null {
   return JSON.stringify({ code: event.code?.trim().replace(/\s+/g, ' ') });
 }
 
-export function traceMetrics(events: readonly TraceEvent[], idealDispatches = 1): TraceMetrics {
+export function traceMetrics(
+  events: readonly TraceEvent[],
+  idealDispatches = 1,
+): TraceMetrics {
   let firstUseful: number | null = null;
   let outcomeSeq: number | null = null;
-  let malformedCalls = 0, failedCalls = 0, blockedCalls = 0, nonTerminalCalls = 0;
-  let failedTerminalFlags = 0, emptyTerminalCalls = 0, duplicateWork = 0;
+  let malformedCalls = 0,
+    failedCalls = 0,
+    blockedCalls = 0,
+    nonTerminalCalls = 0;
+  let failedTerminalFlags = 0,
+    emptyTerminalCalls = 0,
+    duplicateWork = 0;
   const work = new Set<string>();
   for (const e of events) {
-    if (firstUseful === null && (e.kind === 'send' || (e.kind === 'tool-result' && e.ok))) firstUseful = e.seq;
+    if (
+      firstUseful === null &&
+      (e.kind === 'send' || (e.kind === 'tool-result' && e.ok))
+    )
+      firstUseful = e.seq;
     if (e.kind === 'outcome' && e.ok && outcomeSeq === null) outcomeSeq = e.seq;
     if (e.kind === 'tool-call') {
       if (e.data?.malformed === true) malformedCalls++;
       if (e.end !== true) nonTerminalCalls++;
       if (e.end === true && !(e.code ?? '').trim()) emptyTerminalCalls++;
       const key = normalizedWork(e);
-      if (key && work.has(key)) duplicateWork++; else if (key) work.add(key);
+      if (key && work.has(key)) duplicateWork++;
+      else if (key) work.add(key);
     }
     if (e.kind === 'tool-result' && e.ok === false) {
       failedCalls++;
@@ -79,12 +127,25 @@ export function traceMetrics(events: readonly TraceEvent[], idealDispatches = 1)
   // that omission consumed a surplus model turn and is part of the trajectory.
   const missingTerminalFlags = nonTerminalCalls;
   return {
-    naturalTurns, dispatchCount, usefulActionLatency: firstUseful,
-    malformedCalls, failedCalls, blockedCalls,
-    unchangedRetries: events.filter((e) => e.kind === 'tool-result' && e.data?.unchanged === true).length,
-    missingTerminalFlags, failedTerminalFlags, emptyTerminalCalls,
-    postOutcomeDispatches: outcomeSeq === null ? 0 : events.filter((e) => e.kind === 'dispatch' && e.seq > outcomeSeq!).length,
-    duplicateWork, sendsPerRun: events.filter((e) => e.kind === 'send').length,
+    naturalTurns,
+    dispatchCount,
+    usefulActionLatency: firstUseful,
+    malformedCalls,
+    failedCalls,
+    blockedCalls,
+    unchangedRetries: events.filter(
+      (e) => e.kind === 'tool-result' && e.data?.unchanged === true,
+    ).length,
+    missingTerminalFlags,
+    failedTerminalFlags,
+    emptyTerminalCalls,
+    postOutcomeDispatches:
+      outcomeSeq === null
+        ? 0
+        : events.filter((e) => e.kind === 'dispatch' && e.seq > outcomeSeq!)
+            .length,
+    duplicateWork,
+    sendsPerRun: events.filter((e) => e.kind === 'send').length,
     surplusModelTurns: Math.max(0, dispatchCount - idealDispatches),
   };
 }

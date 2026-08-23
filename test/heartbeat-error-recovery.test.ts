@@ -19,18 +19,27 @@ import { NonRetriableError } from '../src/llm/llm.js';
 import { buildTestAgent, makeConfig } from './helpers.js';
 
 const EMPTY_WAKE: CompleteResult = {
-  message: { role: 'assistant', content: '' }, stripped: false,
+  message: { role: 'assistant', content: '' },
+  stripped: false,
   usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
 };
 
 function buildAgent(opts: { intervalMs: number; llm: LLM }) {
   const { agent, sent, tmpDir } = buildTestAgent({
     llm: opts.llm,
-    config: { heartbeat: { intervalMs: opts.intervalMs, maxIntervalMs: 4 * 60 * 60 * 1000, reflectionMinMessages: 99, socialNudgeMs: 12 * 60 * 60 * 1000 }, discord: { ...makeConfig().discord, errorChannelId: 'errors' } },
+    config: {
+      heartbeat: {
+        intervalMs: opts.intervalMs,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        reflectionMinMessages: 99,
+        socialNudgeMs: 12 * 60 * 60 * 1000,
+      },
+      discord: { ...makeConfig().discord, errorChannelId: 'errors' },
+    },
     tmpPrefix: 'harness-hb-err-',
   });
- // Mark a real inbound as seen so the heartbeat's "no conversation yet" guard
- // passes — without this, every beat is skipped.
+  // Mark a real inbound as seen so the heartbeat's "no conversation yet" guard
+  // passes — without this, every beat is skipped.
   agent.primeForHeartbeatTest();
   return { agent, sent, tmpDir };
 }
@@ -43,8 +52,8 @@ function microtask(): Promise<void> {
 }
 
 test('heartbeat: a non-retriable LLM error on a beat does not kill the scheduler chain', async () => {
- // An LLM that throws NonRetriableError once (as a 400 would), then returns
- // a clean empty turn-end on subsequent calls.
+  // An LLM that throws NonRetriableError once (as a 400 would), then returns
+  // a clean empty turn-end on subsequent calls.
   let threw = false;
   const llm: LLM = {
     client: {} as unknown as LLM['client'],
@@ -53,21 +62,26 @@ test('heartbeat: a non-retriable LLM error on a beat does not kill the scheduler
     complete(): Promise<CompleteResult> {
       if (!threw) {
         threw = true;
-        return Promise.reject(new NonRetriableError(new Error('400 Extra inputs are not permitted')));
+        return Promise.reject(
+          new NonRetriableError(
+            new Error('400 Extra inputs are not permitted'),
+          ),
+        );
       }
       return Promise.resolve(EMPTY_WAKE);
     },
     summarize: () => Promise.resolve('SUMMARY'),
   } as LLM;
 
- // Short interval so the scheduler arms a beat quickly. We DO start the
- // real heartbeat (unlike the multichannel tests) because the bug is in the
- // scheduler-chain survival across an error turn.
+  // Short interval so the scheduler arms a beat quickly. We DO start the
+  // real heartbeat (unlike the multichannel tests) because the bug is in the
+  // scheduler-chain survival across an error turn.
   const { agent, sent } = buildAgent({ intervalMs: 20, llm });
 
- // Capture the send (the error path calls deps.send with the failure notice).
- // Hook BEFORE starting the loop to avoid a race with the 20ms beat timer.
-  const { promise: errored, resolve: signalError } = Promise.withResolvers<void>();
+  // Capture the send (the error path calls deps.send with the failure notice).
+  // Hook BEFORE starting the loop to avoid a race with the 20ms beat timer.
+  const { promise: errored, resolve: signalError } =
+    Promise.withResolvers<void>();
   const deps = agent['deps'];
   const origSend = deps.send;
   deps.send = async (channelId, text) => {
@@ -78,29 +92,33 @@ test('heartbeat: a non-retriable LLM error on a beat does not kill the scheduler
   void agent.loop();
   agent.startHeartbeat();
 
- // Wait for the first beat to fire, hit the LLM error, surface the notice,
- // and park at the wake-gate.
+  // Wait for the first beat to fire, hit the LLM error, surface the notice,
+  // and park at the wake-gate.
   await errored;
   await microtask();
   deps.send = origSend;
 
- // The critical assertion: rescheduleBeat must be null (the callback was
- // invoked at the wake-gate), not still dangling. A dangling callback means
- // the setTimeout chain is dead — no future heartbeat will ever fire.
+  // The critical assertion: rescheduleBeat must be null (the callback was
+  // invoked at the wake-gate), not still dangling. A dangling callback means
+  // the setTimeout chain is dead — no future heartbeat will ever fire.
   assert.equal(
-    agent.rescheduleBeatPendingForTest, false,
+    agent.rescheduleBeatPendingForTest,
+    false,
     'heartbeat reschedule callback must be invoked after an error turn; ' +
-    'a dangling callback means the scheduler chain is broken',
+      'a dangling callback means the scheduler chain is broken',
   );
 
- // A new heartbeat is armed (heartbeatTimeout is set).
-  assert.ok(agent['heartbeatTimeout'], 'a new heartbeat is scheduled after the error');
+  // A new heartbeat is armed (heartbeatTimeout is set).
+  assert.ok(
+    agent['heartbeatTimeout'],
+    'a new heartbeat is scheduled after the error',
+  );
 
   agent.stop();
 });
 
 test('heartbeat: a beat that completes normally still reschedules (no regression)', async () => {
- // Sanity: the happy path still clears rescheduleBeat at natural turn-end.
+  // Sanity: the happy path still clears rescheduleBeat at natural turn-end.
   const llm: LLM = {
     client: {} as unknown as LLM['client'],
     model: 'test',
@@ -111,10 +129,11 @@ test('heartbeat: a beat that completes normally still reschedules (no regression
 
   const { agent } = buildAgent({ intervalMs: 20, llm });
 
- // Use the send hook to detect the first beat completing (a normal beat with
- // no sends still reaches natural turn-end → idle, which we detect via a
- // one-shot onIdle override).
-  const { promise: beatDone, resolve: signalBeat } = Promise.withResolvers<void>();
+  // Use the send hook to detect the first beat completing (a normal beat with
+  // no sends still reaches natural turn-end → idle, which we detect via a
+  // one-shot onIdle override).
+  const { promise: beatDone, resolve: signalBeat } =
+    Promise.withResolvers<void>();
   const deps = agent['deps'];
   const origOnIdle = deps.onIdle;
   let idleCount = 0;
@@ -131,10 +150,14 @@ test('heartbeat: a beat that completes normally still reschedules (no regression
   deps.onIdle = origOnIdle;
 
   assert.equal(
-    agent.rescheduleBeatPendingForTest, false,
+    agent.rescheduleBeatPendingForTest,
+    false,
     'a normal beat must clear the reschedule callback at natural turn-end',
   );
-  assert.ok(agent['heartbeatTimeout'], 'a new heartbeat is scheduled after a normal beat');
+  assert.ok(
+    agent['heartbeatTimeout'],
+    'a new heartbeat is scheduled after a normal beat',
+  );
 
   agent.stop();
 });

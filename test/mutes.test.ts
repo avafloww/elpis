@@ -6,7 +6,11 @@ import * as path from 'node:path';
 import { openDatabase, type Database } from '../src/store/db.js';
 import { createMuteStore } from '../src/store/mutes.js';
 
-function freshStore(): { store: ReturnType<typeof createMuteStore>; db: Database; dir: string } {
+function freshStore(): {
+  store: ReturnType<typeof createMuteStore>;
+  db: Database;
+  dir: string;
+} {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-mutes-'));
   const db = openDatabase(dir);
   return { store: createMuteStore(db), db, dir };

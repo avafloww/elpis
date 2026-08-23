@@ -4,15 +4,41 @@ import type { GuildConfig } from '../src/config.js';
 import { buildTestAgent, makeConfig } from './helpers.js';
 
 const GUILDS: GuildConfig[] = [
-  { id: 'g1', slug: 'alpha', slashCommands: false, quietHours: null, timezone: null, channels: { '1001': 'direct' } },
-  { id: 'g2', slug: 'beta', slashCommands: false, quietHours: null, timezone: null, channels: { '2001': 'direct' } },
-  { id: 'g3', slug: 'gamma', slashCommands: false, quietHours: null, timezone: null, channels: { '3001': 'direct' } },
+  {
+    id: 'g1',
+    slug: 'alpha',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '1001': 'direct' },
+  },
+  {
+    id: 'g2',
+    slug: 'beta',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '2001': 'direct' },
+  },
+  {
+    id: 'g3',
+    slug: 'gamma',
+    slashCommands: false,
+    quietHours: null,
+    timezone: null,
+    channels: { '3001': 'direct' },
+  },
 ];
 
 function buildAgent() {
   const built = buildTestAgent({
     config: {
-      heartbeat: { intervalMs: 0, maxIntervalMs: 4 * 60 * 60 * 1000, socialNudgeMs: 1, reflectionMinMessages: 1 },
+      heartbeat: {
+        intervalMs: 0,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        socialNudgeMs: 1,
+        reflectionMinMessages: 1,
+      },
       discord: { ...makeConfig().discord, guilds: GUILDS },
     },
     tmpPrefix: 'harness-hb-minimal-multi-',
@@ -21,15 +47,25 @@ function buildAgent() {
   return built;
 }
 
-function lastSendAt(agent: ReturnType<typeof buildAgent>['agent']): Map<string, number> {
+function lastSendAt(
+  agent: ReturnType<typeof buildAgent>['agent'],
+): Map<string, number> {
   return agent['lastSendAt'] as Map<string, number>;
 }
 
-function channelDirectory(agent: ReturnType<typeof buildAgent>['agent']): import('../src/store/channels.js').ChannelDirectory {
-  return (agent['deps'] as { channels: import('../src/store/channels.js').ChannelDirectory }).channels;
+function channelDirectory(
+  agent: ReturnType<typeof buildAgent>['agent'],
+): import('../src/store/channels.js').ChannelDirectory {
+  return (
+    agent['deps'] as {
+      channels: import('../src/store/channels.js').ChannelDirectory;
+    }
+  ).channels;
 }
 
-async function fireBeat(agent: ReturnType<typeof buildAgent>['agent']): Promise<string> {
+async function fireBeat(
+  agent: ReturnType<typeof buildAgent>['agent'],
+): Promise<string> {
   await agent.fireHeartbeatForTest();
   const queue = agent['inbound'] as { content: string }[];
   assert.equal(queue.length, 1, 'beat enqueued');

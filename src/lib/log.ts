@@ -36,7 +36,10 @@ const noop = () => {};
  * `setLogSink`; a throwing sink must never break logging, so calls are guarded.
  * The sink receives the level and the joined message text (no prefix/timestamp —
  * the sink stamps its own). */
-export type LogSink = (level: Exclude<LogLevel, 'silent'>, message: string) => void;
+export type LogSink = (
+  level: Exclude<LogLevel, 'silent'>,
+  message: string,
+) => void;
 let logSink: LogSink | null = null;
 export function setLogSink(sink: LogSink | null): void {
   logSink = sink;
@@ -54,18 +57,21 @@ function stringifyArg(x: unknown): string {
 
 function emit(level: LogLevel, prefix: string, a: unknown[]): void {
   const ts = new Date().toISOString();
- // single console.error call so a multi-arg line stays one journal line
+  // single console.error call so a multi-arg line stays one journal line
   console.error(`${prefix} ${ts} [${level}]`, ...a);
   if (logSink && level !== 'silent') {
     try {
       logSink(level, a.map(stringifyArg).join(' '));
     } catch {
- // a broken sink must never take down logging
+      // a broken sink must never take down logging
     }
   }
 }
 
-export function createLogger(level: LogLevel = 'info', prefix = '[harness]'): Logger {
+export function createLogger(
+  level: LogLevel = 'info',
+  prefix = '[harness]',
+): Logger {
   const rank = RANK[level] ?? RANK.info;
   const bind = (lvl: LogLevel) =>
     rank >= 0 && RANK[lvl] >= rank

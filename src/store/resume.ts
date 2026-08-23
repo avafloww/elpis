@@ -30,10 +30,17 @@ export interface ResumeMarker {
  * to systemd or the restricted lifecycle broker. Best-effort: a marker-write
  * failure must never block the restart itself. */
 export function clearResumeMarker(dataDirectory: string): void {
-  try { fs.unlinkSync(resolveDataLayout(dataDirectory).resumeMarker); } catch { /* best-effort */ }
+  try {
+    fs.unlinkSync(resolveDataLayout(dataDirectory).resumeMarker);
+  } catch {
+    /* best-effort */
+  }
 }
 
-export function writeResumeMarker(dataDirectory: string, reason?: string): void {
+export function writeResumeMarker(
+  dataDirectory: string,
+  reason?: string,
+): void {
   const marker: ResumeMarker = {
     reason: reason ?? null,
     at: new Date().toISOString(),
@@ -42,12 +49,17 @@ export function writeResumeMarker(dataDirectory: string, reason?: string): void 
     const layout = resolveDataLayout(dataDirectory);
     fs.mkdirSync(layout.root, { recursive: true, mode: 0o700 });
     fs.writeFileSync(layout.resumeMarker, JSON.stringify(marker));
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** Read AND delete the marker (consume-once). Returns null when there is no
  * marker, it is unreadable, or it is older than maxAgeMs. */
-export function consumeResumeMarker(dataDirectory: string, maxAgeMs = 15 * 60_000): ResumeMarker | null {
+export function consumeResumeMarker(
+  dataDirectory: string,
+  maxAgeMs = 15 * 60_000,
+): ResumeMarker | null {
   const file = resolveDataLayout(dataDirectory).resumeMarker;
   let raw: string;
   try {
@@ -55,7 +67,11 @@ export function consumeResumeMarker(dataDirectory: string, maxAgeMs = 15 * 60_00
   } catch {
     return null;
   }
-  try { fs.unlinkSync(file); } catch { /* consumed anyway */ }
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* consumed anyway */
+  }
   try {
     const obj = JSON.parse(raw) as Partial<ResumeMarker>;
     const at = typeof obj.at === 'string' ? obj.at : '';

@@ -56,12 +56,19 @@ export function xxh64(buf: Uint8Array, seed: bigint): bigint {
     let v4 = (seed - PRIME1) & MASK;
     const limit = len - 32;
     while (p <= limit) {
-      v1 = round(v1, read64(buf, p)); p += 8;
-      v2 = round(v2, read64(buf, p)); p += 8;
-      v3 = round(v3, read64(buf, p)); p += 8;
-      v4 = round(v4, read64(buf, p)); p += 8;
+      v1 = round(v1, read64(buf, p));
+      p += 8;
+      v2 = round(v2, read64(buf, p));
+      p += 8;
+      v3 = round(v3, read64(buf, p));
+      p += 8;
+      v4 = round(v4, read64(buf, p));
+      p += 8;
     }
-    h64 = add(add(rotl(v1, 1n), rotl(v2, 7n)), add(rotl(v3, 12n), rotl(v4, 18n)));
+    h64 = add(
+      add(rotl(v1, 1n), rotl(v2, 7n)),
+      add(rotl(v3, 12n), rotl(v4, 18n)),
+    );
     h64 = mergeRound(h64, v1);
     h64 = mergeRound(h64, v2);
     h64 = mergeRound(h64, v3);

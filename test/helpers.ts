@@ -12,37 +12,37 @@
 // (tiny budgets, a scripted LLM, an injected card manager, …) — never fork the
 // graph.
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { Agent, type AgentDeps, type InboundMessage } from "../src/agent.js";
-import { createMemory, ensureFile } from "../src/store/memory.js";
-import { createSandbox } from "../src/sandbox/index.js";
-import { createContextTracker } from "../src/llm/context-tracker.js";
-import { createDensityModel } from "../src/llm/density.js";
-import { createCompactor } from "../src/llm/compactor.js";
-import { createTranscriptStore } from "../src/store/sessions.js";
-import { createChannelDirectory } from "../src/store/channels.js";
-import { openDatabase } from "../src/store/db.js";
-import { MindService } from "../src/store/mind.js";
-import { Scheduler } from "../src/store/scheduler.js";
-import type { Config } from "../src/config.js";
-import { legacyLlmModelRegistry } from "../src/llm/model-registry.js";
-import type { LLM, CompleteResult } from "../src/llm/llm.js";
-import { CONSOLE_CHANNEL_ID, type SandboxDeps } from "../src/types.js";
-import { noopLogger } from "../src/lib/log.js";
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { Agent, type AgentDeps, type InboundMessage } from '../src/agent.js';
+import { createMemory, ensureFile } from '../src/store/memory.js';
+import { createSandbox } from '../src/sandbox/index.js';
+import { createContextTracker } from '../src/llm/context-tracker.js';
+import { createDensityModel } from '../src/llm/density.js';
+import { createCompactor } from '../src/llm/compactor.js';
+import { createTranscriptStore } from '../src/store/sessions.js';
+import { createChannelDirectory } from '../src/store/channels.js';
+import { openDatabase } from '../src/store/db.js';
+import { MindService } from '../src/store/mind.js';
+import { Scheduler } from '../src/store/scheduler.js';
+import type { Config } from '../src/config.js';
+import { legacyLlmModelRegistry } from '../src/llm/model-registry.js';
+import type { LLM, CompleteResult } from '../src/llm/llm.js';
+import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
+import { noopLogger } from '../src/lib/log.js';
 
 /** A minimal explicit yield: successful empty code plus a long one-shot wake. */
 export const EMPTY_WAKE: CompleteResult = {
   message: {
-    role: "assistant",
-    content: "",
+    role: 'assistant',
+    content: '',
     tool_calls: [
       {
-        id: "tc-end",
-        type: "function",
+        id: 'tc-end',
+        type: 'function',
         function: {
-          name: "run",
+          name: 'run',
           arguments:
             '{"code":"","detail":"Yield the fixture turn","wake":{"after":"1h"}}',
         },
@@ -57,45 +57,45 @@ export const EMPTY_WAKE: CompleteResult = {
  * `paths.dataDirectory` (default `/tmp/harness-test`; `buildTestAgent` passes the
  * case's temp dir). Override any field via `overrides`. */
 export function makeConfig(overrides: Partial<Config> = {}): Config {
-  const dataDirectory = overrides.paths?.dataDirectory ?? "/tmp/harness-test";
+  const dataDirectory = overrides.paths?.dataDirectory ?? '/tmp/harness-test';
   return {
     llm: {
-      providerType: "openai-compatible",
-      apiKey: "stub",
-      baseUrl: "http://stub",
-      model: "stub",
+      providerType: 'openai-compatible',
+      apiKey: 'stub',
+      baseUrl: 'http://stub',
+      model: 'stub',
       contextSize: null,
-      reasoningEffort: "high",
+      reasoningEffort: 'high',
       externalThinking: false,
       streamIdleTimeoutMs: 180_000,
       callTimeoutMs: 1_200_000,
-      api: "auto",
+      api: 'auto',
       reasoningSummary: null,
       reasoningContext: null,
       completionReserveTokens: 8192,
-      registrySource: "legacy",
+      registrySource: 'legacy',
       registry: legacyLlmModelRegistry(
         {
-          providerType: "openai-compatible",
-          apiKey: "stub",
-          baseUrl: "http://stub",
-          model: "stub",
+          providerType: 'openai-compatible',
+          apiKey: 'stub',
+          baseUrl: 'http://stub',
+          model: 'stub',
           contextSize: null,
-          reasoningEffort: "high",
+          reasoningEffort: 'high',
           externalThinking: false,
           streamIdleTimeoutMs: 180_000,
           callTimeoutMs: 1_200_000,
-          api: "auto",
+          api: 'auto',
           reasoningSummary: null,
           reasoningContext: null,
-    },
+        },
         { motorEnabled: true },
       ),
     },
-    operator: { name: "operator", pronouns: null, discordId: null },
+    operator: { name: 'operator', pronouns: null, discordId: null },
     discord: {
-      botToken: "stub",
-      applicationId: "stub",
+      botToken: 'stub',
+      applicationId: 'stub',
       errorChannelId: null,
       ignoredUserIds: [],
       attachmentInlineMaxBytes: 32768,
@@ -105,12 +105,12 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       emoteKeyframes: 4,
       guilds: [
         {
-          id: "stub",
-          slug: "stub",
+          id: 'stub',
+          slug: 'stub',
           slashCommands: false,
           quietHours: null,
           timezone: null,
-          channels: { "100": "direct" },
+          channels: { '100': 'direct' },
         },
       ],
     },
@@ -133,7 +133,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       enabled: false,
       mcpEnabled: false,
       port: 8787,
-      host: "127.0.0.1",
+      host: '127.0.0.1',
     },
     kagi: { apiKey: null },
     bluesky: null,
@@ -141,18 +141,18 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       enabled: false,
       maxConcurrent: 1,
       kubernetes: {
-        namespace: "elpis-residence",
-        template: "elpis-secretary",
-        container: "secretary",
+        namespace: 'elpis-residence',
+        template: 'elpis-secretary',
+        container: 'secretary',
         brokerUrl: null,
-        kubectlPath: "kubectl",
+        kubectlPath: 'kubectl',
         context: null,
       },
     },
     workers: {
       enabled: false,
       maxConcurrent: 1,
-      server: { enabled: false, host: "127.0.0.1", port: 8790 },
+      server: { enabled: false, host: '127.0.0.1', port: 8790 },
       workspace: {
         sourceRoot: null,
         maxSourceBytes: 8 * 1024 * 1024,
@@ -160,31 +160,31 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       },
       kubernetes: {
         enabled: false,
-        namespace: "elpis-workers",
-        template: "elpis-worker",
-        container: "worker",
+        namespace: 'elpis-workers',
+        template: 'elpis-worker',
+        container: 'worker',
         brokerUrl: null,
-        kubectlPath: "kubectl",
+        kubectlPath: 'kubectl',
         context: null,
       },
     },
     usageTracker: { enabled: true, pollIntervalMs: 300000 },
     logger: noopLogger,
-    logLevel: "info",
+    logLevel: 'info',
     ...overrides,
     memory: {
       consolidationThresholdTokens: 32000,
       consolidationTargetTokens: 24000,
       ...overrides.memory,
     },
- // Built AFTER the `...overrides` spread so it deep-merges rather than
- // being replaced wholesale: derivation from `dataDirectory` keeps working
- // even when a caller only overrides `paths.dataDirectory`, while an
- // explicit `overrides.paths.*` field still wins (spread last).
+    // Built AFTER the `...overrides` spread so it deep-merges rather than
+    // being replaced wholesale: derivation from `dataDirectory` keeps working
+    // even when a caller only overrides `paths.dataDirectory`, while an
+    // explicit `overrides.paths.*` field still wins (spread last).
     paths: {
       dataDirectory,
-      soulPath: path.join(dataDirectory, "SOUL.md"),
-      memoryPath: path.join(dataDirectory, "MEMORY.md"),
+      soulPath: path.join(dataDirectory, 'SOUL.md'),
+      memoryPath: path.join(dataDirectory, 'MEMORY.md'),
       harnessRoot: dataDirectory,
       ...overrides.paths,
     },
@@ -196,11 +196,11 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
  * behavior. */
 export function makeStubLLM(overrides: Partial<LLM> = {}): LLM {
   return {
-    client: {} as unknown as LLM["client"],
-    model: "test",
-    runTool: {} as unknown as LLM["runTool"],
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
     complete: () => Promise.resolve(EMPTY_WAKE),
-    summarize: () => Promise.resolve("SUMMARY"),
+    summarize: () => Promise.resolve('SUMMARY'),
     ...overrides,
   } as LLM;
 }
@@ -224,7 +224,7 @@ type DepsOrFn<T> = Partial<T> | ((ctx: DepsContext) => Partial<T>);
 const resolveDeps = <T>(
   d: DepsOrFn<T> | undefined,
   ctx: DepsContext,
-): Partial<T> => (typeof d === "function" ? d(ctx) : (d ?? {}));
+): Partial<T> => (typeof d === 'function' ? d(ctx) : (d ?? {}));
 
 export interface BuildTestAgentOpts {
   /** Config field overrides (merged over the temp-dir-backed defaults). */
@@ -232,22 +232,22 @@ export interface BuildTestAgentOpts {
   /** An LLM to use instead of `makeStubLLM()`. */
   llm?: LLM;
   /** A tracker to use instead of the default `createContextTracker(100000, 8192)`
- * — pass a tiny-budget one for compaction tests. */
+   * — pass a tiny-budget one for compaction tests. */
   tracker?: ReturnType<typeof createContextTracker>;
   /** Extra/overriding sandbox deps (e.g. `bg`, `channelName`, `typing`).
- * A function form receives `{ tmpDir, config, memory, llm }`. */
+   * A function form receives `{ tmpDir, config, memory, llm }`. */
   sandboxDeps?: DepsOrFn<SandboxDeps>;
   /** Extra/overriding Agent deps (e.g. `cards`, `setCurrentInbound`,
- * a custom `send`). By default `send` pushes into the returned `sent` array.
- * A function form receives `{ tmpDir, config, memory, llm }`. */
+   * a custom `send`). By default `send` pushes into the returned `sent` array.
+   * A function form receives `{ tmpDir, config, memory, llm }`. */
   agentDeps?: DepsOrFn<AgentDeps>;
   /** Compactor options (keepTokens / foldSerializeCap) for compaction tests. */
-  compactorOpts?: import("../src/llm/compactor.js").CompactorOpts;
+  compactorOpts?: import('../src/llm/compactor.js').CompactorOpts;
   /** mkdtemp prefix (cosmetic — helps identify leftover dirs). */
   tmpPrefix?: string;
   /** Use this directory instead of a fresh mkdtemp (bench engine). The caller
- * owns its lifecycle: cleanup becomes a no-op. Pre-existing SOUL/MEMORY
- * files are preserved (ensureFile only writes when missing). */
+   * owns its lifecycle: cleanup becomes a no-op. Pre-existing SOUL/MEMORY
+   * files are preserved (ensureFile only writes when missing). */
   dir?: string;
 }
 
@@ -256,17 +256,17 @@ export interface BuildTestAgentOpts {
 export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const tmpDir =
     opts.dir ??
-    fs.mkdtempSync(path.join(os.tmpdir(), opts.tmpPrefix ?? "harness-test-"));
+    fs.mkdtempSync(path.join(os.tmpdir(), opts.tmpPrefix ?? 'harness-test-'));
   if (opts.dir) fs.mkdirSync(tmpDir, { recursive: true });
-  ensureFile(path.join(tmpDir, "MEMORY.md"), "# Agent Memory\n");
-  ensureFile(path.join(tmpDir, "SOUL.md"), "# Soul\n");
-  const memory = createMemory(path.join(tmpDir, "MEMORY.md"));
+  ensureFile(path.join(tmpDir, 'MEMORY.md'), '# Agent Memory\n');
+  ensureFile(path.join(tmpDir, 'SOUL.md'), '# Soul\n');
+  const memory = createMemory(path.join(tmpDir, 'MEMORY.md'));
   const config = makeConfig({
     ...opts.config,
     paths: {
       dataDirectory: tmpDir,
-      soulPath: path.join(tmpDir, "SOUL.md"),
-      memoryPath: path.join(tmpDir, "MEMORY.md"),
+      soulPath: path.join(tmpDir, 'SOUL.md'),
+      memoryPath: path.join(tmpDir, 'MEMORY.md'),
       harnessRoot: tmpDir,
       ...opts.config?.paths,
     },
@@ -304,7 +304,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     },
     restart: (reason) => ({
       ok: true,
-      note: `restart simulated in test harness${reason ? `: ${reason}` : ""}`,
+      note: `restart simulated in test harness${reason ? `: ${reason}` : ''}`,
     }),
     typing: () => {},
     scheduler,
@@ -316,7 +316,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     listChannelsWithNames: () => agentRef.current!.knownChannels(),
     resolveChannel: (ref) => agentRef.current!.resolveChannelRef(ref),
     channelName: (id) =>
-      id === CONSOLE_CHANNEL_ID ? "console" : (channelsRef?.get(id) ?? null),
+      id === CONSOLE_CHANNEL_ID ? 'console' : (channelsRef?.get(id) ?? null),
     channelLabel: (id) => agentRef.current!.qualifiedChannelLabel(id),
     ...resolveDeps<SandboxDeps>(opts.sandboxDeps, depsCtx),
   });
@@ -326,7 +326,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     ratio: () => density.ratio(),
     ...opts.compactorOpts,
   });
-  const transcript = createTranscriptStore(path.join(tmpDir, "sessions"));
+  const transcript = createTranscriptStore(path.join(tmpDir, 'sessions'));
   const channels = createChannelDirectory(db, tmpDir, config.discord.guilds);
   channelsRef = channels;
   const agent = new Agent({

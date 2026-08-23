@@ -17,11 +17,11 @@
 // The control-path + argv construction is split into PURE exported helpers so
 // it can be unit-tested without a live ssh (CI has no network).
 
-import { spawn } from "node:child_process";
-import * as path from "node:path";
-import * as fs from "node:fs";
-import { slugify } from "../lib/slug.js";
-import { resolveDataLayout } from "../store/data-layout.js";
+import { spawn } from 'node:child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { slugify } from '../lib/slug.js';
+import { resolveDataLayout } from '../store/data-layout.js';
 
 /** The shape returned by `elpis.ssh(host).exec(cmd)` — same as `elpis.sh` plus `host`. */
 export interface SshResult {
@@ -45,11 +45,11 @@ export interface SshHandle {
   /** The ControlPath socket backing this connection (stable for host+user). */
   controlPath: string;
   /** Run a command on the remote host over the multiplexed connection.
- * Returns `{ stdout, stderr, code, signal, host }` — never throws on a
- * nonzero exit; check `.code`. */
+   * Returns `{ stdout, stderr, code, signal, host }` — never throws on a
+   * nonzero exit; check `.code`. */
   exec(cmd: string, opts?: SshExecOpts): Promise<SshResult>;
   /** Tear down the ssh ControlMaster for this host (best-effort). Subsequent
- * execs re-establish it. */
+   * execs re-establish it. */
   close(): Promise<{ ok: boolean; note: string }>;
 }
 
@@ -61,8 +61,8 @@ export interface SshRegistryOpts {
   /** ControlPersist idle lifetime. Defaults to '10m'. */
   controlPersist?: string;
   /** Track a spawned child against the current run's scope so a bg detach can
- * kill the ssh process tree. globals.ts passes a runScope-backed impl;
- * returns an unregister fn. Omit → no tracking. */
+   * kill the ssh process tree. globals.ts passes a runScope-backed impl;
+   * returns an unregister fn. Omit → no tracking. */
   trackChild?: (pid: number) => () => void;
 }
 
@@ -71,13 +71,13 @@ export interface SshRegistryOpts {
 export const SSH_MAX_BUFFER = 32 * 1024 * 1024;
 
 const DEFAULT_TIMEOUT = 60_000;
-const DEFAULT_PERSIST = "10m";
+const DEFAULT_PERSIST = '10m';
 
 /** Slugify an ssh target (host or user@host) into a filesystem-safe control-socket
  * name component. Collapses runs of non-alnum to a single dash, trims edges.
  * Pure + unit-tested. */
 export function slugifyHost(host: string): string {
-  return slugify(host, "host");
+  return slugify(host, 'host');
 }
 
 /** Derive the ControlPath socket for a host. Stable for a given (host, user, dir)
@@ -85,9 +85,9 @@ export function slugifyHost(host: string): string {
  * Pure + unit-tested (no fs, no network). */
 export function controlPath(
   host: string,
-  opts: { socketDir: string; user?: string } = { socketDir: "" },
+  opts: { socketDir: string; user?: string } = { socketDir: '' },
 ): string {
-  const u = opts.user ? `${slugifyHost(opts.user)}-` : "";
+  const u = opts.user ? `${slugifyHost(opts.user)}-` : '';
   return path.join(opts.socketDir, `elpis-ssh-${u}${slugifyHost(host)}`);
 }
 
@@ -99,14 +99,14 @@ export function controlPath(
  * a missing key surfaces as a nonzero exit + stderr, not an indefinite tty hang. */
 export function controlOpts(controlPathStr: string, persist: string): string[] {
   return [
-    "-o",
-    "ControlMaster=auto",
-    "-o",
+    '-o',
+    'ControlMaster=auto',
+    '-o',
     `ControlPath=${controlPathStr}`,
-    "-o",
+    '-o',
     `ControlPersist=${persist}`,
-    "-o",
-    "BatchMode=yes",
+    '-o',
+    'BatchMode=yes',
   ];
 }
 
@@ -117,7 +117,7 @@ export function execArgv(
   host: string,
   cmd: string,
   opts: { controlPath: string; persist: string; user?: string } = {
-    controlPath: "",
+    controlPath: '',
     persist: DEFAULT_PERSIST,
   },
 ): string[] {
@@ -126,7 +126,7 @@ export function execArgv(
     binary,
     ...controlOpts(opts.controlPath, opts.persist),
     target,
-    "--",
+    '--',
     cmd,
   ];
 }
@@ -139,15 +139,15 @@ export function closeArgv(
   user?: string,
 ): string[] {
   const target = user ? `${user}@${host}` : host;
-  return [binary, "-O", "exit", "-o", `ControlPath=${controlPathStr}`, target];
+  return [binary, '-O', 'exit', '-o', `ControlPath=${controlPathStr}`, target];
 }
 
 export interface SshRegistry {
   /** Get (or lazily create) a handle bound to `host` (optionally `user@host`).
- * Deduped by control-path so two calls for the same target share one master. */
+   * Deduped by control-path so two calls for the same target share one master. */
   open(host: string, opts?: { user?: string }): SshHandle;
   /** Tear down every live master this registry created (best-effort). Called on
- * harness shutdown so ControlPersist sockets don't linger. */
+   * harness shutdown so ControlPersist sockets don't linger. */
   dispose(): Promise<void>;
 }
 
@@ -158,18 +158,18 @@ export function createSshRegistry(
   const socketDir =
     opts?.socketDir ?? resolveDataLayout(dataDirectory).sshSockets;
   fs.mkdirSync(socketDir, { recursive: true });
-  const sshBinary = opts?.sshBinary ?? "ssh";
+  const sshBinary = opts?.sshBinary ?? 'ssh';
   const persist = opts?.controlPersist ?? DEFAULT_PERSIST;
   const trackChild = opts?.trackChild;
- // Track live handles so dispose can close every master we opened. A Map keyed
- // by control-path dedupes: two `elpis.ssh(host)` calls share one handle (and
- // thus one master), so the agent can hold a handle in a top-level const and
- // reuse it across run calls.
+  // Track live handles so dispose can close every master we opened. A Map keyed
+  // by control-path dedupes: two `elpis.ssh(host)` calls share one handle (and
+  // thus one master), so the agent can hold a handle in a top-level const and
+  // reuse it across run calls.
   const handles = new Map<string, SshHandle>();
 
   /** The shared exec implementation. Mirrors `elpis.sh`'s shape: spawn detached,
- * cap each stream at maxBuffer, resolve with a TIMEOUT signal on overrun, and
- * NEVER throw — the caller checks `.code`. */
+   * cap each stream at maxBuffer, resolve with a TIMEOUT signal on overrun, and
+   * NEVER throw — the caller checks `.code`. */
   function exec(
     cmd: string,
     host: string,
@@ -201,8 +201,8 @@ export function createSshRegistry(
         /* already gone */
       }
     };
-    let stdout = "";
-    let stderr = "";
+    let stdout = '';
+    let stderr = '';
     let stdoutTrunc = false;
     let stderrTrunc = false;
     let done = false;
@@ -224,8 +224,8 @@ export function createSshRegistry(
     const timer = setTimeout(() => {
       if (!done) {
         done = true;
-        killGroup("SIGTERM");
-        killTimer = setTimeout(() => killGroup("SIGKILL"), 5000);
+        killGroup('SIGTERM');
+        killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
         killTimer.unref?.();
         resolve({
           host,
@@ -234,29 +234,29 @@ export function createSshRegistry(
             stderr +
             `\n[elpis.ssh TIMED OUT after ${timeoutMs}ms — output above is partial]`,
           code: null,
-          signal: "TIMEOUT",
+          signal: 'TIMEOUT',
         });
       }
     }, timeoutMs);
- // Track against the current run's scope so a bg detach / bg.cancel can
- // kill this ssh's process tree, exactly like `elpis.sh` children.
+    // Track against the current run's scope so a bg detach / bg.cancel can
+    // kill this ssh's process tree, exactly like `elpis.sh` children.
     const unregister =
       child.pid && trackChild ? trackChild(child.pid) : undefined;
-    child.stdout?.on("data", (d: Buffer) => {
+    child.stdout?.on('data', (d: Buffer) => {
       [stdout, stdoutTrunc] = appendCapped(
         stdout,
-        d.toString("utf8"),
+        d.toString('utf8'),
         stdoutTrunc,
       );
     });
-    child.stderr?.on("data", (d: Buffer) => {
+    child.stderr?.on('data', (d: Buffer) => {
       [stderr, stderrTrunc] = appendCapped(
         stderr,
-        d.toString("utf8"),
+        d.toString('utf8'),
         stderrTrunc,
       );
     });
-    child.on("error", (err) => {
+    child.on('error', (err) => {
       if (killTimer) {
         clearTimeout(killTimer);
         killTimer = undefined;
@@ -265,18 +265,18 @@ export function createSshRegistry(
         done = true;
         clearTimeout(timer);
         unregister?.();
- // ssh binary missing / spawn failure — surface as a nonzero exit, not a
- // throw, matching the "never throws" contract the agent expects.
+        // ssh binary missing / spawn failure — surface as a nonzero exit, not a
+        // throw, matching the "never throws" contract the agent expects.
         resolve({
           host,
-          stdout: "",
+          stdout: '',
           stderr: `ssh spawn failed: ${err.message}`,
           code: 127,
           signal: null,
         });
       }
     });
-    child.on("close", (code, signal) => {
+    child.on('close', (code, signal) => {
       if (killTimer) {
         clearTimeout(killTimer);
         killTimer = undefined;
@@ -301,14 +301,14 @@ export function createSshRegistry(
         const argv = closeArgv(sshBinary, host, cp, user);
         const child = spawn(argv[0]!, argv.slice(1), {
           detached: true,
-          stdio: "ignore",
+          stdio: 'ignore',
         });
- // `ssh -O exit` exits promptly; resolve once it closes.
+        // `ssh -O exit` exits promptly; resolve once it closes.
         return new Promise<{ ok: boolean; note: string }>((r) => {
-          child.on("error", () =>
+          child.on('error', () =>
             r({ ok: false, note: `close failed for ${host} (ssh not found)` }),
           );
-          child.on("close", (code) =>
+          child.on('close', (code) =>
             r({
               ok: code === 0,
               note: `control master closed for ${host} (exit ${code})`,

@@ -18,7 +18,7 @@ test('memory.append (remember) stamps a date-only dated bullet', () => {
   const memory = createMemory(file);
   memory.append('a fact worth keeping');
   const raw = fs.readFileSync(file, 'utf8');
- // `- [YYYY-MM-DD] text` — date only, no full-ISO time component.
+  // `- [YYYY-MM-DD] text` — date only, no full-ISO time component.
   assert.match(raw, /^- \[\d{4}-\d{2}-\d{2}\] a fact worth keeping$/m);
   assert.doesNotMatch(raw, /\d{2}:\d{2}:\d{2}/, 'no HH:MM:SS full-ISO stamp');
 });
@@ -37,7 +37,10 @@ test('appendDatedBullet stacks bullets without blank-line drift', () => {
 test('memory hooks can guard reads and observe append/overwrite writes', () => {
   const file = tmpFile();
   const changed: string[] = [];
-  const memory = createMemory(file, { read: () => 'bounded view', changed: p => changed.push(p) });
+  const memory = createMemory(file, {
+    read: () => 'bounded view',
+    changed: (p) => changed.push(p),
+  });
   assert.equal(memory.read(), 'bounded view');
   memory.append('one');
   memory.overwrite('two');

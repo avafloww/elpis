@@ -27,8 +27,8 @@ export interface OAuthCredentials {
   orgId?: string;
   orgName?: string;
   /** Epoch-ms of the interactive login that seeded this grant family. The grant
- * dies ~30 days after this regardless of refresh health (see
- * ANTHROPIC_OAUTH_GRANT_TTL_MS); used only to warn before the deadline. */
+   * dies ~30 days after this regardless of refresh health (see
+   * ANTHROPIC_OAUTH_GRANT_TTL_MS); used only to warn before the deadline. */
   authorizedAt?: number;
 }
 
@@ -67,11 +67,11 @@ function rowToCreds(r: Row): OAuthCredentials {
 }
 
 export class OAuthStore {
- #db: DatabaseSync;
- #provider: string;
- #refreshFn: RefreshFn;
+  #db: DatabaseSync;
+  #provider: string;
+  #refreshFn: RefreshFn;
   /** In-flight refresh, so concurrent getAccessToken() calls single-flight. */
- #refreshing: Promise<OAuthCredentials> | null = null;
+  #refreshing: Promise<OAuthCredentials> | null = null;
 
   constructor(db: DatabaseSync, provider: string, refreshFn: RefreshFn) {
     this.#db = db;
@@ -87,7 +87,9 @@ export class OAuthStore {
   /** Read the stored credential. undefined = no row (not logged in). */
   read(): OAuthCredentials | undefined {
     const row = this.#db
-      .prepare('SELECT access, refresh, expires, account_id, email, org_id, org_name, authorized_at FROM oauth_credentials WHERE provider = ?')
+      .prepare(
+        'SELECT access, refresh, expires, account_id, email, org_id, org_name, authorized_at FROM oauth_credentials WHERE provider = ?',
+      )
       .get(this.#provider) as Row | undefined;
     return row ? rowToCreds(row) : undefined;
   }
@@ -123,19 +125,21 @@ export class OAuthStore {
   }
 
   /** Force a refresh now (single-flighted), regardless of expiry. Used to
- * recover from a 401 when the access token died before its stored deadline.
- * No-op when there is no stored credential. */
+   * recover from a 401 when the access token died before its stored deadline.
+   * No-op when there is no stored credential. */
   async forceRefresh(): Promise<void> {
     const creds = this.read();
     if (creds) await this.#refresh(creds);
   }
 
   /** Return a currently-valid access token, refreshing if near expiry.
- * Throws if there is no stored credential (operator must log in first). */
+   * Throws if there is no stored credential (operator must log in first). */
   async getAccessToken(): Promise<string> {
     const creds = this.read();
     if (!creds) {
-      throw new Error(`no OAuth credential in ${this.location} — run the login flow first (npm run oauth-login)`);
+      throw new Error(
+        `no OAuth credential in ${this.location} — run the login flow first (npm run oauth-login)`,
+      );
     }
     if (Date.now() < creds.expires - REFRESH_SKEW_MS) return creds.access;
     return (await this.#refresh(creds)).access;
@@ -145,9 +149,9 @@ export class OAuthStore {
     if (this.#refreshing) return this.#refreshing;
     this.#refreshing = (async () => {
       const fresh = await this.#refreshFn(current.refresh);
- // Merge over the stored record: provider refresh responses deliberately
- // omit fields fixed at login (e.g. org, authorizedAt), and rotate the
- // refresh token, so a shallow merge keeps identity while advancing tokens.
+      // Merge over the stored record: provider refresh responses deliberately
+      // omit fields fixed at login (e.g. org, authorizedAt), and rotate the
+      // refresh token, so a shallow merge keeps identity while advancing tokens.
       const merged: OAuthCredentials = { ...current, ...fresh };
       this.write(merged);
       return merged;

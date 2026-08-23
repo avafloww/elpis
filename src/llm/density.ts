@@ -18,11 +18,11 @@ import type { Database } from '../store/db.js';
 import type { Logger } from '../lib/log.js';
 
 const SEED_RATIO = 4;
-const ALPHA = 0.1;             // EWMA weight on each new sample
+const ALPHA = 0.1; // EWMA weight on each new sample
 const MIN_RATIO = 2;
 const MAX_RATIO = 6;
 const MIN_PROMPT_TOKENS = 1000; // below this, the prompt is mostly template overhead
-const LOG_DELTA = 0.05;        // log when the ratio moves at least this much
+const LOG_DELTA = 0.05; // log when the ratio moves at least this much
 
 export interface DensityModel {
   ratio(): number;
@@ -34,21 +34,28 @@ function clamp(x: number): number {
   return Math.min(MAX_RATIO, Math.max(MIN_RATIO, x));
 }
 
-export function createDensityModel(db: Database, model: string, logger: Logger): DensityModel {
+export function createDensityModel(
+  db: Database,
+  model: string,
+  logger: Logger,
+): DensityModel {
   let ratio = SEED_RATIO;
   let samples = 0;
 
- // Load any persisted ratio for this model. Never fatal.
+  // Load any persisted ratio for this model. Never fatal.
   try {
-    const row = db.prepare('SELECT ratio, samples FROM token_density WHERE model = ?').get(model) as
-      | { ratio: number; samples: number }
-      | undefined;
+    const row = db
+      .prepare('SELECT ratio, samples FROM token_density WHERE model = ?')
+      .get(model) as { ratio: number; samples: number } | undefined;
     if (row && Number.isFinite(row.ratio)) {
       ratio = clamp(row.ratio);
-      samples = Number.isFinite(row.samples) && row.samples > 0 ? row.samples : 0;
+      samples =
+        Number.isFinite(row.samples) && row.samples > 0 ? row.samples : 0;
     }
   } catch (e) {
-    logger.warn(`[density] could not load persisted ratio for ${model}; using seed ${SEED_RATIO}: ${String(e)}`);
+    logger.warn(
+      `[density] could not load persisted ratio for ${model}; using seed ${SEED_RATIO}: ${String(e)}`,
+    );
   }
 
   const upsert = db.prepare(
@@ -70,18 +77,23 @@ export function createDensityModel(db: Database, model: string, logger: Logger):
       if (charsSent <= 0 || promptTokens < MIN_PROMPT_TOKENS) return;
       const sample = clamp(charsSent / promptTokens);
       const prev = ratio;
-      ratio = samples === 0 ? sample : clamp((1 - ALPHA) * ratio + ALPHA * sample);
+      ratio =
+        samples === 0 ? sample : clamp((1 - ALPHA) * ratio + ALPHA * sample);
       samples++;
       try {
         upsert.run(model, ratio, samples, new Date().toISOString());
       } catch (e) {
         if (!persistWarned) {
           persistWarned = true;
-          logger.warn(`[density] could not persist ratio for ${model} (continuing in memory): ${String(e)}`);
+          logger.warn(
+            `[density] could not persist ratio for ${model} (continuing in memory): ${String(e)}`,
+          );
         }
       }
       if (Math.abs(ratio - prev) >= LOG_DELTA) {
-        logger.info(`[density] ${model} chars/token ${prev.toFixed(3)} → ${ratio.toFixed(3)} (sample ${sample.toFixed(3)}, n=${samples})`);
+        logger.info(
+          `[density] ${model} chars/token ${prev.toFixed(3)} → ${ratio.toFixed(3)} (sample ${sample.toFixed(3)}, n=${samples})`,
+        );
       }
     },
   };

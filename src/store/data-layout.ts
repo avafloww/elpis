@@ -1,7 +1,7 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 export const DATA_LAYOUT_VERSION = 1;
 
@@ -31,34 +31,34 @@ export interface DataLayout {
 }
 
 export function resolveDataLayout(dataDirectory: string): DataLayout {
-  const root = path.join(dataDirectory, "elpis-data");
-  const config = path.join(root, "config");
+  const root = path.join(dataDirectory, 'elpis-data');
+  const config = path.join(root, 'config');
   return {
     dataDirectory,
     root,
     config,
-    extensions: path.join(config, "extensions"),
-    wordlists: path.join(config, "wordlists"),
-    database: path.join(root, "elpis.db"),
-    sessions: path.join(root, "sessions"),
-    bg: path.join(root, "bg"),
-    motor: path.join(root, "motor"),
-    browser: path.join(root, "browser"),
-    computer: path.join(root, "computer"),
-    sshSockets: path.join(root, "ssh-sockets"),
-    memoryBackups: path.join(root, "memory-backups"),
-    changelogSeen: path.join(root, "changelog-seen.json"),
-    resumeMarker: path.join(root, "resume-after-restart.json"),
-    legacyChannels: path.join(root, "channels.json"),
-    policyDenials: path.join(root, "policy-denials"),
-    playwrightCli: path.join(root, "playwright-cli"),
-    gitignore: path.join(root, ".gitignore"),
-    migrationJournal: path.join(root, "layout-migration.json"),
+    extensions: path.join(config, 'extensions'),
+    wordlists: path.join(config, 'wordlists'),
+    database: path.join(root, 'elpis.db'),
+    sessions: path.join(root, 'sessions'),
+    bg: path.join(root, 'bg'),
+    motor: path.join(root, 'motor'),
+    browser: path.join(root, 'browser'),
+    computer: path.join(root, 'computer'),
+    sshSockets: path.join(root, 'ssh-sockets'),
+    memoryBackups: path.join(root, 'memory-backups'),
+    changelogSeen: path.join(root, 'changelog-seen.json'),
+    resumeMarker: path.join(root, 'resume-after-restart.json'),
+    legacyChannels: path.join(root, 'channels.json'),
+    policyDenials: path.join(root, 'policy-denials'),
+    playwrightCli: path.join(root, 'playwright-cli'),
+    gitignore: path.join(root, '.gitignore'),
+    migrationJournal: path.join(root, 'layout-migration.json'),
   };
 }
 
 function fsyncDirectory(directory: string): void {
-  const fd = fs.openSync(directory, "r");
+  const fd = fs.openSync(directory, 'r');
   try {
     fs.fsyncSync(fd);
   } finally {
@@ -72,9 +72,9 @@ function atomicWrite(file: string, content: string, mode: number): void {
     directory,
     `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`,
   );
-  const fd = fs.openSync(tmp, "wx", mode);
+  const fd = fs.openSync(tmp, 'wx', mode);
   try {
-    fs.writeFileSync(fd, content, "utf8");
+    fs.writeFileSync(fd, content, 'utf8');
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -97,7 +97,7 @@ export function ensureElpisDataScaffold(dataDirectory: string): {
   let gitignoreRepaired = true;
   try {
     gitignoreRepaired =
-      fs.readFileSync(layout.gitignore, "utf8") !== ELPIS_DATA_GITIGNORE;
+      fs.readFileSync(layout.gitignore, 'utf8') !== ELPIS_DATA_GITIGNORE;
   } catch {
     /* missing/unreadable is repaired below */
   }
@@ -115,7 +115,7 @@ interface LegacyMove {
 
 interface MigrationJournal {
   version: number;
-  status: "running" | "complete";
+  status: 'running' | 'complete';
   startedAt: string;
   completedAt?: string;
   completed: string[];
@@ -131,65 +131,65 @@ function legacyMoves(layout: DataLayout): LegacyMove[] {
   const root = layout.dataDirectory;
   return [
     {
-      key: "database",
-      source: path.join(root, "agent.db"),
+      key: 'database',
+      source: path.join(root, 'agent.db'),
       target: layout.database,
     },
     {
-      key: "sessions",
-      source: path.join(root, "sessions"),
+      key: 'sessions',
+      source: path.join(root, 'sessions'),
       target: layout.sessions,
     },
     {
-      key: "extensions",
-      source: path.join(root, "extensions"),
+      key: 'extensions',
+      source: path.join(root, 'extensions'),
       target: layout.extensions,
     },
-    { key: "bg", source: path.join(root, "bg"), target: layout.bg },
-    { key: "motor", source: path.join(root, "motor"), target: layout.motor },
+    { key: 'bg', source: path.join(root, 'bg'), target: layout.bg },
+    { key: 'motor', source: path.join(root, 'motor'), target: layout.motor },
     {
-      key: "browser",
-      source: path.join(root, "browser"),
+      key: 'browser',
+      source: path.join(root, 'browser'),
       target: layout.browser,
     },
     {
-      key: "computer",
-      source: path.join(root, "computer"),
+      key: 'computer',
+      source: path.join(root, 'computer'),
       target: layout.computer,
     },
     {
-      key: "ssh-sockets",
-      source: path.join(root, ".ssh-sockets"),
+      key: 'ssh-sockets',
+      source: path.join(root, '.ssh-sockets'),
       target: layout.sshSockets,
     },
     {
-      key: "memory-backups",
-      source: path.join(root, ".memory-backups"),
+      key: 'memory-backups',
+      source: path.join(root, '.memory-backups'),
       target: layout.memoryBackups,
     },
     {
-      key: "changelog-seen",
-      source: path.join(root, ".changelog-seen.json"),
+      key: 'changelog-seen',
+      source: path.join(root, '.changelog-seen.json'),
       target: layout.changelogSeen,
     },
     {
-      key: "resume-marker",
-      source: path.join(root, ".resume-after-restart.json"),
+      key: 'resume-marker',
+      source: path.join(root, '.resume-after-restart.json'),
       target: layout.resumeMarker,
     },
     {
-      key: "legacy-channels",
-      source: path.join(root, "channels.json"),
+      key: 'legacy-channels',
+      source: path.join(root, 'channels.json'),
       target: layout.legacyChannels,
     },
     {
-      key: "policy-denials",
-      source: path.join(root, "private", "policy-denials"),
+      key: 'policy-denials',
+      source: path.join(root, 'private', 'policy-denials'),
       target: layout.policyDenials,
     },
     {
-      key: "playwright-cli",
-      source: path.join(root, ".playwright-cli"),
+      key: 'playwright-cli',
+      source: path.join(root, '.playwright-cli'),
       target: layout.playwrightCli,
     },
   ];
@@ -198,7 +198,7 @@ function legacyMoves(layout: DataLayout): LegacyMove[] {
 function liveProcessCommands(): string[] {
   let names: string[];
   try {
-    names = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name));
+    names = fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name));
   } catch {
     return [];
   }
@@ -207,9 +207,9 @@ function liveProcessCommands(): string[] {
     if (Number(name) === process.pid) continue;
     try {
       const command = fs
-        .readFileSync(path.join("/proc", name, "cmdline"))
-        .toString("utf8")
-        .replace(/\0/g, " ");
+        .readFileSync(path.join('/proc', name, 'cmdline'))
+        .toString('utf8')
+        .replace(/\0/g, ' ');
       if (command) commands.push(command);
     } catch {
       /* process exited or is unreadable */
@@ -227,7 +227,7 @@ function preflight(moves: LegacyMove[], commands: string[]): void {
     }
   }
   const database = moves[0];
-  for (const suffix of ["-wal", "-shm"]) {
+  for (const suffix of ['-wal', '-shm']) {
     const sidecar = `${database.source}${suffix}`;
     if (fs.existsSync(sidecar) && !fs.existsSync(database.source)) {
       throw new Error(
@@ -236,7 +236,7 @@ function preflight(moves: LegacyMove[], commands: string[]): void {
     }
   }
   const coupled = moves.filter(
-    (move) => move.key === "browser" || move.key === "playwright-cli",
+    (move) => move.key === 'browser' || move.key === 'playwright-cli',
   );
   const live = coupled.filter(
     (move) =>
@@ -245,7 +245,7 @@ function preflight(moves: LegacyMove[], commands: string[]): void {
   );
   if (live.length > 0) {
     throw new Error(
-      `data layout migration blocked by live processes using legacy ${live.map((move) => move.key).join(", ")} state; stop them and restart`,
+      `data layout migration blocked by live processes using legacy ${live.map((move) => move.key).join(', ')} state; stop them and restart`,
     );
   }
 }
@@ -254,7 +254,7 @@ function readJournal(file: string): MigrationJournal | null {
   if (!fs.existsSync(file)) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
     throw new Error(
       `data layout migration journal is unreadable: ${error instanceof Error ? error.message : String(error)}`,
@@ -263,18 +263,18 @@ function readJournal(file: string): MigrationJournal | null {
   const value = parsed as Partial<MigrationJournal>;
   if (
     value.version !== DATA_LAYOUT_VERSION ||
-    (value.status !== "running" && value.status !== "complete") ||
-    typeof value.startedAt !== "string" ||
+    (value.status !== 'running' && value.status !== 'complete') ||
+    typeof value.startedAt !== 'string' ||
     !Array.isArray(value.completed) ||
-    value.completed.some((entry) => typeof entry !== "string")
+    value.completed.some((entry) => typeof entry !== 'string')
   ) {
-    throw new Error("data layout migration journal is invalid");
+    throw new Error('data layout migration journal is invalid');
   }
   return {
     version: value.version,
     status: value.status,
     startedAt: value.startedAt,
-    ...(typeof value.completedAt === "string"
+    ...(typeof value.completedAt === 'string'
       ? { completedAt: value.completedAt }
       : {}),
     completed: [...new Set(value.completed)],
@@ -288,32 +288,32 @@ function writeJournal(file: string, journal: MigrationJournal): void {
 function prepareLegacyDatabase(file: string): void {
   const db = new DatabaseSync(file);
   try {
-    db.exec("PRAGMA busy_timeout = 0");
-    const quick = db.prepare("PRAGMA quick_check").get() as {
+    db.exec('PRAGMA busy_timeout = 0');
+    const quick = db.prepare('PRAGMA quick_check').get() as {
       quick_check?: unknown;
     };
-    if (quick.quick_check !== "ok")
+    if (quick.quick_check !== 'ok')
       throw new Error(
         `legacy agent.db quick_check failed: ${String(quick.quick_check)}`,
       );
-    const checkpoint = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+    const checkpoint = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as {
       busy?: unknown;
     };
     if (checkpoint.busy !== 0)
       throw new Error(
-        "legacy agent.db WAL is busy; another process may still be using it",
+        'legacy agent.db WAL is busy; another process may still be using it',
       );
-    const mode = db.prepare("PRAGMA journal_mode=DELETE").get() as {
+    const mode = db.prepare('PRAGMA journal_mode=DELETE').get() as {
       journal_mode?: unknown;
     };
-    if (String(mode.journal_mode).toLowerCase() !== "delete")
+    if (String(mode.journal_mode).toLowerCase() !== 'delete')
       throw new Error(
         `could not collapse legacy agent.db WAL (journal_mode=${String(mode.journal_mode)})`,
       );
   } finally {
     db.close();
   }
-  for (const suffix of ["-wal", "-shm"]) {
+  for (const suffix of ['-wal', '-shm']) {
     if (fs.existsSync(`${file}${suffix}`))
       throw new Error(
         `legacy SQLite sidecar remained after clean checkpoint: ${file}${suffix}`,
@@ -331,13 +331,13 @@ function movePath(move: LegacyMove): boolean {
 }
 
 function replacePrefix(value: unknown, from: string, to: string): unknown {
-  if (typeof value === "string")
+  if (typeof value === 'string')
     return value === from || value.startsWith(`${from}${path.sep}`)
       ? `${to}${value.slice(from.length)}`
       : value;
   if (Array.isArray(value))
     return value.map((entry) => replacePrefix(entry, from, to));
-  if (value && typeof value === "object") {
+  if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
         key,
@@ -352,7 +352,7 @@ function rewriteJsonFile(file: string, from: string, to: string): void {
   if (!fs.existsSync(file)) return;
   let value: unknown;
   try {
-    value = JSON.parse(fs.readFileSync(file, "utf8"));
+    value = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
     throw new Error(
       `cannot rewrite migrated JSON ${file}: ${error instanceof Error ? error.message : String(error)}`,
@@ -365,14 +365,14 @@ function rewriteJsonFile(file: string, from: string, to: string): void {
 function rewriteJsonLines(directory: string, from: string, to: string): void {
   if (!fs.existsSync(directory)) return;
   for (const name of fs.readdirSync(directory)) {
-    if (!name.endsWith(".jsonl")) continue;
+    if (!name.endsWith('.jsonl')) continue;
     const file = path.join(directory, name);
-    const raw = fs.readFileSync(file, "utf8");
-    const lines = raw.split("\n");
+    const raw = fs.readFileSync(file, 'utf8');
+    const lines = raw.split('\n');
     const rewritten = lines
       .map((line, index) => {
-        if (!line) return "";
-      let value: unknown;
+        if (!line) return '';
+        let value: unknown;
         try {
           value = JSON.parse(line);
         } catch (error) {
@@ -380,9 +380,9 @@ function rewriteJsonLines(directory: string, from: string, to: string): void {
             `cannot rewrite migrated JSONL ${file}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
-      return JSON.stringify(replacePrefix(value, from, to));
+        return JSON.stringify(replacePrefix(value, from, to));
       })
-      .join("\n");
+      .join('\n');
     if (rewritten !== raw) atomicWrite(file, rewritten, 0o600);
   }
 }
@@ -404,22 +404,22 @@ export function migrateDataLayout(
   const priorJournal = readJournal(layout.migrationJournal);
   if (!hasLegacyState && priorJournal === null)
     return { layout, moved: [], gitignoreRepaired };
-  if (priorJournal?.status === "complete" && !hasLegacyState) {
+  if (priorJournal?.status === 'complete' && !hasLegacyState) {
     return { layout, moved: [], gitignoreRepaired };
   }
   const journal = priorJournal ?? {
     version: DATA_LAYOUT_VERSION,
-    status: "running" as const,
+    status: 'running' as const,
     startedAt: now().toISOString(),
     completed: [],
   };
-  journal.status = "running";
+  journal.status = 'running';
   delete journal.completedAt;
   writeJournal(layout.migrationJournal, journal);
 
   const moved: string[] = [];
   for (const move of moves) {
-    if (move.key === "database" && fs.existsSync(move.source))
+    if (move.key === 'database' && fs.existsSync(move.source))
       prepareLegacyDatabase(move.source);
     if (movePath(move)) {
       moved.push(move.key);
@@ -432,23 +432,23 @@ export function migrateDataLayout(
   }
 
   rewriteJsonFile(
-    path.join(layout.bg, "registry.json"),
-    path.join(dataDirectory, "bg"),
+    path.join(layout.bg, 'registry.json'),
+    path.join(dataDirectory, 'bg'),
     layout.bg,
   );
   rewriteJsonLines(
-    path.join(layout.motor, "traces"),
-    path.join(dataDirectory, "motor"),
+    path.join(layout.motor, 'traces'),
+    path.join(dataDirectory, 'motor'),
     layout.motor,
   );
   journal.completed = [
     ...new Set([
       ...journal.completed,
-      "rewrite-bg-paths",
-      "rewrite-motor-paths",
+      'rewrite-bg-paths',
+      'rewrite-motor-paths',
     ]),
   ];
-  journal.status = "complete";
+  journal.status = 'complete';
   journal.completedAt = now().toISOString();
   writeJournal(layout.migrationJournal, journal);
   return { layout, moved, gitignoreRepaired };

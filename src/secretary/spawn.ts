@@ -1,11 +1,11 @@
-import type { Config } from "../config.js";
-import type { Database } from "../store/db.js";
-import type { MindId } from "../store/mind-id.js";
+import type { Config } from '../config.js';
+import type { Database } from '../store/db.js';
+import type { MindId } from '../store/mind-id.js';
 import {
   SecretarySessionError,
   SecretarySessionStore,
   type SecretarySession,
-} from "./session.js";
+} from './session.js';
 
 export interface SecretaryProvisionRequest {
   sessionId: string;
@@ -20,10 +20,10 @@ export interface SecretaryProvisionReceipt {
 }
 
 export type SecretaryProvisionState =
-  | { state: "pending" }
-  | { state: "ready"; receipt: SecretaryProvisionReceipt }
-  | { state: "failed"; error?: string }
-  | { state: "missing" };
+  | { state: 'pending' }
+  | { state: 'ready'; receipt: SecretaryProvisionReceipt }
+  | { state: 'failed'; error?: string }
+  | { state: 'missing' };
 
 export interface SecretaryPodRuntime {
   provision(
@@ -36,15 +36,15 @@ export interface SecretaryPodRuntime {
 export class SecretarySpawnError extends Error {
   constructor(
     public readonly code:
-      | "unavailable"
-      | "conflict"
-      | "not_found"
-      | "provision_failed"
-      | "cleanup_failed",
+      | 'unavailable'
+      | 'conflict'
+      | 'not_found'
+      | 'provision_failed'
+      | 'cleanup_failed',
     message: string,
   ) {
     super(message);
-    this.name = "SecretarySpawnError";
+    this.name = 'SecretarySpawnError';
   }
 }
 
@@ -65,15 +65,15 @@ function boundedError(error: unknown): string {
 function validateReceipt(receipt: SecretaryProvisionReceipt): void {
   if (
     !receipt ||
-    typeof receipt !== "object" ||
-    typeof receipt.podName !== "string" ||
+    typeof receipt !== 'object' ||
+    typeof receipt.podName !== 'string' ||
     receipt.podName.length < 1 ||
     receipt.podName.length > 253 ||
-    typeof receipt.podUid !== "string" ||
+    typeof receipt.podUid !== 'string' ||
     receipt.podUid.length < 1 ||
     receipt.podUid.length > 128
   )
-    throw new Error("secretary runtime returned an invalid Pod identity");
+    throw new Error('secretary runtime returned an invalid Pod identity');
 }
 
 export class SecretarySpawnBroker {
@@ -92,8 +92,8 @@ export class SecretarySpawnBroker {
     const session = this.store.get(sessionId);
     if (!session)
       throw new SecretarySpawnError(
-        "not_found",
-        "secretary session is unavailable",
+        'not_found',
+        'secretary session is unavailable',
       );
     return session;
   }
@@ -112,25 +112,25 @@ export class SecretarySpawnBroker {
   ): Promise<SecretarySession> {
     if (!this.options.config.secretary.enabled)
       throw new SecretarySpawnError(
-        "unavailable",
-        "secretary runtime is disabled",
+        'unavailable',
+        'secretary runtime is disabled',
       );
     const modelRef = this.options.config.llm.registry.roles.secretary;
     if (!modelRef)
       throw new SecretarySpawnError(
-        "unavailable",
-        "llm.roles.secretary is not configured",
+        'unavailable',
+        'llm.roles.secretary is not configured',
       );
     const active = this.store
       .list()
       .filter(
         (session) =>
-          session.status === "starting" || session.status === "ready",
+          session.status === 'starting' || session.status === 'ready',
       );
     if (active.length >= this.options.config.secretary.maxConcurrent)
       throw new SecretarySpawnError(
-        "conflict",
-        "secretary session capacity is exhausted",
+        'conflict',
+        'secretary session capacity is exhausted',
       );
 
     const created = this.store.create(hintMindId, modelRef);
@@ -147,27 +147,27 @@ export class SecretarySpawnBroker {
       const failed = this.store.fail(created.session.id, error);
       await this.cleanupBestEffort(failed);
       if (error instanceof SecretarySessionError) throw error;
-      throw new SecretarySpawnError("provision_failed", boundedError(error));
+      throw new SecretarySpawnError('provision_failed', boundedError(error));
     }
   }
 
   async close(sessionId: string): Promise<SecretarySession> {
     const current = this.status(sessionId);
     const closed =
-      current.status === "failed" || current.status === "closed"
+      current.status === 'failed' || current.status === 'closed'
         ? current
         : this.store.close(sessionId);
     try {
       await this.options.runtime.cleanup(closed);
     } catch (error) {
-      throw new SecretarySpawnError("cleanup_failed", boundedError(error));
+      throw new SecretarySpawnError('cleanup_failed', boundedError(error));
     }
     return closed;
   }
 
   async recover(): Promise<SecretarySession[]> {
     for (const session of this.store.list()) {
-      if (session.status !== "starting" && session.status !== "ready") continue;
+      if (session.status !== 'starting' && session.status !== 'ready') continue;
       let state: SecretaryProvisionState;
       try {
         state = await this.options.runtime.inspect(session);
@@ -176,11 +176,11 @@ export class SecretarySpawnBroker {
         await this.cleanupBestEffort(failed);
         continue;
       }
-      if (state.state === "pending") continue;
-      if (state.state === "ready") {
+      if (state.state === 'pending') continue;
+      if (state.state === 'ready') {
         try {
           validateReceipt(state.receipt);
-          if (session.status === "starting") {
+          if (session.status === 'starting') {
             this.store.ready(session.id, state.receipt);
             continue;
           }
@@ -191,12 +191,12 @@ export class SecretarySpawnBroker {
             continue;
           const failed = this.store.fail(
             session.id,
-            "secretary Pod identity changed",
+            'secretary Pod identity changed',
           );
           await this.cleanupBestEffort(failed);
         } catch (error) {
           const current = this.store.get(session.id);
-          if (current?.status === "starting" || current?.status === "ready") {
+          if (current?.status === 'starting' || current?.status === 'ready') {
             const failed = this.store.fail(session.id, error);
             await this.cleanupBestEffort(failed);
           }
@@ -205,9 +205,9 @@ export class SecretarySpawnBroker {
       }
       const failed = this.store.fail(
         session.id,
-        state.state === "failed"
-          ? (state.error ?? "secretary Pod failed")
-          : "secretary Pod is missing",
+        state.state === 'failed'
+          ? (state.error ?? 'secretary Pod failed')
+          : 'secretary Pod is missing',
       );
       await this.cleanupBestEffort(failed);
     }

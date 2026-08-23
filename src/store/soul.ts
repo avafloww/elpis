@@ -14,11 +14,11 @@
 // comes from parseFrontmatter so scalar handling (quotes) stays one
 // convention.
 
-import * as fs from "node:fs";
-import { parseFrontmatter } from "../lib/frontmatter.js";
+import * as fs from 'node:fs';
+import { parseFrontmatter } from '../lib/frontmatter.js';
 
 /** Fallback when SOUL.md is missing, has no frontmatter, or no `name:`. */
-export const DEFAULT_AGENT_NAME = "Agent";
+export const DEFAULT_AGENT_NAME = 'Agent';
 
 /** The frontmatter envelope, anchored at byte 0. Mirrors parseFrontmatter's
  * shape (a closing `---` line must be newline-terminated); tolerates CRLF. */
@@ -30,7 +30,7 @@ const SOUL_ENVELOPE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n/;
  * is `key: value`-shaped counts as an envelope. */
 function looksLikeFrontmatter(inner: string): boolean {
   const lines = inner
-    .split("\n")
+    .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
   return (
@@ -42,17 +42,17 @@ export interface SoulParts {
   /** `name:` from the frontmatter, or null when absent. */
   name: string | null;
   /** The prompt-facing body: raw text minus the envelope + the blank line(s)
- * right after it. Identical to the input when there is no envelope. */
+   * right after it. Identical to the input when there is no envelope. */
   body: string;
 }
 
 export function parseSoul(raw: string): SoulParts {
   const m = raw.match(SOUL_ENVELOPE);
   if (!m || !looksLikeFrontmatter(m[1])) return { name: null, body: raw };
-  const body = raw.slice(m[0].length).replace(/^(\r?\n)+/, "");
-  const name = parseFrontmatter(raw)?.frontmatter["name"];
+  const body = raw.slice(m[0].length).replace(/^(\r?\n)+/, '');
+  const name = parseFrontmatter(raw)?.frontmatter['name'];
   return {
-    name: typeof name === "string" && name.trim() ? name.trim() : null,
+    name: typeof name === 'string' && name.trim() ? name.trim() : null,
     body,
   };
 }
@@ -61,9 +61,9 @@ export function parseSoul(raw: string): SoulParts {
  * the file is missing or carries no name. Cheap enough to call at use sites
  * (a rename in SOUL.md takes effect without a restart). */
 export function readAgentName(soulPath: string): string {
-  let raw = "";
+  let raw = '';
   try {
-    raw = fs.readFileSync(soulPath, "utf8");
+    raw = fs.readFileSync(soulPath, 'utf8');
   } catch {
     return DEFAULT_AGENT_NAME;
   }

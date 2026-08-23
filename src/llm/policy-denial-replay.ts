@@ -4,7 +4,11 @@ import * as path from 'node:path';
 import type { Config } from '../config.js';
 import { createCodexFetch, usesCodexResponsesLite } from './codex-client.js';
 import type { OAuthStore } from './oauth/store.js';
-import { isPolicyDenial, nonSecretHeaders, type PolicyDenialManifest } from './policy-flight-recorder.js';
+import {
+  isPolicyDenial,
+  nonSecretHeaders,
+  type PolicyDenialManifest,
+} from './policy-flight-recorder.js';
 
 function sha256(bytes: Uint8Array): string {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -30,24 +34,51 @@ export async function replayPolicyDenial(
   fetchFn: typeof fetch = fetch,
 ): Promise<ReplayResult> {
   const resolved = path.resolve(target);
-  const manifestPath = fs.statSync(resolved).isDirectory() ? path.join(resolved, 'manifest.json') : resolved;
+  const manifestPath = fs.statSync(resolved).isDirectory()
+    ? path.join(resolved, 'manifest.json')
+    : resolved;
   const bundle = path.dirname(manifestPath);
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as PolicyDenialManifest;
+  const manifest = JSON.parse(
+    fs.readFileSync(manifestPath, 'utf8'),
+  ) as PolicyDenialManifest;
   if (manifest.schemaVersion !== 1 || manifest.provider !== 'codex-responses') {
-    throw new Error(`unsupported replay bundle: schema=${manifest.schemaVersion} provider=${manifest.provider}`);
+    throw new Error(
+      `unsupported replay bundle: schema=${manifest.schemaVersion} provider=${manifest.provider}`,
+    );
   }
-  const requestBody = new Uint8Array(fs.readFileSync(path.join(bundle, manifest.request.bodyFile)));
+  const requestBody = new Uint8Array(
+    fs.readFileSync(path.join(bundle, manifest.request.bodyFile)),
+  );
   const actualHash = sha256(requestBody);
   if (actualHash !== manifest.request.bodySha256) {
-    throw new Error(`request body hash mismatch: manifest=${manifest.request.bodySha256} actual=${actualHash}`);
+    throw new Error(
+      `request body hash mismatch: manifest=${manifest.request.bodySha256} actual=${actualHash}`,
+    );
   }
   const headers = new Headers(manifest.request.headers);
-  const session = headers.get('session_id') ?? headers.get('conversation_id') ?? crypto.randomUUID();
+  const session =
+    headers.get('session_id') ??
+    headers.get('conversation_id') ??
+    crypto.randomUUID();
   const model = (() => {
-    try { return JSON.parse(new TextDecoder().decode(requestBody)).model as string | undefined; } catch { return undefined; }
+    try {
+      return JSON.parse(new TextDecoder().decode(requestBody)).model as
+        string | undefined;
+    } catch {
+      return undefined;
+    }
   })();
-  const responsesLite = headers.has('x-openai-internal-codex-responses-lite') || (model ? usesCodexResponsesLite(model) : false);
-  const authenticated = createCodexFetch(store, () => session, fetchFn, responsesLite, undefined, true);
+  const responsesLite =
+    headers.has('x-openai-internal-codex-responses-lite') ||
+    (model ? usesCodexResponsesLite(model) : false);
+  const authenticated = createCodexFetch(
+    store,
+    () => session,
+    fetchFn,
+    responsesLite,
+    undefined,
+    true,
+  );
   const response = await authenticated(manifest.request.url, {
     method: manifest.request.method,
     headers,
@@ -58,7 +89,10 @@ export async function replayPolicyDenial(
   const root = path.join(bundle, 'replay-results');
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.chmodSync(root, 0o700);
-  const resultDirectory = path.join(root, `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`);
+  const resultDirectory = path.join(
+    root,
+    `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`,
+  );
   fs.mkdirSync(resultDirectory, { mode: 0o700 });
   writeExclusive(path.join(resultDirectory, 'response-body.bin'), responseBody);
   const result = {
@@ -74,7 +108,9 @@ export async function replayPolicyDenial(
     responseBodyFile: 'response-body.bin',
     responseBodyBytes: responseBody.byteLength,
     responseBodySha256: sha256(responseBody),
-    reproducesPolicyDenial: isPolicyDenial(new TextDecoder().decode(responseBody)),
+    reproducesPolicyDenial: isPolicyDenial(
+      new TextDecoder().decode(responseBody),
+    ),
   };
   const resultPath = path.join(resultDirectory, 'result.json');
   writeExclusive(resultPath, JSON.stringify(result, null, 2) + '\n');

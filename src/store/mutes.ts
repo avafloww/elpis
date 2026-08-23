@@ -19,20 +19,29 @@ export interface MuteRow {
 
 export interface MuteStore {
   get(channelId: string): MuteRow | null;
-  set(channelId: string, type: MuteType, setBy: MuteActor, reason?: string | null): void;
+  set(
+    channelId: string,
+    type: MuteType,
+    setBy: MuteActor,
+    reason?: string | null,
+  ): void;
   /** Remove the row (release). Returns true if one existed. */
   clear(channelId: string): boolean;
   all(): MuteRow[];
 }
 
 export function createMuteStore(db: Database): MuteStore {
-  const getStmt = db.prepare('SELECT channel_id, type, set_by, reason, created_at FROM channel_mutes WHERE channel_id = ?');
+  const getStmt = db.prepare(
+    'SELECT channel_id, type, set_by, reason, created_at FROM channel_mutes WHERE channel_id = ?',
+  );
   const upsertStmt = db.prepare(
     'INSERT INTO channel_mutes (channel_id, type, set_by, reason, created_at) VALUES (?, ?, ?, ?, ?) ' +
-    'ON CONFLICT(channel_id) DO UPDATE SET type = excluded.type, set_by = excluded.set_by, reason = excluded.reason, created_at = excluded.created_at',
+      'ON CONFLICT(channel_id) DO UPDATE SET type = excluded.type, set_by = excluded.set_by, reason = excluded.reason, created_at = excluded.created_at',
   );
   const delStmt = db.prepare('DELETE FROM channel_mutes WHERE channel_id = ?');
-  const allStmt = db.prepare('SELECT channel_id, type, set_by, reason, created_at FROM channel_mutes ORDER BY created_at');
+  const allStmt = db.prepare(
+    'SELECT channel_id, type, set_by, reason, created_at FROM channel_mutes ORDER BY created_at',
+  );
   const toRow = (r: Record<string, unknown>): MuteRow => ({
     channelId: r.channel_id as string,
     type: r.type as MuteType,

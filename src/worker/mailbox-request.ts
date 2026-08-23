@@ -1,10 +1,10 @@
-import type { WorkerMailboxKind, WorkerMailboxMessage } from "./mailbox.js";
-import type { WorkerSessionBinding } from "./session.js";
+import type { WorkerMailboxKind, WorkerMailboxMessage } from './mailbox.js';
+import type { WorkerSessionBinding } from './session.js';
 
 export class WorkerMailboxRequestError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "WorkerMailboxRequestError";
+    this.name = 'WorkerMailboxRequestError';
   }
 }
 
@@ -23,8 +23,8 @@ export interface WorkerMailboxService {
 }
 
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new WorkerMailboxRequestError("request must be an object");
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new WorkerMailboxRequestError('request must be an object');
   return value as Record<string, unknown>;
 }
 
@@ -43,10 +43,10 @@ export function dispatchWorkerMailboxRequest(
 ): unknown {
   const input = record(value);
   if (input.protocol !== 1)
-    throw new WorkerMailboxRequestError("protocol must equal 1");
+    throw new WorkerMailboxRequestError('protocol must equal 1');
   switch (input.operation) {
-    case "pull": {
-      exact(input, ["protocol", "operation", "limit"]);
+    case 'pull': {
+      exact(input, ['protocol', 'operation', 'limit']);
       if (
         input.limit !== undefined &&
         (!Number.isInteger(input.limit) ||
@@ -54,15 +54,15 @@ export function dispatchWorkerMailboxRequest(
           Number(input.limit) > 100)
       )
         throw new WorkerMailboxRequestError(
-          "limit must be an integer from 1 to 100",
+          'limit must be an integer from 1 to 100',
         );
       return {
         protocol: 1,
         ...service.pullForWorker(token, input.limit as number | undefined),
       };
     }
-    case "ack": {
-      exact(input, ["protocol", "operation", "ids"]);
+    case 'ack': {
+      exact(input, ['protocol', 'operation', 'ids']);
       if (
         !Array.isArray(input.ids) ||
         input.ids.length < 1 ||
@@ -70,7 +70,7 @@ export function dispatchWorkerMailboxRequest(
         input.ids.some((id) => !Number.isSafeInteger(id) || Number(id) <= 0)
       )
         throw new WorkerMailboxRequestError(
-          "ids must contain 1 to 100 positive safe integers",
+          'ids must contain 1 to 100 positive safe integers',
         );
       return {
         protocol: 1,
@@ -80,16 +80,16 @@ export function dispatchWorkerMailboxRequest(
         ),
       };
     }
-    case "post": {
-      exact(input, ["protocol", "operation", "messageKey", "kind", "body"]);
-      if (input.kind !== "message" && input.kind !== "finish")
-        throw new WorkerMailboxRequestError("kind must be message or finish");
+    case 'post': {
+      exact(input, ['protocol', 'operation', 'messageKey', 'kind', 'body']);
+      if (input.kind !== 'message' && input.kind !== 'finish')
+        throw new WorkerMailboxRequestError('kind must be message or finish');
       if (
-        typeof input.messageKey !== "string" ||
-        typeof input.body !== "string"
+        typeof input.messageKey !== 'string' ||
+        typeof input.body !== 'string'
       )
         throw new WorkerMailboxRequestError(
-          "messageKey and body must be strings",
+          'messageKey and body must be strings',
         );
       return {
         protocol: 1,
@@ -103,7 +103,7 @@ export function dispatchWorkerMailboxRequest(
     }
     default:
       throw new WorkerMailboxRequestError(
-        "operation must be pull, ack, or post",
+        'operation must be pull, ack, or post',
       );
   }
 }

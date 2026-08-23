@@ -1,9 +1,9 @@
-import type { Database } from "../store/db.js";
-import { resolveWorkerSession, type WorkerSessionBinding } from "./session.js";
+import type { Database } from '../store/db.js';
+import { resolveWorkerSession, type WorkerSessionBinding } from './session.js';
 
-export type WorkerMailboxKind = "message" | "finish";
+export type WorkerMailboxKind = 'message' | 'finish';
 export type WorkerMailboxDirection =
-  "dispatcher_to_worker" | "worker_to_dispatcher";
+  'dispatcher_to_worker' | 'worker_to_dispatcher';
 
 export interface WorkerMailboxMessage {
   id: number;
@@ -20,34 +20,34 @@ export interface WorkerMailboxMessage {
 export class WorkerMailboxError extends Error {
   constructor(
     public readonly code:
-      "unauthorized" | "invalid_request" | "not_found" | "conflict",
+      'unauthorized' | 'invalid_request' | 'not_found' | 'conflict',
     message: string,
   ) {
     super(message);
-    this.name = "WorkerMailboxError";
+    this.name = 'WorkerMailboxError';
   }
 }
 
 function boundedText(value: unknown, label: string, max: number): string {
-  if (typeof value !== "string" || value.trim().length === 0)
+  if (typeof value !== 'string' || value.trim().length === 0)
     throw new WorkerMailboxError(
-      "invalid_request",
+      'invalid_request',
       `${label} must be a non-empty string`,
     );
   if (value.length > max)
     throw new WorkerMailboxError(
-      "invalid_request",
+      'invalid_request',
       `${label} must be at most ${max} characters`,
     );
   return value;
 }
 
 function messageKey(value: unknown): string {
-  const key = boundedText(value, "messageKey", 80);
+  const key = boundedText(value, 'messageKey', 80);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(key))
     throw new WorkerMailboxError(
-      "invalid_request",
-      "messageKey contains invalid characters",
+      'invalid_request',
+      'messageKey contains invalid characters',
     );
   return key;
 }
@@ -55,8 +55,8 @@ function messageKey(value: unknown): string {
 function boundedLimit(value = 32): number {
   if (!Number.isInteger(value) || value < 1 || value > 100)
     throw new WorkerMailboxError(
-      "invalid_request",
-      "limit must be an integer from 1 to 100",
+      'invalid_request',
+      'limit must be an integer from 1 to 100',
     );
   return value;
 }
@@ -64,14 +64,14 @@ function boundedLimit(value = 32): number {
 function boundedIds(value: number[]): number[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 100)
     throw new WorkerMailboxError(
-      "invalid_request",
-      "ids must contain 1 to 100 message ids",
+      'invalid_request',
+      'ids must contain 1 to 100 message ids',
     );
   const ids = Array.from(new Set(value));
   if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0))
     throw new WorkerMailboxError(
-      "invalid_request",
-      "ids must be positive safe integers",
+      'invalid_request',
+      'ids must be positive safe integers',
     );
   return ids;
 }
@@ -101,8 +101,8 @@ export class WorkerMailboxBroker {
     const binding = resolveWorkerSession(this.db, token);
     if (!binding)
       throw new WorkerMailboxError(
-        "unauthorized",
-        "worker session is unavailable",
+        'unauthorized',
+        'worker session is unavailable',
       );
     return binding;
   }
@@ -119,17 +119,17 @@ export class WorkerMailboxBroker {
       .get(sessionId) as Record<string, unknown> | undefined;
     const runtime = row?.runtime;
     const active =
-      row && ["spawning", "running", "idle"].includes(String(row.status));
+      row && ['spawning', 'running', 'idle'].includes(String(row.status));
     if (
       !row ||
       (activeOnly && !active) ||
-      (runtime !== "trusted" && runtime !== "kubernetes") ||
-      typeof row.model_ref !== "string" ||
-      typeof row.mind_id !== "string"
+      (runtime !== 'trusted' && runtime !== 'kubernetes') ||
+      typeof row.model_ref !== 'string' ||
+      typeof row.mind_id !== 'string'
     )
       throw new WorkerMailboxError(
-        "not_found",
-        "worker session is unavailable",
+        'not_found',
+        'worker session is unavailable',
       );
     return {
       sessionId: String(row.id),
@@ -167,8 +167,8 @@ export class WorkerMailboxBroker {
       if (prior.kind === kind && prior.sender === sender && prior.body === body)
         return prior;
       throw new WorkerMailboxError(
-        "conflict",
-        "messageKey was already used with different content",
+        'conflict',
+        'messageKey was already used with different content',
       );
     }
     const finish = this.db
@@ -179,12 +179,12 @@ export class WorkerMailboxBroker {
       .get(sessionId);
     if (finish)
       throw new WorkerMailboxError(
-        "conflict",
-        "worker session mailbox is already finished",
+        'conflict',
+        'worker session mailbox is already finished',
       );
-    if (direction === "worker_to_dispatcher" && kind === "finish") {
+    if (direction === 'worker_to_dispatcher' && kind === 'finish') {
       const source = this.db
-        .prepare("SELECT source_sha256 FROM worker_sessions WHERE id = ?")
+        .prepare('SELECT source_sha256 FROM worker_sessions WHERE id = ?')
         .get(sessionId) as { source_sha256: string | null } | undefined;
       if (source?.source_sha256) {
         const artifact = this.db
@@ -195,8 +195,8 @@ export class WorkerMailboxBroker {
           .get(sessionId, source.source_sha256);
         if (!artifact)
           throw new WorkerMailboxError(
-            "conflict",
-            "worker source artifact must be in custody before finish",
+            'conflict',
+            'worker source artifact must be in custody before finish',
           );
       }
     }
@@ -209,7 +209,7 @@ export class WorkerMailboxBroker {
         )
         .run(sessionId, direction, kind, key, sender, body, this.now());
       const row = this.db
-        .prepare("SELECT * FROM worker_mailbox_messages WHERE id = ?")
+        .prepare('SELECT * FROM worker_mailbox_messages WHERE id = ?')
         .get(Number(result.lastInsertRowid)) as Record<string, unknown>;
       return rowMessage(row);
     } catch (error) {
@@ -221,10 +221,10 @@ export class WorkerMailboxBroker {
         raced.body === body
       )
         return raced;
-      if (kind === "finish")
+      if (kind === 'finish')
         throw new WorkerMailboxError(
-          "conflict",
-          "worker session already has a finish message",
+          'conflict',
+          'worker session already has a finish message',
         );
       throw error;
     }
@@ -255,8 +255,8 @@ export class WorkerMailboxBroker {
     idsValue: number[],
   ): number {
     const ids = boundedIds(idsValue);
-    const placeholders = ids.map(() => "?").join(",");
-    this.db.exec("BEGIN IMMEDIATE");
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db
         .prepare(
@@ -266,8 +266,8 @@ export class WorkerMailboxBroker {
         .get(sessionId, direction, ...ids) as { n: number };
       if (row.n !== ids.length)
         throw new WorkerMailboxError(
-          "not_found",
-          "one or more mailbox messages are unavailable",
+          'not_found',
+          'one or more mailbox messages are unavailable',
         );
       this.db
         .prepare(
@@ -275,10 +275,10 @@ export class WorkerMailboxBroker {
            WHERE session_id = ? AND direction = ? AND id IN (${placeholders})`,
         )
         .run(this.now(), sessionId, direction, ...ids);
-      this.db.exec("COMMIT");
+      this.db.exec('COMMIT');
       return ids.length;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.db.exec('ROLLBACK');
       throw error;
     }
   }
@@ -287,16 +287,16 @@ export class WorkerMailboxBroker {
     sessionId: string,
     keyValue: string,
     bodyValue: string,
-    sender = "dispatcher",
+    sender = 'dispatcher',
   ): WorkerMailboxMessage {
     const binding = this.dispatcherSession(sessionId, true);
     return this.insert(
       binding.sessionId,
-      "dispatcher_to_worker",
-      "message",
+      'dispatcher_to_worker',
+      'message',
       messageKey(keyValue),
-      boundedText(sender, "sender", 80),
-      boundedText(bodyValue, "body", 100_000),
+      boundedText(sender, 'sender', 80),
+      boundedText(bodyValue, 'body', 100_000),
     );
   }
 
@@ -307,13 +307,13 @@ export class WorkerMailboxBroker {
     const binding = this.worker(token);
     return {
       binding,
-      messages: this.pending(binding.sessionId, "dispatcher_to_worker", limit),
+      messages: this.pending(binding.sessionId, 'dispatcher_to_worker', limit),
     };
   }
 
   acknowledgeForWorker(token: string, ids: number[]): number {
     const binding = this.worker(token);
-    return this.acknowledge(binding.sessionId, "dispatcher_to_worker", ids);
+    return this.acknowledge(binding.sessionId, 'dispatcher_to_worker', ids);
   }
 
   postFromWorker(
@@ -323,28 +323,28 @@ export class WorkerMailboxBroker {
     bodyValue: string,
   ): WorkerMailboxMessage {
     const binding = this.worker(token);
-    if (kind !== "message" && kind !== "finish")
+    if (kind !== 'message' && kind !== 'finish')
       throw new WorkerMailboxError(
-        "invalid_request",
-        "kind must be message or finish",
+        'invalid_request',
+        'kind must be message or finish',
       );
     return this.insert(
       binding.sessionId,
-      "worker_to_dispatcher",
+      'worker_to_dispatcher',
       kind,
       messageKey(keyValue),
       binding.worker,
-      boundedText(bodyValue, "body", 100_000),
+      boundedText(bodyValue, 'body', 100_000),
     );
   }
 
   pullFromWorker(sessionId: string, limit = 32): WorkerMailboxMessage[] {
     const binding = this.dispatcherSession(sessionId, false);
-    return this.pending(binding.sessionId, "worker_to_dispatcher", limit);
+    return this.pending(binding.sessionId, 'worker_to_dispatcher', limit);
   }
 
   acknowledgeFromWorker(sessionId: string, ids: number[]): number {
     const binding = this.dispatcherSession(sessionId, false);
-    return this.acknowledge(binding.sessionId, "worker_to_dispatcher", ids);
+    return this.acknowledge(binding.sessionId, 'worker_to_dispatcher', ids);
   }
 }

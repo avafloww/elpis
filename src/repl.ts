@@ -22,13 +22,15 @@ const rl = readline.createInterface({
   prompt: '> ',
 });
 
-console.log('agent sandbox repl. type JS, blank line to evaluate multi-line. Ctrl-D to exit.');
+console.log(
+  'agent sandbox repl. type JS, blank line to evaluate multi-line. Ctrl-D to exit.',
+);
 rl.prompt();
 
 let buf = '';
 rl.on('line', (line) => {
   if (line.trim() === '') {
- // evaluate buffer
+    // evaluate buffer
     if (buf.trim()) {
       void runAndPrint(buf);
     }

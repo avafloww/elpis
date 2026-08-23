@@ -46,7 +46,7 @@ export interface UsageTracker {
   stop(): void;
   snapshot(): ProviderUsageSnapshot | null;
   /** Immediate poll (for /usage). Resolves to the updated snapshot; on failure
- * resolves to the stale snapshot with `error` set. Never rejects. */
+   * resolves to the stale snapshot with `error` set. Never rejects. */
   fetchNow(): Promise<ProviderUsageSnapshot | null>;
 }
 
@@ -93,12 +93,17 @@ export function parseKimiUsages(payload: unknown): UsageWindow[] {
   const p = (payload ?? {}) as Record<string, unknown>;
   const out: { win: UsageWindow; secs: number }[] = [];
 
-  const toWindow = (detail: unknown, label: string, secs: number): UsageWindow | null => {
+  const toWindow = (
+    detail: unknown,
+    label: string,
+    secs: number,
+  ): UsageWindow | null => {
     if (detail === null || typeof detail !== 'object') return null;
     const d = detail as Record<string, unknown>;
     const limit = Number(d.limit);
     const used = Number(d.used);
-    if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(used)) return null;
+    if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(used))
+      return null;
     return {
       id: label,
       label,
@@ -114,15 +119,16 @@ export function parseKimiUsages(payload: unknown): UsageWindow[] {
       const w = (r.window ?? {}) as Record<string, unknown>;
       const duration = Number(w.duration);
       const unit = typeof w.timeUnit === 'string' ? w.timeUnit : '';
-      const secs = (UNIT_SECONDS[unit] ?? 0) * (Number.isFinite(duration) ? duration : 0);
+      const secs =
+        (UNIT_SECONDS[unit] ?? 0) * (Number.isFinite(duration) ? duration : 0);
       const label = windowLabel(Number.isFinite(duration) ? duration : 0, unit);
       const win = toWindow(r.detail, label, secs);
       if (win) out.push({ win, secs });
     }
   }
 
- // The top-level summary is the weekly window; skip it if a limits[] row
- // already covers the same 7d span (avoids a duplicate bar).
+  // The top-level summary is the weekly window; skip it if a limits[] row
+  // already covers the same 7d span (avoids a duplicate bar).
   if (!out.some((o) => o.secs === WEEK_SECONDS)) {
     const weekly = toWindow(p.usage, '7d', WEEK_SECONDS);
     if (weekly) out.push({ win: weekly, secs: WEEK_SECONDS });
@@ -145,9 +151,12 @@ const kimiProvider: UsageProvider = {
   },
   async fetch(llm, fetchFn) {
     const base = llm.baseUrl.replace(/\/+$/, '');
-    const headers = { Authorization: `Bearer ${llm.apiKey}`, 'User-Agent': 'KimiCLI/1.6' };
- // Bounded so a hung connection can't stall the poll chain (or a /usage
- // interaction) for undici's much longer default body timeout.
+    const headers = {
+      Authorization: `Bearer ${llm.apiKey}`,
+      'User-Agent': 'KimiCLI/1.6',
+    };
+    // Bounded so a hung connection can't stall the poll chain (or a /usage
+    // interaction) for undici's much longer default body timeout.
     const opts = () => ({ headers, signal: AbortSignal.timeout(15_000) });
     let res = await fetchFn(`${base}/usages`, opts());
     if (res.status === 404) res = await fetchFn(`${base}/usage`, opts());
@@ -160,7 +169,9 @@ const PROVIDERS: UsageProvider[] = [kimiProvider];
 
 /** The registry scan, exported for tests. Returns the matching provider's
  * {id,label} or null. */
-export function detectProvider(baseUrl: string): { id: string; label: string } | null {
+export function detectProvider(
+  baseUrl: string,
+): { id: string; label: string } | null {
   const p = PROVIDERS.find((pr) => pr.matches(baseUrl));
   return p ? { id: p.id, label: p.label } : null;
 }
@@ -190,8 +201,8 @@ export function createUsageTracker(
   let stopped = false;
 
   async function poll(): Promise<ProviderUsageSnapshot | null> {
- // Non-null: `provider` is guaranteed defined here (early return above),
- // but TS's control-flow narrowing doesn't cross this closure boundary.
+    // Non-null: `provider` is guaranteed defined here (early return above),
+    // but TS's control-flow narrowing doesn't cross this closure boundary.
     try {
       const windows = await provider!.fetch(config.llm, fetchFn);
       current = {
@@ -212,15 +223,23 @@ export function createUsageTracker(
         error: msg,
       };
     }
-    try { onUpdate(); } catch { /* a broken observer must never break polling */ }
+    try {
+      onUpdate();
+    } catch {
+      /* a broken observer must never break polling */
+    }
     return current;
   }
 
   function schedule(delayMs: number): void {
     if (stopped) return;
     timer = setTimeout(() => {
- // Floored so a mis-set poll_interval_ms (e.g. 0) can't hammer the API.
-      void poll().finally(() => schedule(Math.max(MIN_POLL_INTERVAL_MS, config.usageTracker.pollIntervalMs)));
+      // Floored so a mis-set poll_interval_ms (e.g. 0) can't hammer the API.
+      void poll().finally(() =>
+        schedule(
+          Math.max(MIN_POLL_INTERVAL_MS, config.usageTracker.pollIntervalMs),
+        ),
+      );
     }, delayMs);
   }
 
@@ -231,7 +250,10 @@ export function createUsageTracker(
     },
     stop(): void {
       stopped = true;
-      if (timer) { clearTimeout(timer); timer = null; }
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     },
     snapshot(): ProviderUsageSnapshot | null {
       return current;

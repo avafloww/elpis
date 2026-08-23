@@ -20,7 +20,7 @@ export interface FeedbackEvent {
   channelId: string;
   channelName: string | null;
   /** The reacted message's text — always stored so the signal survives even if
- * the message is never localized to a transcript. */
+   * the message is never localized to a transcript. */
   messageContent: string;
 }
 
@@ -38,14 +38,22 @@ export function classifyEmoji(name: string | null): Verdict | null {
 export function createFeedbackStore(db: Database): FeedbackStore {
   const ins = db.prepare(
     'INSERT INTO feedback ' +
-    '(verdict, reacted_at, emoji, reactor_id, reactor_name, is_owner, discord_message_id, channel_id, channel_name, message_content) ' +
-    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      '(verdict, reacted_at, emoji, reactor_id, reactor_name, is_owner, discord_message_id, channel_id, channel_name, message_content) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   );
   return {
     recordReaction(e) {
       ins.run(
-        e.verdict, e.reactedAt, e.emoji, e.reactorId, e.reactorName,
-        e.isOwner ? 1 : 0, e.discordMessageId, e.channelId, e.channelName, e.messageContent,
+        e.verdict,
+        e.reactedAt,
+        e.emoji,
+        e.reactorId,
+        e.reactorName,
+        e.isOwner ? 1 : 0,
+        e.discordMessageId,
+        e.channelId,
+        e.channelName,
+        e.messageContent,
       );
     },
   };

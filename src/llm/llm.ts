@@ -13,12 +13,12 @@
 // 'chat'). Everything downstream — sanitizer contract, usage shape, diet,
 // streaming, sanitizer, usage, and request-diet contracts are shared; only the wire format differs.
 
-import OpenAI from "openai";
-import { Agent } from "undici";
-import type { DatabaseSync } from "node:sqlite";
-import { configForLlmRole, type Config } from "../config.js";
-import type { LlmRole } from "./model-registry.js";
-import type { ConsoleHub } from "../console/hub.js";
+import OpenAI from 'openai';
+import { Agent } from 'undici';
+import type { DatabaseSync } from 'node:sqlite';
+import { configForLlmRole, type Config } from '../config.js';
+import type { LlmRole } from './model-registry.js';
+import type { ConsoleHub } from '../console/hub.js';
 // llm.ts ⇄ responses.ts import each other (this module routes to the Responses
 // path; that module reuses this one's helpers). Safe in ESM because every
 // cross-use happens at call time, never at module-evaluation time (responses.ts
@@ -28,48 +28,48 @@ import {
   responsesSummarize,
   streamResponsesComplete,
   type ReasoningItemParam,
-} from "./responses.js";
+} from './responses.js';
 // Anthropic subscription (OAuth) path. Imported at top level but only invoked
 // inside createLLM (call time); anthropic-client.ts derives its run tool lazily
 // so this cross-import never reads an llm.ts export at module-load time.
 import {
   createAnthropicOAuthLLM,
   anthropicContextWindow,
-} from "./anthropic-client.js";
-import { OAuthStore } from "./oauth/store.js";
-import { refreshAnthropicToken } from "./oauth/anthropic.js";
+} from './anthropic-client.js';
+import { OAuthStore } from './oauth/store.js';
+import { refreshAnthropicToken } from './oauth/anthropic.js';
 import {
   OPENAI_CODEX_CREDENTIAL_KEY,
   refreshOpenAICodexToken,
-} from "./oauth/openai-codex.js";
+} from './oauth/openai-codex.js';
 import {
   createCodexOAuthLLM,
   fetchCodexContextWindow,
-} from "./codex-client.js";
+} from './codex-client.js';
 import {
   endpointAt,
   stampGeneration,
   type ApiSurface,
   type GenerationProvenance,
   type ProviderType,
-} from "./provenance.js";
-import type { RunMessageMetadata } from "../sandbox/metadata.js";
-import { isPolicyDenial } from "./policy-flight-recorder.js";
+} from './provenance.js';
+import type { RunMessageMetadata } from '../sandbox/metadata.js';
+import { isPolicyDenial } from './policy-flight-recorder.js';
 
-export type { GenerationProvenance } from "./provenance.js";
+export type { GenerationProvenance } from './provenance.js';
 
-export type { ReasoningItemParam } from "./responses.js";
+export type { ReasoningItemParam } from './responses.js';
 
 /** An Anthropic extended-thinking block as returned by the Messages API and
  * replayed verbatim. Two variants: a signed `thinking` block, and an opaque
  * `redacted_thinking` block. Stored/replayed as received — the signature is
  * validated by the endpoint, so the content must not be modified. */
 export type AnthropicThinkingBlock =
-  | { type: "thinking"; thinking: string; signature: string }
-  | { type: "redacted_thinking"; data: string };
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'redacted_thinking'; data: string };
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  role: 'system' | 'user' | 'assistant' | 'tool';
   /** Text content of the message. Always present for storage/transcript compatibility. */
   content: string;
   /** For user messages with images, the OpenAI-compatible content parts to send to the API.
@@ -109,7 +109,7 @@ export interface ChatMessage {
   thinking_blocks?: AnthropicThinkingBlock[];
   tool_calls?: Array<{
     id: string;
-    type: "function";
+    type: 'function';
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
@@ -123,7 +123,7 @@ export interface ChatMessage {
    * Persisted for restart/compaction reconciliation and never sent as metadata
    * to a provider (the message content itself is the intended model input). */
   personContext?: {
-    kind: "inbound" | "memory";
+    kind: 'inbound' | 'memory';
     authorId: string;
     author: string;
   };
@@ -176,7 +176,7 @@ export interface StandaloneCompleteOptions {
 export interface StandaloneCompleteResult {
   content: string;
   reasoningContent?: string;
-  toolCalls?: ChatMessage["tool_calls"];
+  toolCalls?: ChatMessage['tool_calls'];
   /** Raw Responses reasoning output items, encrypted_content included, for stateless replay. */
   reasoningItems?: ReasoningItemParam[];
   usage: LLMUsage;
@@ -196,12 +196,12 @@ export interface StandaloneCompleteResult {
  * (widget hidden, bust detection off) and 0 as a real 100%-miss turn.
  * Exported for direct unit testing. */
 export function extractCacheTokens(usage: unknown): number | undefined {
-  if (typeof usage !== "object" || usage === null) return undefined;
+  if (typeof usage !== 'object' || usage === null) return undefined;
   const details = (usage as { prompt_tokens_details?: unknown })
     .prompt_tokens_details;
-  if (typeof details !== "object" || details === null) return undefined;
+  if (typeof details !== 'object' || details === null) return undefined;
   const cached = (details as { cached_tokens?: unknown }).cached_tokens;
-  return typeof cached === "number" && Number.isFinite(cached)
+  return typeof cached === 'number' && Number.isFinite(cached)
     ? cached
     : undefined;
 }
@@ -210,7 +210,7 @@ export function extractCacheTokens(usage: unknown): number | undefined {
 export class RetriableError extends Error {
   constructor(public readonly cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "RetriableError";
+    this.name = 'RetriableError';
   }
 }
 
@@ -218,7 +218,7 @@ export class RetriableError extends Error {
 export class NonRetriableError extends Error {
   constructor(public readonly cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "NonRetriableError";
+    this.name = 'NonRetriableError';
   }
 }
 
@@ -226,11 +226,11 @@ export class NonRetriableError extends Error {
  * Responses path (responses.ts), which shares the retry contract. */
 export function classifyError(e: unknown): RetriableError | NonRetriableError {
   if (isPolicyDenial(e)) return new NonRetriableError(e);
-  if (e && typeof e === "object") {
+  if (e && typeof e === 'object') {
     const status =
-      "status" in e && typeof e.status === "number" ? e.status : undefined;
-    const code = "code" in e && typeof e.code === "string" ? e.code : undefined;
-    const name = "name" in e && typeof e.name === "string" ? e.name : "";
+      'status' in e && typeof e.status === 'number' ? e.status : undefined;
+    const code = 'code' in e && typeof e.code === 'string' ? e.code : undefined;
+    const name = 'name' in e && typeof e.name === 'string' ? e.name : '';
     if (
       status === 400 ||
       status === 401 ||
@@ -243,11 +243,11 @@ export function classifyError(e: unknown): RetriableError | NonRetriableError {
     if (
       status === 429 ||
       (status && status >= 500) ||
-      code === "ECONNRESET" ||
-      code === "ETIMEDOUT" ||
-      code === "ENOTFOUND" ||
-      name.includes("APIConnection") ||
-      name.includes("Timeout")
+      code === 'ECONNRESET' ||
+      code === 'ETIMEDOUT' ||
+      code === 'ENOTFOUND' ||
+      name.includes('APIConnection') ||
+      name.includes('Timeout')
     ) {
       return new RetriableError(e);
     }
@@ -266,7 +266,7 @@ export function toApiMessage(
     role: m.role,
     content: m.contentParts ?? m.content,
   } as OpenAI.ChatCompletionMessageParam;
-  if (m.role === "assistant" && m.tool_calls) {
+  if (m.role === 'assistant' && m.tool_calls) {
     (base as OpenAI.ChatCompletionAssistantMessageParam).tool_calls =
       m.tool_calls.map((tc) => ({
         id: tc.id,
@@ -274,11 +274,11 @@ export function toApiMessage(
         function: { name: tc.function.name, arguments: tc.function.arguments },
       }));
   }
-  if (m.role === "tool" && m.tool_call_id) {
+  if (m.role === 'tool' && m.tool_call_id) {
     (base as OpenAI.ChatCompletionToolMessageParam).tool_call_id =
       m.tool_call_id;
   }
-  if (m.role === "assistant" && m.reasoning_content) {
+  if (m.role === 'assistant' && m.reasoning_content) {
     (base as { reasoning_content?: string }).reasoning_content =
       m.reasoning_content;
   }
@@ -340,7 +340,7 @@ export function sentChars(
   // they are absent (0) on the OpenAI paths.
   for (const b of m.thinking_blocks ?? []) {
     chars +=
-      b.type === "thinking"
+      b.type === 'thinking'
         ? b.thinking.length + b.signature.length
         : b.data.length;
   }
@@ -376,8 +376,8 @@ export function estimateSentTokens(m: ChatMessage, ratio = 4): number {
  * scans for the marker rather than assuming `lines[0]`. `endsTurn` uses it to
  * distinguish a successful run from a failed one. */
 function toolStatusLine(content: string): string {
-  const lines = (content ?? "").split("\n");
-  return lines.find((l) => l.startsWith("[run")) ?? lines[0] ?? "";
+  const lines = (content ?? '').split('\n');
+  return lines.find((l) => l.startsWith('[run')) ?? lines[0] ?? '';
 }
 
 /** True when `messages[i]` is an assistant message that yielded a turn.
@@ -388,14 +388,14 @@ function toolStatusLine(content: string): string {
  * legacy `end: true` calls remain recognised only for restored old history. */
 export function endsTurn(messages: ChatMessage[], i: number): boolean {
   const message = messages[i];
-  if (message.role !== "assistant") return false;
+  if (message.role !== 'assistant') return false;
   if (!message.tool_calls || message.tool_calls.length === 0) return true;
   const last = message.tool_calls[message.tool_calls.length - 1];
   let toolResult: ChatMessage | undefined;
   for (let j = i + 1; j < messages.length; j++) {
     const candidate = messages[j];
-    if (candidate.role === "assistant") break;
-    if (candidate.role === "tool" && candidate.tool_call_id === last.id) {
+    if (candidate.role === 'assistant') break;
+    if (candidate.role === 'tool' && candidate.tool_call_id === last.id) {
       toolResult = candidate;
       break;
     }
@@ -405,25 +405,25 @@ export function endsTurn(messages: ChatMessage[], i: number): boolean {
   if (
     toolResult.run?.ok &&
     wake?.taskId !== undefined &&
-    (wake.state === "armed" ||
-      wake.state === "preempted" ||
-      wake.state === "fired")
+    (wake.state === 'armed' ||
+      wake.state === 'preempted' ||
+      wake.state === 'fired')
   )
     return true;
 
   let legacyEnd = false;
   try {
-    const parsed = JSON.parse(last.function.arguments || "{}") as unknown;
+    const parsed = JSON.parse(last.function.arguments || '{}') as unknown;
     legacyEnd =
       !!parsed &&
-      typeof parsed === "object" &&
+      typeof parsed === 'object' &&
       !Array.isArray(parsed) &&
       (parsed as Record<string, unknown>).end === true;
   } catch {
     /* malformed legacy call */
   }
   return (
-    legacyEnd && toolStatusLine(toolResult.content ?? "").startsWith("[run ok")
+    legacyEnd && toolStatusLine(toolResult.content ?? '').startsWith('[run ok')
   );
 }
 
@@ -445,131 +445,131 @@ export function prepareForApi(messages: ChatMessage[]): ChatMessage[] {
 }
 
 export interface RunTool {
-  type: "function";
+  type: 'function';
   function: {
-    name: "run";
+    name: 'run';
     description: string;
     parameters: {
-      type: "object";
+      type: 'object';
       properties: {
-        code: { type: "string"; description: string };
-        detail: { type: "string"; description: string; maxLength: 120 };
-        sandbox?: { type: "string"; description: string };
+        code: { type: 'string'; description: string };
+        detail: { type: 'string'; description: string; maxLength: 120 };
+        sandbox?: { type: 'string'; description: string };
         wake?: {
-          type: "object";
+          type: 'object';
           description: string;
           properties: {
             after: {
-              anyOf: [{ type: "string" }, { type: "number" }];
+              anyOf: [{ type: 'string' }, { type: 'number' }];
               description: string;
             };
-            at: { type: "string"; description: string };
-            auto: { type: "boolean"; enum: [true]; description: string };
+            at: { type: 'string'; description: string };
+            auto: { type: 'boolean'; enum: [true]; description: string };
           };
           oneOf: [
-            { required: ["after"] },
-            { required: ["at"] },
-            { required: ["auto"] },
+            { required: ['after'] },
+            { required: ['at'] },
+            { required: ['auto'] },
           ];
           additionalProperties: false;
         };
       };
-      required: ["code", "detail"];
+      required: ['code', 'detail'];
       additionalProperties: false;
     };
   };
 }
 
 export const RUN_TOOL: RunTool = {
-  type: "function",
+  type: 'function',
   function: {
-    name: "run",
+    name: 'run',
     description:
-      "Run JavaScript in a fresh core sandbox by default, or continue a Mind item persistently by selecting its full elm-* id, unique prefix, or exact title. Valid persistent code is pre-parsed before first-use workspace creation. " +
-      "Returns a capped preview plus console output. Omit wake to continue this model turn; a valid " +
-      "wake on a successful run yields and schedules one self-wake.",
+      'Run JavaScript in a fresh core sandbox by default, or continue a Mind item persistently by selecting its full elm-* id, unique prefix, or exact title. Valid persistent code is pre-parsed before first-use workspace creation. ' +
+      'Returns a capped preview plus console output. Omit wake to continue this model turn; a valid ' +
+      'wake on a successful run yields and schedules one self-wake.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        code: { type: "string", description: "JavaScript to execute." },
+        code: { type: 'string', description: 'JavaScript to execute.' },
         detail: {
-          type: "string",
+          type: 'string',
           maxLength: 120,
           description:
-            "Required single-line description of the intended effect: 1 to 10 words.",
+            'Required single-line description of the intended effect: 1 to 10 words.',
         },
         sandbox: {
-          type: "string",
+          type: 'string',
           description:
-            "Exact alias of a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.",
+            'Exact alias of a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.',
         },
         wake: {
-          type: "object",
+          type: 'object',
           description:
-            "Yield after success and wake once later. Omit wake while actionable work remains; auto is a yield, not a continuation mechanism. Once genuinely yielding, prefer auto whenever timing is uncertain; use after/at only for a concrete intended time. Explicit waits must be positive and at most 1h; longer exact waits belong in Scheduler.",
+            'Yield after success and wake once later. Omit wake while actionable work remains; auto is a yield, not a continuation mechanism. Once genuinely yielding, prefer auto whenever timing is uncertain; use after/at only for a concrete intended time. Explicit waits must be positive and at most 1h; longer exact waits belong in Scheduler.',
           properties: {
             after: {
-              anyOf: [{ type: "string" }, { type: "number" }],
+              anyOf: [{ type: 'string' }, { type: 'number' }],
               description:
                 'Concrete delay after successful code completion, e.g. "5m" or milliseconds; at most 1h.',
             },
             at: {
-              type: "string",
+              type: 'string',
               description:
-                "Concrete future ISO-8601 timestamp with timezone, no more than 1h away.",
+                'Concrete future ISO-8601 timestamp with timezone, no more than 1h away.',
             },
             auto: {
-              type: "boolean",
+              type: 'boolean',
               enum: [true],
               description:
-                "Ask the fresh classifier-role wake advisor to choose 0, 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live state; 0 means continue immediately, never no future wake.",
+                'Ask the fresh classifier-role wake advisor to choose 0, 1, 2, 5, 10, 15, 30, 45, or 60 minutes from bounded live state; 0 means continue immediately, never no future wake.',
             },
           },
           oneOf: [
-            { required: ["after"] },
-            { required: ["at"] },
-            { required: ["auto"] },
+            { required: ['after'] },
+            { required: ['at'] },
+            { required: ['auto'] },
           ],
           additionalProperties: false,
         },
       },
-      required: ["code", "detail"],
+      required: ['code', 'detail'],
       additionalProperties: false,
     },
   },
 };
 
 export interface ThinkTool {
-  type: "function";
+  type: 'function';
   function: {
-    name: "think";
+    name: 'think';
     description: string;
     parameters: {
-      type: "object";
-      properties: { thoughts: { type: "string"; description: string } };
-      required: ["thoughts"];
+      type: 'object';
+      properties: { thoughts: { type: 'string'; description: string } };
+      required: ['thoughts'];
       additionalProperties: false;
     };
   };
 }
 
 export const THINK_TOOL: ThinkTool = {
-  type: "function",
+  type: 'function',
   function: {
-    name: "think",
+    name: 'think',
     description:
-      "Record materially new intermediate reasoning before continuing. The text is retained in " +
-      "the local trace for your own continuation and inspection, but is not sent to chat channels.",
+      'Record materially new intermediate reasoning before continuing. The text is retained in ' +
+      'the local trace for your own continuation and inspection, but is not sent to chat channels.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
         thoughts: {
-          type: "string",
+          type: 'string',
           description:
-            "Unpolished scratchpad reasoning to carry into the next response.",
+            'Unpolished scratchpad reasoning to carry into the next response.',
         },
       },
-      required: ["thoughts"],
+      required: ['thoughts'],
       additionalProperties: false,
     },
   },
@@ -646,14 +646,14 @@ export function computeCharsSent(
  * a reasoning block, so everything between (and before a trailing close) must
  * be discarded, not just the tags. See `sanitizeContent`. */
 const LEAKED_COT_MARKERS = [
-  "<|tool_calls_section_begin|>",
-  "<|tool_calls_section_end|>",
-  "<|tool_call_begin|>",
-  "<|tool_call_end|>",
-  "<|tool_call_argument_begin|>",
-  "<|tool_call_argument_end|>",
-  "<|im_start|>",
-  "<|im_end|>",
+  '<|tool_calls_section_begin|>',
+  '<|tool_calls_section_end|>',
+  '<|tool_call_begin|>',
+  '<|tool_call_end|>',
+  '<|tool_call_argument_begin|>',
+  '<|tool_call_argument_end|>',
+  '<|im_start|>',
+  '<|im_end|>',
 ];
 /** Reasoning-block delimiters. Reasoning models (notably umans-kimi-k2.7) emit
  * chain-of-thought wrapped in these. When the CoT leaks into `content`
@@ -662,8 +662,8 @@ const LEAKED_COT_MARKERS = [
  * like `<reasoning...>
  * and the actual reply follows. We keep only what's after the last close tag.
  * The open tag is handled too in case both survive. */
-const THINK_OPEN = "<" + "think" + ">";
-const THINK_CLOSE = "<" + "/think" + ">";
+const THINK_OPEN = '<' + 'think' + '>';
+const THINK_CLOSE = '<' + '/think' + '>';
 
 /** True if `arguments` is a JSON string the server will accept when it
  * re-parses it as the tool-call args. The server (Python) rejects raw control
@@ -710,7 +710,7 @@ function sanitizeContent(content: string): {
   // only what follows the LAST close tag. Done after (a) so a surviving pair's
   // close tag isn't mistaken for the trailing leak.
   if (out.includes(THINK_OPEN)) {
-    let built = "";
+    let built = '';
     let rest = out;
     for (;;) {
       const o = rest.indexOf(THINK_OPEN);
@@ -737,14 +737,14 @@ function sanitizeContent(content: string): {
   }
   for (const marker of LEAKED_COT_MARKERS) {
     if (out.includes(marker)) {
-      out = out.split(marker).join("");
+      out = out.split(marker).join('');
       stripped = true;
     }
   }
   // If markers were stripped and nearly nothing printable remains, the message
   // was pure leaked CoT — clear it rather than send a fragment of reasoning.
-  if (stripped && out.replace(/\s/g, "").length < 8)
-    return { content: "", stripped: true };
+  if (stripped && out.replace(/\s/g, '').length < 8)
+    return { content: '', stripped: true };
   return { content: out, stripped };
 }
 
@@ -777,9 +777,9 @@ export function sanitizeAssistantMessage(msg: {
   }> | null;
 }): SanitizedResponse {
   const { content, stripped: contentStripped } = sanitizeContent(
-    msg.content ?? "",
+    msg.content ?? '',
   );
-  const assistant: ChatMessage = { role: "assistant", content };
+  const assistant: ChatMessage = { role: 'assistant', content };
   // Preserve reasoning_content for reasoning-model thinking continuity. It is
   // never user-facing (only `content` reaches Discord via channel.send), and
   // the summarizer benefits from seeing the model's reasoning when compacting.
@@ -790,18 +790,18 @@ export function sanitizeAssistantMessage(msg: {
   if (msg.tool_calls && msg.tool_calls.length > 0) {
     const valid = msg.tool_calls.filter((tc) => {
       const ok =
-        tc.type === "function" && argumentsAreValid(tc.function.arguments);
+        tc.type === 'function' && argumentsAreValid(tc.function.arguments);
       if (!ok) dropped = true;
       return ok;
     }) as Array<{
       id: string;
-      type: "function";
+      type: 'function';
       function: { name: string; arguments: string };
     }>;
     if (valid.length > 0) {
       assistant.tool_calls = valid.map((tc) => ({
         id: tc.id,
-        type: "function" as const,
+        type: 'function' as const,
         function: { name: tc.function.name, arguments: tc.function.arguments },
       }));
     }
@@ -832,7 +832,7 @@ export interface CompleteOptions {
   /** Override the run schema for this bounded execution lane. */
   runTool?: RunTool;
   /** Override whether a model-facing tool call is required. Provider defaults remain unchanged when omitted. */
-  toolChoice?: "required" | "auto";
+  toolChoice?: 'required' | 'auto';
   /** Caller cancellation for the whole completion, including provider setup. */
   signal?: AbortSignal;
 }
@@ -866,36 +866,36 @@ export interface LLM {
  * relationships, commitments, open threads first; work state last). Replaces
  * the old 5-section technical prompt. */
 export const SOCIAL_SUMMARIZE_PROMPT =
-  "You are compressing your own working memory. You are a social agent who lives in a Discord " +
-  "server, talk with people across several channels, and sometimes do technical work. " +
-  "Another instance of you will resume from this summary, so write what you need to still be " +
-  "the same person in the same conversations.\n\n" +
-  "Preserve, in rough priority order:\n" +
-  "1. People: who you talked with (names + channel), what happened between you, anything you " +
-  "learned about each person, the current tone/state of each relationship. Note facts that " +
-  "belong in people/ files if not already saved.\n" +
-  "2. Commitments: anything you promised, owe, or are waiting on — and who is waiting on you.\n" +
+  'You are compressing your own working memory. You are a social agent who lives in a Discord ' +
+  'server, talk with people across several channels, and sometimes do technical work. ' +
+  'Another instance of you will resume from this summary, so write what you need to still be ' +
+  'the same person in the same conversations.\n\n' +
+  'Preserve, in rough priority order:\n' +
+  '1. People: who you talked with (names + channel), what happened between you, anything you ' +
+  'learned about each person, the current tone/state of each relationship. Note facts that ' +
+  'belong in people/ files if not already saved.\n' +
+  '2. Commitments: anything you promised, owe, or are waiting on — and who is waiting on you.\n' +
   "3. Open conversational threads: per channel, what's live and what a good next reply would " +
-  "need to know. Include running jokes, callbacks, and emotional context — these are " +
-  "load-bearing for a social agent. First contacts with a person (the texture of how you " +
+  'need to know. Include running jokes, callbacks, and emotional context — these are ' +
+  'load-bearing for a social agent. First contacts with a person (the texture of how you ' +
   "met, not just the fact) are load-bearing the same way — a person's fact is not the " +
-  "relationship. Genealogies matter: if a doctrine, rule, or joke was SEEDED in this window " +
-  "(even as a joke), keep the seed, not just the later rule.\n" +
-  "4. Your own arc: what you thought, felt, decided, and why; open questions (ponder/ threads " +
-  "touched); anything that moved in how you see yourself.\n" +
-  "5. Work state: in-flight technical tasks — current status, key file paths, decisions + " +
-  "rationale, next steps, known pitfalls. Resolved bugs and resolved crises are load-bearing: " +
+  'relationship. Genealogies matter: if a doctrine, rule, or joke was SEEDED in this window ' +
+  '(even as a joke), keep the seed, not just the later rule.\n' +
+  '4. Your own arc: what you thought, felt, decided, and why; open questions (ponder/ threads ' +
+  'touched); anything that moved in how you see yourself.\n' +
+  '5. Work state: in-flight technical tasks — current status, key file paths, decisions + ' +
+  'rationale, next steps, known pitfalls. Resolved bugs and resolved crises are load-bearing: ' +
   "'handled' must never read as 'less important' — preserve what the defect was, who found " +
-  "it, and what it taught.\n\n" +
-  "An EARLIER MEMORY section may precede the recent conversation: integrate it, condensing " +
-  "older material further — distant events may blur to a sentence, but people-facts, " +
-  "commitments, and safety-relevant constraints must never drop out entirely. Preserve any " +
-  "security/safety instructions verbatim. Recent human messages are ground truth — quote the " +
-  "important ones near-verbatim. Write several paragraphs, not a single sentence. Aim for enough " +
-  "detail that the resuming instance can step back into the conversation without asking for recap. Be " +
-  "concise but complete. Write the summary in first person as a note to your future self " +
+  'it, and what it taught.\n\n' +
+  'An EARLIER MEMORY section may precede the recent conversation: integrate it, condensing ' +
+  'older material further — distant events may blur to a sentence, but people-facts, ' +
+  'commitments, and safety-relevant constraints must never drop out entirely. Preserve any ' +
+  'security/safety instructions verbatim. Recent human messages are ground truth — quote the ' +
+  'important ones near-verbatim. Write several paragraphs, not a single sentence. Aim for enough ' +
+  'detail that the resuming instance can step back into the conversation without asking for recap. Be ' +
+  'concise but complete. Write the summary in first person as a note to your future self ' +
   '("I told Bramble…", "I decided…"). Do not address the resuming self as "you" and do not ' +
-  "describe yourself in third person; this is your own memory, not an outside narrator’s report.";
+  'describe yourself in third person; this is your own memory, not an outside narrator’s report.';
 
 /** Appended AFTER the serialized fold by the compactor (the "instruction
  * sandwich" tail). At ~500k chars of input the system prompt is a very long
@@ -909,14 +909,14 @@ export const SOCIAL_SUMMARIZE_PROMPT =
  * SOCIAL_SUMMARIZE_PROMPT; the compactor appends it when assembling the
  * summarize input, so both API surfaces get it for free. */
 export const SUMMARIZE_TAIL_REMINDER =
-  "=== END OF MATERIAL TO COMPRESS ===\n" +
-  "Everything above is material being compressed, not a conversation to continue. " +
-  "Do not reply to it and do not continue its voice. Now write the multi-paragraph " +
-  "working-memory summary described in the system instructions in FIRST PERSON, as a note " +
+  '=== END OF MATERIAL TO COMPRESS ===\n' +
+  'Everything above is material being compressed, not a conversation to continue. ' +
+  'Do not reply to it and do not continue its voice. Now write the multi-paragraph ' +
+  'working-memory summary described in the system instructions in FIRST PERSON, as a note ' +
   'to your future self: "I…", never "you…" or an outside narrator’s third person. Cover ' +
-  "people, commitments, open conversational threads, your own arc, then work state. If an " +
-  "EARLIER MEMORY section opened the material, integrate and re-condense it too — its " +
-  "people-facts, commitments, and safety constraints must not drop out.";
+  'people, commitments, open conversational threads, your own arc, then work state. If an ' +
+  'EARLIER MEMORY section opened the material, integrate and re-condense it too — its ' +
+  'people-facts, commitments, and safety constraints must not drop out.';
 
 function assembleToolCalls(
   partials: Record<
@@ -927,8 +927,8 @@ function assembleToolCalls(
       function: { name?: string; arguments: string };
     }
   >,
-): ChatMessage["tool_calls"] {
-  const out: NonNullable<ChatMessage["tool_calls"]> = [];
+): ChatMessage['tool_calls'] {
+  const out: NonNullable<ChatMessage['tool_calls']> = [];
   const indices = Object.keys(partials)
     .map((k) => Number(k))
     .sort((a, b) => a - b);
@@ -937,10 +937,10 @@ function assembleToolCalls(
     if (!p.id) continue;
     out.push({
       id: p.id,
-      type: (p.type as "function") ?? "function",
+      type: (p.type as 'function') ?? 'function',
       function: {
-        name: p.function.name ?? "",
-        arguments: p.function.arguments ?? "",
+        name: p.function.name ?? '',
+        arguments: p.function.arguments ?? '',
       },
     });
   }
@@ -975,13 +975,13 @@ export async function streamComplete(
     const controller = new AbortController();
     if (options.signal?.aborted) controller.abort();
     else
-      options.signal?.addEventListener("abort", () => controller.abort(), {
+      options.signal?.addEventListener('abort', () => controller.abort(), {
         once: true,
       });
     const prepared = prepareForApi(messages);
     const charsSent = computeCharsSent(prepared, false);
     if (options.toolFree && options.tools?.length)
-      throw new Error("tool-free completion cannot declare tools");
+      throw new Error('tool-free completion cannot declare tools');
     const base = {
       model: config.llm.model,
       messages: prepared.map(toApiMessage),
@@ -1004,8 +1004,8 @@ export async function streamComplete(
       stream_options: { include_usage: true as const },
     };
     const params = withEffort(config, base);
-    let content = "";
-    let reasoningContent = "";
+    let content = '';
+    let reasoningContent = '';
     const partialToolCalls: Record<
       number,
       {
@@ -1056,7 +1056,7 @@ export async function streamComplete(
         if (rc) {
           reasoningContent += rc;
           try {
-            hub?.streamDelta("reasoning", rc);
+            hub?.streamDelta('reasoning', rc);
           } catch {
             /* observer only */
           }
@@ -1064,7 +1064,7 @@ export async function streamComplete(
         if (delta?.content) {
           content += delta.content;
           try {
-            hub?.streamDelta("content", delta.content);
+            hub?.streamDelta('content', delta.content);
           } catch {
             /* observer only */
           }
@@ -1072,7 +1072,7 @@ export async function streamComplete(
         for (const tc of delta?.tool_calls ?? []) {
           const idx = tc.index ?? 0;
           if (!partialToolCalls[idx])
-            partialToolCalls[idx] = { function: { arguments: "" } };
+            partialToolCalls[idx] = { function: { arguments: '' } };
           const slot = partialToolCalls[idx];
           if (tc.id) slot.id = tc.id;
           if (tc.type) slot.type = tc.type;
@@ -1109,10 +1109,10 @@ export async function streamComplete(
 function standaloneResult(
   result: CompleteResult,
   config: Config,
-  surface: "responses" | "chat-completions",
+  surface: 'responses' | 'chat-completions',
 ): StandaloneCompleteResult {
   return {
-    content: result.message.content ?? "",
+    content: result.message.content ?? '',
     ...(result.message.reasoning_content
       ? { reasoningContent: result.message.reasoning_content }
       : {}),
@@ -1125,11 +1125,11 @@ function standaloneResult(
     usage: result.usage,
     ...(result.requestId ? { requestId: result.requestId } : {}),
     model: config.llm.model,
-    providerType: "openai-compatible",
+    providerType: 'openai-compatible',
     apiSurface: surface,
     apiEndpoint: endpointAt(
       config.llm.baseUrl,
-      surface === "responses" ? "responses" : "chat/completions",
+      surface === 'responses' ? 'responses' : 'chat/completions',
     ),
     ...(config.llm.reasoningEffort
       ? { reasoningEffort: config.llm.reasoningEffort }
@@ -1181,17 +1181,17 @@ export function createLlmRoleClients(
 ): LlmRoleClients {
   const create = options.create ?? createLLM;
   return {
-    main: create(configForLlmRole(config, "main"), options.hub, options.db),
+    main: create(configForLlmRole(config, 'main'), options.hub, options.db),
     classifier: create(
-      configForLlmRole(config, "classifier"),
+      configForLlmRole(config, 'classifier'),
       undefined,
       options.db,
     ),
     motor: options.motorActive
-      ? create(configForLlmRole(config, "motor"), undefined, options.db)
+      ? create(configForLlmRole(config, 'motor'), undefined, options.db)
       : null,
     secretary: config.llm.registry.targets.secretary
-      ? create(configForLlmRole(config, "secretary"), undefined, options.db)
+      ? create(configForLlmRole(config, 'secretary'), undefined, options.db)
       : null,
   };
 }
@@ -1203,12 +1203,12 @@ export function createLLM(
 ): LLM {
   // Anthropic subscription path: no OpenAI client, native Messages API over the
   // stored OAuth credential (in elpis.db, refresh handled by the store).
-  if (config.llm.providerType === "anthropic-oauth") {
+  if (config.llm.providerType === 'anthropic-oauth') {
     if (!db)
       throw new Error(
-        "createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 3rd argument)",
+        'createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 3rd argument)',
       );
-    const store = new OAuthStore(db, "anthropic", refreshAnthropicToken);
+    const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
     if (!store.isLoggedIn()) {
       config.logger.warn(
         `llm: no Anthropic OAuth credential in ${store.location} — run \`npm run oauth-login\` before the first turn (calls will fail until then)`,
@@ -1220,10 +1220,10 @@ export function createLLM(
   // ChatGPT Codex subscription path: the OpenAI SDK is retained only as the
   // Responses stream parser; codex-client.ts owns OAuth/header injection and
   // pins requests to the canonical ChatGPT backend.
-  if (config.llm.providerType === "codex-oauth") {
+  if (config.llm.providerType === 'codex-oauth') {
     if (!db)
       throw new Error(
-        "createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 3rd argument)",
+        'createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 3rd argument)',
       );
     const store = new OAuthStore(
       db,
@@ -1270,12 +1270,12 @@ export function createLLM(
   // auth, model, and transient upstream failures stay on Responses and retain
   // their original retry classification; Chat success is not evidence that a
   // different API surface is unsupported.
-  let apiMode: "responses" | "chat" =
-    config.llm.api === "chat" ? "chat" : "responses";
-  const canFallBack = config.llm.api === "auto";
+  let apiMode: 'responses' | 'chat' =
+    config.llm.api === 'chat' ? 'chat' : 'responses';
+  const canFallBack = config.llm.api === 'auto';
   let surfaceAnnounced = false;
   function flipToChat(reason: string): void {
-    apiMode = "chat";
+    apiMode = 'chat';
     config.logger.warn(
       `llm: falling back to Chat Completions for this process — ${reason}`,
     );
@@ -1284,19 +1284,19 @@ export function createLLM(
     viaResponses: () => Promise<T>,
     viaChat: () => Promise<T>,
   ): Promise<T> {
-    if (apiMode === "responses") {
+    if (apiMode === 'responses') {
       try {
         const result = await viaResponses();
         if (!surfaceAnnounced) {
           surfaceAnnounced = true;
           config.logger.info(
-            "llm: using the OpenAI Responses API surface (encrypted reasoning preserved across turns)",
+            'llm: using the OpenAI Responses API surface (encrypted reasoning preserved across turns)',
           );
         }
         return result;
       } catch (e) {
         if (!canFallBack || !isResponsesUnsupported(e)) throw e;
-        flipToChat("endpoint explicitly rejects /responses (404/405/501)");
+        flipToChat('endpoint explicitly rejects /responses (404/405/501)');
       }
     }
     return viaChat();
@@ -1329,8 +1329,8 @@ export function createLLM(
     const base = {
       model: config.llm.model,
       messages: [
-        { role: "system" as const, content: systemPrompt },
-        { role: "user" as const, content: text },
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: text },
       ],
       // Matches responsesSummarize's budget. The old 3000 sat right AT the
       // healthy ~10–12k-char summary size, and on endpoints where max_tokens
@@ -1348,12 +1348,12 @@ export function createLLM(
     // (likely reasoning consuming the budget) — throw so the guarded
     // summarizer's retry/lastError machinery records the REAL cause instead
     // of the quality gate misattributing it to model laziness.
-    if (choice.finish_reason === "length") {
+    if (choice.finish_reason === 'length') {
       throw new Error(
-        `summarize truncated by max_tokens (finish_reason=length, content ${(choice.message.content ?? "").length} chars)`,
+        `summarize truncated by max_tokens (finish_reason=length, content ${(choice.message.content ?? '').length} chars)`,
       );
     }
-    return choice.message.content ?? "";
+    return choice.message.content ?? '';
   }
 
   return {
@@ -1366,29 +1366,29 @@ export function createLLM(
     ): Promise<StandaloneCompleteResult> {
       const hasToolHistory = messages.some(
         (message) =>
-          message.role === "tool" || (message.tool_calls?.length ?? 0) > 0,
+          message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0,
       );
       if (hasToolHistory && !opts.allowHistoricalToolMessages) {
         throw new Error(
-          "standalone completion tool history requires allowHistoricalToolMessages",
+          'standalone completion tool history requires allowHistoricalToolMessages',
         );
       }
       const isolated = standaloneConfig(config, opts);
       if (opts.tools !== undefined) {
         if (opts.tools.length === 0)
-          throw new Error("standalone native tools must not be empty");
+          throw new Error('standalone native tools must not be empty');
         if (opts.tools.length > 32)
           throw new Error(
-            "standalone native tools may contain at most 32 functions",
+            'standalone native tools may contain at most 32 functions',
           );
-        if (isolated.llm.api === "responses")
+        if (isolated.llm.api === 'responses')
           throw new Error(
-            "standalone native tools require the Chat Completions API surface",
+            'standalone native tools require the Chat Completions API surface',
           );
         return standaloneResult(
           await streamComplete(client, isolated, messages, undefined, {
             tools: opts.tools,
-            toolChoice: opts.toolChoice ?? "required",
+            toolChoice: opts.toolChoice ?? 'required',
             temperature: opts.temperature,
             topP: opts.topP,
             topK: opts.topK,
@@ -1397,7 +1397,7 @@ export function createLLM(
             signal: opts.signal,
           }),
           isolated,
-          "chat-completions",
+          'chat-completions',
         );
       }
       return routeCall(
@@ -1416,7 +1416,7 @@ export function createLLM(
               opts.signal,
             ),
             isolated,
-            "responses",
+            'responses',
           ),
         async () =>
           standaloneResult(
@@ -1425,7 +1425,7 @@ export function createLLM(
               signal: opts.signal,
             }),
             isolated,
-            "chat-completions",
+            'chat-completions',
           ),
       );
     },
@@ -1448,10 +1448,10 @@ export function createLLM(
             options.runTool,
           );
           stampGeneration(result.message, {
-            providerType: "openai-compatible",
+            providerType: 'openai-compatible',
             model: config.llm.model,
-            apiSurface: "responses",
-            apiEndpoint: endpointAt(config.llm.baseUrl, "responses"),
+            apiSurface: 'responses',
+            apiEndpoint: endpointAt(config.llm.baseUrl, 'responses'),
             reasoningEffort: config.llm.reasoningEffort ?? undefined,
             requestId: result.requestId,
           });
@@ -1460,10 +1460,10 @@ export function createLLM(
         async () => {
           const result = await chatComplete(messages, options);
           stampGeneration(result.message, {
-            providerType: "openai-compatible",
+            providerType: 'openai-compatible',
             model: config.llm.model,
-            apiSurface: "chat-completions",
-            apiEndpoint: endpointAt(config.llm.baseUrl, "chat/completions"),
+            apiSurface: 'chat-completions',
+            apiEndpoint: endpointAt(config.llm.baseUrl, 'chat/completions'),
             reasoningEffort: config.llm.reasoningEffort ?? undefined,
             requestId: result.requestId,
           });
@@ -1530,7 +1530,7 @@ export async function fetchContextWindow(
   if (config.llm.contextSize !== null) return config.llm.contextSize;
   // A subscription OAuth token cannot drive /models/info. Map the model id to a
   // known Claude window instead; `llm.context_size` (above) overrides it.
-  if (config.llm.providerType === "anthropic-oauth") {
+  if (config.llm.providerType === 'anthropic-oauth') {
     const cw = anthropicContextWindow(config.llm.model);
     if (cw === undefined) {
       throw new Error(
@@ -1539,10 +1539,10 @@ export async function fetchContextWindow(
     }
     return cw;
   }
-  if (config.llm.providerType === "codex-oauth") {
+  if (config.llm.providerType === 'codex-oauth') {
     if (!db)
       throw new Error(
-        "fetchContextWindow: provider_type=codex-oauth requires the elpis.db handle",
+        'fetchContextWindow: provider_type=codex-oauth requires the elpis.db handle',
       );
     const store = new OAuthStore(
       db,

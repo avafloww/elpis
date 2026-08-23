@@ -1,33 +1,33 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { openDatabase } from "../src/store/db.js";
-import { MindStore } from "../src/store/mind.js";
-import { secretaryControlTokenDigest } from "../src/secretary/session.js";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { openDatabase } from '../src/store/db.js';
+import { MindStore } from '../src/store/mind.js';
+import { secretaryControlTokenDigest } from '../src/secretary/session.js';
 import {
   SECRETARY_MIND_MAX_RESPONSE_CHARS,
   SecretaryMindBroker,
   SecretaryMindError,
-} from "../src/secretary/mind.js";
+} from '../src/secretary/mind.js';
 import {
   SecretaryCompletionBroker,
   SecretaryCompletionError,
-} from "../src/secretary/completion.js";
-import { SECRETARY_MIND_TOOL } from "../src/secretary/tool.js";
-import { makeConfig } from "./helpers.js";
-import { createLlmModelRegistry } from "../src/llm/model-registry.js";
-import type { LLM, CompleteOptions } from "../src/llm/llm.js";
+} from '../src/secretary/completion.js';
+import { SECRETARY_MIND_TOOL } from '../src/secretary/tool.js';
+import { makeConfig } from './helpers.js';
+import { createLlmModelRegistry } from '../src/llm/model-registry.js';
+import type { LLM, CompleteOptions } from '../src/llm/llm.js';
 
 function fixture() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secretary-broker-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secretary-broker-'));
   const db = openDatabase(dir);
   const now = Date.now();
   for (const [id, parent] of [
-    ["elm-root0001", null],
-    ["elm-child001", "elm-root0001"],
-    ["elm-sibling1", null],
+    ['elm-root0001', null],
+    ['elm-child001', 'elm-root0001'],
+    ['elm-sibling1', null],
   ] as const)
     db.prepare(
       `INSERT INTO mind_items (id,title,body,kind,status,priority,parent_id,created_by,created_at,updated_at) VALUES (?,?,?,'task','open',2,?,'agent',?,?)`,
@@ -35,14 +35,14 @@ function fixture() {
   db.prepare(
     "INSERT INTO mind_comments (item_id,author,body,created_at) VALUES ('elm-child001','agent','useful detail',?)",
   ).run(now);
-  const token = "s".repeat(43);
+  const token = 's'.repeat(43);
   db.prepare(
     `INSERT INTO secretary_sessions (id,hint_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
   ).run(
-    "sec-" + "a".repeat(22),
-    "elm-root0001",
-    "ready",
-    "p/secretary",
+    'sec-' + 'a'.repeat(22),
+    'elm-root0001',
+    'ready',
+    'p/secretary',
     secretaryControlTokenDigest(token),
     now,
     now,
@@ -54,60 +54,60 @@ function close(f: ReturnType<typeof fixture>) {
   fs.rmSync(f.dir, { recursive: true, force: true });
 }
 
-test("secretary Mind reads globally while an optional hint remains prompt context", () => {
+test('secretary Mind reads globally while an optional hint remains prompt context', () => {
   const f = fixture();
   const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
-  assert.equal(broker.get(f.token).item.id, "elm-root0001");
+  assert.equal(broker.get(f.token).item.id, 'elm-root0001');
   assert.equal(
-    broker.get(f.token, "elm-child001").item.comments[0].body,
-    "useful detail",
+    broker.get(f.token, 'elm-child001').item.comments[0].body,
+    'useful detail',
   );
-  assert.equal(broker.get(f.token, "elm-sibling1").item.id, "elm-sibling1");
+  assert.equal(broker.get(f.token, 'elm-sibling1').item.id, 'elm-sibling1');
   assert.deepEqual(
     broker.tree(f.token).items.map((i) => i.id),
-    ["elm-root0001", "elm-child001"],
+    ['elm-root0001', 'elm-child001'],
   );
 
-  f.db.exec("DROP TRIGGER secretary_sessions_identity_no_update");
+  f.db.exec('DROP TRIGGER secretary_sessions_identity_no_update');
   f.db
-    .prepare("UPDATE secretary_sessions SET hint_mind_id=NULL WHERE id=?")
-    .run("sec-" + "a".repeat(22));
+    .prepare('UPDATE secretary_sessions SET hint_mind_id=NULL WHERE id=?')
+    .run('sec-' + 'a'.repeat(22));
   assert.throws(
     () => broker.get(f.token),
-    (e) => e instanceof SecretaryMindError && e.code === "invalid_request",
+    (e) => e instanceof SecretaryMindError && e.code === 'invalid_request',
   );
-  assert.equal(broker.get(f.token, "elm-sibling1").item.id, "elm-sibling1");
+  assert.equal(broker.get(f.token, 'elm-sibling1').item.id, 'elm-sibling1');
 
   f.db
     .prepare("UPDATE secretary_sessions SET status='closed' WHERE id=?")
-    .run("sec-" + "a".repeat(22));
+    .run('sec-' + 'a'.repeat(22));
   assert.throws(
-    () => broker.get(f.token, "elm-sibling1"),
-    (e) => e instanceof SecretaryMindError && e.code === "unauthorized",
+    () => broker.get(f.token, 'elm-sibling1'),
+    (e) => e instanceof SecretaryMindError && e.code === 'unauthorized',
   );
   close(f);
 });
 
-test("secretary proposal creation derives attribution and preserves proposal invariants", () => {
+test('secretary proposal creation derives attribution and preserves proposal invariants', () => {
   const f = fixture();
   const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
   const created = broker.propose(f.token, {
-    title: "Review this candidate",
-    body: "As submitted through the bounded secretary lane.",
-    kind: "idea",
+    title: 'Review this candidate',
+    body: 'As submitted through the bounded secretary lane.',
+    kind: 'idea',
     priority: 1,
-    parentId: "elm-sibling1",
-    tags: ["secretary-intake"],
+    parentId: 'elm-sibling1',
+    tags: ['secretary-intake'],
   });
-  assert.equal(created.item.status, "proposal");
+  assert.equal(created.item.status, 'proposal');
   assert.equal(
     created.item.createdBy,
     `secretary:${created.binding.sessionId}`,
   );
-  assert.equal(created.item.parentId, "elm-sibling1");
+  assert.equal(created.item.parentId, 'elm-sibling1');
   assert.equal(created.item.dueAt, null);
   assert.deepEqual(created.item.blockedBy, []);
-  assert.deepEqual(created.item.tags, ["secretary-intake"]);
+  assert.deepEqual(created.item.tags, ['secretary-intake']);
   const event = f.db
     .prepare(
       "SELECT actor, data_json FROM mind_events WHERE item_id=? AND type='item.created'",
@@ -121,11 +121,11 @@ test("secretary proposal creation derives attribution and preserves proposal inv
       proposalIntake: JSON.parse(event.data_json).proposalIntake,
     },
     {
-      status: "proposal",
-      body: "As submitted through the bounded secretary lane.",
+      status: 'proposal',
+      body: 'As submitted through the bounded secretary lane.',
       proposalIntake: {
-        requester: "conversation-user",
-        source: "secretary",
+        requester: 'conversation-user',
+        source: 'secretary',
         sessionId: created.binding.sessionId,
       },
     },
@@ -133,35 +133,35 @@ test("secretary proposal creation derives attribution and preserves proposal inv
   close(f);
 });
 
-test("secretary Mind fails closed when a detail exceeds the response bound", () => {
+test('secretary Mind fails closed when a detail exceeds the response bound', () => {
   const f = fixture();
   const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
   f.db
     .prepare("UPDATE mind_items SET body=? WHERE id='elm-root0001'")
-    .run("x".repeat(SECRETARY_MIND_MAX_RESPONSE_CHARS + 1));
+    .run('x'.repeat(SECRETARY_MIND_MAX_RESPONSE_CHARS + 1));
   assert.throws(
     () => broker.get(f.token),
-    (e) => e instanceof SecretaryMindError && e.code === "too_large",
+    (e) => e instanceof SecretaryMindError && e.code === 'too_large',
   );
   close(f);
 });
 
-test("secretary completion binds model, fixed Mind tool, capacity and one-in-flight", async () => {
+test('secretary completion binds model, fixed Mind tool, capacity and one-in-flight', async () => {
   const f = fixture();
   const config = makeConfig();
   config.llm.registry = createLlmModelRegistry({
     providers: {
       p: {
-        providerType: "openai-compatible",
-        apiKey: "x",
-        baseUrl: "https://example.test/v1",
-        api: "responses",
+        providerType: 'openai-compatible',
+        apiKey: 'x',
+        baseUrl: 'https://example.test/v1',
+        api: 'responses',
         externalThinking: false,
         streamIdleTimeoutMs: 1000,
         callTimeoutMs: 1000,
         models: {
           secretary: {
-            name: "wire-secretary",
+            name: 'wire-secretary',
             contextSize: 10000,
             reasoningEffort: null,
             reasoningSummary: null,
@@ -171,24 +171,24 @@ test("secretary completion binds model, fixed Mind tool, capacity and one-in-fli
       },
     },
     roles: {
-      main: "p/secretary",
-      classifier: "p/secretary",
+      main: 'p/secretary',
+      classifier: 'p/secretary',
       motor: null,
-      secretary: "p/secretary",
+      secretary: 'p/secretary',
     },
   });
-  config.llm.registrySource = "canonical";
+  config.llm.registrySource = 'canonical';
   const pending = Promise.withResolvers<any>();
   let options: CompleteOptions | undefined;
   const fake: LLM = {
-    model: "wire-secretary",
+    model: 'wire-secretary',
     runTool: {} as never,
     complete: async (_m, o) => {
       options = o;
       return pending.promise;
     },
     summarize: async () => {
-      throw new Error("no");
+      throw new Error('no');
     },
   };
   const broker = new SecretaryCompletionBroker({
@@ -196,42 +196,42 @@ test("secretary completion binds model, fixed Mind tool, capacity and one-in-fli
     config,
     maxConcurrent: 1,
     create(projected) {
-      assert.equal(projected.llm.model, "wire-secretary");
+      assert.equal(projected.llm.model, 'wire-secretary');
       return fake;
     },
   });
   const first = broker.complete(f.token, [
-    { role: "user", content: "synthesize" },
+    { role: 'user', content: 'synthesize' },
   ]);
   await assert.rejects(
-    () => broker.complete(f.token, [{ role: "user", content: "again" }]),
-    (e) => e instanceof SecretaryCompletionError && e.code === "busy",
+    () => broker.complete(f.token, [{ role: 'user', content: 'again' }]),
+    (e) => e instanceof SecretaryCompletionError && e.code === 'busy',
   );
-  const secondToken = "t".repeat(43);
+  const secondToken = 't'.repeat(43);
   f.db
     .prepare(
       `INSERT INTO secretary_sessions (id,hint_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
     )
     .run(
-      "sec-" + "b".repeat(22),
-      "elm-sibling1",
-      "ready",
-      "p/secretary",
+      'sec-' + 'b'.repeat(22),
+      'elm-sibling1',
+      'ready',
+      'p/secretary',
       secretaryControlTokenDigest(secondToken),
       Date.now(),
       Date.now(),
     );
   await assert.rejects(
-    () => broker.complete(secondToken, [{ role: "user", content: "other" }]),
-    (e) => e instanceof SecretaryCompletionError && e.code === "capacity",
+    () => broker.complete(secondToken, [{ role: 'user', content: 'other' }]),
+    (e) => e instanceof SecretaryCompletionError && e.code === 'capacity',
   );
   assert.equal(options?.runTool, SECRETARY_MIND_TOOL);
-  assert.equal((options?.runTool as any).function.name, "mind");
+  assert.equal((options?.runTool as any).function.name, 'mind');
   pending.resolve({
-    message: { role: "assistant", content: "ok" },
+    message: { role: 'assistant', content: 'ok' },
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     stripped: false,
   });
-  assert.equal((await first).binding.modelRef, "p/secretary");
+  assert.equal((await first).binding.modelRef, 'p/secretary');
   close(f);
 });

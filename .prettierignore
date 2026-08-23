@@ -1,0 +1,2 @@
+# This migration's immutable receipt hashes the complete normalized source file.
+src/store/mind-proposal-migration.ts

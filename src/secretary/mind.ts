@@ -1,15 +1,15 @@
-import type { Database } from "../store/db.js";
+import type { Database } from '../store/db.js';
 import type {
   MindDetail,
   MindKind,
   MindLink,
   MindService,
-} from "../store/mind.js";
-import type { MindId } from "../store/mind-id.js";
+} from '../store/mind.js';
+import type { MindId } from '../store/mind-id.js';
 import {
   resolveSecretarySession,
   type SecretarySessionBinding,
-} from "./session.js";
+} from './session.js';
 
 export const SECRETARY_MIND_MAX_DEPTH = 16;
 export const SECRETARY_MIND_MAX_ITEMS = 100;
@@ -19,11 +19,11 @@ export const SECRETARY_MIND_MAX_LINKS = 1000;
 export class SecretaryMindError extends Error {
   constructor(
     public readonly code:
-      "unauthorized" | "invalid_request" | "not_found" | "too_large",
+      'unauthorized' | 'invalid_request' | 'not_found' | 'too_large',
     message: string,
   ) {
     super(message);
-    this.name = "SecretaryMindError";
+    this.name = 'SecretaryMindError';
   }
 }
 
@@ -46,27 +46,27 @@ export interface SecretaryProposalInput {
 export class SecretaryMindBroker {
   constructor(
     private readonly db: Database,
-    private readonly mind: Pick<MindService, "get" | "create">,
+    private readonly mind: Pick<MindService, 'get' | 'create'>,
   ) {}
 
   private binding(token: string): SecretarySessionBinding {
     const binding = resolveSecretarySession(this.db, token);
     if (!binding)
       throw new SecretaryMindError(
-        "unauthorized",
-        "secretary session is unavailable",
+        'unauthorized',
+        'secretary session is unavailable',
       );
     return binding;
   }
 
   private bounded<T>(value: T): T {
     if (
-      Buffer.byteLength(JSON.stringify(value), "utf8") >
+      Buffer.byteLength(JSON.stringify(value), 'utf8') >
       SECRETARY_MIND_MAX_RESPONSE_CHARS
     )
       throw new SecretaryMindError(
-        "too_large",
-        "secretary Mind response exceeds the bounded response limit",
+        'too_large',
+        'secretary Mind response exceeds the bounded response limit',
       );
     return value;
   }
@@ -97,8 +97,8 @@ export class SecretaryMindBroker {
     ].filter((value): value is MindId => value !== undefined);
     if (linkIds.length > SECRETARY_MIND_MAX_LINKS)
       throw new SecretaryMindError(
-        "too_large",
-        "secretary Mind item has too many links",
+        'too_large',
+        'secretary Mind item has too many links',
       );
     return new Set<MindId>([item.id, ...linkIds]);
   }
@@ -111,12 +111,12 @@ export class SecretaryMindBroker {
     const target = id ?? binding.hintMindId;
     if (!target)
       throw new SecretaryMindError(
-        "invalid_request",
-        "Mind id is required when the secretary session has no hint",
+        'invalid_request',
+        'Mind id is required when the secretary session has no hint',
       );
     const item = this.mind.get(target);
     if (!item)
-      throw new SecretaryMindError("not_found", "Mind item does not exist");
+      throw new SecretaryMindError('not_found', 'Mind item does not exist');
     return this.bounded({
       binding,
       item: this.project(item, this.allowedLinks(item)),
@@ -130,11 +130,11 @@ export class SecretaryMindBroker {
     const binding = this.binding(token);
     const item = this.mind.create({
       ...input,
-      status: "proposal",
+      status: 'proposal',
       actor: `secretary:${binding.sessionId}`,
       proposalIntake: {
-        requester: "conversation-user",
-        source: "secretary",
+        requester: 'conversation-user',
+        source: 'secretary',
         sessionId: binding.sessionId,
       },
     });
@@ -154,8 +154,8 @@ export class SecretaryMindBroker {
     const rootId = id ?? binding.hintMindId;
     if (!rootId)
       throw new SecretaryMindError(
-        "invalid_request",
-        "Mind id is required when the secretary session has no hint",
+        'invalid_request',
+        'Mind id is required when the secretary session has no hint',
       );
     depth = Number.isSafeInteger(depth)
       ? Math.max(0, Math.min(depth, SECRETARY_MIND_MAX_DEPTH))
@@ -178,7 +178,7 @@ export class SecretaryMindBroker {
     const allowed = new Set(selected.map((row) => row.id));
     const items = selected.map((row) => this.mind.get(row.id));
     if (items.some((item) => !item))
-      throw new SecretaryMindError("not_found", "Mind item does not exist");
+      throw new SecretaryMindError('not_found', 'Mind item does not exist');
     return this.bounded({
       binding,
       rootId,

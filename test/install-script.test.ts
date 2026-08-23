@@ -9,7 +9,11 @@ const root = path.resolve(import.meta.dirname, '..');
 const installer = path.join(root, 'deploy', 'install.sh');
 
 function run(args: string[]) {
-  return spawnSync('bash', [installer, ...args], { cwd: root, encoding: 'utf8', timeout: 10_000 });
+  return spawnSync('bash', [installer, ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
 }
 
 test('installer shell parses and documents authored brain seeds', () => {
@@ -24,9 +28,18 @@ test('installer shell parses and documents authored brain seeds', () => {
 
 test('installer isolates an operator-owned bootstrap checkout through a temporary bundle', () => {
   const source = fs.readFileSync(installer, 'utf8');
-  assert.match(source, /git -c safe\.directory="\$LOCAL_SOURCE" -c safe\.directory="\$LOCAL_SOURCE\/\.git"/);
-  assert.match(source, /bundle create "\$_bootstrap_bundle" "refs\/heads\/\$BRANCH"/);
-  assert.match(source, /git clone --branch "\$BRANCH" "\$_bootstrap_bundle" "\$HARNESS_DIR"/);
+  assert.match(
+    source,
+    /git -c safe\.directory="\$LOCAL_SOURCE" -c safe\.directory="\$LOCAL_SOURCE\/\.git"/,
+  );
+  assert.match(
+    source,
+    /bundle create "\$_bootstrap_bundle" "refs\/heads\/\$BRANCH"/,
+  );
+  assert.match(
+    source,
+    /git clone --branch "\$BRANCH" "\$_bootstrap_bundle" "\$HARNESS_DIR"/,
+  );
   assert.match(source, /-C "\$LOCAL_SOURCE" remote get-url origin/);
   assert.doesNotMatch(source, /git -C "\$LOCAL_SOURCE" remote get-url origin/);
   assert.doesNotMatch(source, /git clone --branch "\$BRANCH" "\$LOCAL_SOURCE"/);
@@ -34,10 +47,17 @@ test('installer isolates an operator-owned bootstrap checkout through a temporar
 });
 
 test('installer rejects a missing seed before sudo or package work', () => {
-  const result = run(['--non-interactive', '--soul-file', '/definitely/missing/elpis-soul.md']);
+  const result = run([
+    '--non-interactive',
+    '--soul-file',
+    '/definitely/missing/elpis-soul.md',
+  ]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /--soul-file is not a readable file/);
-  assert.doesNotMatch(result.stdout + result.stderr, /Installing base packages/);
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /Installing base packages/,
+  );
 });
 
 test('installer rejects ambiguous generated and authored SOUL inputs before sudo', () => {
@@ -45,10 +65,22 @@ test('installer rejects ambiguous generated and authored SOUL inputs before sudo
   try {
     const soul = path.join(dir, 'SOUL.md');
     fs.writeFileSync(soul, '# seed\n');
-    const result = run(['--non-interactive', '--agent-name', 'Somebody', '--soul-file', soul]);
+    const result = run([
+      '--non-interactive',
+      '--agent-name',
+      'Somebody',
+      '--soul-file',
+      soul,
+    ]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /--agent-name and --soul-file are mutually exclusive/);
-    assert.doesNotMatch(result.stdout + result.stderr, /Installing base packages/);
+    assert.match(
+      result.stderr,
+      /--agent-name and --soul-file are mutually exclusive/,
+    );
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /Installing base packages/,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

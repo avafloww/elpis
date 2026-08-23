@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PLURALKIT_BOT_ID, PLURALKIT_REQUEST_TIMEOUT_MS, PluralKitResolver, isPluralKitCommand, pluralKitIdentity } from '../src/discord/pluralkit.js';
+import {
+  PLURALKIT_BOT_ID,
+  PLURALKIT_REQUEST_TIMEOUT_MS,
+  PluralKitResolver,
+  isPluralKitCommand,
+  pluralKitIdentity,
+} from '../src/discord/pluralkit.js';
 
 test('official PluralKit bot id stays distinct from proxy webhook authors', () => {
   assert.equal(PLURALKIT_BOT_ID, '466378653216014359');
@@ -36,7 +42,10 @@ test('PluralKitResolver caches one response under proxy and original ids', async
   let calls = 0;
   const fetcher = async () => {
     calls++;
-    return new Response(JSON.stringify(info), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(info), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
   };
   const resolver = new PluralKitResolver(fetcher, 'https://pk.test/v2', 0);
   assert.deepEqual(await resolver.resolve('proxy-1'), info);
@@ -45,15 +54,23 @@ test('PluralKitResolver caches one response under proxy and original ids', async
 });
 
 test('PluralKitResolver returns null for a non-PK message', async () => {
-  const resolver = new PluralKitResolver(async () => new Response('', { status: 404 }), 'https://pk.test/v2', 0);
+  const resolver = new PluralKitResolver(
+    async () => new Response('', { status: 404 }),
+    'https://pk.test/v2',
+    0,
+  );
   assert.equal(await resolver.resolve('ordinary-1'), null);
 });
 
 test('PluralKitResolver rejects malformed successful responses', async () => {
   const resolver = new PluralKitResolver(
-    async () => new Response(JSON.stringify({ id: 'proxy-1' }), { status: 200 }),
+    async () =>
+      new Response(JSON.stringify({ id: 'proxy-1' }), { status: 200 }),
     'https://pk.test/v2',
     0,
   );
-  await assert.rejects(() => resolver.resolve('proxy-1'), /omitted id\/original\/sender/);
+  await assert.rejects(
+    () => resolver.resolve('proxy-1'),
+    /omitted id\/original\/sender/,
+  );
 });

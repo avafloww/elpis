@@ -24,10 +24,14 @@ function packageType(file: string): string | undefined {
   let dir = path.dirname(path.resolve(file));
   for (;;) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as { type?: string };
+      const pkg = JSON.parse(
+        fs.readFileSync(path.join(dir, 'package.json'), 'utf8'),
+      ) as { type?: string };
       if (pkg.type) return pkg.type;
       return undefined;
-    } catch { /* keep walking */ }
+    } catch {
+      /* keep walking */
+    }
     const up = path.dirname(dir);
     if (up === dir) return undefined;
     dir = up;
@@ -44,7 +48,7 @@ export function isEsmPath(file: string): boolean {
 
 export interface StalenessTracker {
   /** Record a require of `resolved`; returns a warning string when the file has
- * changed on disk since the version this process actually loaded. */
+   * changed on disk since the version this process actually loaded. */
   check(resolved: string): string | null;
 }
 
@@ -56,15 +60,19 @@ export function createStalenessTracker(
   return {
     check(resolved: string): string | null {
       let mtime: number;
-      try { mtime = statMtime(resolved); } catch { return null; }
+      try {
+        mtime = statMtime(resolved);
+      } catch {
+        return null;
+      }
       const first = loadedAtMtime.get(resolved);
       if (first === undefined) {
         loadedAtMtime.set(resolved, mtime);
         return null;
       }
       if (mtime <= first) return null;
- // Changed on disk since we loaded it. For CJS the cache-bust in globals.ts
- // handles it, so only ESM is a problem — and there the delete is a no-op.
+      // Changed on disk since we loaded it. For CJS the cache-bust in globals.ts
+      // handles it, so only ESM is a problem — and there the delete is a no-op.
       if (!isEsm(resolved)) {
         loadedAtMtime.set(resolved, mtime);
         return null;

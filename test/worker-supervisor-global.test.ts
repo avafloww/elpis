@@ -1,35 +1,39 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import { buildGlobals } from "../src/sandbox/globals.js";
-import type { SandboxDeps } from "../src/types.js";
-import { makeConfig } from "./helpers.js";
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { buildGlobals } from '../src/sandbox/globals.js';
+import type { SandboxDeps } from '../src/types.js';
+import { makeConfig } from './helpers.js';
 
-function deps(surface: "full" | "core" | "worker") {
+function deps(surface: 'full' | 'core' | 'worker') {
   const calls: unknown[] = [];
   const worker = {
     async start(mindId: unknown, options?: unknown) {
-      calls.push(["start", mindId, options]);
-      return { id: "wrk-a1b2c3d4" } as never;
+      calls.push(['start', mindId, options]);
+      return { id: 'wrk-a1b2c3d4' } as never;
     },
     async send(ref: string, text: string) {
-      calls.push(["send", ref, text]);
+      calls.push(['send', ref, text]);
       return { id: 1 } as never;
     },
     async list() {
-      calls.push(["list"]);
+      calls.push(['list']);
       return [];
     },
     async status(ref: string) {
-      calls.push(["status", ref]);
-      return { session: { id: "wrk-a1b2c3d4" }, messages: [], artifacts: [] } as never;
+      calls.push(['status', ref]);
+      return {
+        session: { id: 'wrk-a1b2c3d4' },
+        messages: [],
+        artifacts: [],
+      } as never;
     },
     async artifact(ref: string, key?: string) {
-      calls.push(["artifact", ref, key]);
-      return { localPath: "/tmp/artifact" } as never;
+      calls.push(['artifact', ref, key]);
+      return { localPath: '/tmp/artifact' } as never;
     },
     async dismiss(ref: string) {
-      calls.push(["dismiss", ref]);
-      return { id: "wrk-a1b2c3d4" } as never;
+      calls.push(['dismiss', ref]);
+      return { id: 'wrk-a1b2c3d4' } as never;
     },
   };
   return {
@@ -39,7 +43,7 @@ function deps(surface: "full" | "core" | "worker") {
       surface,
       worker,
       memory: {
-        read: () => "",
+        read: () => '',
         append: () => undefined,
         overwrite: () => undefined,
       },
@@ -48,39 +52,39 @@ function deps(surface: "full" | "core" | "worker") {
   };
 }
 
-test("full sandbox exposes a frozen forwarding worker supervisor", async () => {
-  const f = deps("full");
+test('full sandbox exposes a frozen forwarding worker supervisor', async () => {
+  const f = deps('full');
   const elpis = buildGlobals(f.value).elpis as any;
   assert.deepEqual(Object.keys(elpis.worker).sort(), [
-    "artifact",
-    "dismiss",
-    "list",
-    "send",
-    "start",
-    "status",
+    'artifact',
+    'dismiss',
+    'list',
+    'send',
+    'start',
+    'status',
   ]);
-  await elpis.worker.start("elm-a1b2c3d4", { modelRef: "p/model" });
-  await elpis.worker.send("quiet-otter", "steer");
-  await elpis.worker.status("quiet-otter");
-  await elpis.worker.artifact("quiet-otter", "workspace.patch.gz");
+  await elpis.worker.start('elm-a1b2c3d4', { modelRef: 'p/model' });
+  await elpis.worker.send('quiet-otter', 'steer');
+  await elpis.worker.status('quiet-otter');
+  await elpis.worker.artifact('quiet-otter', 'workspace.patch.gz');
   await elpis.worker.list();
-  await elpis.worker.dismiss("quiet-otter");
+  await elpis.worker.dismiss('quiet-otter');
   assert.deepEqual(f.calls, [
-    ["start", "elm-a1b2c3d4", { modelRef: "p/model" }],
-    ["send", "quiet-otter", "steer"],
-    ["status", "quiet-otter"],
-    ["artifact", "quiet-otter", "workspace.patch.gz"],
-    ["list"],
-    ["dismiss", "quiet-otter"],
+    ['start', 'elm-a1b2c3d4', { modelRef: 'p/model' }],
+    ['send', 'quiet-otter', 'steer'],
+    ['status', 'quiet-otter'],
+    ['artifact', 'quiet-otter', 'workspace.patch.gz'],
+    ['list'],
+    ['dismiss', 'quiet-otter'],
   ]);
   assert.equal(Object.isFrozen(elpis.worker), true);
 });
 
-test("worker supervision is absent from core and worker sandboxes", () => {
-  for (const surface of ["core", "worker"] as const) {
+test('worker supervision is absent from core and worker sandboxes', () => {
+  for (const surface of ['core', 'worker'] as const) {
     const f = deps(surface);
     const elpis = buildGlobals(f.value).elpis as Record<string, unknown>;
     assert.equal(elpis.worker, undefined);
-    assert.equal(Object.keys(elpis).includes("worker"), false);
+    assert.equal(Object.keys(elpis).includes('worker'), false);
   }
 });

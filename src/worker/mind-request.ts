@@ -5,14 +5,14 @@ import {
   type MindComment,
   type MindDetail,
   type MindStatus,
-} from "../store/mind.js";
-import { isMindId, type MindId } from "../store/mind-id.js";
-import type { WorkerSessionBinding } from "./session.js";
+} from '../store/mind.js';
+import { isMindId, type MindId } from '../store/mind-id.js';
+import type { WorkerSessionBinding } from './session.js';
 
 export class WorkerMindRequestError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "WorkerMindRequestError";
+    this.name = 'WorkerMindRequestError';
   }
 }
 
@@ -23,7 +23,7 @@ export interface WorkerMindService {
   ): { binding: WorkerSessionBinding; item: MindDetail };
   createChild(
     token: string,
-    input: Omit<CreateMindItem, "parentId" | "worker" | "dependsOn"> & {
+    input: Omit<CreateMindItem, 'parentId' | 'worker' | 'dependsOn'> & {
       parentId?: MindId;
     },
   ): MindDetail;
@@ -32,7 +32,7 @@ export interface WorkerMindService {
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new WorkerMindRequestError(`${label} must be an object`);
   return value as Record<string, unknown>;
 }
@@ -51,7 +51,7 @@ function text(
   max: number,
   allowEmpty = false,
 ): string {
-  if (typeof value !== "string")
+  if (typeof value !== 'string')
     throw new WorkerMindRequestError(`${label} must be a string`);
   if (!allowEmpty && value.trim().length === 0)
     throw new WorkerMindRequestError(`${label} must not be empty`);
@@ -76,27 +76,27 @@ function requiredId(value: unknown, label: string): MindId {
 function createInput(
   value: unknown,
   parentId: MindId | undefined,
-): Omit<CreateMindItem, "parentId" | "worker" | "dependsOn"> & {
+): Omit<CreateMindItem, 'parentId' | 'worker' | 'dependsOn'> & {
   parentId?: MindId;
 } {
-  const item = record(value, "item");
-  exact(item, ["title", "body", "kind", "status", "priority", "dueAt", "tags"]);
-  const result: Omit<CreateMindItem, "parentId" | "worker" | "dependsOn"> & {
+  const item = record(value, 'item');
+  exact(item, ['title', 'body', 'kind', 'status', 'priority', 'dueAt', 'tags']);
+  const result: Omit<CreateMindItem, 'parentId' | 'worker' | 'dependsOn'> & {
     parentId?: MindId;
   } = {
-    title: text(item.title, "item.title", 240),
+    title: text(item.title, 'item.title', 240),
     ...(parentId ? { parentId } : {}),
   };
   if (item.body !== undefined)
-    result.body = text(item.body, "item.body", 100_000, true);
+    result.body = text(item.body, 'item.body', 100_000, true);
   if (item.kind !== undefined) {
     if (!MIND_KINDS.includes(item.kind as never))
-      throw new WorkerMindRequestError("item.kind is invalid");
-    result.kind = item.kind as CreateMindItem["kind"];
+      throw new WorkerMindRequestError('item.kind is invalid');
+    result.kind = item.kind as CreateMindItem['kind'];
   }
   if (item.status !== undefined) {
     if (!MIND_STATUSES.includes(item.status as never))
-      throw new WorkerMindRequestError("item.status is invalid");
+      throw new WorkerMindRequestError('item.status is invalid');
     result.status = item.status as MindStatus;
   }
   if (item.priority !== undefined) {
@@ -106,7 +106,7 @@ function createInput(
       Number(item.priority) > 4
     )
       throw new WorkerMindRequestError(
-        "item.priority must be an integer from 0 to 4",
+        'item.priority must be an integer from 0 to 4',
       );
     result.priority = item.priority as number;
   }
@@ -116,7 +116,7 @@ function createInput(
       (!Number.isFinite(item.dueAt) || Number(item.dueAt) <= 0)
     )
       throw new WorkerMindRequestError(
-        "item.dueAt must be finite epoch-ms or null",
+        'item.dueAt must be finite epoch-ms or null',
       );
     result.dueAt = item.dueAt as number | null;
   }
@@ -125,19 +125,19 @@ function createInput(
       !Array.isArray(item.tags) ||
       item.tags.length > 64 ||
       item.tags.some((tag) => {
-        if (typeof tag !== "string" || tag.length > 48) return true;
+        if (typeof tag !== 'string' || tag.length > 48) return true;
         const normalized = tag
           .trim()
           .toLowerCase()
-          .replace(/^#/, "")
-          .replace(/\s+/g, "-");
+          .replace(/^#/, '')
+          .replace(/\s+/g, '-');
         return (
           !normalized || !/^[\p{L}\p{N}][\p{L}\p{N}._/-]*$/u.test(normalized)
         );
       })
     )
       throw new WorkerMindRequestError(
-        "item.tags must be at most 64 valid bounded strings",
+        'item.tags must be at most 64 valid bounded strings',
       );
     result.tags = [...item.tags] as string[];
   }
@@ -149,51 +149,51 @@ export function dispatchWorkerMindRequest(
   token: string,
   value: unknown,
 ): unknown {
-  const input = record(value, "request");
+  const input = record(value, 'request');
   if (input.protocol !== 1)
-    throw new WorkerMindRequestError("protocol must equal 1");
+    throw new WorkerMindRequestError('protocol must equal 1');
   switch (input.operation) {
-    case "get": {
-      exact(input, ["protocol", "operation", "id"]);
-      return { protocol: 1, ...service.get(token, optionalId(input.id, "id")) };
+    case 'get': {
+      exact(input, ['protocol', 'operation', 'id']);
+      return { protocol: 1, ...service.get(token, optionalId(input.id, 'id')) };
     }
-    case "create": {
-      exact(input, ["protocol", "operation", "parentId", "item"]);
+    case 'create': {
+      exact(input, ['protocol', 'operation', 'parentId', 'item']);
       return {
         protocol: 1,
         item: service.createChild(
           token,
-          createInput(input.item, optionalId(input.parentId, "parentId")),
+          createInput(input.item, optionalId(input.parentId, 'parentId')),
         ),
       };
     }
-    case "comment": {
-      exact(input, ["protocol", "operation", "id", "body"]);
+    case 'comment': {
+      exact(input, ['protocol', 'operation', 'id', 'body']);
       return {
         protocol: 1,
         comment: service.addComment(
           token,
-          requiredId(input.id, "id"),
-          text(input.body, "body", 100_000),
+          requiredId(input.id, 'id'),
+          text(input.body, 'body', 100_000),
         ),
       };
     }
-    case "status": {
-      exact(input, ["protocol", "operation", "id", "status"]);
+    case 'status': {
+      exact(input, ['protocol', 'operation', 'id', 'status']);
       if (!MIND_STATUSES.includes(input.status as never))
-        throw new WorkerMindRequestError("status is invalid");
+        throw new WorkerMindRequestError('status is invalid');
       return {
         protocol: 1,
         item: service.setStatus(
           token,
-          requiredId(input.id, "id"),
+          requiredId(input.id, 'id'),
           input.status as MindStatus,
         ),
       };
     }
     default:
       throw new WorkerMindRequestError(
-        "operation must be get, create, comment, or status",
+        'operation must be get, create, comment, or status',
       );
   }
 }

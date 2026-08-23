@@ -26,8 +26,8 @@ import { serializeMessage, type StreamEntry } from './hub.js';
 
 export interface ArchivedReader {
   /** Return up to `limit` archived entries with ids in [beforeId - limit,
- * beforeId). `beforeId` is 0 for the first (newest) archived page, or the
- * oldest negative id the client already holds. */
+   * beforeId). `beforeId` is 0 for the first (newest) archived page, or the
+   * oldest negative id the client already holds. */
   read(beforeId: number, limit: number): StreamEntry[];
 }
 
@@ -44,22 +44,26 @@ function listMainFilesChrono(sessionsRoot: string): string[] {
   const withMtime = names.map((f) => {
     const full = path.join(dir, f);
     let mtime = 0;
-    try { mtime = fs.statSync(full).mtimeMs; } catch { /* skip */ }
+    try {
+      mtime = fs.statSync(full).mtimeMs;
+    } catch {
+      /* skip */
+    }
     return { full, name: f, mtime };
   });
-  withMtime.sort((a, b) => (a.mtime - b.mtime) || (a.name < b.name ? -1 : 1));
+  withMtime.sort((a, b) => a.mtime - b.mtime || (a.name < b.name ? -1 : 1));
   return withMtime.map((x) => x.full);
 }
 
 export function createArchivedReader(sessionsRoot: string): ArchivedReader {
- // Freeze the archived file set at boot: all-but-newest.
+  // Freeze the archived file set at boot: all-but-newest.
   const frozen = listMainFilesChrono(sessionsRoot);
   const files = frozen.slice(0, Math.max(0, frozen.length - 1));
 
- // Build the flat chronological pool lazily (concatenation of all archived
- // files), then cache it. The frozen file set never changes and the pool is
- // built exactly once, so there's no second reader to justify a separate
- // per-file cache alongside it.
+  // Build the flat chronological pool lazily (concatenation of all archived
+  // files), then cache it. The frozen file set never changes and the pool is
+  // built exactly once, so there's no second reader to justify a separate
+  // per-file cache alongside it.
   let pool: ChatMessage[] | null = null;
   const getPool = (): ChatMessage[] => {
     if (pool) return pool;
@@ -73,7 +77,7 @@ export function createArchivedReader(sessionsRoot: string): ArchivedReader {
       const p = getPool();
       const T = p.length;
       if (T === 0) return [];
- // beforeId <= 0. First page: beforeId 0 → the newest archived slice.
+      // beforeId <= 0. First page: beforeId 0 → the newest archived slice.
       const end = beforeId >= 0 ? T : beforeId + T; // pool index (exclusive)
       const hi = Math.min(T, Math.max(0, end));
       const lo = Math.max(0, hi - limit);
@@ -85,7 +89,11 @@ export function createArchivedReader(sessionsRoot: string): ArchivedReader {
           if (call.function.name === 'think') thinkCallIds.add(call.id);
         }
         const entry = serializeMessage(message, i - T, null);
-        if (message.role === 'tool' && message.tool_call_id && thinkCallIds.delete(message.tool_call_id)) {
+        if (
+          message.role === 'tool' &&
+          message.tool_call_id &&
+          thinkCallIds.delete(message.tool_call_id)
+        ) {
           entry.kind = 'think-result';
         }
         if (i >= lo) out.push(entry);

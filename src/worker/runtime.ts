@@ -1,21 +1,21 @@
-import type { Server } from "node:http";
-import * as path from "node:path";
-import type { Config } from "../config.js";
-import { createLLM } from "../llm/llm.js";
-import type { Logger } from "../lib/log.js";
-import type { Database } from "../store/db.js";
-import type { MindService } from "../store/mind.js";
-import type { SecretaryConversationService } from "../secretary/conversation-request.js";
-import type { SecretaryMindService } from "../secretary/mind-request.js";
-import type { SecretaryCompletionService } from "./http.js";
-import { WorkerCompletionBroker } from "./completion.js";
+import type { Server } from 'node:http';
+import * as path from 'node:path';
+import type { Config } from '../config.js';
+import { createLLM } from '../llm/llm.js';
+import type { Logger } from '../lib/log.js';
+import type { Database } from '../store/db.js';
+import type { MindService } from '../store/mind.js';
+import type { SecretaryConversationService } from '../secretary/conversation-request.js';
+import type { SecretaryMindService } from '../secretary/mind-request.js';
+import type { SecretaryCompletionService } from './http.js';
+import { WorkerCompletionBroker } from './completion.js';
 import {
   createWorkerCompletionHttpServer,
   listenWorkerCompletionHttpServer,
-} from "./http.js";
-import { WorkerMailboxBroker } from "./mailbox.js";
-import { WorkerMindBroker } from "./mind.js";
-import { WorkerWorkspaceStore } from "./workspace.js";
+} from './http.js';
+import { WorkerMailboxBroker } from './mailbox.js';
+import { WorkerMindBroker } from './mind.js';
+import { WorkerWorkspaceStore } from './workspace.js';
 
 export interface ScopedWorkerServerRuntime {
   server: Server;
@@ -54,8 +54,8 @@ export async function startScopedWorkerServer(
     db: options.db,
     storageRoot: path.join(
       options.config.paths.dataDirectory,
-      "elpis-data",
-      "workers",
+      'elpis-data',
+      'workers',
     ),
     sourceRoot: options.config.workers.workspace.sourceRoot,
     maxSourceBytes: options.config.workers.workspace.maxSourceBytes,

@@ -33,27 +33,27 @@ test('slugifyHost: collapses non-alnum, lowercases, trims edges', () => {
 
 test('controlPath: stable for host+user, distinct otherwise', () => {
   const dir = '/tmp/socks';
- // Same host + same user → identical socket (so two handles share ONE master).
+  // Same host + same user → identical socket (so two handles share ONE master).
   assert.equal(
     controlPath('ai.example.com', { socketDir: dir, user: 'agent' }),
     controlPath('ai.example.com', { socketDir: dir, user: 'agent' }),
   );
- // Different user → different socket.
+  // Different user → different socket.
   assert.notEqual(
     controlPath('ai.example.com', { socketDir: dir, user: 'agent' }),
     controlPath('ai.example.com', { socketDir: dir, user: 'root' }),
   );
- // No user → shorter prefix.
+  // No user → shorter prefix.
   assert.equal(
     controlPath('ai.example.com', { socketDir: dir }),
     path.join(dir, 'elpis-ssh-ai-example-com'),
   );
- // With user → user- prefixed.
+  // With user → user- prefixed.
   assert.equal(
     controlPath('ai.example.com', { socketDir: dir, user: 'root' }),
     path.join(dir, 'elpis-ssh-root-ai-example-com'),
   );
- // Different host → different socket.
+  // Different host → different socket.
   assert.notEqual(
     controlPath('hostA', { socketDir: dir }),
     controlPath('hostB', { socketDir: dir }),
@@ -64,12 +64,16 @@ test('controlPath: stable for host+user, distinct otherwise', () => {
 
 test('controlOpts: emits ControlMaster/ControlPath/ControlPersist/BatchMode', () => {
   const opts = controlOpts('/tmp/cp', '10m');
- // Pairs of -o / value, in order.
+  // Pairs of -o / value, in order.
   assert.deepEqual(opts, [
-    '-o', 'ControlMaster=auto',
-    '-o', 'ControlPath=/tmp/cp',
-    '-o', 'ControlPersist=10m',
-    '-o', 'BatchMode=yes',
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    'ControlPath=/tmp/cp',
+    '-o',
+    'ControlPersist=10m',
+    '-o',
+    'BatchMode=yes',
   ]);
 });
 
@@ -80,14 +84,18 @@ test('execArgv: full argv for an exec, no shell, BatchMode, target -- cmd', () =
   });
   assert.equal(argv[0], 'ssh');
   assert.deepEqual(argv.slice(1, 9), [
-    '-o', 'ControlMaster=auto',
-    '-o', 'ControlPath=/tmp/cp',
-    '-o', 'ControlPersist=10m',
-    '-o', 'BatchMode=yes',
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    'ControlPath=/tmp/cp',
+    '-o',
+    'ControlPersist=10m',
+    '-o',
+    'BatchMode=yes',
   ]);
   assert.equal(argv[9], 'ai.example.com'); // target form (no user)
-  assert.equal(argv[10], '--');          // separator before the remote command
-  assert.equal(argv[11], 'uptime');       // the command, NOT re-split by a shell
+  assert.equal(argv[10], '--'); // separator before the remote command
+  assert.equal(argv[11], 'uptime'); // the command, NOT re-split by a shell
 });
 
 test('execArgv: user@host target form when a user is given', () => {
@@ -102,8 +110,8 @@ test('execArgv: user@host target form when a user is given', () => {
 });
 
 test('execArgv: a command with shell metacharacters is passed as a SINGLE arg', () => {
- // The whole cmd string is one argv element — argv-array spawn never shells it,
- // so `rm -rf /` or `; whoami` cannot break out of the remote command slot.
+  // The whole cmd string is one argv element — argv-array spawn never shells it,
+  // so `rm -rf /` or `; whoami` cannot break out of the remote command slot.
   const argv = execArgv('ssh', 'h', 'echo $(whoami); rm -rf /', {
     controlPath: '/tmp/cp',
     persist: '10m',
@@ -113,14 +121,22 @@ test('execArgv: a command with shell metacharacters is passed as a SINGLE arg', 
 });
 
 test('closeArgv: ssh -O exit -o ControlPath target', () => {
-  assert.deepEqual(
-    closeArgv('ssh', 'ai.example.com', '/tmp/cp'),
-    ['ssh', '-O', 'exit', '-o', 'ControlPath=/tmp/cp', 'ai.example.com'],
-  );
-  assert.deepEqual(
-    closeArgv('ssh', 'ai.example.com', '/tmp/cp', 'root'),
-    ['ssh', '-O', 'exit', '-o', 'ControlPath=/tmp/cp', 'root@ai.example.com'],
-  );
+  assert.deepEqual(closeArgv('ssh', 'ai.example.com', '/tmp/cp'), [
+    'ssh',
+    '-O',
+    'exit',
+    '-o',
+    'ControlPath=/tmp/cp',
+    'ai.example.com',
+  ]);
+  assert.deepEqual(closeArgv('ssh', 'ai.example.com', '/tmp/cp', 'root'), [
+    'ssh',
+    '-O',
+    'exit',
+    '-o',
+    'ControlPath=/tmp/cp',
+    'root@ai.example.com',
+  ]);
 });
 
 // ─── registry: handle dedup + exec result shape (fake binary, no network) ───
@@ -130,8 +146,12 @@ test('closeArgv: ssh -O exit -o ControlPath target', () => {
 function fakeSshBin(payload: string, exitCode = 0): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-bin-'));
   const bin = path.join(dir, 'ssh');
- // `#!/bin/sh` + echo: argv is ignored, stdout gets the payload, stderr empty.
-  fs.writeFileSync(bin, `#!/bin/sh\necho ${JSON.stringify(payload)}\nexit ${exitCode}\n`, { mode: 0o755 });
+  // `#!/bin/sh` + echo: argv is ignored, stdout gets the payload, stderr empty.
+  fs.writeFileSync(
+    bin,
+    `#!/bin/sh\necho ${JSON.stringify(payload)}\nexit ${exitCode}\n`,
+    { mode: 0o755 },
+  );
   return bin;
 }
 
@@ -166,13 +186,15 @@ test('exec: nonzero remote exit surfaces in .code (never throws)', async () => {
   const reg = createSshRegistry(dir, { sshBinary: bin });
   const r = await reg.open('h').exec('false-ish');
   assert.equal(r.code, 42);
- // Must NOT throw — the contract is "check .code yourself".
+  // Must NOT throw — the contract is "check .code yourself".
   assert.match(r.stdout, /oops/);
 });
 
 test('exec: a missing ssh binary resolves code 127 with a stderr note (no throw)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-reg-'));
-  const reg = createSshRegistry(dir, { sshBinary: '/nonexistent/ssh-binary-xyz' });
+  const reg = createSshRegistry(dir, {
+    sshBinary: '/nonexistent/ssh-binary-xyz',
+  });
   const r = await reg.open('h').exec('uptime');
   assert.equal(r.code, 127);
   assert.match(r.stderr, /ssh spawn failed/);
@@ -181,7 +203,7 @@ test('exec: a missing ssh binary resolves code 127 with a stderr note (no throw)
 
 test('exec: respects a per-call timeout (resolves with TIMEOUT signal)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-reg-'));
- // A fake ssh that sleeps longer than the timeout.
+  // A fake ssh that sleeps longer than the timeout.
   const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-bin-'));
   const bin = path.join(sdir, 'ssh');
   fs.writeFileSync(bin, `#!/bin/sh\nsleep 5\n`, { mode: 0o755 });
@@ -208,9 +230,9 @@ test('dispose: closes all live handles without throwing', async () => {
   reg.open('h1');
   reg.open('h2');
   reg.open('h3', { user: 'root' });
- // Should not throw and should resolve.
+  // Should not throw and should resolve.
   await reg.dispose();
- // After dispose, open mints fresh handles (the live map was cleared).
+  // After dispose, open mints fresh handles (the live map was cleared).
   const h = reg.open('h1');
   assert.ok(h);
 });
