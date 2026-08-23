@@ -29,7 +29,7 @@ import {
 import { createArchivedReader } from '../src/console/history.js';
 import { formatInboundEnvelope } from '../src/lib/envelope.js';
 import { attachmentsOf, utterance } from '../src/console/client/envelope.js';
-import { runAttribution } from '../src/console/client/run.js';
+import { wakePresentation } from '../src/console/client/run.js';
 import {
   createTranscriptStore,
   MAIN_TRANSCRIPT_ID,
@@ -166,9 +166,9 @@ test('client console composer uses IME-safe Enter and one acknowledged WebSocket
   );
   assert.match(
     main,
-    /event\.key === 'Enter' && !event\.shiftKey && !event\.isComposing/,
+    /event\.key === 'Enter'[\s\S]*!event\.shiftKey[\s\S]*!event\.isComposing/,
   );
-  assert.match(main, /<ThreadComposer[\s\S]*send=\{actions\.sendChat\}/);
+  assert.match(main, /<ThreadComposer state=\{state\} actions=\{actions\}/);
   assert.match(hook, /send\(\{ t: 'chat', nonce, content: value \}\)/);
   assert.match(hook, /case 'chatResult':[\s\S]*frame\.ok === false/);
   assert.match(
@@ -190,7 +190,8 @@ test('client console has a bounded CSS-driven mobile drawer and logs view', () =
   );
   assert.match(main, /drawer-scrim/);
   assert.match(main, /MobileTabs/);
-  assert.match(main, /actions\.setView\('logs'\)/);
+  assert.match(main, /view: 'logs' as ViewName/);
+  assert.match(main, /actions\.setView\(item\.view\)/);
   const mobileCss = css.slice(css.indexOf('@media'));
   assert.match(mobileCss, /@media\s*\(max-width:\s*760px\)/);
   assert.match(mobileCss, /height:\s*100dvh/);
@@ -198,7 +199,11 @@ test('client console has a bounded CSS-driven mobile drawer and logs view', () =
   assert.match(mobileCss, /\.mobile-tabs\s*\{[\s\S]*?display:\s*flex/);
   assert.match(
     mobileCss,
-    /\.drawer-scrim\s*\{[\s\S]*?display:\s*block;[\s\S]*?position:\s*fixed;[\s\S]*?inset:\s*0/,
+    /\.drawer-layer\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?inset:\s*0/,
+  );
+  assert.match(
+    mobileCss,
+    /\.drawer-scrim\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/,
   );
 });
 
@@ -358,8 +363,8 @@ test('Preact stream waits compactly until a real delta materializes content', ()
     path.join(here, '../src/console/client/use-console.ts'),
     'utf8',
   );
-  assert.match(thread, /live\.content \? [\s\S]*thinking-line/);
-  assert.match(thread, /stream-caret/);
+  assert.match(thread, /live\.content \|\| 'thinking'/);
+  assert.match(thread, /streaming-copy/);
   assert.match(hook, /case 'streamStart'/);
   assert.match(hook, /case 'delta'/);
 });
@@ -474,27 +479,36 @@ test('serializeMessage: run calls stay action cards while think calls become CoT
   assert.deepEqual(tool.sends, [{ channel: 'agora', text: 'hi' }]);
 });
 
-test('typed run attribution renders bounded sandbox and wake lifecycle', () => {
-  const value = runAttribution({
-    execution: {
-      kind: 'persistent',
-      lifecycle: 'ready',
-      alias: 'quietly-crimson-ibis',
-      mindId: 7,
-      mindTitle: 'Wake contract',
-      mindStatus: 'open',
-      runId: 'exec-g2-r3',
-      generation: 2,
-      coldStart: true,
-      retiring: true,
+test('typed wake presentation omits sandbox lifecycle from the primary surface', () => {
+  const value = wakePresentation(
+    {
+      execution: {
+        kind: 'persistent',
+        lifecycle: 'ready',
+        alias: 'quietly-crimson-ibis',
+        mindId: 7,
+        mindTitle: 'Wake contract',
+        mindStatus: 'open',
+        runId: 'exec-g2-r3',
+      },
+      detached: true,
+      bgId: 'bg-4',
+      wake: {
+        kind: 'after',
+        state: 'armed',
+        targetAt: 60_000,
+        taskId: 3,
+        advice: { reason: 'quiet-exploration' },
+      },
     },
-    detached: true,
-    bgId: 'bg-4',
-    wake: { kind: 'after', state: 'armed', targetAt: 2, taskId: 3 },
-  });
-  assert.equal(
-    value,
-    'quietly-crimson-ibis · ready · Mind #7 · Wake contract · open · exec-g2-r3 · cold · retiring · detached bg-4 · wake armed · after → 1970-01-01T00:00:00.002Z · task #3',
+    0,
+  );
+  assert.ok(value);
+  assert.equal(value.reason, 'quiet exploration');
+  assert.equal(value.raw, 'task #3 · after · armed');
+  assert.doesNotMatch(
+    JSON.stringify(value),
+    /quietly-crimson-ibis|ready|Mind #7|exec-g2-r3|detached bg-4/,
   );
 });
 
@@ -1096,21 +1110,21 @@ test('handleClientMessage: committed history invalidates the context cache', asy
   );
 });
 
-test('Preact Mind detail is rendered-first with explicit edit and raw Markdown copy', () => {
+test('Preact Mind detail follows the rendered-first reference without v1 edit chrome', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const source = fs.readFileSync(
     path.join(here, '../src/console/client/components/mind.tsx'),
     'utf8',
   );
-  assert.match(source, /if \(editing\)[\s\S]*<MindForm[\s\S]*item=\{item\}/);
   assert.match(source, /<Markdown value=\{item\.body\}/);
-  assert.match(source, /copy\(item\.body\)/);
+  assert.match(source, /class='secretary-glyph'/);
+  assert.match(source, /class='mind-comments'/);
   assert.match(
     source,
-    /\.sort\([\s\S]*?\(a,\s*b\)\s*=>[\s\S]*?Number\(b\.createdAt/,
+    /\.sort\([\s\S]*?\(a,\s*b\)\s*=>[\s\S]*?Number\(a\.createdAt/,
   );
-  assert.match(source, /copy\(String\(comment\.body/);
   assert.match(source, /item\.dependencies \?\? item\.blockedBy/);
+  assert.doesNotMatch(source, /MindForm|editing|copy raw|copy\(item\.body/);
 });
 
 test('Preact context pane quietly debounces committed-message refreshes', () => {

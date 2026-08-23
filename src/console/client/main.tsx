@@ -1,12 +1,13 @@
 import { render } from 'preact';
-import { useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
+import { clock, statusLabel, statusTone } from './components/common.js';
 import { ContextView } from './components/context.js';
 import { MindView } from './components/mind.js';
 import { SecretaryView } from './components/secretary.js';
 import { ThreadView } from './components/thread.js';
 import { WorkersView } from './components/workers.js';
-import { clock } from './components/common.js';
-import type { JsonObject, MindItem, ViewName } from './types.js';
+import type { ConsoleActions } from './use-console.js';
+import type { ConsoleState, JsonObject, MindItem, ViewName } from './types.js';
 import { number, text } from './types.js';
 import { useConsole } from './use-console.js';
 import './styles.css';
@@ -19,101 +20,202 @@ const NAV: Array<{ view: ViewName; glyph: string; label: string }> = [
   { view: 'secretary', glyph: '◈', label: 'Secretary' },
 ];
 
-function ContextMeter({ usage }: { usage: JsonObject | null }) {
-  const current = number(usage?.current);
-  const windowSize = number(usage?.window, 1);
-  const trigger = number(usage?.trigger, windowSize);
-  const ratio = Math.max(0, Math.min(100, (current / windowSize) * 100));
-  const triggerRatio = Math.max(0, Math.min(100, (trigger / windowSize) * 100));
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => matchMedia('(max-width: 760px)').matches,
+  );
+  useEffect(() => {
+    const media = matchMedia('(max-width: 760px)');
+    const update = (): void => setNarrow(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  return narrow;
+}
+
+function connectionLabel(state: ConsoleState): string {
+  if (state.connection !== 'connected')
+    return state.connection.replaceAll('_', '…');
+  const hours = Math.floor(number(state.meta?.uptimeMs) / 3_600_000);
+  return hours >= 24
+    ? `up ${Math.floor(hours / 24)}d ${hours % 24}h`
+    : `up ${hours}h`;
+}
+
+function connectionTone(state: ConsoleState): string {
+  if (state.connection === 'connected') return '#8fb89a';
+  if (state.connection === 'connecting' || state.connection === 'reconnecting')
+    return '#d9b24f';
+  return '#d98f8c';
+}
+
+function ratio(state: ConsoleState): number {
+  const current = number(state.usage?.current);
+  const windowSize = number(state.usage?.window, 1);
+  return Math.max(0, Math.min(100, (current / windowSize) * 100));
+}
+
+function roomName(value: string): string {
+  return value.replace('/', ' / ');
+}
+
+function roomLabel(room: { name: string; guildSlug?: string }): string {
+  const name = roomName(room.name);
+  return room.guildSlug && !name.startsWith(`${room.guildSlug} / `)
+    ? `${room.guildSlug} / ${name}`
+    : name;
+}
+
+function workerRef(session: JsonObject): string {
   return (
-    <div class='context-meter'>
-      <div class='meter-head'>
-        <span>CONTEXT WINDOW</span>
+    text(session.worker) ||
+    text(session.slug) ||
+    text(session.id) ||
+    text(session.sessionId)
+  );
+}
+
+function ContextMeter({
+  state,
+  compact = false,
+}: {
+  state: ConsoleState;
+  compact?: boolean;
+}) {
+  const current = number(state.usage?.current);
+  const windowSize = number(state.usage?.window, 1);
+  const trigger = number(state.usage?.trigger, windowSize);
+  const percent = ratio(state);
+  const triggerPercent = Math.max(
+    0,
+    Math.min(100, (trigger / windowSize) * 100),
+  );
+  return (
+    <div class={`context-meter ${compact ? 'context-meter-compact' : ''}`}>
+      <div>
+        <span>Context window</span>
         <strong>
           {Math.round(current / 1000)}k / {Math.round(windowSize / 1000)}k
         </strong>
-        <span>{Math.round(ratio)}%</span>
+        <em>{Math.round(percent)}%</em>
       </div>
-      <div class='meter-track'>
-        <span style={{ width: `${ratio}%` }} />
-        <i style={{ left: `${triggerRatio}%` }} />
-      </div>
-      <div class='meter-caption'>
-        <span>compaction at {Math.round(triggerRatio)}%</span>
-      </div>
+      <span class='meter-track'>
+        <i style={{ width: `${percent}%` }} />
+        <b style={{ left: `${triggerPercent}%` }} />
+      </span>
+      {!compact ? (
+        <small>
+          <span>compaction at {Math.round(triggerPercent)}%</span>
+          <span>
+            cache{' '}
+            {Math.round(
+              number(
+                state.usage?.cache && (state.usage.cache as JsonObject).ratio,
+              ) * 100,
+            ) || 0}
+            %
+          </span>
+        </small>
+      ) : null}
     </div>
   );
 }
 
 function Rooms({
-  rooms,
-  active,
-  onSelect,
+  state,
+  actions,
+  close,
 }: {
-  rooms: Array<{ id: string; name: string; count: number; color?: string }>;
-  active: string;
-  onSelect(id: string): void;
+  state: ConsoleState;
+  actions: ConsoleActions;
+  close?(): void;
 }) {
-  const total = rooms.reduce((sum, room) => sum + room.count, 0);
+  const total = state.rooms.reduce((sum, room) => sum + room.count, 0);
+  const choose = (id: string): void => {
+    actions.setRoom(id);
+    actions.selectMind(null);
+    actions.selectWorker(null);
+    actions.setView('thread');
+    close?.();
+  };
+  const rows = [
+    { id: 'all', name: 'All rooms', count: total, color: '#d8b877' },
+    ...state.rooms,
+  ];
   return (
-    <div class='rooms'>
-      <div class='group-label'>ROOMS</div>
-      <button
-        class={active === 'all' ? 'room-row active' : 'room-row'}
-        onClick={() => onSelect('all')}
-      >
-        <span class='room-dot room-all' />
-        <span>All rooms</span>
-        <small>{total}</small>
-      </button>
-      {rooms.map((room) => (
+    <section class='sidebar-section room-section'>
+      <div class='section-label'>Rooms</div>
+      {rows.map((room) => (
         <button
-          class={active === room.id ? 'room-row active' : 'room-row'}
-          onClick={() => onSelect(room.id)}
+          class={state.room === room.id ? 'selected' : ''}
+          onClick={() => choose(room.id)}
         >
-          <span
-            class='room-dot'
-            style={{ background: `var(--${room.color || 'muted'})` }}
-          />
-          <span>{room.name}</span>
-          <small>{room.count}</small>
+          <i style={{ background: room.color || '#767a70' }} />
+          <strong>{roomLabel(room)}</strong>
+          <span>{room.count}</span>
         </button>
       ))}
-    </div>
+    </section>
   );
 }
 
 function LiveWorkers({
-  sessions,
-  onOpen,
+  state,
+  actions,
+  close,
 }: {
-  sessions: JsonObject[];
-  onOpen(ref: string): void;
+  state: ConsoleState;
+  actions: ConsoleActions;
+  close?(): void;
 }) {
-  const active = sessions
+  const active = state.workers.sessions
     .filter((session) =>
       ['spawning', 'running', 'idle'].includes(text(session.status)),
     )
     .slice(0, 3);
+  const open = (session: JsonObject): void => {
+    actions.selectWorker(workerRef(session));
+    actions.setView('workers');
+    close?.();
+  };
   return (
-    <div class='rail-workers'>
-      <div class='group-label'>
-        WORKERS · LIVE<span>{active.length} running</span>
+    <section class='sidebar-section sidebar-workers'>
+      <div class='section-label'>
+        Workers · live <span>{active.length} running</span>
       </div>
-      {active.map((session) => {
-        const ref = text(session.worker, text(session.slug, text(session.id)));
-        return (
-          <button onClick={() => onOpen(ref)}>
-            <code>{ref}</code>
-            <span>
-              {text(session.mindTitle, text(session.mindId, 'bounded episode'))}
+      {active.map((session) => (
+        <button onClick={() => open(session)}>
+          <div>
+            <i class={`tone-dot tone-${statusTone(session.status)}`} />
+            <code>{workerRef(session)}</code>
+          </div>
+          <strong>
+            {text(
+              session.mindTitle,
+              state.mindItems.find((item) => item.id === text(session.mindId))
+                ?.title ||
+                text(session.title, text(session.mindId, 'bounded episode')),
+            )}
+          </strong>
+          <small>
+            <span class={`tone-${statusTone(session.status)}`}>
+              {statusLabel(session.status)}
             </span>
-            <small>{text(session.status)}</small>
-          </button>
-        );
-      })}
-      {!active.length ? <div class='rail-empty'>no active episodes</div> : null}
-    </div>
+            <time>{text(session.startedAgo)}</time>
+          </small>
+        </button>
+      ))}
+      <button
+        class='all-workers-link'
+        onClick={() => {
+          actions.selectWorker(null);
+          actions.setView('workers');
+          close?.();
+        }}
+      >
+        All {state.workers.sessions.length} workers →
+      </button>
+    </section>
   );
 }
 
@@ -121,94 +223,95 @@ function Sidebar({
   state,
   actions,
   proposals,
-  onClose,
+  close,
+  drawer = false,
 }: {
-  state: ReturnType<typeof useConsole>[0];
-  actions: ReturnType<typeof useConsole>[1];
+  state: ConsoleState;
+  actions: ConsoleActions;
   proposals: number;
-  onClose?(): void;
+  close?(): void;
+  drawer?: boolean;
 }) {
-  const selectRoom = (id: string): void => {
-    actions.setRoom(id);
-    actions.setView('thread');
-    onClose?.();
+  const chooseView = (view: ViewName): void => {
+    actions.selectMind(null);
+    actions.selectWorker(null);
+    actions.setView(view);
+    close?.();
   };
   return (
-    <aside class='sidebar'>
-      <div class='brand-block'>
+    <aside class={`sidebar ${drawer ? 'sidebar-drawer' : ''}`}>
+      <header class='sidebar-brand'>
         <img src='./elpis-logo-dark.svg' alt='Elpis' />
-        <div class='brand-meta'>
-          <a
-            href={`https://github.com/avafloww/elpis/commit/${state.meta?.gitHash || ''}`}
-            target='_blank'
-            rel='noreferrer'
-          >
-            {state.meta?.gitHash?.slice(0, 7) || 'local'}
-          </a>
-          <span>
-            <i class={`connection-dot connection-${state.connection}`} />
-            {state.connection === 'connected'
-              ? `up ${Math.floor(number(state.meta?.uptimeMs) / 3_600_000)}h`
-              : state.connection}
-          </span>
-        </div>
+        <span class='surface-spacer' />
+        {drawer ? (
+          <button onClick={close}>×</button>
+        ) : (
+          <>
+            <a
+              href={`https://github.com/avafloww/elpis/commit/${state.meta?.gitHash || ''}`}
+              target='_blank'
+              rel='noreferrer'
+            >
+              {state.meta?.gitHash?.slice(0, 7) || 'local'}
+            </a>
+            <span>{connectionLabel(state)}</span>
+            <i style={{ background: connectionTone(state) }} />
+          </>
+        )}
+      </header>
+      {drawer ? (
+        <ContextMeter state={state} compact />
+      ) : (
+        <nav class='view-nav'>
+          {NAV.map((item) => (
+            <button
+              class={state.view === item.view ? 'selected' : ''}
+              onClick={() => chooseView(item.view)}
+            >
+              <i>{item.glyph}</i>
+              <strong>{item.label}</strong>
+              {item.view === 'mind' && proposals ? (
+                <span>{proposals}</span>
+              ) : null}
+            </button>
+          ))}
+        </nav>
+      )}
+      <div class='sidebar-scroll'>
+        <Rooms state={state} actions={actions} close={close} />
+        <LiveWorkers state={state} actions={actions} close={close} />
       </div>
-      <nav>
-        {NAV.map((item) => (
-          <button
-            class={state.view === item.view ? 'active' : ''}
-            onClick={() => {
-              actions.setView(item.view);
-              onClose?.();
-            }}
-          >
-            <span>{item.glyph}</span>
-            {item.label}
-            {item.view === 'mind' && proposals ? (
-              <small>{proposals}</small>
-            ) : null}
-          </button>
-        ))}
-      </nav>
-      <Rooms rooms={state.rooms} active={state.room} onSelect={selectRoom} />
-      <LiveWorkers
-        sessions={state.workers.sessions}
-        onOpen={(ref) => {
-          actions.selectWorker(ref);
-          actions.setView('workers');
-          onClose?.();
-        }}
-      />
-      <div class='sidebar-spacer' />
-      <ContextMeter usage={state.usage as JsonObject | null} />
+      {!drawer ? <ContextMeter state={state} /> : null}
     </aside>
   );
 }
 
-function StatusBar({ state }: { state: ReturnType<typeof useConsole>[0] }) {
+function StatusBar({ state }: { state: ConsoleState }) {
   const activeWorkers = state.workers.sessions.filter((session) =>
     ['spawning', 'running', 'idle'].includes(text(session.status)),
   ).length;
-  const activity = state.live
+  const label = state.live
     ? 'writing · live turn'
     : activeWorkers
       ? `${activeWorkers} worker${activeWorkers === 1 ? '' : 's'} running`
       : 'idle';
+  const selectedRoom = state.rooms.find((room) => room.id === state.room);
+  const lens =
+    state.room === 'all'
+      ? 'all rooms'
+      : selectedRoom
+        ? roomLabel(selectedRoom)
+        : roomName(state.room);
   return (
     <div class='status-bar'>
-      <span class={state.live ? 'activity active' : 'activity'}>
-        <i />
-        {activity}
+      <span class={state.live ? 'active' : ''}>
+        {state.live ? <i /> : null}
+        {label}
       </span>
       {!['workers', 'secretary'].includes(state.view) ? (
         <>
           <b />
-          <span>
-            {state.room === 'all'
-              ? 'all rooms'
-              : state.rooms.find((room) => room.id === state.room)?.name ||
-                state.room}
-          </span>
+          <span>{lens}</span>
         </>
       ) : null}
     </div>
@@ -216,71 +319,83 @@ function StatusBar({ state }: { state: ReturnType<typeof useConsole>[0] }) {
 }
 
 function ThreadComposer({
-  connected,
-  send,
+  state,
+  actions,
+  mobile = false,
 }: {
-  connected: boolean;
-  send(value: string): boolean;
+  state: ConsoleState;
+  actions: ConsoleActions;
+  mobile?: boolean;
 }) {
   const [draft, setDraft] = useState('');
   return (
     <form
-      class='composer thread-composer'
+      class={`thread-composer ${mobile ? 'mobile-composer' : ''}`}
       onSubmit={(event) => {
         event.preventDefault();
-        if (send(draft)) setDraft('');
+        if (actions.sendChat(draft)) setDraft('');
       }}
     >
-      <textarea
-        value={draft}
-        disabled={!connected}
-        onInput={(event) => setDraft(event.currentTarget.value)}
-        placeholder='Write a message…'
-        rows={2}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }
-        }}
-      />
-      <span>console</span>
-      <button disabled={!draft.trim() || !connected}>↑</button>
+      <div>
+        <textarea
+          rows={1}
+          value={draft}
+          disabled={state.connection !== 'connected'}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (
+              event.key === 'Enter' &&
+              !event.shiftKey &&
+              !event.isComposing
+            ) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder='Write a message…'
+        />
+        {!mobile ? <span>console</span> : null}
+        <button disabled={!draft.trim() || state.connection !== 'connected'}>
+          ↑
+        </button>
+      </div>
     </form>
   );
 }
 
 function LogRail({
-  logs,
+  state,
   open,
   setOpen,
   full = false,
 }: {
-  logs: Array<JsonObject>;
+  state: ConsoleState;
   open: boolean;
   setOpen(value: boolean): void;
   full?: boolean;
 }) {
-  const latest = logs.at(-1);
+  const latest = state.logs.at(-1);
   return (
     <section
-      class={`${full ? 'logs-full ' : ''}log-rail ${open ? 'open' : ''}`}
+      class={`log-rail ${open ? 'log-rail-open' : ''} ${full ? 'log-view-full' : ''}`}
     >
-      <header>
-        <span>LOGS</span>
-        {latest ? (
-          <>
-            <time>{clock(latest.ts)}</time>
-            <code>{text(latest.msg, text(latest.message))}</code>
-          </>
-        ) : (
-          <code>no recent log lines</code>
-        )}
-        <button onClick={() => setOpen(!open)}>{open ? 'hide' : 'show'}</button>
-      </header>
+      {!full ? (
+        <header>
+          <span>Logs</span>
+          <time>{latest ? clock(latest.ts) : ''}</time>
+          <code>
+            {latest
+              ? text(latest.msg, text(latest.message))
+              : 'no recent log lines'}
+          </code>
+          <button onClick={() => setOpen(!open)}>
+            {open ? 'hide' : 'show'}
+          </button>
+        </header>
+      ) : null}
       {open || full ? (
         <div class='log-lines'>
-          {logs.map((line, index) => (
+          {state.logs.map((line, index) => (
             <div class={`log-line log-${text(line.level, 'info')}`} key={index}>
               <time>{clock(line.ts)}</time>
               <span>{text(line.msg, text(line.message))}</span>
@@ -292,81 +407,33 @@ function LogRail({
   );
 }
 
-function MobileTop({
+function ViewBody({
   state,
-  open,
+  actions,
+  hintMindId,
+  setHintMindId,
 }: {
-  state: ReturnType<typeof useConsole>[0];
-  open(): void;
+  state: ConsoleState;
+  actions: ConsoleActions;
+  hintMindId: string | null;
+  setHintMindId(value: string | null): void;
 }) {
-  const usage = state.usage as JsonObject | null;
-  return (
-    <header class='mobile-top'>
-      <img src='./elpis-logo-dark.svg' alt='Elpis' />
-      <code>{state.meta?.gitHash?.slice(0, 7) || 'local'}</code>
-      <span class='spacer' />
-      <i class={`connection-dot connection-${state.connection}`} />
-      <span>{Math.round(number(usage?.ratio) * 100)}%</span>
-      <button onClick={open}>☰</button>
-    </header>
-  );
-}
-
-function MobileTabs({
-  view,
-  setView,
-  openLogs,
-}: {
-  view: ViewName;
-  setView(view: ViewName): void;
-  openLogs(): void;
-}) {
-  const tabs = NAV.filter((item) => item.view !== 'context');
-  return (
-    <nav class='mobile-tabs'>
-      {tabs.map((item) => (
-        <button
-          class={view === item.view ? 'active' : ''}
-          onClick={() => setView(item.view)}
-        >
-          <span>{item.glyph}</span>
-          <small>{item.label}</small>
-        </button>
-      ))}
-      <button class={view === 'logs' ? 'active' : ''} onClick={openLogs}>
-        <span>≡</span>
-        <small>Logs</small>
-      </button>
-    </nav>
-  );
-}
-
-function App() {
-  const [state, actions] = useConsole();
-  const [drawer, setDrawer] = useState(false);
-  const [logsOpen, setLogsOpen] = useState(false);
-  const [hintMindId, setHintMindId] = useState<string | null>(null);
-  const proposals = useMemo(
-    () => state.mindItems.filter((item) => item.status === 'proposal').length,
-    [state.mindItems],
-  );
   const askSecretary = (item: MindItem): void => {
     setHintMindId(item.id);
     actions.setView('secretary');
   };
-  let body;
   if (state.view === 'thread')
-    body = <ThreadView state={state} actions={actions} />;
-  else if (state.view === 'context')
-    body = <ContextView state={state} actions={actions} />;
-  else if (state.view === 'mind')
-    body = (
+    return <ThreadView state={state} actions={actions} />;
+  if (state.view === 'context')
+    return <ContextView state={state} actions={actions} />;
+  if (state.view === 'mind')
+    return (
       <MindView state={state} actions={actions} onAskSecretary={askSecretary} />
     );
-  else if (state.view === 'workers')
-    body = <WorkersView state={state} actions={actions} />;
-  else if (state.view === 'secretary')
-    body = (
+  if (state.view === 'workers')
+    return <WorkersView state={state} actions={actions} />;
+  if (state.view === 'secretary')
+    return (
       <SecretaryView
         state={state}
         actions={actions}
@@ -374,56 +441,189 @@ function App() {
         onClearHint={() => setHintMindId(null)}
       />
     );
-  else
-    body = (
-      <LogRail
-        logs={state.logs as JsonObject[]}
-        open
-        setOpen={() => undefined}
-        full
-      />
-    );
+  return <LogRail state={state} open setOpen={() => undefined} full />;
+}
+
+function DesktopApp({
+  state,
+  actions,
+  proposals,
+  hintMindId,
+  setHintMindId,
+}: {
+  state: ConsoleState;
+  actions: ConsoleActions;
+  proposals: number;
+  hintMindId: string | null;
+  setHintMindId(value: string | null): void;
+}) {
+  const [logsOpen, setLogsOpen] = useState(false);
   return (
-    <div class='app-shell'>
+    <div class='desktop-shell'>
+      <Sidebar state={state} actions={actions} proposals={proposals} />
+      <main class='desktop-main'>
+        <StatusBar state={state} />
+        <div class='view-body'>
+          <ViewBody
+            state={state}
+            actions={actions}
+            hintMindId={hintMindId}
+            setHintMindId={setHintMindId}
+          />
+        </div>
+        {state.view === 'thread' ? (
+          <ThreadComposer state={state} actions={actions} />
+        ) : null}
+        <LogRail state={state} open={logsOpen} setOpen={setLogsOpen} />
+      </main>
+    </div>
+  );
+}
+
+function MobileTop({ state, open }: { state: ConsoleState; open(): void }) {
+  return (
+    <header class='mobile-topbar'>
+      <img src='./elpis-logo-dark.svg' alt='Elpis' />
+      <a
+        href={`https://github.com/avafloww/elpis/commit/${state.meta?.gitHash || ''}`}
+      >
+        {state.meta?.gitHash?.slice(0, 7) || 'local'}
+      </a>
+      <span class='surface-spacer' />
+      <i style={{ background: connectionTone(state) }} />
+      <span>{Math.round(ratio(state))}%</span>
+      <button onClick={open}>☰</button>
+    </header>
+  );
+}
+
+function MobileTabs({
+  state,
+  actions,
+  proposals,
+}: {
+  state: ConsoleState;
+  actions: ConsoleActions;
+  proposals: number;
+}) {
+  const tabs = [
+    ...NAV.filter((item) => item.view !== 'context'),
+    { view: 'logs' as ViewName, glyph: '≡', label: 'Logs' },
+  ];
+  return (
+    <nav class='mobile-tabs'>
+      {tabs.map((item) => (
+        <button
+          class={state.view === item.view ? 'selected' : ''}
+          onClick={() => {
+            actions.selectMind(null);
+            actions.selectWorker(null);
+            actions.setView(item.view);
+          }}
+        >
+          <i>{item.glyph}</i>
+          <span>{item.label}</span>
+          {item.view === 'mind' && proposals ? <b>{proposals}</b> : null}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function MobileApp({
+  state,
+  actions,
+  proposals,
+  hintMindId,
+  setHintMindId,
+}: {
+  state: ConsoleState;
+  actions: ConsoleActions;
+  proposals: number;
+  hintMindId: string | null;
+  setHintMindId(value: string | null): void;
+}) {
+  const [drawer, setDrawer] = useState(false);
+  const selectedRoom = state.rooms.find((room) => room.id === state.room);
+  const lens =
+    state.room === 'all'
+      ? 'all rooms'
+      : selectedRoom
+        ? roomLabel(selectedRoom)
+        : roomName(state.room);
+  return (
+    <div class='mobile-shell'>
       <MobileTop state={state} open={() => setDrawer(true)} />
-      {drawer ? (
-        <div class='drawer-scrim' onClick={() => setDrawer(false)}>
-          <div onClick={(event) => event.stopPropagation()}>
-            <Sidebar
-              state={state}
-              actions={actions}
-              proposals={proposals}
-              onClose={() => setDrawer(false)}
-            />
+      <div class='mobile-body'>
+        {state.view === 'thread' ? (
+          <div class='mobile-thread-status'>
+            <span class={state.live ? 'active' : ''}>
+              {state.live ? <i /> : null}
+              {state.live ? 'writing' : 'idle'}
+            </span>
+            <span>· {lens}</span>
           </div>
+        ) : null}
+        <ViewBody
+          state={state}
+          actions={actions}
+          hintMindId={hintMindId}
+          setHintMindId={setHintMindId}
+        />
+      </div>
+      {state.view === 'thread' ? (
+        <ThreadComposer state={state} actions={actions} mobile />
+      ) : null}
+      <MobileTabs state={state} actions={actions} proposals={proposals} />
+      {drawer ? (
+        <div class='drawer-layer'>
+          <button class='drawer-scrim' onClick={() => setDrawer(false)} />
+          <Sidebar
+            state={state}
+            actions={actions}
+            proposals={proposals}
+            close={() => setDrawer(false)}
+            drawer
+          />
         </div>
       ) : null}
-      <Sidebar state={state} actions={actions} proposals={proposals} />
-      <main>
-        <StatusBar state={state} />
-        {state.notice ? (
-          <button class='global-notice' onClick={() => actions.clearNotice()}>
-            {state.notice} ×
-          </button>
-        ) : null}
-        <div class='main-view'>{body}</div>
-        {state.view === 'thread' ? (
-          <ThreadComposer
-            connected={state.connection === 'connected'}
-            send={actions.sendChat}
-          />
-        ) : null}
-        <LogRail
-          logs={state.logs as JsonObject[]}
-          open={logsOpen}
-          setOpen={setLogsOpen}
-        />
-      </main>
-      <MobileTabs
-        view={state.view}
-        setView={actions.setView}
-        openLogs={() => actions.setView('logs')}
-      />
+    </div>
+  );
+}
+
+function App() {
+  const [state, actions] = useConsole();
+  const [hintMindId, setHintMindId] = useState<string | null>(null);
+  const narrow = useNarrow();
+  const proposals = useMemo(
+    () => state.mindItems.filter((item) => item.status === 'proposal').length,
+    [state.mindItems],
+  );
+  const body = narrow ? (
+    <MobileApp
+      state={state}
+      actions={actions}
+      proposals={proposals}
+      hintMindId={hintMindId}
+      setHintMindId={setHintMindId}
+    />
+  ) : (
+    <DesktopApp
+      state={state}
+      actions={actions}
+      proposals={proposals}
+      hintMindId={hintMindId}
+      setHintMindId={setHintMindId}
+    />
+  );
+  return (
+    <div class='app-root'>
+      {body}
+      {state.notice ? (
+        <button class='global-notice' onClick={() => actions.clearNotice()}>
+          {state.notice} ×
+        </button>
+      ) : null}
     </div>
   );
 }

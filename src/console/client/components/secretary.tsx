@@ -2,11 +2,18 @@ import { useMemo, useState } from 'preact/hooks';
 import type { ConsoleActions } from '../use-console.js';
 import type { ConsoleState, JsonObject } from '../types.js';
 import { array, object, text } from '../types.js';
-import { Empty, Markdown, relative, Status } from './common.js';
+import {
+  Empty,
+  Markdown,
+  relative,
+  statusLabel,
+  statusTone,
+} from './common.js';
 
 function sessionId(session: JsonObject): string {
   return text(session.id) || text(session.sessionId);
 }
+
 function sessionHint(session: JsonObject): string | null {
   return text(session.hintMindId) || text(session.rootMindId) || null;
 }
@@ -27,13 +34,12 @@ export function turnMessages(
   const records = array<JsonObject>(response.records);
   if (records.length) {
     for (const record of records) {
-      if (typeof record.content === 'string') {
+      if (typeof record.content === 'string')
         rows.push({
           role: text(record.role, 'assistant'),
           content: record.content,
           status,
         });
-      }
     }
   } else if (typeof response.content === 'string') {
     rows.push({
@@ -51,6 +57,20 @@ export function turnMessages(
   return rows;
 }
 
+function titleFor(
+  session: JsonObject | null,
+  state: ConsoleState,
+  hintMindId: string | null,
+): string {
+  const hint = session ? sessionHint(session) : hintMindId;
+  const item = hint
+    ? state.mindItems.find((candidate) => candidate.id === hint)
+    : null;
+  return (
+    item?.title || text(session?.title, hint ? 'Mind intake' : 'General intake')
+  );
+}
+
 export function SecretaryView({
   state,
   actions,
@@ -63,6 +83,7 @@ export function SecretaryView({
   onClearHint(): void;
 }) {
   const [draft, setDraft] = useState('');
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const sessions = state.secretary.sessions;
   const selected =
     sessions.find(
@@ -77,38 +98,36 @@ export function SecretaryView({
       selected ? array<JsonObject>(selected.turns).flatMap(turnMessages) : [],
     [selected],
   );
-  const start = (): void => {
+  const title = titleFor(selected, state, hintMindId);
+  const start = (): void =>
     actions.control('secretary', 'start', hintMindId ? { hintMindId } : {});
-  };
   return (
     <div class='secretary-layout'>
-      <div class='secretary-main'>
-        <div class='secretary-header'>
-          <div>
-            <div class='eyebrow'>GLOBAL MIND INTAKE</div>
-            <h1>
-              {selected
-                ? `Secretary · ${sessionId(selected).slice(-6)}`
-                : 'Secretary'}
-            </h1>
-            <div class='pills'>
-              {selected ? <Status value={selected.status} /> : null}
-              {hintMindId ? (
-                <button class='source-chip' onClick={onClearHint}>
-                  prompt hint: {hintMindId} ×
-                </button>
-              ) : null}
-              {selected && sessionHint(selected) ? (
-                <span class='source-chip'>
-                  opened from: {sessionHint(selected)}
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div class='heading-actions'>
+      <div class='secretary-main reference-scroll'>
+        <div class='secretary-conversation'>
+          {!state.secretary.available ? (
+            <Empty>
+              {state.secretary.error ||
+                'Secretary is unavailable — the isolated runtime or configured model cannot be reached right now.'}
+            </Empty>
+          ) : null}
+          <header class='secretary-head'>
+            <button
+              class='mobile-session-toggle'
+              onClick={() => setSessionsOpen(true)}
+            >
+              ☰
+            </button>
+            <h1>{title}</h1>
+            {selected ? (
+              <span class={`status-word tone-${statusTone(selected.status)}`}>
+                {statusLabel(selected.status)}
+              </span>
+            ) : null}
+            <span class='surface-spacer' />
             {active ? (
               <button
-                class='danger'
+                class='dismiss-control'
                 onClick={() =>
                   actions.control('secretary', 'close', {
                     sessionId: sessionId(selected),
@@ -119,112 +138,135 @@ export function SecretaryView({
               </button>
             ) : (
               <button
-                class='primary'
+                class='new-session-control'
                 disabled={!state.secretary.available}
                 onClick={start}
               >
                 ＋ New session
               </button>
             )}
-          </div>
-        </div>
-        {!state.secretary.available ? (
-          <Empty>
-            {state.secretary.error ||
-              'Secretary is unavailable — the isolated runtime or configured model cannot be reached.'}
-          </Empty>
-        ) : !selected ? (
-          <Empty>
-            Start an ephemeral secretary chat. Its durable turn history remains
-            here after the runtime closes.
-          </Empty>
-        ) : (
-          <div class='secretary-thread'>
+          </header>
+          {hintMindId ? (
+            <button class='source-context' onClick={onClearHint}>
+              opened from:{' '}
+              {state.mindItems.find((item) => item.id === hintMindId)?.title ||
+                hintMindId}{' '}
+              ×
+            </button>
+          ) : null}
+          {selected && sessionHint(selected) ? (
+            <button
+              class='related-mind-link'
+              onClick={() => {
+                const id = sessionHint(selected);
+                if (!id) return;
+                actions.selectMind(id);
+                actions.setView('mind');
+              }}
+            >
+              <span>Related in Mind</span>
+              <strong>
+                {state.mindItems.find(
+                  (item) => item.id === sessionHint(selected),
+                )?.title || sessionHint(selected)}
+              </strong>
+              <i>→</i>
+            </button>
+          ) : null}
+          <div class='secretary-turns'>
             {messages.map((message, index) => (
-              <article
-                class={`secretary-bubble secretary-${message.role}`}
+              <div
+                class={`secretary-turn secretary-turn-${message.role}`}
                 key={index}
               >
                 <div>
-                  <strong>{message.role}</strong>
-                  {message.status ? <Status value={message.status} /> : null}
+                  <span>
+                    {message.role === 'assistant' ? 'secretary' : message.role}
+                  </span>
+                  <small class={`tone-${statusTone(message.status)}`}>
+                    {statusLabel(message.status)}
+                  </small>
                 </div>
-                <Markdown value={message.content} className='prose' />
-              </article>
+                <Markdown value={message.content} />
+              </div>
             ))}
+            {!messages.length && selected ? (
+              <span class='muted-copy'>No turns in this session yet.</span>
+            ) : null}
+            {!selected ? (
+              <span class='muted-copy'>
+                Open a new session to begin a bounded Mind conversation.
+              </span>
+            ) : null}
           </div>
-        )}
-        <form
-          class='composer secretary-composer'
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (selected && active && draft.trim()) {
-              actions.control('secretary', 'enqueue', {
-                sessionId: sessionId(selected),
-                content: draft,
-              });
-              setDraft('');
-            }
-          }}
-        >
-          <textarea
-            value={draft}
-            onInput={(event) => setDraft(event.currentTarget.value)}
-            disabled={!selected || !active || state.connection !== 'connected'}
-            placeholder='Give the secretary a rough thought…'
-            rows={2}
-            onKeyDown={(event) => {
-              if (
-                event.key === 'Enter' &&
-                !event.shiftKey &&
-                !event.isComposing
-              ) {
+          {active ? (
+            <form
+              class='secretary-composer'
+              onSubmit={(event) => {
                 event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-          <span>secretary</span>
-          <button disabled={!draft.trim() || !selected || !active}>↑</button>
-        </form>
+                if (!draft.trim()) return;
+                actions.control('secretary', 'enqueue', {
+                  sessionId: sessionId(selected),
+                  content: draft.trim(),
+                });
+                setDraft('');
+              }}
+            >
+              <input
+                value={draft}
+                onInput={(event) => setDraft(event.currentTarget.value)}
+                placeholder='Ask the secretary…'
+              />
+              <button disabled={!draft.trim()}>Ask</button>
+            </form>
+          ) : null}
+        </div>
       </div>
-      <aside class='session-rail'>
-        <div class='group-label'>
-          PAST SESSIONS<span>{sessions.length}</span>
+      <aside class={`session-rail ${sessionsOpen ? 'session-rail-open' : ''}`}>
+        <div class='session-rail-head'>
+          <span>Past sessions</span>
+          <button
+            class='session-rail-close'
+            onClick={() => setSessionsOpen(false)}
+          >
+            ×
+          </button>
         </div>
         <button
-          class='new-session'
-          disabled={
-            !state.secretary.available ||
-            sessions.some((session) =>
-              ['starting', 'ready'].includes(text(session.status)),
-            )
-          }
+          class='session-new'
           onClick={start}
+          disabled={!state.secretary.available}
         >
           ＋ New session
         </button>
-        {sessions.map((session) => (
-          <button
-            class={`session-row ${sessionId(session) === state.selectedSecretaryId ? 'active' : ''}`}
-            onClick={() => actions.selectSecretary(sessionId(session))}
-          >
-            <span class={`status-dot dot-${text(session.status)}`} />
-            <span>
-              <strong>
-                {sessionHint(session)
-                  ? `From ${sessionHint(session)}`
-                  : `Session ${sessionId(session).slice(-6)}`}
-              </strong>
-              <small>
-                {array(session.turns).length} turns ·{' '}
-                {relative(session.updatedAt ?? session.createdAt)}
-              </small>
-            </span>
-            <Status value={session.status} />
-          </button>
-        ))}
+        <div class='session-list'>
+          {sessions.map((session) => {
+            const id = sessionId(session);
+            return (
+              <button
+                class={id === sessionId(selected ?? {}) ? 'selected' : ''}
+                onClick={() => {
+                  actions.selectSecretary(id);
+                  setSessionsOpen(false);
+                }}
+              >
+                <strong>{titleFor(session, state, null)}</strong>
+                <span>
+                  {relative(
+                    session.updatedAt ?? session.createdAt ?? session.startedAt,
+                  )}
+                </span>
+                <small class={`tone-${statusTone(session.status)}`}>
+                  {statusLabel(session.status)}
+                </small>
+              </button>
+            );
+          })}
+        </div>
       </aside>
+      {sessionsOpen ? (
+        <button class='session-scrim' onClick={() => setSessionsOpen(false)} />
+      ) : null}
     </div>
   );
 }

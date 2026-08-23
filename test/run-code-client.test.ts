@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { runAttribution, splitRunResult } from '../src/console/client/run.js';
+import {
+  resultSummary,
+  splitRunResult,
+  wakePresentation,
+} from '../src/console/client/run.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -17,7 +21,8 @@ test('typed run card preserves source exactly without a browser formatter runtim
     path.join(root, 'package.json'),
     'utf8',
   );
-  assert.match(source, /<pre>\{call\.code\}<\/pre>/);
+  assert.match(source, /<HighlightedCode value=\{call\.code\} \/>/);
+  assert.doesNotMatch(source, /runAttribution|run-attribution/);
   assert.doesNotMatch(
     source + packageSource,
     /formatSource|ElpisRunCode|prettierPlugins|run-code\.js|prettier\.umd|prism\.js/,
@@ -37,23 +42,37 @@ test('typed run result parser separates value and console without rewriting eith
   );
 });
 
-test('typed run result parser preserves failed output and attribution', () => {
+test('typed run card summarizes results and isolates wake presentation', () => {
   assert.deepEqual(splitRunResult('[run FAILED]\nboom'), {
     ok: false,
     value: 'boom',
     console: '',
   });
   assert.equal(
-    runAttribution({
+    resultSummary('[run ok]\nObject{2 keys: task, result}'),
+    'Object{2 keys: task, result}',
+  );
+  const wake = wakePresentation(
+    {
       execution: {
         alias: 'elm-example',
         lifecycle: 'ready',
         mindId: 'elm-example',
         runId: 'elm-example:g2:r4',
       },
-      detached: true,
-      bgId: 'job-1',
-    }),
-    'elm-example · ready · Mind #elm-example · elm-example:g2:r4 · detached job-1',
+      wake: {
+        state: 'armed',
+        kind: 'after',
+        targetAt: 3_600_000,
+        taskId: 7,
+        advice: { reason: 'quiet-exploration' },
+      },
+    },
+    0,
   );
+  assert.ok(wake);
+  assert.match(wake.when, /^Wake scheduled · /);
+  assert.equal(wake.reason, 'quiet exploration');
+  assert.equal(wake.raw, 'task #7 · after · armed');
+  assert.doesNotMatch(JSON.stringify(wake), /elm-example|lifecycle|runId/);
 });

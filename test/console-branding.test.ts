@@ -88,7 +88,7 @@ test('Preact shell uses fixed dark v2 PWA chrome and safe-area mobile layout wit
   assert.match(html, /elpis-icon-dark\.svg/);
   assert.match(css, /height:\s*100dvh/);
   assert.match(css, /safe-area-inset-bottom/);
-  assert.match(css, /--app:\s*#141320/);
+  assert.match(css, /--bg-app:\s*#141320/);
   assert.doesNotMatch(html + css, /serviceWorker/);
   assert.equal(fs.existsSync(path.join(publicDir, 'service-worker.js')), false);
 });
