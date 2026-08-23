@@ -37,7 +37,7 @@ function fixture() {
   ).run(now);
   const token = "s".repeat(43);
   db.prepare(
-    `INSERT INTO secretary_sessions (id,root_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
+    `INSERT INTO secretary_sessions (id,hint_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
   ).run(
     "sec-" + "a".repeat(22),
     "elm-root0001",
@@ -54,7 +54,7 @@ function close(f: ReturnType<typeof fixture>) {
   fs.rmSync(f.dir, { recursive: true, force: true });
 }
 
-test("secretary Mind reads exact root descendants and revokes terminal tokens", () => {
+test("secretary Mind reads globally while an optional hint remains prompt context", () => {
   const f = fixture();
   const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
   assert.equal(broker.get(f.token).item.id, "elm-root0001");
@@ -62,20 +62,73 @@ test("secretary Mind reads exact root descendants and revokes terminal tokens", 
     broker.get(f.token, "elm-child001").item.comments[0].body,
     "useful detail",
   );
+  assert.equal(broker.get(f.token, "elm-sibling1").item.id, "elm-sibling1");
   assert.deepEqual(
     broker.tree(f.token).items.map((i) => i.id),
     ["elm-root0001", "elm-child001"],
   );
+
+  f.db.exec("DROP TRIGGER secretary_sessions_identity_no_update");
+  f.db
+    .prepare("UPDATE secretary_sessions SET hint_mind_id=NULL WHERE id=?")
+    .run("sec-" + "a".repeat(22));
   assert.throws(
-    () => broker.get(f.token, "elm-sibling1"),
-    (e) => e instanceof SecretaryMindError && e.code === "outside_scope",
+    () => broker.get(f.token),
+    (e) => e instanceof SecretaryMindError && e.code === "invalid_request",
   );
+  assert.equal(broker.get(f.token, "elm-sibling1").item.id, "elm-sibling1");
+
   f.db
     .prepare("UPDATE secretary_sessions SET status='closed' WHERE id=?")
     .run("sec-" + "a".repeat(22));
   assert.throws(
-    () => broker.get(f.token),
+    () => broker.get(f.token, "elm-sibling1"),
     (e) => e instanceof SecretaryMindError && e.code === "unauthorized",
+  );
+  close(f);
+});
+
+test("secretary proposal creation derives attribution and preserves proposal invariants", () => {
+  const f = fixture();
+  const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
+  const created = broker.propose(f.token, {
+    title: "Review this candidate",
+    body: "As submitted through the bounded secretary lane.",
+    kind: "idea",
+    priority: 1,
+    parentId: "elm-sibling1",
+    tags: ["secretary-intake"],
+  });
+  assert.equal(created.item.status, "proposal");
+  assert.equal(
+    created.item.createdBy,
+    `secretary:${created.binding.sessionId}`,
+  );
+  assert.equal(created.item.parentId, "elm-sibling1");
+  assert.equal(created.item.dueAt, null);
+  assert.deepEqual(created.item.blockedBy, []);
+  assert.deepEqual(created.item.tags, ["secretary-intake"]);
+  const event = f.db
+    .prepare(
+      "SELECT actor, data_json FROM mind_events WHERE item_id=? AND type='item.created'",
+    )
+    .get(created.item.id) as { actor: string; data_json: string };
+  assert.equal(event.actor, `secretary:${created.binding.sessionId}`);
+  assert.deepEqual(
+    {
+      status: JSON.parse(event.data_json).status,
+      body: JSON.parse(event.data_json).body,
+      proposalIntake: JSON.parse(event.data_json).proposalIntake,
+    },
+    {
+      status: "proposal",
+      body: "As submitted through the bounded secretary lane.",
+      proposalIntake: {
+        requester: "conversation-user",
+        source: "secretary",
+        sessionId: created.binding.sessionId,
+      },
+    },
   );
   close(f);
 });
@@ -93,7 +146,7 @@ test("secretary Mind fails closed when a detail exceeds the response bound", () 
   close(f);
 });
 
-test("secretary completion binds model, fixed read tool, capacity and one-in-flight", async () => {
+test("secretary completion binds model, fixed Mind tool, capacity and one-in-flight", async () => {
   const f = fixture();
   const config = makeConfig();
   config.llm.registry = createLlmModelRegistry({
@@ -157,7 +210,7 @@ test("secretary completion binds model, fixed read tool, capacity and one-in-fli
   const secondToken = "t".repeat(43);
   f.db
     .prepare(
-      `INSERT INTO secretary_sessions (id,root_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
+      `INSERT INTO secretary_sessions (id,hint_mind_id,status,model_ref,runtime,control_token_digest,created_at,updated_at) VALUES (?,?,?,?, 'kubernetes',?,?,?)`,
     )
     .run(
       "sec-" + "b".repeat(22),

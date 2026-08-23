@@ -1,5 +1,10 @@
 import type { Database } from "../store/db.js";
-import type { MindDetail, MindLink, MindService } from "../store/mind.js";
+import type {
+  MindDetail,
+  MindKind,
+  MindLink,
+  MindService,
+} from "../store/mind.js";
 import type { MindId } from "../store/mind-id.js";
 import {
   resolveSecretarySession,
@@ -14,7 +19,7 @@ export const SECRETARY_MIND_MAX_LINKS = 1000;
 export class SecretaryMindError extends Error {
   constructor(
     public readonly code:
-      "unauthorized" | "outside_scope" | "not_found" | "too_large",
+      "unauthorized" | "invalid_request" | "not_found" | "too_large",
     message: string,
   ) {
     super(message);
@@ -29,10 +34,19 @@ export interface SecretaryMindTree {
   truncated: boolean;
 }
 
+export interface SecretaryProposalInput {
+  title: string;
+  body?: string;
+  kind?: MindKind;
+  priority?: number;
+  parentId?: MindId | null;
+  tags?: string[];
+}
+
 export class SecretaryMindBroker {
   constructor(
     private readonly db: Database,
-    private readonly mind: Pick<MindService, "get">,
+    private readonly mind: Pick<MindService, "get" | "create">,
   ) {}
 
   private binding(token: string): SecretarySessionBinding {
@@ -43,25 +57,6 @@ export class SecretaryMindBroker {
         "secretary session is unavailable",
       );
     return binding;
-  }
-
-  private scoped(binding: SecretarySessionBinding, id: MindId): void {
-    const row = this.db
-      .prepare(
-        `WITH RECURSIVE ancestry(id, parent_id, depth) AS (
-           SELECT id, parent_id, 0 FROM mind_items WHERE id = ?
-           UNION ALL
-           SELECT i.id, i.parent_id, a.depth + 1
-           FROM mind_items i JOIN ancestry a ON i.id = a.parent_id
-           WHERE a.depth < 64
-         ) SELECT 1 AS ok FROM ancestry WHERE id = ? LIMIT 1`,
-      )
-      .get(id, binding.rootMindId);
-    if (!row)
-      throw new SecretaryMindError(
-        "outside_scope",
-        "Mind item is outside secretary scope",
-      );
   }
 
   private bounded<T>(value: T): T {
@@ -92,10 +87,7 @@ export class SecretaryMindBroker {
     };
   }
 
-  private allowedLinks(
-    binding: SecretarySessionBinding,
-    item: MindDetail,
-  ): ReadonlySet<MindId> {
+  private allowedLinks(item: MindDetail): ReadonlySet<MindId> {
     const linkIds = [
       item.parent?.id,
       ...item.children.map((link) => link.id),
@@ -108,20 +100,7 @@ export class SecretaryMindBroker {
         "too_large",
         "secretary Mind item has too many links",
       );
-    const allowed = new Set<MindId>([item.id]);
-    for (const linkId of linkIds) {
-      try {
-        this.scoped(binding, linkId);
-        allowed.add(linkId);
-      } catch (error) {
-        if (
-          !(error instanceof SecretaryMindError) ||
-          error.code !== "outside_scope"
-        )
-          throw error;
-      }
-    }
-    return allowed;
+    return new Set<MindId>([item.id, ...linkIds]);
   }
 
   get(
@@ -129,14 +108,39 @@ export class SecretaryMindBroker {
     id?: MindId,
   ): { binding: SecretarySessionBinding; item: MindDetail } {
     const binding = this.binding(token);
-    const target = id ?? binding.rootMindId;
-    this.scoped(binding, target);
+    const target = id ?? binding.hintMindId;
+    if (!target)
+      throw new SecretaryMindError(
+        "invalid_request",
+        "Mind id is required when the secretary session has no hint",
+      );
     const item = this.mind.get(target);
     if (!item)
       throw new SecretaryMindError("not_found", "Mind item does not exist");
     return this.bounded({
       binding,
-      item: this.project(item, this.allowedLinks(binding, item)),
+      item: this.project(item, this.allowedLinks(item)),
+    });
+  }
+
+  propose(
+    token: string,
+    input: SecretaryProposalInput,
+  ): { binding: SecretarySessionBinding; item: MindDetail } {
+    const binding = this.binding(token);
+    const item = this.mind.create({
+      ...input,
+      status: "proposal",
+      actor: `secretary:${binding.sessionId}`,
+      proposalIntake: {
+        requester: "conversation-user",
+        source: "secretary",
+        sessionId: binding.sessionId,
+      },
+    });
+    return this.bounded({
+      binding,
+      item: this.project(item, this.allowedLinks(item)),
     });
   }
 
@@ -147,8 +151,12 @@ export class SecretaryMindBroker {
     limit = SECRETARY_MIND_MAX_ITEMS,
   ): SecretaryMindTree {
     const binding = this.binding(token);
-    const rootId = id ?? binding.rootMindId;
-    this.scoped(binding, rootId);
+    const rootId = id ?? binding.hintMindId;
+    if (!rootId)
+      throw new SecretaryMindError(
+        "invalid_request",
+        "Mind id is required when the secretary session has no hint",
+      );
     depth = Number.isSafeInteger(depth)
       ? Math.max(0, Math.min(depth, SECRETARY_MIND_MAX_DEPTH))
       : SECRETARY_MIND_MAX_DEPTH;

@@ -166,6 +166,12 @@ export interface MindListFilter {
   offset?: number;
 }
 
+export interface MindProposalIntake {
+  requester: "conversation-user";
+  source: "secretary";
+  sessionId: string;
+}
+
 export interface CreateMindItem {
   title: string;
   body?: string;
@@ -177,6 +183,7 @@ export interface CreateMindItem {
   tags?: string[];
   dependsOn?: MindId[];
   actor?: string;
+  proposalIntake?: MindProposalIntake;
 }
 
 export interface UpdateMindItem {
@@ -602,6 +609,15 @@ export class MindStore {
       throw new Error(
         "mind: proposal items cannot have readiness dependencies",
       );
+    const proposalIntake = opts.proposalIntake;
+    if (
+      proposalIntake !== undefined &&
+      (status !== "proposal" ||
+        proposalIntake.requester !== "conversation-user" ||
+        proposalIntake.source !== "secretary" ||
+        !/^sec-[A-Za-z0-9_-]{22}$/.test(proposalIntake.sessionId))
+    )
+      throw new Error("mind: proposal intake metadata is invalid");
     const tags = uniq((opts.tags ?? []).map(normalizeTag));
     const now = Date.now();
     const id = this.transaction(() => {
@@ -643,6 +659,9 @@ export class MindStore {
         actor,
         {
           title: opts.title.trim(),
+          ...(status === "proposal"
+            ? { body, ...(proposalIntake ? { proposalIntake } : {}) }
+            : {}),
           kind,
           status,
           priority,

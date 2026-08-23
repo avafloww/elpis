@@ -8,14 +8,14 @@
 // pragma_table_info checks before ALTER TABLE ADD COLUMN) — there is no
 // version-gated early return. See docs/persistence.md.
 
-import { DatabaseSync } from "node:sqlite";
-import * as path from "node:path";
-import { runComponentMigrations } from "./migrations.js";
+import { DatabaseSync } from 'node:sqlite';
+import * as path from 'node:path';
+import { runComponentMigrations } from './migrations.js';
 import {
   migrateMindIds,
   MIND_ID_MIGRATION_CHECKSUM,
-} from "./mind-id-migration.js";
-import { MIND_PROPOSAL_STATUS_MIGRATION } from "./mind-proposal-migration.js";
+} from './mind-id-migration.js';
+import { MIND_PROPOSAL_STATUS_MIGRATION } from './mind-proposal-migration.js';
 
 export type Database = DatabaseSync;
 
@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -82,15 +82,15 @@ export function runMigrations(db: DatabaseSync): void {
       .prepare(`SELECT name FROM pragma_table_info('scheduled_tasks')`)
       .all() as { name: string }[]
   ).map((r) => r.name);
-  if (!columns.includes("nag_interval_ms")) {
-    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN nag_interval_ms INTEGER");
+  if (!columns.includes('nag_interval_ms')) {
+    db.exec('ALTER TABLE scheduled_tasks ADD COLUMN nag_interval_ms INTEGER');
   }
-  if (!columns.includes("parent_id")) {
-    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN parent_id INTEGER");
+  if (!columns.includes('parent_id')) {
+    db.exec('ALTER TABLE scheduled_tasks ADD COLUMN parent_id INTEGER');
   }
-  if (!columns.includes("nag_count")) {
+  if (!columns.includes('nag_count')) {
     db.exec(
-      "ALTER TABLE scheduled_tasks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0",
+      'ALTER TABLE scheduled_tasks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0',
     );
   }
 
@@ -132,8 +132,8 @@ export function runMigrations(db: DatabaseSync): void {
       name: string;
     }[]
   ).map((r) => r.name);
-  if (!chanCols.includes("guild_id")) {
-    db.exec("ALTER TABLE channels ADD COLUMN guild_id TEXT");
+  if (!chanCols.includes('guild_id')) {
+    db.exec('ALTER TABLE channels ADD COLUMN guild_id TEXT');
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS channel_mutes (
@@ -150,8 +150,8 @@ export function runMigrations(db: DatabaseSync): void {
   // Agent.send needs the recorded parent to make a mute on #general hold
   // inside the threads under it — the same inheritance ingest already applies
   // via resolvePolicyChannelId. NULL for a normal (non-thread) channel.
-  if (!chanCols.includes("parent_id")) {
-    db.exec("ALTER TABLE channels ADD COLUMN parent_id TEXT");
+  if (!chanCols.includes('parent_id')) {
+    db.exec('ALTER TABLE channels ADD COLUMN parent_id TEXT');
   }
 
   // v6 -> v7 (calibrated token density: per-model chars-per-token ratio, learned
@@ -281,13 +281,13 @@ export function runMigrations(db: DatabaseSync): void {
       name: string;
     }[]
   ).map((r) => r.name);
-  if (!mindCommentColumns.includes("reply_to_id")) {
+  if (!mindCommentColumns.includes('reply_to_id')) {
     db.exec(
-      "ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL",
+      'ALTER TABLE mind_comments ADD COLUMN reply_to_id INTEGER REFERENCES mind_comments(id) ON DELETE SET NULL',
     );
   }
   db.exec(
-    "CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)",
+    'CREATE INDEX IF NOT EXISTS mind_comments_reply_idx ON mind_comments(reply_to_id)',
   );
 
   // v12: persistent run-v3 sandboxes. Registrations and alias reservations are
@@ -361,21 +361,21 @@ export function runMigrations(db: DatabaseSync): void {
       .prepare(`SELECT name FROM pragma_table_info('persistent_sandboxes')`)
       .all() as { name: string }[]
   ).map((r) => r.name);
-  if (!sandboxColumns.includes("cold_notice_pending")) {
+  if (!sandboxColumns.includes('cold_notice_pending')) {
     db.exec(
-      "ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))",
+      'ALTER TABLE persistent_sandboxes ADD COLUMN cold_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (cold_notice_pending IN (0,1))',
     );
   }
 
   // This receipt says only that the idempotent legacy blocks above completed;
   // it does not invent checksummed history for schema versions 1 through 13.
-  runComponentMigrations(db, "core", [
+  runComponentMigrations(db, 'core', [
     {
-      name: "0013-legacy-through-v13",
-      sql: "SELECT 1;",
+      name: '0013-legacy-through-v13',
+      sql: 'SELECT 1;',
     },
     {
-      name: "0015-sandbox-retirement-deadline",
+      name: '0015-sandbox-retirement-deadline',
       sql: `
         ALTER TABLE persistent_sandboxes ADD COLUMN retire_requested_at INTEGER;
         UPDATE persistent_sandboxes
@@ -386,12 +386,12 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     {
-      name: "0016-mind-elm-identities",
+      name: '0016-mind-elm-identities',
       checksum: MIND_ID_MIGRATION_CHECKSUM,
       up: migrateMindIds,
     },
     {
-      name: "0017-fleet-actor-sessions",
+      name: '0017-fleet-actor-sessions',
       sql: `
         ALTER TABLE fleet_sessions ADD COLUMN model_ref TEXT;
         ALTER TABLE fleet_sessions ADD COLUMN mind_id TEXT REFERENCES mind_items(id);
@@ -404,7 +404,7 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     {
-      name: "0018-fleet-actor-mailbox",
+      name: '0018-fleet-actor-mailbox',
       sql: `
         CREATE TABLE fleet_mailbox_messages (
           id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -428,7 +428,7 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     {
-      name: "0019-native-workers",
+      name: '0019-native-workers',
       sql: `
         CREATE TABLE worker_sessions (
           id                   TEXT PRIMARY KEY,
@@ -474,7 +474,7 @@ export function runMigrations(db: DatabaseSync): void {
     },
     MIND_PROPOSAL_STATUS_MIGRATION,
     {
-      name: "0021-worker-workspace-custody",
+      name: '0021-worker-workspace-custody',
       sql: `
         ALTER TABLE worker_sessions ADD COLUMN source_revision TEXT
           CHECK (source_revision IS NULL OR length(source_revision) BETWEEN 1 AND 128);
@@ -515,7 +515,7 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     {
-      name: "0022-secretary-sessions",
+      name: '0022-secretary-sessions',
       sql: `
         CREATE TABLE secretary_sessions (
           id                   TEXT PRIMARY KEY
@@ -573,7 +573,7 @@ export function runMigrations(db: DatabaseSync): void {
       `,
     },
     {
-      name: "0023-secretary-conversation-turns",
+      name: '0023-secretary-conversation-turns',
       sql: `
         CREATE TABLE secretary_turns (
           id               TEXT PRIMARY KEY
@@ -669,6 +669,183 @@ export function runMigrations(db: DatabaseSync): void {
         END;
       `,
     },
+    {
+      name: '0024-global-secretary-authority',
+      sql: `
+        ALTER TABLE secretary_turns RENAME TO secretary_turns_v23;
+        ALTER TABLE secretary_sessions RENAME TO secretary_sessions_v22;
+
+        DROP INDEX secretary_turns_active_session_idx;
+        DROP INDEX secretary_turns_session_sequence_idx;
+        DROP INDEX secretary_turns_status_idx;
+        DROP TRIGGER secretary_turns_identity_no_update;
+        DROP TRIGGER secretary_turns_status_transition_guard;
+        DROP TRIGGER secretary_turns_pristine_insert_guard;
+        DROP TRIGGER secretary_turns_lifecycle_update_guard;
+        DROP TRIGGER secretary_sessions_settle_turns_before_terminal;
+        DROP INDEX secretary_sessions_active_root_idx;
+        DROP INDEX secretary_sessions_status_idx;
+        DROP TRIGGER secretary_sessions_identity_no_update;
+        DROP TRIGGER secretary_sessions_status_transition_guard;
+
+        CREATE TABLE secretary_sessions (
+          id                   TEXT PRIMARY KEY
+            CHECK (
+              length(id) = 26
+              AND substr(id, 1, 4) = 'sec-'
+              AND substr(id, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          hint_mind_id         TEXT REFERENCES mind_items(id) ON DELETE RESTRICT,
+          status               TEXT NOT NULL CHECK (status IN ('starting','ready','closed','failed')),
+          model_ref            TEXT NOT NULL
+            CHECK (
+              length(model_ref) >= 3
+              AND model_ref = lower(model_ref)
+              AND model_ref NOT GLOB '*[^a-z0-9._/-]*'
+              AND instr(model_ref, '/') > 1
+              AND instr(substr(model_ref, instr(model_ref, '/') + 1), '/') = 0
+              AND substr(model_ref, 1, 1) GLOB '[a-z0-9]'
+              AND substr(model_ref, instr(model_ref, '/') + 1, 1) GLOB '[a-z0-9]'
+            ),
+          runtime              TEXT NOT NULL CHECK (runtime = 'kubernetes'),
+          control_token_digest TEXT NOT NULL UNIQUE
+            CHECK (
+              length(control_token_digest) = 64
+              AND control_token_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+          pod_name             TEXT CHECK (pod_name IS NULL OR length(pod_name) BETWEEN 1 AND 253),
+          pod_uid              TEXT CHECK (pod_uid IS NULL OR length(pod_uid) BETWEEN 1 AND 128),
+          created_at           INTEGER NOT NULL,
+          updated_at           INTEGER NOT NULL CHECK (updated_at >= created_at),
+          last_error           TEXT
+        );
+        INSERT INTO secretary_sessions
+          (id, hint_mind_id, status, model_ref, runtime, control_token_digest,
+           pod_name, pod_uid, created_at, updated_at, last_error)
+        SELECT id, root_mind_id, status, model_ref, runtime, control_token_digest,
+               pod_name, pod_uid, created_at, updated_at, last_error
+        FROM secretary_sessions_v22;
+        CREATE INDEX secretary_sessions_status_idx
+          ON secretary_sessions(status, created_at);
+        CREATE TRIGGER secretary_sessions_identity_no_update
+        BEFORE UPDATE OF id, hint_mind_id, model_ref, runtime, control_token_digest
+        ON secretary_sessions
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary session identity and hint are immutable');
+        END;
+        CREATE TRIGGER secretary_sessions_status_transition_guard
+        BEFORE UPDATE OF status ON secretary_sessions
+        WHEN NEW.status != OLD.status
+          AND NOT (
+            (OLD.status = 'starting' AND NEW.status IN ('ready','closed','failed'))
+            OR (OLD.status = 'ready' AND NEW.status IN ('closed','failed'))
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid secretary session status transition');
+        END;
+
+        CREATE TABLE secretary_turns (
+          id               TEXT PRIMARY KEY
+            CHECK (
+              length(id) = 26
+              AND substr(id, 1, 4) = 'stn-'
+              AND substr(id, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          session_id       TEXT NOT NULL REFERENCES secretary_sessions(id) ON DELETE CASCADE,
+          sequence         INTEGER NOT NULL CHECK (sequence >= 1),
+          status           TEXT NOT NULL
+            CHECK (status IN ('queued','claimed','completed','ambiguous','cancelled')),
+          request_json     TEXT NOT NULL
+            CHECK (
+              length(request_json) BETWEEN 2 AND 262144
+              AND json_valid(request_json)
+              AND json_type(request_json) = 'object'
+            ),
+          response_json    TEXT
+            CHECK (
+              response_json IS NULL
+              OR (
+                length(response_json) BETWEEN 2 AND 262144
+                AND json_valid(response_json)
+                AND json_type(response_json) = 'object'
+              )
+            ),
+          created_at       INTEGER NOT NULL,
+          updated_at       INTEGER NOT NULL CHECK (updated_at >= created_at),
+          claimed_at       INTEGER CHECK (claimed_at IS NULL OR claimed_at >= created_at),
+          completed_at     INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+          last_error       TEXT CHECK (last_error IS NULL OR length(last_error) <= 1000),
+          UNIQUE (session_id, sequence)
+        );
+        INSERT INTO secretary_turns
+          (id, session_id, sequence, status, request_json, response_json,
+           created_at, updated_at, claimed_at, completed_at, last_error)
+        SELECT id, session_id, sequence, status, request_json, response_json,
+               created_at, updated_at, claimed_at, completed_at, last_error
+        FROM secretary_turns_v23;
+        CREATE UNIQUE INDEX secretary_turns_active_session_idx
+          ON secretary_turns(session_id)
+          WHERE status IN ('queued','claimed');
+        CREATE INDEX secretary_turns_session_sequence_idx
+          ON secretary_turns(session_id, sequence);
+        CREATE INDEX secretary_turns_status_idx
+          ON secretary_turns(status, updated_at);
+        CREATE TRIGGER secretary_turns_identity_no_update
+        BEFORE UPDATE OF id, session_id, sequence, request_json, created_at
+        ON secretary_turns
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary turn identity and request are immutable');
+        END;
+        CREATE TRIGGER secretary_turns_status_transition_guard
+        BEFORE UPDATE OF status ON secretary_turns
+        WHEN NEW.status != OLD.status
+          AND NOT (
+            (OLD.status = 'queued' AND NEW.status IN ('claimed','cancelled'))
+            OR (OLD.status = 'claimed' AND NEW.status IN ('completed','ambiguous','cancelled'))
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid secretary turn status transition');
+        END;
+        CREATE TRIGGER secretary_turns_pristine_insert_guard
+        BEFORE INSERT ON secretary_turns
+        WHEN NEW.status != 'queued'
+          OR NEW.response_json IS NOT NULL
+          OR NEW.claimed_at IS NOT NULL
+          OR NEW.completed_at IS NOT NULL
+          OR NEW.last_error IS NOT NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'new secretary turns must be pristine');
+        END;
+        CREATE TRIGGER secretary_sessions_settle_turns_before_terminal
+        BEFORE UPDATE OF status ON secretary_sessions
+        WHEN OLD.status IN ('starting','ready')
+          AND NEW.status IN ('closed','failed')
+        BEGIN
+          UPDATE secretary_turns
+          SET status='cancelled', updated_at=MAX(updated_at, NEW.updated_at),
+              last_error=COALESCE(NEW.last_error, 'secretary session closed')
+          WHERE session_id=OLD.id AND status='queued';
+          UPDATE secretary_turns
+          SET status='ambiguous', updated_at=MAX(updated_at, NEW.updated_at),
+              last_error=COALESCE(NEW.last_error, 'secretary session closed')
+          WHERE session_id=OLD.id AND status='claimed';
+        END;
+        CREATE TRIGGER secretary_turns_lifecycle_update_guard
+        BEFORE UPDATE ON secretary_turns
+        WHEN
+          (NEW.status = 'queued' AND (NEW.claimed_at IS NOT NULL OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'claimed' AND (NEW.claimed_at IS NULL OR NEW.claimed_at > NEW.updated_at OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'completed' AND (NEW.claimed_at IS NULL OR NEW.completed_at IS NULL OR NEW.completed_at < NEW.claimed_at OR NEW.completed_at > NEW.updated_at OR NEW.response_json IS NULL OR NEW.last_error IS NOT NULL))
+          OR (NEW.status = 'ambiguous' AND (NEW.claimed_at IS NULL OR NEW.claimed_at > NEW.updated_at OR NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NULL))
+          OR (NEW.status = 'cancelled' AND (NEW.response_json IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.last_error IS NULL))
+        BEGIN
+          SELECT RAISE(ABORT, 'secretary turn lifecycle fields do not match status');
+        END;
+
+        DROP TABLE secretary_turns_v23;
+        DROP TABLE secretary_sessions_v22;
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -678,10 +855,10 @@ export function runMigrations(db: DatabaseSync): void {
  * SQLITE_BUSY — the offline scripts/feedback.ts reconcile may write
  * message_index while the live harness inserts a feedback row. */
 export function openDatabase(dataDirectory: string): DatabaseSync {
-  const db = new DatabaseSync(path.join(dataDirectory, "elpis.db"));
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
+  const db = new DatabaseSync(path.join(dataDirectory, 'elpis.db'));
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('PRAGMA busy_timeout = 5000');
   runMigrations(db);
   return db;
 }

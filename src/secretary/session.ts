@@ -7,13 +7,12 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const SESSION_ID_RE = /^sec-[A-Za-z0-9_-]{22}$/;
 const ACTIVE_STATUSES = new Set<SecretarySessionStatus>(["starting", "ready"]);
-const ROOT_STATUSES = new Set(["inbox", "open", "in_progress", "waiting"]);
 
 export type SecretarySessionStatus = "starting" | "ready" | "closed" | "failed";
 
 export interface SecretarySession {
   id: string;
-  rootMindId: MindId;
+  hintMindId: MindId | null;
   status: SecretarySessionStatus;
   modelRef: string;
   runtime: "kubernetes";
@@ -27,7 +26,7 @@ export interface SecretarySession {
 /** The capability scope returned after a raw token has been authenticated. */
 export interface SecretarySessionBinding {
   sessionId: string;
-  rootMindId: MindId;
+  hintMindId: MindId | null;
   modelRef: string;
   runtime: "kubernetes";
 }
@@ -108,13 +107,13 @@ export function verifySecretaryControlToken(
 
 function rowSession(row: Record<string, unknown>): SecretarySession {
   const id = row.id;
-  const rootMindId = row.root_mind_id;
+  const hintMindId = row.hint_mind_id;
   const status = row.status;
   const modelRef = row.model_ref;
   if (!isSecretarySessionId(id))
     throw new Error("secretary session has invalid identity");
-  if (!isMindId(rootMindId))
-    throw new Error("secretary session has invalid root Mind identity");
+  if (hintMindId !== null && !isMindId(hintMindId))
+    throw new Error("secretary session has invalid hint Mind identity");
   if (
     status !== "starting" &&
     status !== "ready" &&
@@ -133,7 +132,7 @@ function rowSession(row: Record<string, unknown>): SecretarySession {
     throw new Error("secretary session has invalid timestamps");
   return {
     id,
-    rootMindId,
+    hintMindId,
     status,
     modelRef,
     runtime: "kubernetes",
@@ -158,7 +157,7 @@ export function resolveSecretarySession(
   }
   const row = db
     .prepare(
-      `SELECT id, root_mind_id, status, model_ref, runtime,
+      `SELECT id, hint_mind_id, status, model_ref, runtime,
               control_token_digest, pod_name, pod_uid, created_at, updated_at, last_error
        FROM secretary_sessions WHERE control_token_digest = ?`,
     )
@@ -174,7 +173,7 @@ export function resolveSecretarySession(
     if (!ACTIVE_STATUSES.has(session.status)) return null;
     return {
       sessionId: session.id,
-      rootMindId: session.rootMindId,
+      hintMindId: session.hintMindId,
       modelRef: session.modelRef,
       runtime: session.runtime,
     };
@@ -232,11 +231,7 @@ function validatePodIdentity(value: SecretaryPodIdentity): {
   return { podName, podUid };
 }
 
-/**
- * Host-side custody for secretary identities. Creation accepts only the exact,
- * already-resolved root and canonical model reference; deployment policy stays
- * outside this store.
- */
+/** Host-side custody for global secretary identities and optional prompt hints. */
 export class SecretarySessionStore {
   private readonly now: () => number;
   private readonly credential: () => SecretaryControlCredential;
@@ -266,11 +261,11 @@ export class SecretarySessionStore {
     ).map(rowSession);
   }
 
-  create(rootMindId: MindId, modelRef: string): CreatedSecretarySession {
-    if (!isMindId(rootMindId))
+  create(hintMindId: MindId | null, modelRef: string): CreatedSecretarySession {
+    if (hintMindId !== null && !isMindId(hintMindId))
       throw new SecretarySessionError(
         "invalid_request",
-        "rootMindId must be an exact canonical elm- identity",
+        "hintMindId must be null or an exact canonical elm- identity",
       );
     validateModelRef(modelRef);
     const credential = this.credential();
@@ -299,31 +294,16 @@ export class SecretarySessionStore {
     let sessionId = "";
     this.options.db.exec("BEGIN IMMEDIATE");
     try {
-      const root = this.options.db
-        .prepare("SELECT id, status, archived_at FROM mind_items WHERE id = ?")
-        .get(rootMindId) as
-        { id: unknown; status: unknown; archived_at: unknown } | undefined;
-      if (!root || root.id !== rootMindId)
-        throw new SecretarySessionError(
-          "not_found",
-          "root Mind item is unavailable",
-        );
-      if (root.archived_at !== null || !ROOT_STATUSES.has(String(root.status)))
-        throw new SecretarySessionError(
-          "unavailable",
-          "root Mind item is not active committed work",
-        );
-      const active = this.options.db
-        .prepare(
-          `SELECT id FROM secretary_sessions
-           WHERE root_mind_id = ? AND status IN ('starting','ready')`,
-        )
-        .get(rootMindId);
-      if (active)
-        throw new SecretarySessionError(
-          "conflict",
-          "root Mind item already has an active secretary session",
-        );
+      if (hintMindId !== null) {
+        const hint = this.options.db
+          .prepare("SELECT id FROM mind_items WHERE id = ?")
+          .get(hintMindId) as { id: unknown } | undefined;
+        if (!hint || hint.id !== hintMindId)
+          throw new SecretarySessionError(
+            "not_found",
+            "hint Mind item is unavailable",
+          );
+      }
       for (let attempt = 0; attempt < 32; attempt++) {
         const candidate = this.id();
         if (!isSecretarySessionId(candidate))
@@ -347,11 +327,11 @@ export class SecretarySessionStore {
       this.options.db
         .prepare(
           `INSERT INTO secretary_sessions
-             (id, root_mind_id, status, model_ref, runtime,
+             (id, hint_mind_id, status, model_ref, runtime,
               control_token_digest, created_at, updated_at)
            VALUES (?, ?, 'starting', ?, 'kubernetes', ?, ?, ?)`,
         )
-        .run(sessionId, rootMindId, modelRef, credential.digest, now, now);
+        .run(sessionId, hintMindId, modelRef, credential.digest, now, now);
       this.options.db.exec("COMMIT");
     } catch (error) {
       this.options.db.exec("ROLLBACK");

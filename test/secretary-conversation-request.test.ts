@@ -7,7 +7,7 @@ import {
 
 const binding = {
   sessionId: "sec-AAAAAAAAAAAAAAAAAAAAAA",
-  rootMindId: "elm-000000a1" as const,
+  hintMindId: "elm-000000a1" as const,
   modelRef: "p/secretary",
   runtime: "kubernetes" as const,
 };
@@ -67,7 +67,7 @@ test("conversation dispatcher rejects spoofable scope and unknown operations pre
       operation: "complete",
       turnId: "x",
       response: {},
-      rootMindId: "spoof",
+      hintMindId: "spoof",
     },
     { protocol: 2, operation: "pull" },
     { protocol: 1, operation: "enqueue" },

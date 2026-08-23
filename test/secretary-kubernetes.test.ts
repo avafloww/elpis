@@ -54,7 +54,7 @@ function safeTemplate() {
 function session(patch: Partial<SecretarySession> = {}): SecretarySession {
   return {
     id: SESSION_ID,
-    rootMindId: "elm-secretary001",
+    hintMindId: "elm-secretary001",
     status: "ready",
     modelRef: "p/model",
     runtime: "kubernetes",
@@ -110,7 +110,7 @@ test("provision clones only the fixed template and injects token through one Sec
   const f = fixture();
   const receipt = await f.runtime.provision({
     sessionId: SESSION_ID,
-    rootMindId: "elm-secretary001",
+    hintMindId: "elm-secretary001",
     modelRef: "p/model",
     token: "t".repeat(43),
   });
@@ -220,7 +220,7 @@ test("unsafe templates fail before Secret or Pod creation", async () => {
       () =>
         f.runtime.provision({
           sessionId: SESSION_ID,
-          rootMindId: "elm-secretary001",
+          hintMindId: "elm-secretary001",
           modelRef: "p/model",
           token: "t".repeat(43),
         }),
@@ -246,7 +246,7 @@ test("Pod create failure deletes only the deterministic Secret", async () => {
     () =>
       f.runtime.provision({
         sessionId: SESSION_ID,
-        rootMindId: "elm-secretary001",
+        hintMindId: "elm-secretary001",
         modelRef: "p/model",
         token: "t".repeat(43),
       }),

@@ -151,8 +151,8 @@ function statusForSecretaryMind(error: SecretaryMindError): number {
   switch (error.code) {
     case "unauthorized":
       return 401;
-    case "outside_scope":
-      return 403;
+    case "invalid_request":
+      return 400;
     case "not_found":
       return 404;
     case "too_large":

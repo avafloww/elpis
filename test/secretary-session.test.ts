@@ -82,7 +82,7 @@ test("secretary credentials are random 256-bit base64url capabilities", () => {
   assert.equal(isSecretarySessionId(newSecretarySessionId()), true);
 });
 
-test("secretary store preserves exact root scope and persists only a token digest", () => {
+test("secretary store preserves an optional hint and persists only a token digest", () => {
   const db = database();
   const root = "elm-000000a1" as MindId;
   insertMind(db, root);
@@ -98,7 +98,7 @@ test("secretary store preserves exact root scope and persists only a token diges
   assert.equal(created.token, raw);
   assert.deepEqual(created.session, {
     id: newSecretarySessionId(() => Buffer.alloc(16, 1)),
-    rootMindId: root,
+    hintMindId: root,
     status: "starting",
     modelRef: "resident/secretary-v1",
     runtime: "kubernetes",
@@ -110,14 +110,14 @@ test("secretary store preserves exact root scope and persists only a token diges
   });
   const persisted = db
     .prepare(
-      "SELECT root_mind_id, runtime, control_token_digest FROM secretary_sessions",
+      "SELECT hint_mind_id, runtime, control_token_digest FROM secretary_sessions",
     )
     .get() as {
-    root_mind_id: string;
+    hint_mind_id: string;
     runtime: string;
     control_token_digest: string;
   };
-  assert.equal(persisted.root_mind_id, root);
+  assert.equal(persisted.hint_mind_id, root);
   assert.equal(persisted.runtime, "kubernetes");
   assert.equal(
     persisted.control_token_digest,
@@ -126,7 +126,7 @@ test("secretary store preserves exact root scope and persists only a token diges
   assert.equal(JSON.stringify(persisted).includes(raw), false);
   assert.deepEqual(resolveSecretarySession(db, raw), {
     sessionId: created.session.id,
-    rootMindId: root,
+    hintMindId: root,
     modelRef: "resident/secretary-v1",
     runtime: "kubernetes",
   });
@@ -151,14 +151,14 @@ test("secretary store preserves exact root scope and persists only a token diges
     "close is idempotent",
   );
 
-  const replacement = store.create(root, "resident/secretary-v1");
+  const replacement = store.create(null, "resident/secretary-v1");
   assert.notEqual(replacement.session.id, created.session.id);
-  assert.equal(replacement.session.rootMindId, root);
+  assert.equal(replacement.session.hintMindId, null);
   assert.ok(resolveSecretarySession(db, replacement.token));
   db.close();
 });
 
-test("secretary creation fails closed for inexact, missing, proposed, closed, and archived roots", () => {
+test("secretary creation accepts no hint and any existing Mind item state", () => {
   const db = database();
   const valid = "elm-000000b1" as MindId;
   insertMind(db, valid);
@@ -168,8 +168,8 @@ test("secretary creation fails closed for inexact, missing, proposed, closed, an
   insertMind(db, "elm-000000b5" as MindId, "open", 50);
   const store = new SecretarySessionStore({
     db,
-    id: ids(10, 11),
-    credential: credentials(10, 11),
+    id: ids(10, 11, 12, 13, 14),
+    credential: credentials(10, 11, 12, 13, 14),
   });
 
   assert.throws(
@@ -183,61 +183,60 @@ test("secretary creation fails closed for inexact, missing, proposed, closed, an
     (error) =>
       error instanceof SecretarySessionError && error.code === "not_found",
   );
-  for (const root of [
+  const hints = [
+    null,
     "elm-000000b2",
     "elm-000000b3",
     "elm-000000b4",
     "elm-000000b5",
-  ] as MindId[]) {
-    assert.throws(
-      () => store.create(root, "resident/secretary-v1"),
-      (error) =>
-        error instanceof SecretarySessionError && error.code === "unavailable",
-    );
-  }
+  ] as (MindId | null)[];
+  assert.deepEqual(
+    hints.map(
+      (hint) => store.create(hint, "resident/secretary-v1").session.hintMindId,
+    ),
+    hints,
+  );
   assert.throws(
     () => store.create(valid, "Resident/secretary-v1"),
     (error) =>
       error instanceof SecretarySessionError &&
       error.code === "invalid_request",
   );
-  assert.equal(store.list().length, 0);
+  assert.equal(store.list().length, hints.length);
   db.close();
 });
 
-test("secretary active-root uniqueness and terminal transitions revoke capabilities", () => {
+test("duplicate hints do not define authority and terminal transitions revoke only their token", () => {
   const db = database();
-  const root = "elm-000000c1" as MindId;
-  insertMind(db, root);
+  const hint = "elm-000000c1" as MindId;
+  insertMind(db, hint);
   const store = new SecretarySessionStore({
     db,
     now: () => 200,
-    id: ids(20, 21),
-    credential: credentials(20, 21),
+    id: ids(20, 21, 22),
+    credential: credentials(20, 21, 22),
   });
-  const first = store.create(root, "resident/secretary-v1");
-  assert.throws(
-    () => store.create(root, "resident/secretary-v1"),
-    (error) =>
-      error instanceof SecretarySessionError && error.code === "conflict",
-  );
+  const first = store.create(hint, "resident/secretary-v1");
+  const second = store.create(hint, "resident/secretary-v1");
+  const unhinted = store.create(null, "resident/secretary-v1");
+  assert.equal(second.session.hintMindId, hint);
+  assert.equal(unhinted.session.hintMindId, null);
+
   const failed = store.fail(first.session.id, new Error("synthetic failure"));
   assert.equal(failed.status, "failed");
   assert.equal(failed.lastError, "synthetic failure");
   assert.equal(resolveSecretarySession(db, first.token), null);
+  assert.ok(resolveSecretarySession(db, second.token));
+  assert.ok(resolveSecretarySession(db, unhinted.token));
   assert.throws(
     () => store.close(first.session.id),
     (error) =>
       error instanceof SecretarySessionError && error.code === "conflict",
   );
-  assert.equal(
-    store.create(root, "resident/secretary-v1").session.status,
-    "starting",
-  );
   db.close();
 });
 
-test("v22 schema enforces canonical identity, scope, runtime, digest, and lifecycle", () => {
+test("v24 schema enforces canonical identity, immutable hint, runtime, digest, and lifecycle", () => {
   const db = database();
   const root = "elm-000000d1" as MindId;
   insertMind(db, root);
@@ -245,7 +244,7 @@ test("v22 schema enforces canonical identity, scope, runtime, digest, and lifecy
   const digest = secretaryControlTokenDigest(token(30));
   const insert = db.prepare(
     `INSERT INTO secretary_sessions
-       (id, root_mind_id, status, model_ref, runtime,
+       (id, hint_mind_id, status, model_ref, runtime,
         control_token_digest, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 1, 1)`,
   );
@@ -257,17 +256,21 @@ test("v22 schema enforces canonical identity, scope, runtime, digest, and lifecy
     "kubernetes",
     digest,
   );
-  assert.throws(
-    () =>
-      insert.run(
-        newSecretarySessionId(() => Buffer.alloc(16, 31)),
-        root,
-        "ready",
-        "resident/secretary-v1",
-        "kubernetes",
-        secretaryControlTokenDigest(token(31)),
-      ),
-    /UNIQUE constraint failed: secretary_sessions.root_mind_id/,
+  insert.run(
+    newSecretarySessionId(() => Buffer.alloc(16, 31)),
+    root,
+    "ready",
+    "resident/secretary-v1",
+    "kubernetes",
+    secretaryControlTokenDigest(token(31)),
+  );
+  insert.run(
+    newSecretarySessionId(() => Buffer.alloc(16, 32)),
+    null,
+    "closed",
+    "resident/secretary-v1",
+    "kubernetes",
+    secretaryControlTokenDigest(token(32)),
   );
   assert.throws(
     () =>
@@ -320,9 +323,9 @@ test("v22 schema enforces canonical identity, scope, runtime, digest, and lifecy
   assert.throws(
     () =>
       db
-        .prepare("UPDATE secretary_sessions SET root_mind_id = ? WHERE id = ?")
+        .prepare("UPDATE secretary_sessions SET hint_mind_id = ? WHERE id = ?")
         .run("elm-000000d2", id),
-    /identity and scope are immutable/,
+    /identity and hint are immutable/,
   );
   db.prepare(
     "UPDATE secretary_sessions SET status = 'closed' WHERE id = ?",
@@ -341,7 +344,7 @@ test("v22 schema enforces canonical identity, scope, runtime, digest, and lifecy
     .all() as { source: string; target: string }[];
   assert.deepEqual(
     foreignKeys.map((row) => ({ ...row })),
-    [{ source: "root_mind_id", target: "mind_items" }],
+    [{ source: "hint_mind_id", target: "mind_items" }],
   );
   db.close();
 });

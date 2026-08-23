@@ -497,8 +497,9 @@ export class ConsoleHub {
     const secretary = this.sources?.secretary;
     if (!secretary) throw new Error('secretary control unavailable');
     if (op === 'start') {
-      if (!isMindId(m.rootMindId)) throw new Error('rootMindId must be an exact canonical elm- identity');
-      return publicSecretarySession(await secretary.broker.start(m.rootMindId));
+      if (m.hintMindId !== undefined && !isMindId(m.hintMindId))
+        throw new Error('hintMindId must be an exact canonical elm- identity');
+      return publicSecretarySession(await secretary.broker.start(m.hintMindId ?? null));
     }
     if (op === 'enqueue') {
       const sessionId = controlSecretaryId(m.sessionId);
@@ -846,7 +847,7 @@ function publicWorkerStatus(value: unknown): Record<string, unknown> {
 }
 
 const SECRETARY_SESSION_FIELDS = [
-  'id', 'rootMindId', 'status', 'modelRef', 'runtime', 'createdAt', 'updatedAt', 'lastError',
+  'id', 'hintMindId', 'status', 'modelRef', 'runtime', 'createdAt', 'updatedAt', 'lastError',
 ] as const;
 function publicSecretarySession(value: unknown): Record<string, unknown> { return picked(value, SECRETARY_SESSION_FIELDS); }
 function publicSecretaryTurn(value: unknown): Record<string, unknown> {

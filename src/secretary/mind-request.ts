@@ -1,10 +1,11 @@
-import type { MindDetail } from "../store/mind.js";
+import { MIND_KINDS, type MindDetail, type MindKind } from "../store/mind.js";
 import { isMindId, type MindId } from "../store/mind-id.js";
 import type { SecretarySessionBinding } from "./session.js";
 import {
   SECRETARY_MIND_MAX_DEPTH,
   SECRETARY_MIND_MAX_ITEMS,
   type SecretaryMindTree,
+  type SecretaryProposalInput,
 } from "./mind.js";
 
 export class SecretaryMindRequestError extends Error {
@@ -25,6 +26,10 @@ export interface SecretaryMindService {
     depth?: number,
     limit?: number,
   ): SecretaryMindTree;
+  propose(
+    token: string,
+    input: SecretaryProposalInput,
+  ): { binding: SecretarySessionBinding; item: MindDetail };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -67,6 +72,54 @@ function integer(
   return Number(value);
 }
 
+function proposalText(
+  value: unknown,
+  label: string,
+  maximum: number,
+  required = false,
+): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "string")
+    throw new SecretaryMindRequestError(`${label} must be a string`);
+  const text = label === "title" ? value.trim() : value;
+  if ((required && text.length === 0) || text.length > maximum)
+    throw new SecretaryMindRequestError(
+      `${label} must contain ${required ? "1" : "0"} to ${maximum} characters`,
+    );
+  return text;
+}
+
+function proposalKind(value: unknown): MindKind | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !MIND_KINDS.includes(value as MindKind))
+    throw new SecretaryMindRequestError("kind is invalid");
+  return value as MindKind;
+}
+
+function proposalParent(value: unknown): MindId | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (!isMindId(value))
+    throw new SecretaryMindRequestError(
+      "parentId must be null or a canonical elm-* id",
+    );
+  return value;
+}
+
+function proposalTags(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 32)
+    throw new SecretaryMindRequestError(
+      "tags must be an array of at most 32 strings",
+    );
+  return value.map((tag, index) => {
+    if (typeof tag !== "string" || tag.trim().length < 1 || tag.length > 80)
+      throw new SecretaryMindRequestError(
+        `tag ${index} must contain 1 to 80 characters`,
+      );
+    return tag;
+  });
+}
+
 export function dispatchSecretaryMindRequest(
   service: SecretaryMindService,
   token: string,
@@ -102,7 +155,31 @@ export function dispatchSecretaryMindRequest(
           ),
         ),
       };
+    case "propose":
+      exact(input, [
+        "protocol",
+        "operation",
+        "title",
+        "body",
+        "kind",
+        "priority",
+        "parentId",
+        "tags",
+      ]);
+      return {
+        protocol: 1,
+        ...service.propose(token, {
+          title: proposalText(input.title, "title", 240, true)!,
+          body: proposalText(input.body, "body", 100_000),
+          kind: proposalKind(input.kind),
+          priority: integer(input.priority, "priority", 0, 4, 2),
+          parentId: proposalParent(input.parentId),
+          tags: proposalTags(input.tags),
+        }),
+      };
     default:
-      throw new SecretaryMindRequestError("operation must be get or tree");
+      throw new SecretaryMindRequestError(
+        "operation must be get, tree, or propose",
+      );
   }
 }

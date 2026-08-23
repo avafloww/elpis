@@ -23,7 +23,7 @@ async function start(inject = false) {
               return {
                 binding: {
                   sessionId: "sec-" + "a".repeat(22),
-                  rootMindId: "elm-root0001",
+                  hintMindId: "elm-root0001",
                   modelRef: "p/sec",
                   runtime: "kubernetes",
                 },
@@ -45,11 +45,14 @@ async function start(inject = false) {
           secretaryMind: {
             get() {
               throw new SecretaryMindError(
-                "outside_scope",
-                "Mind item is outside secretary scope",
+                "invalid_request",
+                "Mind id is required without a hint",
               );
             },
             tree() {
+              throw new Error("unused");
+            },
+            propose() {
               throw new Error("unused");
             },
           },
@@ -91,7 +94,7 @@ test("secretary HTTP routes are unavailable unless services are injected", async
   await close(f.server);
 });
 
-test("secretary HTTP routes enforce protocol and distinct scope errors", async () => {
+test("secretary HTTP routes enforce protocol and global request errors", async () => {
   const f = await start(true);
   let r = await fetch(f.base + "/v1/secretary/complete", {
     method: "POST",
@@ -108,10 +111,10 @@ test("secretary HTTP routes enforce protocol and distinct scope errors", async (
     headers,
     body: JSON.stringify({ protocol: 1, operation: "get", id: "elm-other001" }),
   });
-  assert.equal(r.status, 403);
+  assert.equal(r.status, 400);
   assert.deepEqual(await r.json(), {
-    error: "Mind item is outside secretary scope",
-    code: "outside_scope",
+    error: "Mind id is required without a hint",
+    code: "invalid_request",
   });
   await close(f.server);
 });

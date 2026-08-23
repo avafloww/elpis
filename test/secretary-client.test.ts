@@ -7,7 +7,7 @@ const sessionId = "sec-AAAAAAAAAAAAAAAAAAAAAA";
 const turnId = "stn-BBBBBBBBBBBBBBBBBBBBBB";
 const binding = {
   sessionId,
-  rootMindId: "elm-root0001",
+  hintMindId: "elm-root0001",
   modelRef: "p/secretary",
   runtime: "kubernetes",
 };

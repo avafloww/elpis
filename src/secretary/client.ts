@@ -174,19 +174,32 @@ export class SecretaryHttpClient {
 
   private binding(value: unknown): SecretarySessionBinding {
     const input = record(value, "secretary binding");
+    const keys = Object.keys(input).sort();
+    if (
+      keys.length !== 4 ||
+      keys[0] !== "hintMindId" ||
+      keys[1] !== "modelRef" ||
+      keys[2] !== "runtime" ||
+      keys[3] !== "sessionId"
+    )
+      throw new Error("secretary broker binding shape is invalid");
+    const hintMindId =
+      input.hintMindId === null
+        ? null
+        : (text(
+            input.hintMindId,
+            "secretary binding hint",
+          ) as SecretarySessionBinding["hintMindId"]);
     const binding: SecretarySessionBinding = {
       sessionId: text(input.sessionId, "secretary binding session"),
-      rootMindId: text(
-        input.rootMindId,
-        "secretary binding root",
-      ) as SecretarySessionBinding["rootMindId"],
+      hintMindId,
       modelRef: text(input.modelRef, "secretary binding model"),
       runtime: input.runtime as "kubernetes",
     };
     if (
       binding.sessionId !== this.options.sessionId ||
       binding.runtime !== "kubernetes" ||
-      !isMindId(binding.rootMindId) ||
+      (binding.hintMindId !== null && !isMindId(binding.hintMindId)) ||
       !/^[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9._-]*$/.test(binding.modelRef)
     )
       throw new Error("secretary broker returned a different session binding");

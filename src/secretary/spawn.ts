@@ -9,7 +9,7 @@ import {
 
 export interface SecretaryProvisionRequest {
   sessionId: string;
-  rootMindId: MindId;
+  hintMindId: MindId | null;
   modelRef: string;
   token: string;
 }
@@ -98,8 +98,8 @@ export class SecretarySpawnBroker {
     return session;
   }
 
-  start(rootMindId: MindId): Promise<SecretarySession> {
-    const run = this.startTail.then(() => this.startInside(rootMindId));
+  start(hintMindId: MindId | null = null): Promise<SecretarySession> {
+    const run = this.startTail.then(() => this.startInside(hintMindId));
     this.startTail = run.then(
       () => undefined,
       () => undefined,
@@ -107,7 +107,9 @@ export class SecretarySpawnBroker {
     return run;
   }
 
-  private async startInside(rootMindId: MindId): Promise<SecretarySession> {
+  private async startInside(
+    hintMindId: MindId | null,
+  ): Promise<SecretarySession> {
     if (!this.options.config.secretary.enabled)
       throw new SecretarySpawnError(
         "unavailable",
@@ -131,11 +133,11 @@ export class SecretarySpawnBroker {
         "secretary session capacity is exhausted",
       );
 
-    const created = this.store.create(rootMindId, modelRef);
+    const created = this.store.create(hintMindId, modelRef);
     try {
       const receipt = await this.options.runtime.provision({
         sessionId: created.session.id,
-        rootMindId,
+        hintMindId,
         modelRef,
         token: created.token,
       });

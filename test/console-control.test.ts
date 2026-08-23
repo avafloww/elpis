@@ -42,7 +42,7 @@ const workerSession = {
 };
 const secretaryId = 'sec-1234567890123456789012';
 const secretarySession = {
-  id: secretaryId, rootMindId: 'elm-1234abcd', status: 'ready', modelRef: 'configured/secretary',
+  id: secretaryId, hintMindId: 'elm-1234abcd', status: 'ready', modelRef: 'configured/secretary',
   runtime: 'kubernetes', podName: 'secretary-pod', podUid: 'uid', createdAt: 1, updatedAt: 2,
   lastError: null, token: 'raw-secretary-token', controlTokenDigest: 'digest',
 };
@@ -166,7 +166,7 @@ test('control operations validate bounded identities/content and delegate exact 
   await control(hub, c, { lane: 'worker', op: 'start', reqId: 10, mindId: 'elm-1234abcd', modelRef: 'configured/model' });
   await control(hub, c, { lane: 'worker', op: 'send', reqId: 11, ref: 'worker:quiet-fox', content: 'bounded hello' });
   await control(hub, c, { lane: 'worker', op: 'dismiss', reqId: 12, ref: 'wrk-12345678' });
-  await control(hub, c, { lane: 'secretary', op: 'start', reqId: 13, rootMindId: 'elm-1234abcd' });
+  await control(hub, c, { lane: 'secretary', op: 'start', reqId: 13, hintMindId: 'elm-1234abcd' });
   await control(hub, c, { lane: 'secretary', op: 'enqueue', reqId: 14, sessionId: secretaryId, content: 'question' });
   await control(hub, c, { lane: 'secretary', op: 'close', reqId: 15, sessionId: secretaryId });
   assert.deepEqual(calls, [
@@ -180,7 +180,7 @@ test('control operations validate bounded identities/content and delegate exact 
     { lane: 'worker', op: 'start', reqId: 20, mindId: 'elm-123' },
     { lane: 'worker', op: 'send', reqId: 21, ref: 'x'.repeat(200), content: 'x' },
     { lane: 'worker', op: 'send', reqId: 22, ref: 'wrk-12345678', content: '😀'.repeat(9000) },
-    { lane: 'secretary', op: 'start', reqId: 23, rootMindId: 'elm-123' },
+    { lane: 'secretary', op: 'start', reqId: 23, hintMindId: 'elm-123' },
     { lane: 'secretary', op: 'enqueue', reqId: 24, sessionId: 'sec-short', content: 'x' },
   ]) assert.equal((await control(hub, c, frame)).ok, false);
   assert.equal(calls.length, before);

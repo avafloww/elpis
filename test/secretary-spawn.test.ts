@@ -97,10 +97,10 @@ test("secretary spawn binds exact root and configured model while persisting onl
   insertMind(f.db, ROOT_A);
   const session = await f.broker.start(ROOT_A);
   assert.equal(session.status, "ready");
-  assert.equal(session.rootMindId, ROOT_A);
+  assert.equal(session.hintMindId, ROOT_A);
   assert.equal(session.modelRef, f.config.llm.registry.roles.secretary);
   assert.equal(f.requests.length, 1);
-  assert.equal(f.requests[0].rootMindId, ROOT_A);
+  assert.equal(f.requests[0].hintMindId, ROOT_A);
   assert.equal(f.requests[0].modelRef, f.config.llm.registry.roles.secretary);
   assert.match(f.requests[0].token, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(

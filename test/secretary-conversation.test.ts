@@ -108,7 +108,7 @@ test("token-bound broker never accepts caller-supplied session scope", () => {
   const turn = f.conversations.enqueue(f.session.id, user("bound question"));
   const pulled = f.broker.pull(f.token);
   assert.equal(pulled.binding.sessionId, f.session.id);
-  assert.equal(pulled.binding.rootMindId, ROOT);
+  assert.equal(pulled.binding.hintMindId, ROOT);
   assert.equal(pulled.turn?.id, turn.id);
   assert.deepEqual(pulled.turn?.messages, [user("bound question")]);
   const completed = f.broker.complete(
