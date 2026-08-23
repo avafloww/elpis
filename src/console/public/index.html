@@ -1,213 +1,37 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" data-elpis-theme-color content="#e7ece4">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Elpis">
-
-<title>Elpis · harness console</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./styles.css">
-<link id="elpis-favicon" data-elpis-favicon rel="icon" type="image/svg+xml" href="./elpis-icon-light.svg">
-<link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
-<link rel="manifest" href="./manifest.webmanifest">
-
-<script src="./elpis-branding.js" defer></script>
-<script src="./marked.umd.js"></script>
-<script src="./prettier-standalone.js"></script>
-<script src="./prettier-babel.js"></script>
-<script src="./prettier-estree.js"></script>
-<script src="./prettier-typescript.js"></script>
-<script src="./prism.js"></script>
-<script src="./prism-typescript.js"></script>
-<script src="./run-code.js"></script>
-</head>
-<body>
-<div class="ep-app" id="app" data-theme="light" data-cot="open">
-<script>/* set theme before first paint to avoid a light flash for dark-preference users */
-(function(){try{var t=localStorage.getItem('ep-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.getElementById('app').setAttribute('data-theme',t);}catch(e){}})();</script>
-
-  <!-- ============ top bar ============ -->
-  <div class="ep-topbar">
-    <div class="ep-brand" role="img" aria-label="Elpis harness console">
-      <span class="ep-brand-lockup" aria-hidden="true">
-        <img class="ep-brand-logo ep-brand-logo-light" src="./elpis-logo-light.svg" alt="">
-        <img class="ep-brand-logo ep-brand-logo-dark" src="./elpis-logo-dark.svg" alt="">
-      </span>
-    </div>
-
-    <!-- context usage meter -->
-    <div class="ep-meter">
-      <div class="ep-meter-head">
-        <span class="ep-meter-label">context usage</span>
-        <span class="ep-meter-value" id="meter-value">— / — · 0%</span>
-      </div>
-      <div class="ep-meter-track-wrap">
-        <div class="ep-meter-track"><div class="ep-meter-fill" id="meter-fill"></div></div>
-        <div class="ep-meter-tick" id="meter-tick" title="compaction target"></div>
-      </div>
-      <div class="ep-meter-subwrap">
-        <span class="ep-meter-sub" id="meter-sub">⟂ compaction</span>
-      </div>
-    </div>
-
-    <div class="ep-spacer"></div>
-
-    <div class="ep-ws" id="ws-chip">
-      <div class="ep-ws-dot" id="ws-dot"></div>
-      <span class="ep-ws-url" id="ws-url">/ws</span>
-      <span class="ep-ws-state" id="ws-state">· connecting</span>
-    </div>
-    <div class="ep-gitbox">
-      <span class="ep-git">elpis@<span class="ep-git-hash" id="git-hash">…</span></span>
-      <span class="ep-uptime" id="git-uptime">up …</span>
-    </div>
-    <button class="ep-toggle" id="theme-toggle" title="Toggle light / dark">
-      <span id="theme-icon">☀</span><span id="theme-label">Elpis</span>
-    </button>
-    <div class="ep-avatar" id="agent-avatar">◆</div>
-  </div>
-
-  <!-- ============ middle row ============ -->
-  <div class="ep-middle">
-    <button class="ep-rail-scrim" id="rail-scrim" type="button" aria-label="Close rooms" hidden></button>
-
-    <!-- rooms lens rail -->
-    <div class="ep-rail" id="rail" data-active-room="all">
-      <div class="ep-rail-head">
-        <div class="ep-rail-title">Rooms</div>
-        <div class="ep-rail-explain">One shared context. Spotlight a room to see only what it contributed.</div>
-      </div>
-      <div class="scroll ep-rail-list" id="rail-list"></div>
-      <div class="ep-rail-cache" id="rail-cache" hidden></div>
-      <div class="ep-rail-usage" id="rail-usage" hidden></div>
-      <div class="ep-rail-foot">
-        <div class="ep-rail-foot-row"><span>participants</span><span id="participant-count">—</span></div>
-      </div>
-    </div>
-
-    <!-- unified stream -->
-    <div class="ep-streamcol">
-      <div class="ep-stream-head">
-        <button class="ep-rooms-toggle" id="rooms-toggle" type="button" aria-controls="rail" aria-expanded="false">Rooms</button>
-        <nav class="ep-view-tabs" aria-label="Console view">
-          <button class="ep-view-tab" id="stream-toggle">Thread</button>
-          <button class="ep-view-tab" id="view-toggle">Context</button>
-          <button class="ep-view-tab" id="mind-toggle">Mind</button>
-        </nav>
-        <span class="ep-spacer"></span>
-        <div class="ep-view-tools" id="stream-tools">
-          <button class="ep-toggle ep-latest-btn" id="stream-latest" type="button" title="Jump to the latest Thread activity" hidden>↓ latest</button>
-          <span class="ep-compacting" id="compacting" hidden>⟳ compacting…</span>
-          <span class="ep-lens" id="lens-label">all rooms</span>
-          <button class="ep-toggle ep-cot-btn" id="cot-toggle" title="Show or hide all chains of thought"><span class="ep-flower-gold">❋</span> CoT <span id="cot-label">shown</span></button>
-          <button class="ep-toggle ep-cot-btn" id="tools-toggle" title="Show or hide all tool calls and results">Tools <span id="tools-label">hidden</span></button>
-        </div>
-        <div class="ep-view-tools" id="context-tools" hidden>
-          <button class="ep-toggle ep-latest-btn" id="ctx-latest" type="button" title="Jump to the latest Context message" hidden>↓ latest</button>
-          <span class="ep-ctx-stat" id="ctx-stat">—</span>
-          <button class="ep-toggle ep-ctx-btn" id="ctx-refresh" title="Re-request the current context window">↻ refresh</button>
-          <button class="ep-toggle ep-ctx-btn" id="ctx-copy-json" title="Copy the full request body (model + tools + messages) as pretty JSON">⧉ JSON</button>
-          <button class="ep-toggle ep-ctx-btn" id="ctx-copy-jsonl" title="Copy the messages as JSONL — one message object per line">⧉ JSONL</button>
-        </div>
-        <div class="ep-view-tools" id="mind-tools" hidden>
-          <span class="ep-mind-status" id="mind-status">loading…</span>
-          <select class="ep-field ep-mind-sort" id="mind-sort" aria-label="Sort Mind items">
-            <option value="updated_desc">updated · newest</option><option value="updated_asc">updated · oldest</option>
-            <option value="created_desc">created · newest</option><option value="created_asc">created · oldest</option>
-            <option value="last_comment_desc">last comment · newest</option><option value="last_comment_asc">last comment · oldest</option>
-          </select>
-          <button class="ep-mind-tag-filter" id="mind-tag-filter" title="Clear tag filter" hidden></button>
-          <input class="ep-field ep-mind-search" id="mind-search" placeholder="search mind…" aria-label="Search mind">
-          <button class="ep-toggle ep-mind-btn" id="mind-refresh" title="Refresh Mind">↻</button>
-          <button class="ep-toggle ep-mind-btn primary" id="mind-new">＋ new</button>
-        </div>
-      </div>
-      <div class="ep-stream scroll" id="stream" data-active-room="all">
-        <div class="ep-backfill" id="backfill-note" hidden>loading earlier context…</div>
-        <div id="stream-body"></div>
-        <div id="stream-live"></div>
-      </div>
-      <form class="ep-composer" id="composer">
-        <div class="ep-composer-box">
-          <textarea id="composer-text" rows="1" maxlength="32768" aria-label="Message agent · console" placeholder="Write a message…"></textarea>
-          <button type="submit" id="composer-send" aria-label="Send message" title="Send message">↑</button>
-        </div>
-        <span class="ep-composer-status" id="composer-status" aria-live="polite"></span>
-      </form>
-
-      <!-- context explorer: the raw context window, as the next API call would send it -->
-      <div class="ep-ctx" id="ctx" hidden>
-        <div class="scroll ep-ctx-list" id="ctx-body"></div>
-      </div>
-      <!-- mind: durable dependency-aware work graph -->
-      <div class="ep-mind" id="mind" hidden>
-        <div class="ep-ops" id="ops">
-          <div class="ep-ops-head">
-            <span class="ep-ops-title">unfinished operations</span>
-            <span class="ep-ops-note">real fixed-template backends · rough controls</span>
-            <span class="ep-spacer"></span>
-            <button class="ep-mind-mini" id="ops-refresh" type="button">↻ refresh</button>
-          </div>
-          <div class="ep-ops-grid">
-            <section class="ep-op-lane" aria-labelledby="worker-lane-title">
-              <div class="ep-op-head"><strong id="worker-lane-title">workers</strong><span id="worker-op-status">loading…</span></div>
-              <div class="ep-op-start">
-                <input class="ep-field" id="worker-root" placeholder="selected elm-* Mind id" aria-label="Worker Mind root">
-                <button class="ep-mind-mini" id="worker-start" type="button">start</button>
-              </div>
-              <div class="ep-op-sessions" id="worker-sessions"></div>
-            </section>
-            <section class="ep-op-lane" aria-labelledby="secretary-lane-title">
-              <div class="ep-op-head"><strong id="secretary-lane-title">secretary</strong><span id="secretary-op-status">loading…</span></div>
-              <div class="ep-op-start">
-                <input class="ep-field" id="secretary-root" placeholder="selected elm-* Mind root" aria-label="Secretary Mind root">
-                <button class="ep-mind-mini" id="secretary-start" type="button">start</button>
-              </div>
-              <div class="ep-op-sessions" id="secretary-sessions"></div>
-            </section>
-          </div>
-        </div>
-        <div class="ep-mind-stats" id="mind-stats"></div>
-        <div class="ep-mind-workspace">
-          <div class="scroll ep-mind-list" id="mind-list"></div>
-          <div class="scroll ep-mind-detail" id="mind-detail">
-            <div class="ep-mind-empty">Select an item, or make the next true piece of work.</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- draggable separator -->
-  <div class="ep-resizer" id="resizer" title="Drag to resize the log"></div>
-
-  <!-- ============ docked log ============ -->
-  <div class="ep-logdock" id="logdock">
-    <div class="ep-log-head">
-      <span class="ep-log-title">Aether</span>
-      <span class="ep-log-cmd">journalctl --user -u elpis-harness -f</span>
-      <span class="ep-spacer"></span>
-      <div class="ep-log-filters" id="log-filters">
-        <span class="ep-log-chip active" data-level="all">all</span>
-        <span class="ep-log-chip" data-level="debug">debug</span>
-        <span class="ep-log-chip" data-level="info">info</span>
-        <span class="ep-log-chip" data-level="warn">warn</span>
-        <span class="ep-log-chip" data-level="error">error</span>
-      </div>
-      <button class="ep-log-toggle" id="log-toggle" type="button" aria-controls="log-body" aria-expanded="false">show</button>
-      <div class="ep-log-live"></div>
-    </div>
-    <div class="scroll ep-log-body" id="log-body" data-filter="all"></div>
-  </div>
-
-</div>
-<script src="./scroll-follow.js"></script>
-<script src="./app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#141320" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="Elpis" />
+    <title>Elpis · console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" type="image/svg+xml" href="./elpis-icon-dark.svg" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="./apple-touch-icon.png"
+    />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./app.css" />
+    <script src="./marked.umd.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="./app.js"></script>
+  </body>
 </html>

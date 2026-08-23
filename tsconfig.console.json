@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "noEmit": true,
+    "rootDir": ".",
+    "types": []
+  },
+  "include": ["src/console/client/**/*.ts", "src/console/client/**/*.tsx"],
+  "exclude": []
+}

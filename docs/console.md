@@ -1,38 +1,30 @@
 # Elpis Console
 
-Elpis Console is a local web interface for observing and interacting with the running agent. It is served by `src/console/server.ts` and synchronized over one WebSocket through `ConsoleHub`.
+Elpis Console is the private Preact interface for observing and steering one running resident. `src/console/server.ts` serves a static bundle built from `src/console/client`; `ConsoleHub` synchronizes every view over one same-origin WebSocket.
 
 ## Views
 
-- **Thread** — committed messages, streaming assistant work, tool calls, sends, compaction markers, and archived backfill.
-- **Context** — the exact next-call request projection, including system segments, messages, and tools.
-- **Mind** — searchable work graph with filters, sorting, rendered Markdown, comments, dependencies, reminders, and edit controls.
-- **Log dock** — recent structured harness logs and level filters.
+- **Thread** — committed messages, streaming assistant work, reasoning and tool cards, sends, compaction markers, room lens, and archived backfill.
+- **Context** — the exact next-call request projection with verbatim copy actions.
+- **Mind** — grouped proposals and committed work, details, comments, edits, and secretary launch context.
+- **Workers** — fixed-template episode status, steering mailbox, and path-free artifact receipts.
+- **Secretary** — ephemeral runtime conversations with durable turn history and optional Mind prompt hints.
+- **Logs** — a persistent desktop rail and dedicated mobile view over the bounded log tail.
 
-The room rail filters the displayed thread without creating separate histories.
+The v2 visual and functional divergences are recorded in `docs/console-v2-adjustments.md`.
 
-Thread and Context follow new activity only while the reader is already near the bottom. Scrolling up pauses follow mode and reveals a `↓ latest` control in that view; clicking it jumps to the newest item and resumes following. Context refreshes preserve the paused scroll position instead of forcing the pane down.
+## Build
 
-## Streaming
+`npm run build` typechecks the Node harness, copies static authored assets, then strictly typechecks the browser client with `tsconfig.console.json` and bundles Preact through esbuild into stable `dist/console/public/app.js` and `app.css` assets. The design-tool `.dc.html` runtime is not part of production.
 
-Provider deltas reach the browser incrementally. A pending stream is visually distinct from committed history; committed messages replace the pending overlay. Context refreshes only after committed history changes because it represents the next complete request, not partial output.
+## Behavioral invariants
 
-## Chat ingress
+The room rail filters one shared history rather than creating separate conversations. Thread follows growth only while the reader remains near the bottom; scrolling upward reveals `↓ latest`. Archived prepend preserves the visible position. Provider deltas arrive incrementally and committed history replaces the pending stream. Context responses are request-correlated so stale projections cannot repaint the view.
 
-The composer sends a console-provenance person message into the same inbound FIFO as Discord. Enter sends and Shift+Enter inserts a newline. The hub deduplicates client nonces and returns an explicit result.
+The Thread composer enqueues console-provenance person speech into the same inbound FIFO as Discord. Worker and secretary operations use fixed request-correlated Hub controls. The UI renders unavailable, stale, ambiguous, failed, and empty states honestly instead of inventing fixture data.
 
-Console speech does not impersonate Discord and does not bypass the agent loop.
+## Privacy and isolation
 
-## Context privacy
+Context may expose system prompts, durable memory, conversation history, and tool schemas. Thread, Mind, worker receipts, secretary history, and logs may expose private work. Treat the entire console as a private administrative surface.
 
-The Context view can expose system prompts, durable memory, conversation history, and tool schemas. The Thread and Mind views can expose private messages and work. Treat the entire console as a private administrative surface.
-
-The server binds to loopback by default and provides no built-in authentication. For remote access, place an authenticated TLS reverse proxy in front of it.
-
-## Attachments
-
-The server exposes mode-restricted attachment files through a path-contained `/attachments/` route. Known media types may render inline; unknown types download as bytes. Path traversal is rejected.
-
-## Failure isolation
-
-Console bind or client errors are logged but do not stop the agent. The console reads state through the hub and delegates mutations through explicit handlers; it does not directly own the agent's stores.
+The server binds to loopback by default. Remote access requires an authenticated TLS reverse proxy. Same-origin WebSocket checks, bounded attachment routes, and explicit Hub mutation handlers remain server-owned. Console bind or client failures do not stop the agent.

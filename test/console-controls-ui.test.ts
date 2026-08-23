@@ -1,40 +1,84 @@
-import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
-import test from "node:test";
-import { fileURLToPath } from "node:url";
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { turnMessages } from '../src/console/client/components/secretary.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.join(here, "../src/console/public");
+const root = path.join(here, '..');
+const read = (file: string): string =>
+  fs.readFileSync(path.join(root, file), 'utf8');
 
-function read(name: string): string {
-  return fs.readFileSync(path.join(publicDir, name), "utf8");
-}
-
-test("rough operations strip exposes real worker and secretary lanes", () => {
-  const html = read("index.html");
-  assert.match(html, /unfinished operations/);
-  assert.match(html, /id="worker-root"/);
-  assert.match(html, /id="secretary-root"/);
-  assert.match(html, /id="worker-sessions"/);
-  assert.match(html, /id="secretary-sessions"/);
+test('console source is a Preact five-view shell with one WebSocket reducer', () => {
+  const main = read('src/console/client/main.tsx');
+  const socket = read('src/console/client/use-console.ts');
+  const html = read('src/console/public/index.html');
+  assert.match(main, /Thread.*Context.*Mind.*Workers.*Secretary/s);
+  assert.match(main, /useConsole\(\)/);
+  assert.match(socket, /new WebSocket/);
+  assert.match(socket, /t: 'control'/);
+  assert.match(socket, /t: 'mind'/);
+  assert.match(html, /id="app"/);
+  assert.match(html, /app\.css/);
+  assert.match(html, /app\.js/);
+  assert.doesNotMatch(html, /unfinished operations|worker-root|secretary-root/);
 });
 
-test("console controls use the one request-correlated websocket contract", () => {
-  const app = read("app.js");
-  assert.match(app, /JSON\.stringify\(\{ t: 'control', lane, op, reqId,/);
-  assert.match(app, /case 'controlResult': applyControlResult\(m\)/);
-  assert.match(app, /controlSend\('worker', 'snapshot'\)/);
-  assert.match(app, /controlSend\('secretary', 'snapshot'\)/);
-  assert.match(app, /window\.confirm\(`Dismiss /);
-  assert.match(app, /window\.confirm\(`Close and revoke /);
+test('build uses exact Preact and esbuild seam while retired vanilla files stay absent', () => {
+  const pkg = JSON.parse(read('package.json'));
+  assert.equal(pkg.dependencies.preact, '10.29.8');
+  assert.equal(pkg.devDependencies.esbuild, '0.28.2');
+  assert.match(
+    pkg.scripts['build:console'],
+    /tsc -p tsconfig\.console\.json.*build-console/,
+  );
+  for (const file of [
+    'app.js',
+    'styles.css',
+    'scroll-follow.js',
+    'run-code.js',
+    'elpis-branding.js',
+  ])
+    assert.equal(
+      fs.existsSync(path.join(root, 'src/console/public', file)),
+      false,
+      file,
+    );
 });
 
-test("console operations UI displays receipts but has no secret or local-path control", () => {
-  const app = read("app.js");
-  const html = read("index.html");
-  const controls = app.slice(app.indexOf("const controlState"), app.indexOf("function applyMindSnapshot"));
-  assert.match(controls, /a\.sha256 \|\| a\.digest/);
-  assert.doesNotMatch(html, /token|credential|artifact path/i);
-  assert.doesNotMatch(controls, /secretKey|rawToken|relativePath|localPath/);
+test('secretary turn renderer preserves ordinary request and response wire records', () => {
+  assert.deepEqual(
+    turnMessages({
+      status: 'completed',
+      request: { role: 'user', content: 'question' },
+      response: { role: 'assistant', content: 'answer' },
+    }),
+    [
+      { role: 'user', content: 'question', status: 'completed' },
+      { role: 'assistant', content: 'answer', status: 'completed' },
+    ],
+  );
+});
+
+test('operations display bounded receipts without raw credentials or local paths', () => {
+  const source = [
+    'main.tsx',
+    'use-console.ts',
+    'components/workers.tsx',
+    'components/secretary.tsx',
+  ]
+    .map((file) => read(`src/console/client/${file}`))
+    .join('\n');
+  assert.match(source, /sha256/);
+  assert.match(source, /artifact/);
+  assert.match(source, /request-correlated|reqId|requestId/);
+  assert.doesNotMatch(
+    source,
+    /rawToken|controlTokenDigest|secretKey|relativePath|localPath|podUid|podName/,
+  );
+  assert.match(
+    read('docs/console-v2-adjustments.md'),
+    /Secretary launch context is not authority scope/,
+  );
 });
