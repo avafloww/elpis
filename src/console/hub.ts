@@ -1497,7 +1497,7 @@ export function frameUrlFromLocalPath(localPath: string): string | null {
 
 function watchFrameUrl(content: string): string | null {
   for (const match of content.matchAll(
-    /^attachment#\d+: .* \(image\/[^,]+, \d+ bytes\) -> (.*?)(?: \(inlined below\))?$/gm,
+    /^\s*attachment#\d+: .* \(image\/[^,]+, \d+ bytes\) -> (.*?)(?: \(inlined below\))?$/gm,
   )) {
     const url = frameUrlFromLocalPath(match[1] ?? '');
     if (url) return url;

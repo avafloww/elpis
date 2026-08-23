@@ -462,6 +462,22 @@ test('serializeMessage delivers backend-owned person, harness, and watch provena
   assert.equal(watch.eventKind, 'watch');
   assert.equal(watch.displayName, 'harness');
   assert.equal(watch.frameUrl, '/frames/computer/desktop.png');
+
+  const relativeWatch = serializeMessage(
+    {
+      role: 'user',
+      channel: 'watch',
+      content: [
+        '<incoming-message channel="watch" author="harness" time="t">',
+        '  attachment#1: live.png (image/png, 123 bytes) -> elpis-data/browser/screenshots/live.png',
+        '[watch] live frame',
+        '</incoming-message>',
+      ].join('\n'),
+    },
+    31,
+    32,
+  );
+  assert.equal(relativeWatch.frameUrl, '/frames/browser/live.png');
   assert.equal(
     frameUrlFromLocalPath(
       '/tmp/home/elpis-data/motor/episodes/episode-0004.png',
