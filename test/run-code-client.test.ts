@@ -59,6 +59,33 @@ test('operation card targets hide host prefixes while retaining useful paths', (
   );
 });
 
+test('operation cards follow the rich reference taxonomy without fake telemetry', () => {
+  const source = fs.readFileSync(
+    path.join(root, 'src/console/client/components/thread.tsx'),
+    'utf8',
+  );
+  const styles = fs.readFileSync(
+    path.join(root, 'src/console/client/styles.css'),
+    'utf8',
+  );
+  for (const label of [
+    'edited file',
+    'ran command',
+    'created Mind item',
+    'read file',
+    'wrote file',
+    'desktop',
+  ])
+    assert.match(source, new RegExp(label));
+  assert.match(source, /callId=\{call\.id\}/);
+  assert.match(source, /\+ show full value/);
+  assert.match(source, /more lines/);
+  assert.match(styles, /operation-mind-body/);
+  assert.match(styles, /operation-desktop-body/);
+  assert.match(styles, /operation-run-state\.running/);
+  assert.doesNotMatch(source, /exit 0|durationMs|operation-state/);
+});
+
 test('rich edit cards produce a bounded line diff with stable line numbers', () => {
   assert.deepEqual(editDiffPreview('a\nb\nc', 'a\nB\nC\nc'), [
     { kind: 'same', number: 1, text: 'a' },

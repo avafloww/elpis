@@ -400,20 +400,32 @@ test('sandbox operation extraction types direct Mind, edit, shell, file, and des
   const protectedCode = protectDisplayHeredocs(code);
   assert.equal(protectedCode.error, undefined);
   assert.deepEqual(extractSandboxOperations(code, protectedCode), [
-    { kind: 'mind', name: 'elpis.mind.get', target: 'elm-example' },
+    {
+      kind: 'mind',
+      name: 'elpis.mind.get',
+      target: 'elm-example',
+      args: ['elm-example'],
+    },
     {
       kind: 'edit',
       name: 'elpis.edit',
       target: 'src/a.ts',
+      args: ['src/a.ts', 'const n=1;', 'const n = 2;'],
       before: 'const n=1;',
       after: 'const n = 2;',
     },
-    { kind: 'shell', name: 'elpis.sh', target: 'npm test' },
-    { kind: 'file', name: 'elpis.read', target: 'src/a.ts' },
+    { kind: 'shell', name: 'elpis.sh', target: 'npm test', args: ['npm test'] },
+    {
+      kind: 'file',
+      name: 'elpis.read',
+      target: 'src/a.ts',
+      args: ['src/a.ts'],
+    },
     {
       kind: 'computer',
       name: 'elpis.computer.look',
       target: 'verify frame',
+      args: ['verify frame'],
     },
   ]);
 });

@@ -191,6 +191,7 @@ export interface SandboxOperation {
   kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
   name: string;
   target: string;
+  args?: string[];
   before?: string;
   after?: string;
 }
@@ -1318,6 +1319,7 @@ const SUMMARY_PREFIX = '=== Summary of earlier conversation';
 const NOTICE_MARK = '[harness: context compacted';
 
 const OPERATION_VALUE_MAX = 20_000;
+const OPERATION_ARGUMENT_MAX = 600;
 const OPERATION_TOTAL_VALUE_MAX = 120_000;
 
 function splitCallArguments(
@@ -1445,7 +1447,19 @@ export function extractSandboxOperations(
     const openParen = match.index + spelling.lastIndexOf('(');
     const args = splitCallArguments(source, blanked, openParen);
     const target = operationArgument(args[0], heredocs);
-    const operation: SandboxOperation = { kind, name, target: target.value };
+    const operation: SandboxOperation = {
+      kind,
+      name,
+      target: target.value,
+      args: args
+        .slice(0, 4)
+        .map((value) =>
+          operationArgument(value, heredocs).value.slice(
+            0,
+            OPERATION_ARGUMENT_MAX,
+          ),
+        ),
+    };
     if (kind === 'edit') {
       const before = operationArgument(args[1], heredocs);
       const after = operationArgument(args[2], heredocs);

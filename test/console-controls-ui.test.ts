@@ -9,6 +9,8 @@ import { clampLogRailHeight } from '../src/console/client/scroll.js';
 import {
   appendSecretaryTurn,
   secretaryIdFromControl,
+  secretaryPendingStatus,
+  secretarySnapshotHasPending,
   upsertControlSession,
   workerDetailFromControl,
 } from '../src/console/client/use-console.js';
@@ -179,6 +181,37 @@ test('successful control receipts upsert sessions and append Secretary turns imm
   const source = read('src/console/client/use-console.ts');
   for (const op of ['start', 'send', 'dismiss', 'enqueue', 'close'])
     assert.match(source, new RegExp(`frame\\.op === '${op}'`));
+});
+
+test('Secretary pending state drives bounded refresh and honest activity labels', () => {
+  const snapshot = {
+    available: true,
+    sessions: [
+      { id: 'sec-queued', turns: [{ status: 'queued' }] },
+      { id: 'sec-claimed', turns: [{ status: 'claimed' }] },
+    ],
+  };
+  assert.equal(secretaryPendingStatus(snapshot.sessions[0]), 'queued');
+  assert.equal(secretaryPendingStatus(snapshot.sessions[1]), 'claimed');
+  assert.equal(secretarySnapshotHasPending(snapshot), true);
+  assert.equal(
+    secretarySnapshotHasPending({
+      available: true,
+      sessions: [{ turns: [{ status: 'completed' }] }],
+    }),
+    false,
+  );
+  const socket = read('src/console/client/use-console.ts');
+  const view = read('src/console/client/components/secretary.tsx');
+  assert.match(socket, /frame\.op !== 'snapshot'/);
+  assert.match(
+    socket,
+    /frame\.lane === 'secretary'[\s\S]*frame\.op === 'snapshot'[\s\S]*secretary: controlSnapshot\(frame\.result\)/,
+  );
+  assert.match(socket, /state\.view !== 'secretary'/);
+  assert.match(socket, /}, 750\)/);
+  assert.match(view, /Waiting for Secretary/);
+  assert.match(view, /Secretary is thinking/);
 });
 
 test('secretary turn renderer preserves ordinary request and response wire records', () => {

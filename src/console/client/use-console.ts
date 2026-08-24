@@ -107,6 +107,21 @@ export function upsertControlSession(
   };
 }
 
+export function secretaryPendingStatus(
+  session: unknown,
+): 'queued' | 'claimed' | null {
+  const turns = array<JsonObject>(object(session).turns);
+  if (turns.some((turn) => text(turn.status) === 'claimed')) return 'claimed';
+  if (turns.some((turn) => text(turn.status) === 'queued')) return 'queued';
+  return null;
+}
+
+export function secretarySnapshotHasPending(
+  snapshot: ControlSnapshot,
+): boolean {
+  return snapshot.sessions.some((session) => secretaryPendingStatus(session));
+}
+
 export function appendSecretaryTurn(
   snapshot: ControlSnapshot,
   value: unknown,
@@ -283,6 +298,12 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
           notice: text(frame.error, 'control operation failed'),
         };
       if (frame.lane === 'worker') {
+        if (frame.op === 'snapshot')
+          return {
+            ...state,
+            workers: controlSnapshot(frame.result),
+            notice: null,
+          };
         if (frame.op === 'status')
           return {
             ...state,
@@ -333,6 +354,12 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
         }
       }
       if (frame.lane === 'secretary') {
+        if (frame.op === 'snapshot')
+          return {
+            ...state,
+            secretary: controlSnapshot(frame.result),
+            notice: null,
+          };
         if (frame.op === 'start') {
           const session = object(frame.result);
           return {
@@ -467,7 +494,11 @@ export function useConsole(): [ConsoleState, ConsoleActions] {
                 reqId: ++requestId.current,
               });
           }
-          if (frame.t === 'controlResult' && frame.ok !== false) {
+          if (
+            frame.t === 'controlResult' &&
+            frame.ok !== false &&
+            frame.op !== 'snapshot'
+          ) {
             const lane = frame.lane === 'secretary' ? 'secretary' : 'worker';
             send({
               t: 'control',
@@ -501,6 +532,24 @@ export function useConsole(): [ConsoleState, ConsoleActions] {
       socket.current?.close();
     };
   }, [send]);
+
+  useEffect(() => {
+    if (
+      state.connection !== 'connected' ||
+      state.view !== 'secretary' ||
+      !secretarySnapshotHasPending(state.secretary)
+    )
+      return;
+    const timer = window.setTimeout(() => {
+      send({
+        t: 'control',
+        lane: 'secretary',
+        op: 'snapshot',
+        reqId: ++requestId.current,
+      });
+    }, 750);
+    return () => window.clearTimeout(timer);
+  }, [send, state.connection, state.secretary, state.view]);
 
   const setView = useCallback(
     (view: ViewName) => {

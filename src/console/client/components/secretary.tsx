@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'preact/hooks';
-import type { ConsoleActions } from '../use-console.js';
+import { secretaryPendingStatus, type ConsoleActions } from '../use-console.js';
 import type { ConsoleState, JsonObject } from '../types.js';
 import { array, object, text } from '../types.js';
 import {
@@ -99,6 +99,7 @@ export function SecretaryView({
     [selected],
   );
   const title = titleFor(selected, state, hintMindId);
+  const pending = selected ? secretaryPendingStatus(selected) : null;
   const start = (): void =>
     actions.control('secretary', 'start', hintMindId ? { hintMindId } : {});
   return (
@@ -190,6 +191,24 @@ export function SecretaryView({
                 <Markdown value={message.content} />
               </div>
             ))}
+            {pending ? (
+              <div
+                class={`secretary-activity secretary-activity-${pending}`}
+                role='status'
+                aria-live='polite'
+              >
+                <span class='secretary-activity-dots' aria-hidden='true'>
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span>
+                  {pending === 'claimed'
+                    ? 'Secretary is thinking'
+                    : 'Waiting for Secretary'}
+                </span>
+              </div>
+            ) : null}
             {!messages.length && selected ? (
               <span class='muted-copy'>No turns in this session yet.</span>
             ) : null}
