@@ -1,5 +1,6 @@
 import type { ChatMessage, CompleteResult } from '../llm/llm.js';
 import type { SecretaryConversationPullReply } from './conversation.js';
+import { SecretaryBrokerRequestError } from './client.js';
 
 const MAX_MODEL_ROUNDS = 8;
 const MAX_MIND_CALLS = 16;
@@ -38,6 +39,19 @@ function toolResult(value: unknown): string {
   return encoded;
 }
 
+function recoverableToolError(error: unknown): string | null {
+  if (
+    error instanceof SecretaryBrokerRequestError &&
+    error.status !== 400 &&
+    error.status !== 422
+  )
+    return null;
+  const message = (
+    error instanceof Error ? error.message : String(error)
+  ).slice(0, 1000);
+  return toolResult({ error: { type: 'invalid_tool_request', message } });
+}
+
 export async function runSecretaryTurn(
   client: SecretaryTurnClient,
   turn: NonNullable<SecretaryConversationPullReply['turn']>,
@@ -67,15 +81,21 @@ export async function runSecretaryTurn(
       mindCalls++;
       if (mindCalls > MAX_MIND_CALLS)
         throw new Error('secretary Mind call budget exceeded');
-      if (call.type !== 'function' || call.function.name !== 'mind')
-        throw new Error('secretary completion requested an unsupported tool');
-      const result = await client.mind(
-        toolInput(call.function.arguments),
-        signal,
-      );
+      let content: string;
+      try {
+        if (call.type !== 'function' || call.function.name !== 'mind')
+          throw new Error('secretary completion requested an unsupported tool');
+        content = toolResult(
+          await client.mind(toolInput(call.function.arguments), signal),
+        );
+      } catch (error) {
+        const recovered = recoverableToolError(error);
+        if (recovered === null) throw error;
+        content = recovered;
+      }
       messages.push({
         role: 'tool',
-        content: toolResult(result),
+        content,
         tool_call_id: call.id,
       });
     }

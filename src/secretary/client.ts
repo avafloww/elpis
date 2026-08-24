@@ -19,6 +19,16 @@ type Route =
   | '/v1/secretary/complete'
   | '/v1/secretary/mind';
 
+export class SecretaryBrokerRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SecretaryBrokerRequestError';
+  }
+}
+
 export interface SecretaryHttpClientOptions {
   brokerUrl: string;
   token: string;
@@ -241,7 +251,10 @@ export class SecretaryHttpClient {
         typeof value.error === 'string'
           ? value.error.slice(0, 500)
           : 'request failed';
-      throw new Error(`secretary broker ${response.status}: ${message}`);
+      throw new SecretaryBrokerRequestError(
+        response.status,
+        `secretary broker ${response.status}: ${message}`,
+      );
     }
     if (value.protocol !== 1)
       throw new Error('secretary broker protocol mismatch');

@@ -79,6 +79,7 @@ function validateReceipt(receipt: SecretaryProvisionReceipt): void {
 export class SecretarySpawnBroker {
   private readonly store: SecretarySessionStore;
   private startTail: Promise<void> = Promise.resolve();
+  private reconcileTail: Promise<SecretarySession[]> = Promise.resolve([]);
 
   constructor(private readonly options: SecretarySpawnBrokerOptions) {
     this.store = options.store ?? new SecretarySessionStore({ db: options.db });
@@ -166,45 +167,77 @@ export class SecretarySpawnBroker {
   }
 
   async recover(): Promise<SecretarySession[]> {
+    return this.inspectActive(true);
+  }
+
+  reconcile(): Promise<SecretarySession[]> {
+    const run = this.reconcileTail.then(() => this.inspectActive(false));
+    this.reconcileTail = run.then(
+      () => this.store.list(),
+      () => this.store.list(),
+    );
+    return run;
+  }
+
+  private active(
+    sessionId: string,
+    includeStarting: boolean,
+  ): SecretarySession | null {
+    const current = this.store.get(sessionId);
+    if (!current) return null;
+    if (current.status === 'ready') return current;
+    return includeStarting && current.status === 'starting' ? current : null;
+  }
+
+  private async inspectActive(
+    includeStarting: boolean,
+  ): Promise<SecretarySession[]> {
     for (const session of this.store.list()) {
-      if (session.status !== 'starting' && session.status !== 'ready') continue;
+      if (!this.active(session.id, includeStarting)) continue;
       let state: SecretaryProvisionState;
       try {
         state = await this.options.runtime.inspect(session);
       } catch (error) {
-        const failed = this.store.fail(session.id, error);
-        await this.cleanupBestEffort(failed);
+        const current = this.active(session.id, includeStarting);
+        if (current) {
+          const failed = this.store.fail(current.id, error);
+          await this.cleanupBestEffort(failed);
+        }
         continue;
       }
       if (state.state === 'pending') continue;
       if (state.state === 'ready') {
         try {
           validateReceipt(state.receipt);
-          if (session.status === 'starting') {
-            this.store.ready(session.id, state.receipt);
+          const current = this.active(session.id, includeStarting);
+          if (!current) continue;
+          if (current.status === 'starting') {
+            this.store.ready(current.id, state.receipt);
             continue;
           }
           if (
-            session.podName === state.receipt.podName &&
-            session.podUid === state.receipt.podUid
+            current.podName === state.receipt.podName &&
+            current.podUid === state.receipt.podUid
           )
             continue;
           const failed = this.store.fail(
-            session.id,
+            current.id,
             'secretary Pod identity changed',
           );
           await this.cleanupBestEffort(failed);
         } catch (error) {
-          const current = this.store.get(session.id);
-          if (current?.status === 'starting' || current?.status === 'ready') {
-            const failed = this.store.fail(session.id, error);
+          const current = this.active(session.id, includeStarting);
+          if (current) {
+            const failed = this.store.fail(current.id, error);
             await this.cleanupBestEffort(failed);
           }
         }
         continue;
       }
+      const current = this.active(session.id, includeStarting);
+      if (!current) continue;
       const failed = this.store.fail(
-        session.id,
+        current.id,
         state.state === 'failed'
           ? (state.error ?? 'secretary Pod failed')
           : 'secretary Pod is missing',

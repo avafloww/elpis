@@ -21,6 +21,8 @@ export interface SecretarySupervisorRuntime {
   conversation: SecretaryConversationStore;
   conversationTransport: SecretaryConversationBroker;
   mind: SecretaryMindBroker;
+  reconcile(): Promise<void>;
+  stop(): void;
 }
 
 export interface SecretarySupervisorOptions {
@@ -30,6 +32,7 @@ export interface SecretarySupervisorOptions {
   logger: Logger;
   runtime?: SecretaryPodRuntime;
   create?: typeof createLLM;
+  reconcileIntervalMs?: number;
 }
 
 function kubernetesOptions(config: Config): KubernetesSecretaryRuntimeOptions {
@@ -77,5 +80,34 @@ export async function startSecretarySupervisor(
   options.logger.info(
     `secretary supervisor recovered ${active} active session(s); marked ${ambiguous} claimed turn(s) ambiguous`,
   );
-  return { broker, completion, conversation, conversationTransport, mind };
+  let reconciling = false;
+  const reconcile = async (): Promise<void> => {
+    if (reconciling) return;
+    if (!broker.list().some((session) => session.status === 'ready')) return;
+    reconciling = true;
+    try {
+      await broker.reconcile();
+    } catch (error) {
+      options.logger.warn(
+        `secretary live reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      reconciling = false;
+    }
+  };
+  const intervalMs = options.reconcileIntervalMs ?? 2_000;
+  const timer =
+    intervalMs > 0 ? setInterval(() => void reconcile(), intervalMs) : null;
+  timer?.unref();
+  return {
+    broker,
+    completion,
+    conversation,
+    conversationTransport,
+    mind,
+    reconcile,
+    stop: () => {
+      if (timer) clearInterval(timer);
+    },
+  };
 }

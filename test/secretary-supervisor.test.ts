@@ -7,7 +7,10 @@ import { noopLogger, type Logger } from '../src/lib/log.js';
 import { SecretaryConversationStore } from '../src/secretary/conversation.js';
 import { startSecretarySupervisor } from '../src/secretary/supervisor.js';
 import { SecretarySessionStore } from '../src/secretary/session.js';
-import type { SecretaryPodRuntime } from '../src/secretary/spawn.js';
+import type {
+  SecretaryPodRuntime,
+  SecretaryProvisionState,
+} from '../src/secretary/spawn.js';
 import { openDatabase } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
 import { Scheduler } from '../src/store/scheduler.js';
@@ -36,19 +39,26 @@ function fixture(enabled: boolean) {
   const scheduler = new Scheduler({ db, logger });
   const mind = new MindService({ db, scheduler, logger });
   let inspections = 0;
+  let cleanups = 0;
+  let provisionState: SecretaryProvisionState | null = null;
   const runtime: SecretaryPodRuntime = {
     async provision() {
       throw new Error('provision must not run during boot recovery');
     },
     async inspect(session) {
       inspections += 1;
-      return {
-        state: 'ready',
-        receipt: { podName: `pod-${session.id}`, podUid: `uid-${session.id}` },
-      };
+      return (
+        provisionState ?? {
+          state: 'ready',
+          receipt: {
+            podName: `pod-${session.id}`,
+            podUid: `uid-${session.id}`,
+          },
+        }
+      );
     },
     async cleanup() {
-      throw new Error('cleanup must not run for matching ready identity');
+      cleanups += 1;
     },
   };
   return {
@@ -58,7 +68,12 @@ function fixture(enabled: boolean) {
     mind,
     logs,
     runtime,
+    reconcileIntervalMs: 0,
     inspections: () => inspections,
+    cleanups: () => cleanups,
+    setProvisionState(state: SecretaryProvisionState | null) {
+      provisionState = state;
+    },
     close() {
       db.close();
       fs.rmSync(data, { recursive: true, force: true });
@@ -125,5 +140,33 @@ test('enabled supervisor marks claimed turns ambiguous before exposure', async (
   assert.deepEqual(f.logs, [
     'secretary supervisor recovered 1 active session(s); marked 1 claimed turn(s) ambiguous',
   ]);
+  f.close();
+});
+
+test('live reconciliation fails a dead ready Pod and settles its claimed turn', async () => {
+  const f = fixture(true);
+  const sessions = new SecretarySessionStore({ db: f.db });
+  const created = sessions.create(ROOT, f.config.llm.registry.roles.secretary!);
+  const ready = sessions.ready(created.session.id, {
+    podName: `pod-${created.session.id}`,
+    podUid: `uid-${created.session.id}`,
+  });
+  const result = await startSecretarySupervisor(f);
+  assert.ok(result);
+  const turn = result.conversation.enqueue(ready.id, {
+    role: 'user',
+    content: 'claimed by a Pod that then exits',
+  });
+  result.conversation.claim(ready.id);
+  f.setProvisionState({ state: 'failed', error: 'secretary Pod exited 1' });
+
+  await result.reconcile();
+
+  assert.equal(result.broker.status(ready.id).status, 'failed');
+  const settled = result.conversation.status(turn.id);
+  assert.equal(settled.status, 'ambiguous');
+  assert.equal(settled.lastError, 'secretary Pod exited 1');
+  assert.equal(f.cleanups(), 1);
+  result.stop();
   f.close();
 });
