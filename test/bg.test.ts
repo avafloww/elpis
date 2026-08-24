@@ -33,6 +33,19 @@ async function awaitExit(
   throw new Error(`job ${id} did not exit within ${timeoutMs}ms`);
 }
 
+async function awaitCondition(
+  condition: () => boolean,
+  message: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(message);
+}
+
 test('elpis.bg.start: detaches a job and writes to a log file', async () => {
   const dir = tmpDir();
   const reg = createBgRegistry(dir);
@@ -364,19 +377,23 @@ test('bg jobs: restart recovery reports newly-dead work and grandfathers old com
 
 test('bg jobs: still-running heartbeats auto-rearm until completion', async () => {
   const dir = tmpDir();
+  const finish = path.join(dir, 'finish');
   const nudges: number[] = [];
   const reg = createBgRegistry(dir, {
     jobNudgeMs: 25,
     onJobStillRunning: () => nudges.push(Date.now()),
   });
   reg.activate();
-  const { id } = reg.start('sleep 0.14');
-  await new Promise<void>((r) => setTimeout(r, 105));
-  assert.ok(
-    nudges.length >= 2,
-    `expected repeated auto-rearmed heartbeats, got ${nudges.length}`,
-  );
-  await awaitExit(reg, id);
+  const { id } = reg.start(`while [ ! -f "${finish}" ]; do sleep 0.01; done`);
+  try {
+    await awaitCondition(
+      () => nudges.length >= 2,
+      `expected repeated auto-rearmed heartbeats, got ${nudges.length}`,
+    );
+  } finally {
+    fs.writeFileSync(finish, 'done');
+    await awaitExit(reg, id);
+  }
   const atFinish = nudges.length;
   await new Promise<void>((r) => setTimeout(r, 60));
   assert.equal(
