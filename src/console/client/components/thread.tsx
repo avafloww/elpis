@@ -7,7 +7,7 @@ import {
   useState,
 } from 'preact/hooks';
 import type { ConsoleActions } from '../use-console.js';
-import type { ConsoleState, StreamEntry } from '../types.js';
+import type { ConsoleState, MindItem, StreamEntry } from '../types.js';
 import { object, text } from '../types.js';
 import { attachmentsOf, attachmentUrl, utterance } from '../envelope.js';
 import {
@@ -320,124 +320,120 @@ function operationLabel(operation: OperationReceipt): string {
   return 'desktop';
 }
 
+export function operationMindId(operation: {
+  kind: string;
+  target: string;
+  targetLiteral?: boolean;
+}): string | null {
+  return operation.kind === 'mind' &&
+    operation.targetLiteral === true &&
+    /^elm-[a-z0-9]+$/i.test(operation.target)
+    ? operation.target
+    : null;
+}
+
+export function operationReceiptUseful(operation: {
+  kind: string;
+  target: string;
+  targetLiteral?: boolean;
+}): boolean {
+  if (operation.kind === 'mind') return operationMindId(operation) !== null;
+  if (operation.kind === 'file') return operation.targetLiteral === true;
+  return true;
+}
+
 function OperationCard({
   operation,
-  result,
   callId,
   detail,
+  mindItems,
+  onOpenMind,
 }: {
   operation: OperationReceipt;
   result?: StreamEntry;
   callId: string;
   detail?: string;
+  mindItems: MindItem[];
+  onOpenMind(id: string): void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const outcome = result ? splitRunResult(result.content) : null;
-  const runState = result ? (outcome?.ok ? 'run ok' : 'run failed') : 'running';
-  const runTone = result ? (outcome?.ok ? 'ok' : 'failed') : 'running';
+  const target = operationDisplayTarget(operation.target);
+  const mindId = operationMindId(operation);
+  if (operation.kind === 'mind') {
+    if (!mindId) return null;
+    const item = mindItems.find((candidate) => candidate.id === mindId);
+    return (
+      <button
+        class='operation-compact operation-mind-link'
+        onClick={() => onOpenMind(mindId)}
+        title={`Open ${mindId} in Mind`}
+      >
+        <span class='surface-label'>{operationLabel(operation)}</span>
+        <strong>{item?.title || mindId}</strong>
+        {item?.status ? <span>{item.status.replaceAll('_', ' ')}</span> : null}
+        <code>{mindId}</code>
+        <i>→</i>
+      </button>
+    );
+  }
+  if (!operationReceiptUseful(operation)) return null;
+  if (operation.kind !== 'edit') {
+    const summary =
+      operation.kind === 'computer'
+        ? detail || target
+        : operation.kind === 'git' && target === '—'
+          ? operation.name.split('.').at(-1) || 'operation'
+          : target;
+    return (
+      <div
+        class={`operation-compact operation-${operation.kind}-compact`}
+        title={`${operation.name} · ${callId}`}
+      >
+        <span class='surface-label'>{operationLabel(operation)}</span>
+        <strong>{summary}</strong>
+      </div>
+    );
+  }
   const diff =
-    operation.kind === 'edit' &&
-    operation.before !== undefined &&
-    operation.after !== undefined
+    operation.before !== undefined && operation.after !== undefined
       ? editDiffPreview(operation.before, operation.after)
       : [];
   const added = diff.filter((line) => line.kind === 'add').length;
   const removed = diff.filter((line) => line.kind === 'remove').length;
-  const output = (outcome?.console || outcome?.value || '').trim();
-  const outputLines = output ? output.split('\n') : [];
-  const outputLimited = !expanded && outputLines.length > 12;
-  const visibleOutput = outputLimited
-    ? outputLines.slice(0, 12).join('\n')
-    : output;
-  const target = operationDisplayTarget(operation.target);
-  const args = operation.args ?? [];
-  const canExpandEdit =
-    operation.kind === 'edit' && (operation.after?.split('\n').length ?? 0) > 8;
-  const canExpandOutput = outputLines.length > 12;
+  const canExpand = (operation.after?.split('\n').length ?? 0) > 8;
   return (
-    <div class={`operation-card operation-${operation.kind}`}>
+    <div class='operation-card operation-edit'>
       <header>
-        <span class='surface-label'>{operationLabel(operation)}</span>
-        {operation.kind === 'mind' ? null : <strong>{target}</strong>}
+        <span class='surface-label'>edited file</span>
+        <strong>{target}</strong>
         <span class='surface-spacer' />
-        {operation.kind === 'edit' ? (
-          <span class='operation-counts'>
-            <b>+{added}</b>
-            <i>−{removed}</i>
-          </span>
-        ) : operation.kind === 'mind' ? (
-          <code class='operation-short-id' title={target}>
-            {target}
-          </code>
-        ) : (
-          <span class={`operation-run-state ${runTone}`}>{runState}</span>
-        )}
+        <span class='operation-counts'>
+          <b>+{added}</b>
+          <i>−{removed}</i>
+        </span>
       </header>
-      {operation.kind === 'edit' && diff.length ? (
-        expanded && operation.after ? (
-          <pre class='operation-full-value'>{operation.after}</pre>
-        ) : (
-          <pre class='operation-diff'>
-            {diff.map((line, index) => (
-              <span class={`diff-${line.kind}`} key={index}>
-                <b>{line.number ?? ''}</b>
-                <i>
-                  {line.kind === 'add'
-                    ? '+'
-                    : line.kind === 'remove'
-                      ? '−'
-                      : ' '}
-                </i>
-                <code>{line.text}</code>
-              </span>
-            ))}
-          </pre>
-        )
-      ) : operation.kind === 'mind' ? (
-        <div class='operation-mind-body'>
-          <strong>{target}</strong>
-          <div class='operation-meta-row'>
-            <span>{operation.name.split('.').at(-1)}</span>
-            <span class={outcome?.ok ? 'ok' : ''}>{runState}</span>
-            {args.slice(1, 4).map((value, index) => (
-              <code key={index}>{value}</code>
-            ))}
-          </div>
-          {result ? <p>{resultSummary(result.content, 260)}</p> : null}
-        </div>
-      ) : operation.kind === 'computer' ? (
-        <div class='operation-desktop-body'>
-          <strong>{detail || target}</strong>
-          <code>
-            {operation.name}({args.join(', ')})
-          </code>
-          <span>
-            {result
-              ? resultSummary(result.content, 260)
-              : 'awaiting frame receipt'}
-          </span>
-        </div>
-      ) : visibleOutput ? (
-        <pre class='operation-output'>{visibleOutput}</pre>
-      ) : operation.kind === 'file' || operation.kind === 'git' ? (
-        <div class='operation-detail-body'>
-          <code>{operation.name}</code>
-          <span>
-            {result ? resultSummary(result.content, 260) : 'awaiting result'}
-          </span>
-        </div>
+      {expanded && operation.after ? (
+        <pre class='operation-full-value'>{operation.after}</pre>
+      ) : diff.length ? (
+        <pre class='operation-diff'>
+          {diff.map((line, index) => (
+            <span class={`diff-${line.kind}`} key={index}>
+              <b>{line.number ?? ''}</b>
+              <i>
+                {line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}
+              </i>
+              <code>{line.text}</code>
+            </span>
+          ))}
+        </pre>
       ) : null}
       <footer>
-        {canExpandEdit || canExpandOutput ? (
+        {canExpand ? (
           <button onClick={() => setExpanded(!expanded)}>
-            {expanded
-              ? '− collapse'
-              : operation.kind === 'edit'
-                ? '+ show full value'
-                : `+ ${outputLines.length - 12} more lines`}
+            {expanded ? '− collapse' : '+ show full value'}
           </button>
         ) : (
-          <span>{operation.name}</span>
+          <span>edit receipt</span>
         )}
         <span class='surface-spacer' />
         <code title={callId}>{callId}</code>
@@ -620,11 +616,15 @@ function Entry({
   resultByCall,
   room,
   agent,
+  mindItems,
+  onOpenMind,
 }: {
   entry: StreamEntry;
   resultByCall: Map<string, StreamEntry>;
   room: string;
   agent: string;
+  mindItems: MindItem[];
+  onOpenMind(id: string): void;
 }) {
   if (entry.kind === 'think-result' || entry.kind === 'tool') return null;
   if (['compaction', 'cachebust', 'cleared', 'yieldnudge'].includes(entry.kind))
@@ -691,6 +691,8 @@ function Entry({
                 result={result}
                 callId={call.id}
                 detail={call.detail}
+                mindItems={mindItems}
+                onOpenMind={onOpenMind}
               />
             ))}
             {result ? <BackgroundCard entry={result} /> : null}
@@ -721,11 +723,15 @@ export function ThreadStream({
   room,
   agent,
   live,
+  mindItems,
+  onOpenMind,
 }: {
   entries: StreamEntry[];
   room: string;
   agent: string;
   live?: ConsoleState['live'];
+  mindItems: MindItem[];
+  onOpenMind(id: string): void;
 }) {
   const resultByCall = useMemo(
     () =>
@@ -745,6 +751,8 @@ export function ThreadStream({
           resultByCall={resultByCall}
           room={room}
           agent={agent}
+          mindItems={mindItems}
+          onOpenMind={onOpenMind}
         />
       ))}
       {live ? (
@@ -837,6 +845,11 @@ export function ThreadView({
         room={state.room}
         agent={cleanTag(state.meta?.botTag || 'agent')}
         live={state.live}
+        mindItems={state.mindItems}
+        onOpenMind={(id) => {
+          actions.selectMind(id);
+          actions.setView('mind');
+        }}
       />
       {!atBottom ? (
         <button

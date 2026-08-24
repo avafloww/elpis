@@ -916,14 +916,6 @@ pre {
   background: var(--bg-card);
 }
 
-.operation-mind {
-  border-color: rgba(168, 146, 214, 0.28);
-}
-
-.operation-computer {
-  border-color: rgba(130, 179, 186, 0.28);
-}
-
 .operation-card > header,
 .operation-card > footer {
   display: flex;
@@ -939,19 +931,6 @@ pre {
 
 .operation-card > header .surface-label {
   color: var(--gold);
-}
-
-.operation-shell > header .surface-label,
-.operation-computer > header .surface-label {
-  color: var(--teal);
-}
-
-.operation-mind > header .surface-label {
-  color: var(--violet);
-}
-
-.operation-git > header .surface-label {
-  color: var(--green);
 }
 
 .operation-card > header strong {
@@ -983,37 +962,78 @@ pre {
   font-weight: 500;
 }
 
-.operation-run-state {
-  flex: none;
-  padding: 1px 8px;
-  border: 1px solid rgba(217, 143, 140, 0.38);
-  border-radius: 99px;
-  color: var(--red);
+.operation-compact {
+  width: 100%;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--muted);
+  text-align: left;
+}
+
+button.operation-compact {
+  cursor: pointer;
+}
+
+.operation-compact:hover {
+  border-color: rgba(216, 184, 119, 0.26);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.operation-compact .surface-label {
+  color: var(--muted);
   font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.operation-run-state.ok {
-  border-color: rgba(143, 184, 154, 0.4);
+.operation-shell-compact .surface-label,
+.operation-computer-compact .surface-label {
+  color: var(--teal);
+}
+
+.operation-git-compact .surface-label {
   color: var(--green);
 }
 
-.operation-run-state.running {
-  border-color: rgba(217, 178, 79, 0.4);
-  color: var(--amber);
+.operation-mind-link .surface-label {
+  color: var(--violet);
 }
 
-.operation-short-id {
-  max-width: 42%;
+.operation-compact strong {
+  min-width: 0;
   overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.operation-compact > span:not(.surface-label) {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.operation-compact > code {
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.operation-compact > i {
+  color: var(--violet);
+  font-style: normal;
+}
+
 .operation-diff,
-.operation-output,
 .operation-full-value {
   max-height: min(320px, 38vh);
   margin: 0;
@@ -1075,75 +1095,9 @@ pre {
   color: #6d4c4b;
 }
 
-.operation-output,
 .operation-full-value {
   padding: 11px 14px;
   color: var(--mono-fg);
-  white-space: pre-wrap;
-}
-
-.operation-mind-body,
-.operation-desktop-body,
-.operation-detail-body {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 13px 14px;
-}
-
-.operation-mind-body > strong,
-.operation-desktop-body > strong {
-  color: var(--fg);
-  font-size: 14.5px;
-  font-weight: 500;
-  line-height: 1.4;
-}
-
-.operation-mind-body > p,
-.operation-desktop-body > span,
-.operation-detail-body > span {
-  margin: 0;
-  color: var(--soft);
-  font-size: 11.5px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.operation-meta-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-}
-
-.operation-meta-row > span,
-.operation-meta-row > code {
-  padding: 2px 9px;
-  border: 1px solid rgba(168, 146, 214, 0.36);
-  border-radius: 99px;
-  color: var(--violet);
-  font-size: 9.5px;
-}
-
-.operation-meta-row > span.ok {
-  border-color: rgba(143, 184, 154, 0.4);
-  color: var(--green);
-}
-
-.operation-meta-row > code {
-  max-width: 100%;
-  overflow: hidden;
-  border-color: var(--line);
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.operation-desktop-body > code,
-.operation-detail-body > code {
-  color: var(--teal);
-  font-size: 11.5px;
-  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 

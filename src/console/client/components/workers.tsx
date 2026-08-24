@@ -141,6 +141,11 @@ function WorkerDetail({
             entries={workerEntries(messages, ref || 'worker')}
             room='all'
             agent={ref || 'worker'}
+            mindItems={state.mindItems}
+            onOpenMind={(id) => {
+              actions.selectMind(id);
+              actions.setView('mind');
+            }}
           />
         </section>
         {active ? (

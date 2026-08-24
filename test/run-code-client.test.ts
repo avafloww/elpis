@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import {
   editDiffPreview,
   operationDisplayTarget,
+  operationMindId,
+  operationReceiptUseful,
 } from '../src/console/client/components/thread.js';
 import {
   formatRunSource,
@@ -59,7 +61,7 @@ test('operation card targets hide host prefixes while retaining useful paths', (
   );
 });
 
-test('operation cards follow the rich reference taxonomy without fake telemetry', () => {
+test('operation receipts optimize for human navigation instead of data volume', () => {
   const source = fs.readFileSync(
     path.join(root, 'src/console/client/components/thread.tsx'),
     'utf8',
@@ -68,22 +70,45 @@ test('operation cards follow the rich reference taxonomy without fake telemetry'
     path.join(root, 'src/console/client/styles.css'),
     'utf8',
   );
-  for (const label of [
-    'edited file',
-    'ran command',
-    'created Mind item',
-    'read file',
-    'wrote file',
-    'desktop',
-  ])
-    assert.match(source, new RegExp(label));
-  assert.match(source, /callId=\{call\.id\}/);
-  assert.match(source, /\+ show full value/);
-  assert.match(source, /more lines/);
-  assert.match(styles, /operation-mind-body/);
-  assert.match(styles, /operation-desktop-body/);
-  assert.match(styles, /operation-run-state\.running/);
-  assert.doesNotMatch(source, /exit 0|durationMs|operation-state/);
+  assert.equal(
+    operationMindId({
+      kind: 'mind',
+      target: 'elm-example',
+      targetLiteral: true,
+    }),
+    'elm-example',
+  );
+  assert.equal(
+    operationMindId({ kind: 'mind', target: 'id', targetLiteral: false }),
+    null,
+  );
+  assert.equal(
+    operationReceiptUseful({
+      kind: 'file',
+      target: 'path',
+      targetLiteral: false,
+    }),
+    false,
+  );
+  assert.equal(
+    operationReceiptUseful({
+      kind: 'file',
+      target: 'src/a.ts',
+      targetLiteral: true,
+    }),
+    true,
+  );
+  assert.match(source, /if \(!mindId\) return null/);
+  assert.match(source, /item\?\.title \|\| mindId/);
+  assert.match(source, /onOpenMind\(mindId\)/);
+  assert.match(
+    source,
+    /actions\.selectMind\(id\)[\s\S]*actions\.setView\('mind'\)/,
+  );
+  assert.match(styles, /\.operation-compact/);
+  assert.match(styles, /min-height: 38px/);
+  assert.doesNotMatch(source, /resultSummary\(result\.content, 260\)/);
+  assert.doesNotMatch(styles, /operation-mind-body|operation-desktop-body/);
 });
 
 test('rich edit cards produce a bounded line diff with stable line numbers', () => {

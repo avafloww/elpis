@@ -191,6 +191,7 @@ export interface SandboxOperation {
   kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
   name: string;
   target: string;
+  targetLiteral?: boolean;
   args?: string[];
   before?: string;
   after?: string;
@@ -1451,6 +1452,7 @@ export function extractSandboxOperations(
       kind,
       name,
       target: target.value,
+      targetLiteral: target.literal,
       args: args
         .slice(0, 4)
         .map((value) =>

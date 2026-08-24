@@ -57,6 +57,7 @@ export interface StreamEntry {
       kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
       name: string;
       target: string;
+      targetLiteral?: boolean;
       args?: string[];
       before?: string;
       after?: string;
