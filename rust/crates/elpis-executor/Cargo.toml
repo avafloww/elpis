@@ -13,3 +13,5 @@ elpis-protocol = { path = "../elpis-protocol" }
 elpis-python = { path = "../elpis-python" }
 elpis-runtime = { path = "../elpis-runtime", optional = true }
 serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

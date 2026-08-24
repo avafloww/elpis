@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 #[cfg(feature = "embedded-python")]
 use std::path::PathBuf;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "embedded-python")]
 static PYTHON_ARCHIVE: &[u8] = include_bytes!(env!("ELPIS_PYTHON_ARCHIVE"));
@@ -47,23 +49,42 @@ fn load_runtime() -> Result<ExecutorRuntime, String> {
     })
 }
 
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("elpis_executor=info,elpis_python=info,elpis_runtime=info")
+    });
+    tracing_subscriber::fmt()
+        .json()
+        .with_ansi(false)
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .init();
+}
+
 fn main() {
+    init_logging();
+    info!(
+        embedded_python = cfg!(feature = "embedded-python"),
+        "executor starting"
+    );
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut stdout = io::stdout().lock();
     let runtime = match load_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("elpis-executor: runtime startup failed: {error}");
+            error!(error = %error, "runtime startup failed");
             std::process::exit(1);
         }
     };
+    info!("executor runtime ready");
     let mut contexts: HashMap<String, PythonContext> = HashMap::new();
     loop {
         let frame = match read_request_frame(&mut input) {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(error) => {
+                warn!(error = %error, "protocol transport failed");
                 let response = Response::failure(None, "protocol", "transport", error.to_string());
                 write_response(&mut stdout, &response);
                 break;
@@ -75,9 +96,11 @@ fn main() {
         };
         write_response(&mut stdout, &response);
     }
+    let open_contexts = contexts.len();
     for context in contexts.values_mut() {
         let _ = context.close();
     }
+    info!(open_contexts, "executor stopped");
 }
 
 fn read_request_frame(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
