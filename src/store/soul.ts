@@ -38,9 +38,24 @@ function looksLikeFrontmatter(inner: string): boolean {
   );
 }
 
+export const RESIDENT_REANCHOR_MAX_WORDS = 10;
+export const RESIDENT_REANCHOR_MAX_BYTES = 120;
+
+function residentReanchor(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  if (normalized.split(' ').length > RESIDENT_REANCHOR_MAX_WORDS) return null;
+  if (Buffer.byteLength(normalized, 'utf8') > RESIDENT_REANCHOR_MAX_BYTES)
+    return null;
+  return normalized;
+}
+
 export interface SoulParts {
   /** `name:` from the frontmatter, or null when absent. */
   name: string | null;
+  /** Optional resident-authored request-tail orientation, tightly bounded. */
+  reanchor: string | null;
   /** The prompt-facing body: raw text minus the envelope + the blank line(s)
    * right after it. Identical to the input when there is no envelope. */
   body: string;
@@ -48,11 +63,14 @@ export interface SoulParts {
 
 export function parseSoul(raw: string): SoulParts {
   const m = raw.match(SOUL_ENVELOPE);
-  if (!m || !looksLikeFrontmatter(m[1])) return { name: null, body: raw };
+  if (!m || !looksLikeFrontmatter(m[1]))
+    return { name: null, reanchor: null, body: raw };
   const body = raw.slice(m[0].length).replace(/^(\r?\n)+/, '');
-  const name = parseFrontmatter(raw)?.frontmatter['name'];
+  const frontmatter = parseFrontmatter(raw)?.frontmatter ?? {};
+  const name = frontmatter['name'];
   return {
     name: typeof name === 'string' && name.trim() ? name.trim() : null,
+    reanchor: residentReanchor(frontmatter['reanchor']),
     body,
   };
 }

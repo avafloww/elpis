@@ -322,7 +322,6 @@ export function formatMindFrontier(
   });
   const lines = [
     '<mind-frontier>',
-    'Live external-cortex context, not a new request. It is omitted from the transcript.',
     `counts: ready_commitments=${ready.length} in_progress_commitments=${inProgress.length} blocked_commitments=${blocked.length} waiting_commitments=${waiting.length} held_thoughts=${thoughts.length} database_active=${stats.active} overdue=${stats.overdue}`,
   ];
   const add = (label: string, items: MindItem[]) => {
@@ -334,11 +333,8 @@ export function formatMindFrontier(
   add('ready commitments', ready);
   add('blocked commitments', blocked);
   add('waiting commitments', waiting);
-  add('held thoughts — recorded, not promised; do not auto-act', thoughts);
-  lines.push(
-    'Open an item with elpis.mind.get(id) before acting. Do not bypass blockers; keep status and comments honest.',
-    '</mind-frontier>',
-  );
+  add('held thoughts', thoughts);
+  lines.push('</mind-frontier>');
   return lines.join('\n');
 }
 
@@ -3005,19 +3001,29 @@ export class Agent {
    * it once per turn, before the retry loop, for prefix-cache stability) and
    * contextSnapshot (the console's context-explorer view) — so what the
    * explorer shows can never drift from what a turn actually sends. */
-  private buildMindFrontierMessage(): ChatMessage | null {
+  private buildResidentContextMessage(): ChatMessage | null {
+    const sections: string[] = [];
     if (
-      !this.deps.mind ||
-      !this.mindFrontierAllowedThisTurn ||
-      !allowsMindFrontier(
+      this.deps.mind &&
+      this.mindFrontierAllowedThisTurn &&
+      allowsMindFrontier(
         this.turnChannelId,
         this.deps.channels,
         this.config.discord.guilds,
       )
-    )
-      return null;
-    const content = formatMindFrontier(this.deps.mind);
-    return content == null ? null : user(content);
+    ) {
+      const frontier = formatMindFrontier(this.deps.mind);
+      if (frontier) sections.push(frontier);
+    }
+    const reanchor = parseSoul(readFileOr(this.config.paths.soulPath)).reanchor;
+    if (reanchor) {
+      const escaped = reanchor
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+      sections.push(`<resident-reanchor>${escaped}</resident-reanchor>`);
+    }
+    return sections.length === 0 ? null : user(sections.join('\n'));
   }
 
   /** Assemble ephemeral request-only context at a recency seam: after stable
@@ -3030,14 +3036,14 @@ export class Agent {
   ): ChatMessage[] {
     const messages = [systemMessage, ...this.messages];
     if (includeMindFrontier) {
-      const mind = this.buildMindFrontierMessage();
-      if (mind) {
+      const residentContext = this.buildResidentContextMessage();
+      if (residentContext) {
         const tail = Math.min(
           this.mindFrontierTailMessagesThisTurn,
           this.messages.length,
         );
         const insertAt = 1 + this.messages.length - tail;
-        messages.splice(insertAt, 0, mind);
+        messages.splice(insertAt, 0, residentContext);
       }
     }
     return messages;

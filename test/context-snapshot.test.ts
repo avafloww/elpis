@@ -9,6 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
 import { buildTestAgent } from './helpers.js';
 import {
   allowsMindFrontier,
@@ -211,10 +212,7 @@ test('formatMindFrontier: commitments and held thoughts stay distinct; bodies st
     /in progress:[\s\S]*#7 \[in progress\][^\n]*by mcp:codex-worker-7/,
   );
   assert.match(card, /waiting commitments:[\s\S]*#8 \[waiting\]/);
-  assert.match(
-    card,
-    /held thoughts — recorded, not promised; do not auto-act:[\s\S]*#9/,
-  );
+  assert.match(card, /held thoughts:[\s\S]*#9/);
   assert.ok(
     !card.includes('private implementation body'),
     'frontier must not duplicate item bodies',
@@ -306,6 +304,34 @@ test('contextSnapshot: wired Mind frontier is a final ephemeral request message'
     }[];
     assert.equal(messages.at(-1)?.role, 'user');
     assert.match(messages.at(-1)?.content ?? '', /^<mind-frontier>[\s\S]*#12/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('contextSnapshot: SOUL reanchor is a final ephemeral message without rewriting the system body', () => {
+  const { agent, config, cleanup } = buildTestAgent();
+  try {
+    const body = '# Soul\n\nThe body stays in the system prefix.\n';
+    fs.writeFileSync(
+      config.paths.soulPath,
+      `---\nname: Echo\nreanchor: Again is truer than forever.\n---\n\n${body}`,
+    );
+    const messages = agent.contextSnapshot().messages as {
+      role: string;
+      content: string;
+    }[];
+    assert.equal(messages[0]?.role, 'system');
+    assert.match(
+      messages[0]?.content ?? '',
+      /The body stays in the system prefix/,
+    );
+    assert.doesNotMatch(messages[0]?.content ?? '', /Again is truer/);
+    assert.deepEqual(messages.at(-1), {
+      role: 'user',
+      content:
+        '<resident-reanchor>Again is truer than forever.</resident-reanchor>',
+    });
   } finally {
     cleanup();
   }

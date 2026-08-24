@@ -20,6 +20,7 @@ test('no frontmatter: body is the input, byte for byte; name is null', () => {
   const raw = '# Soul\n\nI am someone.\n';
   const parsed = parseSoul(raw);
   assert.equal(parsed.name, null);
+  assert.equal(parsed.reanchor, null);
   assert.equal(parsed.body, raw);
 });
 
@@ -28,6 +29,25 @@ test('frontmatter name is extracted and the body matches the pre-frontmatter fil
   const parsed = parseSoul(`---\nname: Echo\n---\n\n${original}`);
   assert.equal(parsed.name, 'Echo');
   assert.equal(parsed.body, original);
+});
+
+test('optional reanchor is normalized, bounded, and does not alter body bytes', () => {
+  const original = '# Soul\n\nbody\n';
+  const parsed = parseSoul(
+    `---\nname: Echo\nreanchor: Again   is truer than forever.\n---\n\n${original}`,
+  );
+  assert.equal(parsed.reanchor, 'Again is truer than forever.');
+  assert.equal(parsed.body, original);
+  assert.equal(
+    parseSoul(
+      '---\nreanchor: one two three four five six seven eight nine ten eleven\n---\nbody\n',
+    ).reanchor,
+    null,
+  );
+  assert.equal(
+    parseSoul(`---\nreanchor: ${'界'.repeat(41)}\n---\nbody\n`).reanchor,
+    null,
+  );
 });
 
 test('no blank line after the envelope also yields the exact body', () => {

@@ -3,6 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
 import { RUN_TOOL, THINK_TOOL, externalThinkingJuice } from '../src/llm/llm.js';
 import { buildTestAgent, EMPTY_WAKE, makeConfig } from './helpers.js';
 import type {
@@ -329,7 +330,7 @@ test('external thinking stays optional on synthetic stimulus turns', async () =>
   cleanup();
 });
 
-test('Mind frontier serves once per outer turn, not on tool continuations', async () => {
+test('resident context serves once per outer turn before inbound, not on tool continuations', async () => {
   const llm = scriptedLLM([runCall('1 + 1', false), EMPTY_WAKE, EMPTY_WAKE]);
   const mindItem = {
     id: 12,
@@ -372,7 +373,7 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
     },
   } as unknown as MindService;
   const base = makeConfig();
-  const { agent, cleanup } = buildTestAgent({
+  const { agent, config, cleanup } = buildTestAgent({
     llm,
     config: {
       discord: {
@@ -392,6 +393,10 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
     agentDeps: { mind },
     tmpPrefix: 'harness-mind-frontier-cadence-',
   });
+  fs.writeFileSync(
+    config.paths.soulPath,
+    '---\nname: Echo\nreanchor: Again is truer than forever.\n---\n\n# Soul\n',
+  );
   agent.enqueue({ ...userMsg(), guildId: 'g-home' });
   agent.enqueue({
     ...userMsg(),
@@ -404,8 +409,8 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
   assert.equal(llm.calls, 2);
   assert.match(
     String(llm.requests[0].at(-4)?.content),
-    /^<mind-frontier>/,
-    'frontier sits before the whole current inbound batch',
+    /^<mind-frontier>[\s\S]*<resident-reanchor>Again is truer than forever\.<\/resident-reanchor>$/,
+    'combined resident context sits before the whole current inbound batch',
   );
   assert.match(
     String(llm.requests[0].at(-3)?.content),
@@ -424,9 +429,11 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
   );
   assert.ok(
     llm.requests[1].every(
-      (m) => !String(m.content).startsWith('<mind-frontier>'),
+      (m) =>
+        !String(m.content).startsWith('<mind-frontier>') &&
+        !String(m.content).includes('<resident-reanchor>'),
     ),
-    'post-tool continuation omits the request-only card',
+    'post-tool continuation omits the request-only resident context card',
   );
 
   agent.enqueue({
@@ -440,8 +447,8 @@ test('Mind frontier serves once per outer turn, not on tool continuations', asyn
   assert.equal(llm.calls, 3);
   assert.match(
     String(llm.requests[2].at(-2)?.content),
-    /^<mind-frontier>/,
-    'turn end re-arms the next turn',
+    /^<mind-frontier>[\s\S]*<resident-reanchor>/,
+    'turn end re-arms the next resident context card',
   );
   assert.match(
     String(llm.requests[2].at(-1)?.content),
