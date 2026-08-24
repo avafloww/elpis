@@ -127,6 +127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-transport"
+version = "0.1.0"
+dependencies = [
+ "elpis-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

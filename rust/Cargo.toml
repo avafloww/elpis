@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/elpis-protocol",
+  "crates/elpis-transport",
   "crates/elpis-python",
   "crates/elpis-executor",
   "crates/elpis-runtime",

@@ -34,7 +34,7 @@ pub fn validate_id(label: &'static str, value: &str, max: usize) -> Result<(), P
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Validate {
