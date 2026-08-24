@@ -544,7 +544,20 @@ test('zero-delay auto advice arms and fires an immediate continuation turn', asy
   void h.agent.loop();
   h.scheduler.start();
   h.agent.enqueue(inbound());
-  await settle(200);
+  await awaitCondition(() => {
+    const currentTool = h.agent.messagesForTest.find(
+      (message) => message.tool_call_id === 'auto-zero',
+    );
+    const currentTask = h.scheduler
+      .list()
+      .find((candidate) => candidate.id === currentTool?.run?.wake?.taskId);
+    return (
+      currentTool?.run?.wake?.state === 'fired' &&
+      llm.calls >= 2 &&
+      parseRunWakePayload(currentTask?.payload ?? '')?.state === 'fired' &&
+      Boolean(currentTask?.doneAt)
+    );
+  }, 'immediate wake did not fire and start the continuation turn');
   h.agent.stop();
   h.scheduler.stop();
   const tool = h.agent.messagesForTest.find(
