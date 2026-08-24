@@ -80,7 +80,11 @@ import {
 } from './builtin-modules.js';
 import { readAgentName } from './store/soul.js';
 import { setLogSink } from './lib/log.js';
-import { ConsoleHub, type MetaInfo } from './console/hub.js';
+import {
+  ConsoleHub,
+  startedAtFromUptime,
+  type MetaInfo,
+} from './console/hub.js';
 import { createConsoleServer, type ConsoleServer } from './console/server.js';
 import { createArchivedReader } from './console/history.js';
 import { createMcpEndpoint } from './mcp/server.js';
@@ -171,6 +175,10 @@ export function completeStandaloneForRole(
 export async function createElpisRuntime(
   adapters: ElpisRuntimeAdapters = {},
 ): Promise<ElpisRuntime> {
+  const processStartedAt = startedAtFromUptime(
+    Date.now(),
+    process.uptime() * 1000,
+  );
   const config = (adapters.loadConfigFile ?? loadConfigFile)();
   const profile = detectRuntimeProfile();
   const modules = resolveBuiltinModules(config, profile);
@@ -663,9 +671,10 @@ export async function createElpisRuntime(
         return {
           gitHash: hash.trim() || 'unknown',
           treeClean: dirty.trim().length === 0,
+          startedAt: processStartedAt,
           uptimeMs: Math.round(process.uptime() * 1000),
           model: config.llm.model,
-          botTag: discord.client.user?.tag ?? botTag,
+          agentName: readAgentName(config.paths.soulPath),
         };
       },
     });

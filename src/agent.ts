@@ -115,6 +115,7 @@ import {
 import { spawnText } from './lib/proc.js';
 import { sniffImageMediaType } from './lib/image.js';
 import { applyKernelTurn } from './kernel/turn.js';
+import { custodyWatchFrames } from './console/watch-custody.js';
 
 // The inbound-envelope format lives in lib/envelope.ts (build + parse in one
 // place); re-exported here so existing importers (tests, discord.ts's attachment
@@ -1401,22 +1402,13 @@ export class Agent {
     note: string,
     channelId?: string | null,
   ): { ok: boolean; count: number } {
-    const mime: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-    };
-    const attachments: InboundMessageAttachment[] = paths
-      .map((p) => ({
-        url: '',
-        name: path.basename(p),
-        contentType: mime[path.extname(p).toLowerCase()] ?? null,
-        localPath: p,
-        size: fs.statSync(p).size,
-      }))
-      .filter((a) => a.contentType);
+    // Do not expose caller-selected private paths to the console. Explicitly
+    // watched image bytes move into bounded, image-only custody first; the
+    // envelope and one-generation multimodal load both use that immutable copy.
+    const attachments: InboundMessageAttachment[] = custodyWatchFrames(
+      paths,
+      this.deps.config.paths.dataDirectory,
+    ).map((frame) => ({ url: '', ...frame }));
     const scopedChannelId =
       channelId && channelId !== INTERNAL_CHANNEL_ID
         ? channelId

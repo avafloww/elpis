@@ -127,34 +127,95 @@ function ThoughtCard({ value }: { value: string }) {
   );
 }
 
-function syntaxClass(token: string): string {
+export type CodeLanguage =
+  | 'javascript'
+  | 'json'
+  | 'css'
+  | 'markup'
+  | 'shell'
+  | 'config'
+  | 'markdown'
+  | 'plain';
+
+export function codeLanguageForPath(target: string): CodeLanguage {
+  const clean = target.toLowerCase().split(/[?#]/, 1)[0] ?? '';
+  const extension = clean.includes('.') ? (clean.split('.').at(-1) ?? '') : '';
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'].includes(extension))
+    return 'javascript';
+  if (extension === 'json' || extension === 'jsonl') return 'json';
+  if (['css', 'scss', 'less'].includes(extension)) return 'css';
+  if (['html', 'htm', 'xml', 'svg'].includes(extension)) return 'markup';
+  if (['sh', 'bash', 'zsh', 'fish'].includes(extension)) return 'shell';
+  if (['yaml', 'yml', 'toml', 'ini'].includes(extension)) return 'config';
+  if (['md', 'mdx', 'markdown'].includes(extension)) return 'markdown';
+  return 'plain';
+}
+
+function syntaxPattern(language: CodeLanguage): RegExp | null {
+  if (language === 'javascript')
+    return /((?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)|\b(?:const|let|var|return|await|async|if|else|for|while|new|throw|try|catch|true|false|null|undefined|elpis|fs|console|process|require|JSON|Object|Array|Promise)\b|\b\d+(?:\.\d+)?\b|\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g;
+  if (language === 'json')
+    return /("(?:[^"\\]|\\.)*"|\b(?:true|false|null)\b|-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)/gi;
+  if (language === 'css')
+    return /((?:'[^'\n]*'|"[^"\n]*")|\/\*[\s\S]*?\*\/|#[0-9a-f]{3,8}\b|--[a-z0-9_-]+|-?\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%|s|ms|deg)?\b)/gi;
+  if (language === 'markup')
+    return /(<!--[\s\S]*?-->|<\/?[a-z][^>]*>|"[^"\n]*"|'[^'\n]*')/gi;
+  if (language === 'shell')
+    return /((?:'[^'\n]*'|"[^"\n]*")|#[^\n]*|\$\{?[a-z_][a-z0-9_]*\}?|\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|function|export|local|sudo)\b|\b\d+\b)/gi;
+  if (language === 'config')
+    return /((?:'[^'\n]*'|"[^"\n]*")|#[^\n]*|\b(?:true|false|null)\b|-?\b\d+(?:\.\d+)?\b|^[ \t]*[a-z0-9_.-]+(?=\s*[:=]))/gim;
+  if (language === 'markdown')
+    return /(`[^`\n]+`|^#{1,6}\s+[^\n]*|\[[^\]]+\]\([^)]+\)|^>\s+[^\n]*)/gm;
+  return null;
+}
+
+function syntaxClass(token: string, language: CodeLanguage): string {
   if (/^(?:'[^']*'|"[^"]*"|`[^`]*`)$/.test(token)) return 'syntax-string';
+  if (/^(?:\/\/|\/\*|#(?![0-9a-f]{3,8}\b)|<!--)/i.test(token))
+    return 'syntax-comment';
   if (
-    /^(?:const|let|var|return|await|async|if|else|for|while|new|throw|try|catch|true|false|null|undefined)$/.test(
+    /^(?:const|let|var|return|await|async|if|then|else|elif|fi|for|while|do|done|case|esac|new|throw|try|catch|true|false|null|undefined|export|local|sudo)$/i.test(
       token,
     )
   )
     return 'syntax-keyword';
-  if (/^\d+(?:\.\d+)?$/.test(token)) return 'syntax-number';
+  if (/^-?\d|^#[0-9a-f]{3,8}$/i.test(token)) return 'syntax-number';
   if (
-    /^(?:elpis|fs|console|process|require|JSON|Object|Array|Promise)$/.test(
+    language === 'markup' ||
+    /^(?:elpis|fs|console|process|require|JSON|Object|Array|Promise|\$|--)/.test(
       token,
-    )
+    ) ||
+    (language === 'config' && /[a-z0-9_.-]/i.test(token)) ||
+    (language === 'markdown' && /^(?:#|>|\[)/.test(token))
   )
     return 'syntax-object';
-  if (/^\/\//.test(token)) return 'syntax-comment';
   return '';
 }
 
-function HighlightedCode({ value }: { value: string }) {
-  const parts = value.split(
-    /((?:'[^'\n]*'|"[^"\n]*"|`[^`]*`)|\b(?:const|let|var|return|await|async|if|else|for|while|new|throw|try|catch|true|false|null|undefined|elpis|fs|console|process|require|JSON|Object|Array|Promise)\b|\b\d+(?:\.\d+)?\b|\/\/[^\n]*)/g,
-  );
+export function syntaxTokens(
+  value: string,
+  language: CodeLanguage,
+): Array<{ value: string; className: string }> {
+  const pattern = syntaxPattern(language);
+  const parts = pattern ? value.split(pattern) : [value];
+  return parts.map((part) => ({
+    value: part,
+    className: syntaxClass(part, language),
+  }));
+}
+
+function HighlightedCode({
+  value,
+  language = 'javascript',
+}: {
+  value: string;
+  language?: CodeLanguage;
+}) {
   return (
     <code>
-      {parts.map((part, index) => (
-        <span class={syntaxClass(part)} key={index}>
-          {part}
+      {syntaxTokens(value, language).map((part, index) => (
+        <span class={part.className} key={index}>
+          {part.value}
         </span>
       ))}
     </code>
@@ -398,6 +459,7 @@ function OperationCard({
     operation.before !== undefined && operation.after !== undefined
       ? editDiffPreview(operation.before, operation.after)
       : [];
+  const language = codeLanguageForPath(operation.target);
   const added = diff.filter((line) => line.kind === 'add').length;
   const removed = diff.filter((line) => line.kind === 'remove').length;
   const canExpand = (operation.after?.split('\n').length ?? 0) > 8;
@@ -413,7 +475,9 @@ function OperationCard({
         </span>
       </header>
       {expanded && operation.after ? (
-        <pre class='operation-full-value'>{operation.after}</pre>
+        <pre class='operation-full-value'>
+          <HighlightedCode value={operation.after} language={language} />
+        </pre>
       ) : diff.length ? (
         <pre class='operation-diff'>
           {diff.map((line, index) => (
@@ -422,7 +486,7 @@ function OperationCard({
               <i>
                 {line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}
               </i>
-              <code>{line.text}</code>
+              <HighlightedCode value={line.text} language={language} />
             </span>
           ))}
         </pre>
@@ -755,9 +819,8 @@ export function ThreadStream({
           onOpenMind={onOpenMind}
         />
       ))}
-      {live ? (
+      {live?.content ? (
         <div class='thread-item'>
-          {live.reasoning ? <ThoughtCard value={live.reasoning} /> : null}
           <div class='message-row'>
             <div class='message-avatar agent-avatar live-avatar'>◆</div>
             <div class='message-copy'>
@@ -766,7 +829,7 @@ export function ThreadStream({
                 <span class='writing-pill'>writing</span>
               </div>
               <div class='message-prose reply-prose streaming-copy'>
-                {live.content || 'thinking'}
+                {live.content}
                 <i />
               </div>
             </div>
@@ -843,7 +906,7 @@ export function ThreadView({
       <ThreadStream
         entries={state.messages}
         room={state.room}
-        agent={cleanTag(state.meta?.botTag || 'agent')}
+        agent={cleanTag(state.meta?.agentName || 'agent')}
         live={state.live}
         mindItems={state.mindItems}
         onOpenMind={(id) => {

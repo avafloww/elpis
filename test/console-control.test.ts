@@ -47,9 +47,10 @@ function sources(overrides: Partial<HubSources> = {}): HubSources {
     meta: () => ({
       gitHash: 'x',
       treeClean: true,
+      startedAt: 0,
       uptimeMs: 0,
       model: 'x',
-      botTag: 'x',
+      agentName: 'x',
     }),
     archived: () => [],
     subUsage: () => null,

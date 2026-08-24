@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { ChatComposer, ActivityStrip } from './components/chat.js';
 import { clock, statusLabel, statusTone } from './components/common.js';
 import { ContextView } from './components/context.js';
 import { MindView } from './components/mind.js';
@@ -34,10 +35,27 @@ function useNarrow(): boolean {
   return narrow;
 }
 
-function connectionLabel(state: ConsoleState): string {
+function useNow(): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return now;
+}
+
+function connectionLabel(state: ConsoleState, now: number): string {
   if (state.connection !== 'connected')
     return state.connection.replaceAll('_', '…');
-  const hours = Math.floor(number(state.meta?.uptimeMs) / 3_600_000);
+  const startedAt = number(state.meta?.startedAt);
+  const uptimeMs =
+    startedAt > 0
+      ? Math.max(0, now - startedAt)
+      : Math.max(0, number(state.meta?.uptimeMs));
+  const minutes = Math.floor(uptimeMs / 60_000);
+  if (minutes < 1) return 'up <1m';
+  if (minutes < 60) return `up ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
   return hours >= 24
     ? `up ${Math.floor(hours / 24)}d ${hours % 24}h`
     : `up ${hours}h`;
@@ -233,6 +251,7 @@ function Sidebar({
   close?(): void;
   drawer?: boolean;
 }) {
+  const now = useNow();
   const chooseView = (view: ViewName): void => {
     actions.selectMind(null);
     actions.selectWorker(null);
@@ -255,7 +274,7 @@ function Sidebar({
             >
               {state.meta?.gitHash?.slice(0, 7) || 'local'}
             </a>
-            <span>{connectionLabel(state)}</span>
+            <span>{connectionLabel(state, now)}</span>
             <i style={{ background: connectionTone(state) }} />
           </>
         )}
@@ -284,83 +303,6 @@ function Sidebar({
       </div>
       {!drawer ? <ContextMeter state={state} /> : null}
     </aside>
-  );
-}
-
-function StatusBar({ state }: { state: ConsoleState }) {
-  const activeWorkers = state.workers.sessions.filter((session) =>
-    ['spawning', 'running', 'idle'].includes(text(session.status)),
-  ).length;
-  const label = state.live
-    ? 'writing · live turn'
-    : activeWorkers
-      ? `${activeWorkers} worker${activeWorkers === 1 ? '' : 's'} running`
-      : 'idle';
-  const selectedRoom = state.rooms.find((room) => room.id === state.room);
-  const lens =
-    state.room === 'all'
-      ? 'all rooms'
-      : selectedRoom
-        ? roomLabel(selectedRoom)
-        : roomName(state.room);
-  return (
-    <div class='status-bar'>
-      <span class={state.live ? 'active' : ''}>
-        {state.live ? <i /> : null}
-        {label}
-      </span>
-      {!['workers', 'secretary'].includes(state.view) ? (
-        <>
-          <b />
-          <span>{lens}</span>
-        </>
-      ) : null}
-    </div>
-  );
-}
-
-function ThreadComposer({
-  state,
-  actions,
-  mobile = false,
-}: {
-  state: ConsoleState;
-  actions: ConsoleActions;
-  mobile?: boolean;
-}) {
-  const [draft, setDraft] = useState('');
-  return (
-    <form
-      class={`thread-composer ${mobile ? 'mobile-composer' : ''}`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (actions.sendChat(draft)) setDraft('');
-      }}
-    >
-      <div>
-        <textarea
-          rows={1}
-          value={draft}
-          disabled={state.connection !== 'connected'}
-          onInput={(event) => setDraft(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (
-              event.key === 'Enter' &&
-              !event.shiftKey &&
-              !event.isComposing
-            ) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-          placeholder='Write a message…'
-        />
-        {!mobile ? <span>console</span> : null}
-        <button disabled={!draft.trim() || state.connection !== 'connected'}>
-          ↑
-        </button>
-      </div>
-    </form>
   );
 }
 
@@ -569,7 +511,6 @@ function DesktopApp({
     <div class='desktop-shell'>
       <Sidebar state={state} actions={actions} proposals={proposals} />
       <main class='desktop-main'>
-        <StatusBar state={state} />
         <div class='view-body'>
           <ViewBody
             state={state}
@@ -579,7 +520,19 @@ function DesktopApp({
           />
         </div>
         {state.view === 'thread' ? (
-          <ThreadComposer state={state} actions={actions} />
+          <>
+            {state.live && !state.live.content ? (
+              <ActivityStrip
+                label={`${text(state.meta?.agentName, 'agent')} is thinking`}
+                detail={state.live.reasoning || undefined}
+              />
+            ) : null}
+            <ChatComposer
+              disabled={state.connection !== 'connected'}
+              contextLabel='console'
+              onSend={actions.sendChat}
+            />
+          </>
         ) : null}
         <LogRail state={state} open={logsOpen} setOpen={setLogsOpen} />
       </main>
@@ -651,26 +604,10 @@ function MobileApp({
   setHintMindId(value: string | null): void;
 }) {
   const [drawer, setDrawer] = useState(false);
-  const selectedRoom = state.rooms.find((room) => room.id === state.room);
-  const lens =
-    state.room === 'all'
-      ? 'all rooms'
-      : selectedRoom
-        ? roomLabel(selectedRoom)
-        : roomName(state.room);
   return (
     <div class='mobile-shell'>
       <MobileTop state={state} open={() => setDrawer(true)} />
       <div class='mobile-body'>
-        {state.view === 'thread' ? (
-          <div class='mobile-thread-status'>
-            <span class={state.live ? 'active' : ''}>
-              {state.live ? <i /> : null}
-              {state.live ? 'writing' : 'idle'}
-            </span>
-            <span>· {lens}</span>
-          </div>
-        ) : null}
         <ViewBody
           state={state}
           actions={actions}
@@ -679,7 +616,19 @@ function MobileApp({
         />
       </div>
       {state.view === 'thread' ? (
-        <ThreadComposer state={state} actions={actions} mobile />
+        <>
+          {state.live && !state.live.content ? (
+            <ActivityStrip
+              label={`${text(state.meta?.agentName, 'agent')} is thinking`}
+              detail={state.live.reasoning || undefined}
+            />
+          ) : null}
+          <ChatComposer
+            disabled={state.connection !== 'connected'}
+            mobile
+            onSend={actions.sendChat}
+          />
+        </>
       ) : null}
       <MobileTabs state={state} actions={actions} proposals={proposals} />
       {drawer ? (

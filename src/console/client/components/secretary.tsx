@@ -1,14 +1,10 @@
 import { useMemo, useState } from 'preact/hooks';
 import { secretaryPendingStatus, type ConsoleActions } from '../use-console.js';
-import type { ConsoleState, JsonObject } from '../types.js';
-import { array, object, text } from '../types.js';
-import {
-  Empty,
-  Markdown,
-  relative,
-  statusLabel,
-  statusTone,
-} from './common.js';
+import type { ConsoleState, JsonObject, StreamEntry } from '../types.js';
+import { array, number, object, text } from '../types.js';
+import { ActivityStrip, ChatComposer } from './chat.js';
+import { Empty, relative, statusLabel, statusTone } from './common.js';
+import { ThreadStream } from './thread.js';
 
 function sessionId(session: JsonObject): string {
   return text(session.id) || text(session.sessionId);
@@ -57,6 +53,53 @@ export function turnMessages(
   return rows;
 }
 
+export function secretaryEntries(session: JsonObject | null): StreamEntry[] {
+  if (!session) return [];
+  const entries: StreamEntry[] = [];
+  let id = 0;
+  for (const turn of array<JsonObject>(session.turns)) {
+    const status = text(turn.status);
+    const createdAt = number(turn.createdAt, number(session.createdAt));
+    const completedAt = number(turn.completedAt, createdAt);
+    for (const message of turnMessages(turn)) {
+      if (message.role === 'assistant') {
+        entries.push({
+          id: id++,
+          kind: 'assistant',
+          role: 'assistant',
+          channel: 'secretary',
+          content: message.content,
+          ts: completedAt,
+        });
+      } else if (message.role === 'user') {
+        entries.push({
+          id: id++,
+          kind: 'user',
+          role: 'user',
+          channel: 'secretary',
+          content: message.content,
+          eventKind: 'person',
+          displayName: 'operator',
+          ts: createdAt,
+        });
+      }
+    }
+    if (status === 'ambiguous' || status === 'cancelled')
+      entries.push({
+        id: id++,
+        kind: 'notice',
+        role: 'system',
+        channel: 'secretary',
+        content:
+          status === 'ambiguous'
+            ? 'Secretary stopped before completion; this turn may have partially executed and was not retried.'
+            : 'This queued Secretary turn was cancelled before execution.',
+        ts: number(turn.updatedAt, createdAt),
+      });
+  }
+  return entries;
+}
+
 function titleFor(
   session: JsonObject | null,
   state: ConsoleState,
@@ -82,7 +125,6 @@ export function SecretaryView({
   hintMindId: string | null;
   onClearHint(): void;
 }) {
-  const [draft, setDraft] = useState('');
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const sessions = state.secretary.sessions;
   const selected =
@@ -93,11 +135,7 @@ export function SecretaryView({
     null;
   const active =
     selected && ['starting', 'ready'].includes(text(selected.status));
-  const messages = useMemo(
-    () =>
-      selected ? array<JsonObject>(selected.turns).flatMap(turnMessages) : [],
-    [selected],
-  );
+  const entries = useMemo(() => secretaryEntries(selected), [selected]);
   const title = titleFor(selected, state, hintMindId);
   const pending = selected ? secretaryPendingStatus(selected) : null;
   const start = (): void =>
@@ -174,42 +212,18 @@ export function SecretaryView({
               <i>→</i>
             </button>
           ) : null}
-          <div class='secretary-turns'>
-            {messages.map((message, index) => (
-              <div
-                class={`secretary-turn secretary-turn-${message.role}`}
-                key={index}
-              >
-                <div>
-                  <span>
-                    {message.role === 'assistant' ? 'secretary' : message.role}
-                  </span>
-                  <small class={`tone-${statusTone(message.status)}`}>
-                    {statusLabel(message.status)}
-                  </small>
-                </div>
-                <Markdown value={message.content} />
-              </div>
-            ))}
-            {pending ? (
-              <div
-                class={`secretary-activity secretary-activity-${pending}`}
-                role='status'
-                aria-live='polite'
-              >
-                <span class='secretary-activity-dots' aria-hidden='true'>
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                <span>
-                  {pending === 'claimed'
-                    ? 'Secretary is thinking'
-                    : 'Waiting for Secretary'}
-                </span>
-              </div>
-            ) : null}
-            {!messages.length && selected ? (
+          <div class='secretary-thread'>
+            <ThreadStream
+              entries={entries}
+              room='all'
+              agent='Secretary'
+              mindItems={state.mindItems}
+              onOpenMind={(id) => {
+                actions.selectMind(id);
+                actions.setView('mind');
+              }}
+            />
+            {!entries.length && selected ? (
               <span class='muted-copy'>No turns in this session yet.</span>
             ) : null}
             {!selected ? (
@@ -218,26 +232,28 @@ export function SecretaryView({
               </span>
             ) : null}
           </div>
+          {pending ? (
+            <ActivityStrip
+              label={
+                pending === 'claimed'
+                  ? 'Secretary is thinking'
+                  : 'Waiting for Secretary'
+              }
+              tone={pending === 'claimed' ? 'thinking' : 'waiting'}
+            />
+          ) : null}
           {active ? (
-            <form
-              class='secretary-composer'
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (!draft.trim()) return;
+            <ChatComposer
+              contextLabel='secretary'
+              disabled={pending !== null}
+              placeholder='Ask the secretary…'
+              onSend={(content) => {
                 actions.control('secretary', 'enqueue', {
                   sessionId: sessionId(selected),
-                  content: draft.trim(),
+                  content,
                 });
-                setDraft('');
               }}
-            >
-              <input
-                value={draft}
-                onInput={(event) => setDraft(event.currentTarget.value)}
-                placeholder='Ask the secretary…'
-              />
-              <button disabled={!draft.trim()}>Ask</button>
-            </form>
+            />
           ) : null}
         </div>
       </div>

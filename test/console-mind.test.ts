@@ -61,9 +61,10 @@ function setup() {
     meta: () => ({
       gitHash: 'x',
       treeClean: true,
+      startedAt: 0,
       uptimeMs: 1,
       model: 'test',
-      botTag: 'aster',
+      agentName: 'aster',
     }),
     archived: () => [],
     subUsage: () => null,

@@ -22,6 +22,7 @@ import {
   extractCode,
   extractSandboxOperations,
   frameUrlFromLocalPath,
+  startedAtFromUptime,
   extractDetail,
   parseEnvelope,
   type HubSources,
@@ -33,6 +34,10 @@ import { formatInboundEnvelope } from '../src/lib/envelope.js';
 import { protectDisplayHeredocs } from '../src/lib/heredoc-display.js';
 import { attachmentsOf, utterance } from '../src/console/client/envelope.js';
 import { wakePresentation } from '../src/console/client/run.js';
+import {
+  codeLanguageForPath,
+  syntaxTokens,
+} from '../src/console/client/components/thread.js';
 import {
   createTranscriptStore,
   MAIN_TRANSCRIPT_ID,
@@ -96,9 +101,10 @@ const stubSources = (overrides: Partial<HubSources> = {}): HubSources => ({
   meta: () => ({
     gitHash: 'abc1234',
     treeClean: true,
+    startedAt: 0,
     uptimeMs: 1000,
     model: 'test',
-    botTag: 'Echo#1',
+    agentName: 'Echo#1',
   }),
   archived: () => [],
   subUsage: () => null,
@@ -114,6 +120,14 @@ const u = (
   role: 'user',
   channel: chan,
   content: `<incoming-message channel="${chan}" author="${author}" time="${ts}" local-time="12:34">\n${text}\n</incoming-message>`,
+});
+
+test('startedAt handoff is a stable process epoch, not frozen uptime', () => {
+  assert.equal(
+    startedAtFromUptime(1_700_000_123_456, 123_456),
+    1_700_000_000_000,
+  );
+  assert.equal(startedAtFromUptime(1000, -50), 1000);
 });
 
 test('handleClientMessage: console chat validates, delegates, and deduplicates by nonce', async () => {
@@ -157,10 +171,18 @@ test('handleClientMessage: console chat validates, delegates, and deduplicates b
   );
 });
 
-test('client console composer uses IME-safe Enter and one acknowledged WebSocket ingress', () => {
+test('shared console composer is IME-safe and Thread keeps one acknowledged ingress', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const main = fs.readFileSync(
     path.join(here, '../src/console/client/main.tsx'),
+    'utf8',
+  );
+  const chat = fs.readFileSync(
+    path.join(here, '../src/console/client/components/chat.tsx'),
+    'utf8',
+  );
+  const secretary = fs.readFileSync(
+    path.join(here, '../src/console/client/components/secretary.tsx'),
     'utf8',
   );
   const hook = fs.readFileSync(
@@ -168,10 +190,14 @@ test('client console composer uses IME-safe Enter and one acknowledged WebSocket
     'utf8',
   );
   assert.match(
-    main,
+    chat,
     /event\.key === 'Enter'[\s\S]*!event\.shiftKey[\s\S]*!event\.isComposing/,
   );
-  assert.match(main, /<ThreadComposer state=\{state\} actions=\{actions\}/);
+  assert.match(main, /<ChatComposer[\s\S]*onSend=\{actions\.sendChat\}/);
+  assert.match(
+    secretary,
+    /<ChatComposer[\s\S]*placeholder='Ask the secretary…'/,
+  );
   assert.match(hook, /send\(\{ t: 'chat', nonce, content: value \}\)/);
   assert.match(hook, /case 'chatResult':[\s\S]*frame\.ok === false/);
   assert.match(
@@ -368,18 +394,52 @@ test('Preact thread renders backend event kinds and real watch frames without pe
   assert.doesNotMatch(thread, /entry\.author === 'harness'/);
 });
 
-test('Preact stream waits compactly until a real delta materializes content', () => {
+test('edit diff language detection follows the target path without executing code', () => {
+  assert.equal(codeLanguageForPath('src/view.tsx'), 'javascript');
+  assert.equal(codeLanguageForPath('package.json'), 'json');
+  assert.equal(codeLanguageForPath('src/theme.css'), 'css');
+  assert.equal(codeLanguageForPath('public/index.html'), 'markup');
+  assert.equal(codeLanguageForPath('scripts/deploy.sh'), 'shell');
+  assert.equal(codeLanguageForPath('config/runtime.yaml'), 'config');
+  assert.equal(codeLanguageForPath('README.md'), 'markdown');
+  assert.equal(codeLanguageForPath('ROM.bin'), 'plain');
+  assert.deepEqual(
+    syntaxTokens("const answer = 'yes' // kept", 'javascript')
+      .filter((token) => token.className)
+      .map((token) => token.className),
+    ['syntax-keyword', 'syntax-string', 'syntax-comment'],
+  );
+  assert.ok(
+    syntaxTokens('color: #d8b877;', 'css').some(
+      (token) => token.className === 'syntax-number',
+    ),
+  );
+});
+
+test('Preact stream keeps thinking transient until real content exists', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
+  const main = fs.readFileSync(
+    path.join(here, '../src/console/client/main.tsx'),
+    'utf8',
+  );
   const thread = fs.readFileSync(
     path.join(here, '../src/console/client/components/thread.tsx'),
+    'utf8',
+  );
+  const chat = fs.readFileSync(
+    path.join(here, '../src/console/client/components/chat.tsx'),
     'utf8',
   );
   const hook = fs.readFileSync(
     path.join(here, '../src/console/client/use-console.ts'),
     'utf8',
   );
-  assert.match(thread, /live\.content \|\| 'thinking'/);
+  assert.match(thread, /live\?\.content/);
   assert.match(thread, /streaming-copy/);
+  assert.doesNotMatch(thread, /live\.content \|\| 'thinking'/);
+  assert.match(main, /<ActivityStrip[\s\S]*is thinking/);
+  assert.match(chat, /class=\{`activity-strip activity-\$\{tone\}`\}/);
+  assert.doesNotMatch(main, /StatusBar|mobile-thread-status/);
   assert.match(hook, /case 'streamStart'/);
   assert.match(hook, /case 'delta'/);
 });

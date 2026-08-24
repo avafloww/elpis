@@ -121,13 +121,20 @@ export interface ContextSnapshot {
   messages: unknown[];
 }
 
-/** Static-ish header metadata (git hash, uptime, model, bot tag). */
+/** Static-ish header metadata (git hash, process start, model, agent name). */
 export interface MetaInfo {
   gitHash: string;
   treeClean: boolean;
+  startedAt: number;
   uptimeMs: number;
   model: string;
-  botTag: string;
+  agentName: string;
+}
+
+export function startedAtFromUptime(nowMs: number, uptimeMs: number): number {
+  const safeNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const safeUptime = Number.isFinite(uptimeMs) ? Math.max(0, uptimeMs) : 0;
+  return Math.round(safeNow - safeUptime);
 }
 
 export interface LogLine {
@@ -1485,6 +1492,7 @@ type UserEventPresentation = Pick<
 >;
 
 const FRAME_MARKERS = [
+  ['/elpis-data/watch-frames/', 'watch'],
   ['/elpis-data/computer/screenshots/', 'computer'],
   ['/elpis-data/browser/screenshots/', 'browser'],
   ['/elpis-data/motor/episodes/', 'motor'],
@@ -1503,7 +1511,12 @@ export function frameUrlFromLocalPath(localPath: string): string | null {
     if (
       parts.length === 0 ||
       parts.some((part) => part === '.' || part === '..') ||
-      !/\.(?:png|jpe?g|gif|webp)$/i.test(parts.at(-1) ?? '')
+      !/\.(?:png|jpe?g|gif|webp)$/i.test(parts.at(-1) ?? '') ||
+      (kind === 'watch' &&
+        (parts.length !== 1 ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:png|jpe?g|gif|webp)$/i.test(
+            parts[0] ?? '',
+          )))
     )
       return null;
     return `/frames/${kind}/${parts.map(encodeURIComponent).join('/')}`;

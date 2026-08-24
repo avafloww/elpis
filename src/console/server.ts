@@ -20,6 +20,7 @@ import type { ConsoleHub, HubClient } from './hub.js';
 import type { McpHttpEndpoint } from '../mcp/server.js';
 import { resolveDataLayout } from '../store/data-layout.js';
 import { ATTACHMENT_DIR } from '../types.js';
+import { watchCustodyRoot } from './watch-custody.js';
 
 export interface ConsoleServer {
   start(): Promise<void>;
@@ -79,16 +80,30 @@ function resolveFrameRequest(
   reqPath: string,
   dataDirectory: string,
 ): FrameRequest | null {
-  const match = reqPath.match(/^\/frames\/(computer|browser|motor)\/(.+)$/);
+  const match = reqPath.match(
+    /^\/frames\/(watch|computer|browser|motor)\/(.+)$/,
+  );
   if (!match) return null;
   const layout = resolveDataLayout(dataDirectory);
   const roots = {
+    watch: watchCustodyRoot(dataDirectory),
     computer: path.join(layout.computer, 'screenshots'),
     browser: path.join(layout.browser, 'screenshots'),
     motor: path.join(layout.motor, 'episodes'),
   } as const;
-  const root = roots[match[1] as keyof typeof roots];
-  const file = path.normalize(path.join(root, match[2] ?? ''));
+  const kind = match[1] as keyof typeof roots;
+  const relative = match[2] ?? '';
+  // Custody writes only flat UUID capabilities. Do not let this route become a
+  // second generic tree browser even inside its private root.
+  if (
+    kind === 'watch' &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:png|jpe?g|gif|webp)$/i.test(
+      relative,
+    )
+  )
+    return null;
+  const root = roots[kind];
+  const file = path.normalize(path.join(root, relative));
   if (!file.startsWith(root + path.sep)) return null;
   if (!/\.(?:png|jpe?g|gif|webp)$/i.test(file)) return null;
   return { file, root };

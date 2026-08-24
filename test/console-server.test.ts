@@ -27,6 +27,7 @@ import {
   resolveFramePath,
 } from '../src/console/server.js';
 import { ConsoleHub } from '../src/console/hub.js';
+import { custodyWatchFrames } from '../src/console/watch-custody.js';
 import { makeConfig } from './helpers.js';
 
 test('isAllowedOrigin: absent Origin is allowed (the non-browser client path)', () => {
@@ -221,6 +222,22 @@ test('/frames/ route serves only bounded canonical images and rejects symlink es
     404,
   );
   assert.equal((await fetch(`${base}/frames/computer/escape.png`)).status, 404);
+
+  const privateFrame = path.join(dataDirectory, 'private-acceptance.png');
+  fs.writeFileSync(
+    privateFrame,
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  );
+  const [custodied] = custodyWatchFrames([privateFrame], dataDirectory);
+  assert.ok(custodied);
+  const watched = await fetch(
+    `${base}/frames/watch/${path.basename(custodied.localPath)}`,
+  );
+  assert.equal(watched.status, 200);
+  assert.equal(watched.headers.get('content-type'), 'image/png');
   assert.equal(
     (await fetch(`${base}/frames/computer/..%2F..%2Fsecret.png`)).status,
     403,

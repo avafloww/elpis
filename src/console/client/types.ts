@@ -27,9 +27,10 @@ export interface UsageInfo {
 export interface MetaInfo {
   gitHash?: string;
   treeClean?: boolean;
+  startedAt?: number;
   uptimeMs?: number;
   model?: string;
-  botTag?: string;
+  agentName?: string;
 }
 
 export interface StreamEntry {
