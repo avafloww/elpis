@@ -94,6 +94,23 @@ test('provenance and run attribution are excluded from every provider request su
         generation: 2,
         runId: 'private-run',
       },
+      operationReceipts: [
+        {
+          sequence: 0,
+          kind: 'shell',
+          name: 'sh',
+          command: 'private receipt command',
+          state: 'completed',
+          startedAt: 1,
+          durationMs: 1,
+          ok: true,
+          code: 0,
+          signal: null,
+          stdout: 'private receipt output',
+          stdoutBytes: 22,
+          stderrBytes: 0,
+        },
+      ],
       wake: {
         kind: 'after',
         state: 'armed',
@@ -109,7 +126,7 @@ test('provenance and run attribution are excluded from every provider request su
     tool,
   ];
   const forbidden =
-    /provenance|private\.example|harness-private-alias|private-executor|private-run|private metadata detail|toolContractVersion/;
+    /provenance|private\.example|harness-private-alias|private-executor|private-run|private metadata detail|private receipt command|private receipt output|operationReceipts|toolContractVersion/;
   assert.doesNotMatch(JSON.stringify(toApiMessage(tool)), forbidden);
   assert.doesNotMatch(
     JSON.stringify(toResponsesInput(prepareForApi(messages))),

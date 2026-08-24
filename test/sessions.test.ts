@@ -258,6 +258,23 @@ test('sessions: run execution and wake metadata round-trip', () => {
         runId: 'executor-1:g2:r4',
         statusReminder: true,
       },
+      operationReceipts: [
+        {
+          sequence: 0,
+          kind: 'shell',
+          name: 'sh',
+          command: 'printf persisted',
+          state: 'completed',
+          startedAt: 900,
+          durationMs: 10,
+          ok: true,
+          code: 0,
+          signal: null,
+          stdout: 'persisted',
+          stdoutBytes: 9,
+          stderrBytes: 0,
+        },
+      ],
       wake: {
         kind: 'after',
         state: 'armed',

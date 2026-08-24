@@ -86,8 +86,14 @@ import {
   RUN_WAKE_TASK_PREFIX,
   type DurableRunWakePayload,
 } from './sandbox/wake.js';
+import {
+  RUN_OPERATION_COMMAND_MAX_BYTES,
+  RUN_OPERATION_ERROR_MAX_BYTES,
+  RUN_OPERATION_STREAM_MAX_BYTES,
+} from './sandbox/metadata.js';
 import type {
   RunMessageMetadata,
+  RunOperationReceipt,
   RunWakeMetadata,
 } from './sandbox/metadata.js';
 import { TOOL_CONTRACT_VERSION } from './llm/provenance.js';
@@ -128,6 +134,53 @@ export {
 export type { InboundMessageAttachment } from './lib/envelope.js';
 
 export { INTERNAL_CHANNEL_ID } from './types.js';
+
+function boundReceiptField(
+  value: string,
+  maxBytes: number,
+): {
+  value: string;
+  truncated: boolean;
+} {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return { value, truncated: false };
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    value: bytes.subarray(0, end).toString('utf8'),
+    truncated: true,
+  };
+}
+
+function redactOperationReceipts(
+  receipts: RunOperationReceipt[] | undefined,
+  secrets: string[],
+): RunOperationReceipt[] | undefined {
+  if (receipts === undefined) return undefined;
+  return receipts.map((receipt) => {
+    const copy = { ...receipt };
+    const fields = [
+      ['command', RUN_OPERATION_COMMAND_MAX_BYTES],
+      ['stdout', RUN_OPERATION_STREAM_MAX_BYTES],
+      ['stderr', RUN_OPERATION_STREAM_MAX_BYTES],
+      ['error', RUN_OPERATION_ERROR_MAX_BYTES],
+    ] as const;
+    for (const [key, maxBytes] of fields) {
+      if (copy[key] === undefined) continue;
+      const bounded = boundReceiptField(
+        redactSecrets(copy[key], secrets),
+        maxBytes,
+      );
+      copy[key] = bounded.value;
+      if (bounded.truncated) {
+        if (key === 'command') copy.commandTruncated = true;
+        if (key === 'stdout') copy.stdoutTruncated = true;
+        if (key === 'stderr') copy.stderrTruncated = true;
+      }
+    }
+    return copy;
+  });
+}
 
 /**
  * Render a RunResult as PLAIN TEXT for the tool message the model reads.
@@ -2311,6 +2364,10 @@ export class Agent {
             );
           }
 
+          const operationReceipts = redactOperationReceipts(
+            result.operationReceipts,
+            this.secretValues,
+          );
           let wakeMetadata: RunWakeMetadata | undefined;
           if (parsed?.wake) {
             wakeMetadata = {
@@ -2349,6 +2406,12 @@ export class Agent {
                   ? { detached: result.detached }
                   : {}),
                 ...(result.bgId ? { bgId: result.bgId } : {}),
+                ...(operationReceipts ? { operationReceipts } : {}),
+                ...(result.operationReceiptsDropped
+                  ? {
+                      operationReceiptsDropped: result.operationReceiptsDropped,
+                    }
+                  : {}),
               };
               const contextResult = redactSecrets(
                 formatRunResult(result, contextRunMetadata),
@@ -2426,6 +2489,12 @@ export class Agent {
               : {}),
             ...(result.bgId ? { bgId: result.bgId } : {}),
             ...(wakeMetadata ? { wake: wakeMetadata } : {}),
+            ...(operationReceipts ? { operationReceipts } : {}),
+            ...(result.operationReceiptsDropped
+              ? {
+                  operationReceiptsDropped: result.operationReceiptsDropped,
+                }
+              : {}),
           };
           let resultText = formatRunResult(result, runMetadata);
           const redacted = redactSecrets(resultText, this.secretValues);

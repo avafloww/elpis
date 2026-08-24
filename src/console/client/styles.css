@@ -997,6 +997,74 @@ button.operation-compact {
   font-style: normal;
 }
 
+.runtime-operation > .operation-compact {
+  font-family: inherit;
+}
+
+.runtime-operation-bad > .operation-compact {
+  border-color: rgba(217, 143, 140, 0.2);
+}
+
+.runtime-operation-omitted {
+  padding: 5px 11px;
+  color: var(--faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+.runtime-operation-output {
+  max-height: min(360px, 42vh);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: var(--bg-code);
+}
+
+.runtime-operation:has(.runtime-operation-output) > .operation-compact {
+  border-radius: 9px 9px 0 0;
+}
+
+.runtime-operation-output section + section {
+  border-top: 1px solid var(--line);
+}
+
+.runtime-operation-output header {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 11px;
+  color: var(--muted);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.runtime-operation-output header code {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.runtime-operation-output pre {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px 11px 11px;
+  color: var(--mono-fg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.runtime-stderr pre {
+  color: var(--red);
+}
+
 .operation-diff,
 .operation-full-value {
   max-height: min(320px, 38vh);

@@ -36,7 +36,7 @@ import type {
 } from '../src/llm/llm.js';
 import type { Agent } from '../src/agent.js';
 import type { RunResult } from '../src/types.js';
-import { buildTestAgent } from './helpers.js';
+import { buildTestAgent, makeConfig } from './helpers.js';
 import {
   parseRunWakePayload,
   RUN_WAKE_TASK_PREFIX,
@@ -177,6 +177,68 @@ test('run v4 rejects invalid wake before execution and forwards exact sandbox al
     .find((candidate) => candidate.id === tools[2]?.run?.wake?.taskId);
   assert.ok(task && task.doneAt == null);
   assert.equal(parseRunWakePayload(task.payload)?.state, 'armed');
+  h.cleanup();
+});
+
+test('operation receipts are redacted before tool metadata commit and stay out of tool text', async () => {
+  const secret = 'abcd1234';
+  const base = makeConfig();
+  const h = buildTestAgent({
+    config: {
+      ...base,
+      llm: { ...base.llm, apiKey: secret },
+    },
+    llm: scripted([
+      runResponse({ code: 'secret', wake: { after: '1h' } }, 'secret-run'),
+    ]),
+    tmpPrefix: 'run-v4-receipt-secret-',
+    agentDeps: {
+      sandbox: {
+        run: async () => ({
+          ok: true,
+          preview: 'done',
+          operationReceipts: [
+            {
+              sequence: 0,
+              kind: 'shell',
+              name: 'sh',
+              command: `printf ${secret}`,
+              state: 'completed',
+              startedAt: 1,
+              durationMs: 2,
+              ok: true,
+              code: 0,
+              signal: null,
+              stdout: secret.repeat(512),
+              stderr: `warning ${secret}`,
+              stdoutBytes: secret.length * 512,
+              stderrBytes: secret.length + 8,
+              error: `caught ${secret}`,
+            },
+          ],
+        }),
+      },
+    },
+  });
+  void h.agent.loop();
+  h.agent.enqueue(inbound());
+  await settle();
+  h.agent.stop();
+  const tool = h.agent.messagesForTest.find(
+    (message) =>
+      message.role === 'tool' && message.tool_call_id === 'secret-run',
+  );
+  assert.ok(tool?.run?.operationReceipts);
+  const serialized = JSON.stringify(tool.run.operationReceipts);
+  assert.doesNotMatch(serialized, new RegExp(secret));
+  assert.match(serialized, /\[SECRET REDACTED\]/);
+  assert.ok(
+    Buffer.byteLength(tool.run.operationReceipts[0]?.stdout ?? '', 'utf8') <=
+      4096,
+  );
+  assert.equal(tool.run.operationReceipts[0]?.stdoutTruncated, true);
+  assert.doesNotMatch(tool.content, /operationReceipts|printf|warning|caught/);
+  assert.match(tool.content, /done/);
   h.cleanup();
 });
 

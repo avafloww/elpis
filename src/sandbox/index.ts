@@ -134,7 +134,13 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
     // carried through every await AND every post-detach continuation via
     // AsyncLocalStorage. No global buffer swap → reentrant, and a detached run's
     // late console.log lands in ITS buffer (delivered with the settle notice).
-    const scope: RunScope = { logbuf: [], childPids: new Set(), sends: [] };
+    const scope: RunScope = {
+      logbuf: [],
+      childPids: new Set(),
+      sends: [],
+      operationReceipts: [],
+      operationReceiptsDropped: 0,
+    };
     return runScope.run(scope, () => runInScope(code, scope, owner));
   }
 
@@ -313,6 +319,8 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
         failureKind: 'runtime',
         error: friendlyRunError(err),
         logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
+        operationReceipts: structuredClone(scope.operationReceipts),
+        operationReceiptsDropped: scope.operationReceiptsDropped || undefined,
       };
     }
 
@@ -327,6 +335,8 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
         note: 'still running — result delivered as a bg future',
         logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
         sends: scope.sends.length > 0 ? scope.sends.slice() : undefined,
+        operationReceipts: structuredClone(scope.operationReceipts),
+        operationReceiptsDropped: scope.operationReceiptsDropped || undefined,
       };
     }
 
@@ -346,6 +356,8 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       savedAs: stored && deps.surface !== 'core' ? '_' : undefined,
       logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
       sends: scope.sends.length > 0 ? scope.sends.slice() : undefined,
+      operationReceipts: structuredClone(scope.operationReceipts),
+      operationReceiptsDropped: scope.operationReceiptsDropped || undefined,
     };
   }
 

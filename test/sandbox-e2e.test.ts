@@ -184,18 +184,49 @@ test('e2e: sh returns object with stdout (async, A5)', async () => {
   const r = await sandbox.run('await elpis.sh("whoami")');
   assert.equal(r.ok, true, String(r.error));
   assert.match(r.preview || '', /whoami|stdout|sh\{/);
+  assert.equal(r.operationReceipts?.length, 1);
+  assert.deepEqual(
+    {
+      sequence: r.operationReceipts?.[0]?.sequence,
+      kind: r.operationReceipts?.[0]?.kind,
+      name: r.operationReceipts?.[0]?.name,
+      command: r.operationReceipts?.[0]?.command,
+      state: r.operationReceipts?.[0]?.state,
+      ok: r.operationReceipts?.[0]?.ok,
+      code: r.operationReceipts?.[0]?.code,
+      signal: r.operationReceipts?.[0]?.signal,
+    },
+    {
+      sequence: 0,
+      kind: 'shell',
+      name: 'sh',
+      command: 'whoami',
+      state: 'completed',
+      ok: true,
+      code: 0,
+      signal: null,
+    },
+  );
+  assert.match(r.operationReceipts?.[0]?.stdout ?? '', /\S/);
 });
 
 test('e2e: sh nonzero exit does not throw (async, A5)', async () => {
   const r = await sandbox.run('await elpis.sh("nonexistent-cmd-xyz")');
   assert.equal(r.ok, true);
-  // the result object should show nonzero/null code
+  const receipt = r.operationReceipts?.[0];
+  assert.equal(receipt?.state, 'completed');
+  assert.equal(receipt?.ok, false);
+  assert.notEqual(receipt?.code, 0);
+  assert.match(receipt?.stderr ?? '', /nonexistent-cmd-xyz|not found/i);
 });
 
 test('e2e: sudo runs as root (async, A5)', async () => {
   const r = await sandbox.run('(await elpis.sudo("whoami")).stdout.trim()');
   assert.equal(r.ok, true, String(r.error));
   assert.match(r.preview || '', /root/);
+  assert.equal(r.operationReceipts?.[0]?.name, 'sudo');
+  assert.equal(r.operationReceipts?.[0]?.command, 'whoami');
+  assert.match(r.operationReceipts?.[0]?.stdout ?? '', /root/);
 });
 
 test('e2e: sh nonexistent cmd has nonzero code (async, A5)', async () => {
@@ -209,6 +240,7 @@ test('e2e: sh proxy guard throws on un-awaited .stdout (A5)', async () => {
   const r = await sandbox.run('elpis.sh("whoami").stdout');
   assert.equal(r.ok, false);
   assert.match(r.error || '', /async|await/i);
+  assert.equal(r.operationReceipts?.[0]?.state, 'running');
 });
 
 test('e2e: sh final-expression promise auto-resolves (A5)', async () => {
@@ -217,6 +249,52 @@ test('e2e: sh final-expression promise auto-resolves (A5)', async () => {
   const r = await sandbox.run('elpis.sh("echo flat")');
   assert.equal(r.ok, true, String(r.error));
   assert.match(r.preview || '', /flat/);
+});
+
+test('e2e: parallel sh receipts retain invocation order, not completion order', async () => {
+  const r = await sandbox.run(
+    'await Promise.all([elpis.sh("sleep 0.05; printf first"), elpis.sh("printf second")]); "done"',
+  );
+  assert.equal(r.ok, true, String(r.error));
+  assert.deepEqual(
+    r.operationReceipts?.map((receipt) => ({
+      sequence: receipt.sequence,
+      command: receipt.command,
+      stdout: receipt.stdout,
+      state: receipt.state,
+    })),
+    [
+      {
+        sequence: 0,
+        command: 'sleep 0.05; printf first',
+        stdout: 'first',
+        state: 'completed',
+      },
+      {
+        sequence: 1,
+        command: 'printf second',
+        stdout: 'second',
+        state: 'completed',
+      },
+    ],
+  );
+});
+
+test('e2e: a non-executed conditional shell call leaves a present empty ledger', async () => {
+  const r = await sandbox.run(
+    'if (false) await elpis.sh("printf never"); "done"',
+  );
+  assert.equal(r.ok, true, String(r.error));
+  assert.deepEqual(r.operationReceipts, []);
+});
+
+test('e2e: receipt cap reports omitted invocations', async () => {
+  const r = await sandbox.run(
+    'await Promise.all(Array.from({ length: 33 }, () => elpis.sh("printf x"))); "done"',
+  );
+  assert.equal(r.ok, true, String(r.error));
+  assert.equal(r.operationReceipts?.length, 16);
+  assert.equal(r.operationReceiptsDropped, 17);
 });
 
 test('e2e: console.log captured', async () => {
@@ -1030,6 +1108,9 @@ test('git: status/diff/add/commit in a temp repo', async () => {
   const st0 = await sb.run('await elpis.git.status()');
   assert.equal(st0.ok, true, String(st0.error));
   assert.match(st0.preview ?? '', /ok: true/);
+  assert.equal(st0.operationReceipts?.[0]?.kind, 'git');
+  assert.equal(st0.operationReceipts?.[0]?.name, 'status');
+  assert.match(st0.operationReceipts?.[0]?.command ?? '', /^git status/);
 
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
   const add = await sb.run('await elpis.git.add("a.txt")');
@@ -1039,6 +1120,11 @@ test('git: status/diff/add/commit in a temp repo', async () => {
   const commit = await sb.run('await elpis.git.commit("first")');
   assert.equal(commit.ok, true, String(commit.error));
   assert.match(commit.preview ?? '', /sha:/);
+  assert.deepEqual(
+    commit.operationReceipts?.map((receipt) => receipt.name),
+    ['commit', 'rev-parse'],
+  );
+  assert.ok(commit.operationReceipts?.every((receipt) => receipt.ok));
 
   const diff = await sb.run('await elpis.git.diff()');
   assert.equal(diff.ok, true, String(diff.error));
@@ -1100,6 +1186,17 @@ test('git: commit with nothing staged THROWS instead of silently no-oping', asyn
   const r = await sb.run('await elpis.git.commit("nothing staged")');
   assert.equal(r.ok, false, 'a no-op commit must not look like success');
   assert.match(r.error ?? '', /git\.commit failed/);
+  assert.equal(r.operationReceipts?.[0]?.kind, 'git');
+  assert.equal(r.operationReceipts?.[0]?.name, 'commit');
+  assert.equal(r.operationReceipts?.[0]?.state, 'completed');
+  assert.equal(r.operationReceipts?.[0]?.ok, false);
+
+  const caught = await sb.run(
+    'try { await elpis.git.commit("nothing staged") } catch {} "caught"',
+  );
+  assert.equal(caught.ok, true, String(caught.error));
+  assert.equal(caught.operationReceipts?.[0]?.ok, false);
+  assert.notEqual(caught.operationReceipts?.[0]?.code, 0);
 });
 
 test('git: commitAndPush stages untracked files by default', async () => {
@@ -1365,6 +1462,32 @@ test('post-detach logs do NOT bleed into the next run; DO arrive with the settle
   );
 });
 
+test('detached sh snapshots an honest running receipt', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-detach-sh-'));
+  const detached = createSandbox({
+    config: {
+      sandbox: {
+        syncTimeoutMs: 3000,
+        asyncDeadlineMs: 50,
+        previewMaxBytes: 2048,
+        logMaxBytes: 4096,
+      },
+      kagi: { apiKey: null },
+      paths: { harnessRoot: tmp, dataDirectory: tmp },
+    },
+    memory: { read: () => '', append: () => {}, overwrite: () => {} },
+    logbuf: [],
+    bg: createBgRegistry(tmp),
+  });
+  const r = await detached.run(
+    'await elpis.sh("sleep 0.15; printf late"); "done"',
+  );
+  assert.equal(r.detached, true);
+  assert.equal(r.operationReceipts?.[0]?.state, 'running');
+  assert.equal(r.operationReceipts?.[0]?.command, 'sleep 0.15; printf late');
+  await new Promise((resolve) => setTimeout(resolve, 180));
+});
+
 test('sh caps accumulated stdout (no unbounded growth)', async () => {
   // Generate ~5KB but cap the buffer at 500 bytes via the test hook.
   const r = await sandbox.run(
@@ -1379,6 +1502,10 @@ test('sh caps accumulated stdout (no unbounded growth)', async () => {
     Number(m![1]) < 700,
     `stdout should be capped near 500, got ${m![1]}`,
   );
+  const receipt = r.operationReceipts?.[0];
+  assert.equal(receipt?.stdoutTruncated, true);
+  assert.ok((receipt?.stdoutBytes ?? 0) > 5_000);
+  assert.match(receipt?.stdout ?? '', /output truncated/);
 });
 
 // ---------- heredoc expansion ----------

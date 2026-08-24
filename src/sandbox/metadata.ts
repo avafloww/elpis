@@ -1,5 +1,32 @@
 import type { MindId } from '../store/mind-id.js';
 
+export const RUN_OPERATION_RECEIPT_MAX_COUNT = 16;
+export const RUN_OPERATION_COMMAND_MAX_BYTES = 2_048;
+export const RUN_OPERATION_STREAM_MAX_BYTES = 4_096;
+export const RUN_OPERATION_ERROR_MAX_BYTES = 1_024;
+
+export interface RunOperationReceipt {
+  sequence: number;
+  kind: 'shell' | 'git';
+  name: string;
+  command: string;
+  commandBytes?: number;
+  commandTruncated?: boolean;
+  state: 'running' | 'completed' | 'failed';
+  startedAt: number;
+  durationMs?: number;
+  ok?: boolean;
+  code?: number | null;
+  signal?: string | null;
+  stdout?: string;
+  stderr?: string;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  error?: string;
+}
+
 export interface SandboxExecutionMetadata {
   kind: 'ephemeral' | 'persistent';
   lifecycle?: 'ephemeral' | 'ready' | 'busy' | 'detached' | 'reset' | 'retired';
@@ -44,6 +71,8 @@ export interface RunMessageMetadata {
   detached?: boolean;
   bgId?: string;
   wake?: RunWakeMetadata;
+  operationReceipts?: RunOperationReceipt[];
+  operationReceiptsDropped?: number;
 }
 
 function boundedString(value: unknown, max = 512): string | undefined {
@@ -56,6 +85,95 @@ function finiteInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value)
     ? value
     : undefined;
+}
+
+function boundedUtf8String(
+  value: unknown,
+  maxBytes: number,
+  allowEmpty = false,
+): string | undefined {
+  return typeof value === 'string' &&
+    (allowEmpty || value.length > 0) &&
+    Buffer.byteLength(value, 'utf8') <= maxBytes
+    ? value
+    : undefined;
+}
+
+function parseOperationReceipt(
+  raw: unknown,
+  expectedSequence: number,
+): RunOperationReceipt | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  if (finiteInteger(source.sequence) !== expectedSequence) return undefined;
+  if (source.kind !== 'shell' && source.kind !== 'git') return undefined;
+  const name = boundedUtf8String(source.name, 64);
+  const command = boundedUtf8String(
+    source.command,
+    RUN_OPERATION_COMMAND_MAX_BYTES,
+    true,
+  );
+  if (!name || command === undefined) return undefined;
+  if (
+    source.state !== 'running' &&
+    source.state !== 'completed' &&
+    source.state !== 'failed'
+  )
+    return undefined;
+  const startedAt = finiteInteger(source.startedAt);
+  if (startedAt === undefined || startedAt < 0) return undefined;
+  const receipt: RunOperationReceipt = {
+    sequence: expectedSequence,
+    kind: source.kind,
+    name,
+    command,
+    state: source.state,
+    startedAt,
+  };
+  for (const key of [
+    'commandBytes',
+    'durationMs',
+    'stdoutBytes',
+    'stderrBytes',
+  ] as const) {
+    const value = finiteInteger(source[key]);
+    if (value !== undefined && value >= 0) receipt[key] = value;
+  }
+  for (const key of [
+    'commandTruncated',
+    'stdoutTruncated',
+    'stderrTruncated',
+  ] as const) {
+    if (typeof source[key] === 'boolean') receipt[key] = source[key];
+  }
+  if (typeof source.ok === 'boolean') receipt.ok = source.ok;
+  if (source.code === null) receipt.code = null;
+  else {
+    const code = finiteInteger(source.code);
+    if (code !== undefined) receipt.code = code;
+  }
+  if (source.signal === null) receipt.signal = null;
+  else {
+    const signal = boundedUtf8String(source.signal, 64);
+    if (signal) receipt.signal = signal;
+  }
+  const stdout = boundedUtf8String(
+    source.stdout,
+    RUN_OPERATION_STREAM_MAX_BYTES,
+  );
+  if (stdout) receipt.stdout = stdout;
+  const stderr = boundedUtf8String(
+    source.stderr,
+    RUN_OPERATION_STREAM_MAX_BYTES,
+  );
+  if (stderr) receipt.stderr = stderr;
+  const error = boundedUtf8String(source.error, RUN_OPERATION_ERROR_MAX_BYTES);
+  if (error) receipt.error = error;
+  if (receipt.state === 'running') return receipt;
+  if (receipt.durationMs === undefined || receipt.ok === undefined)
+    return undefined;
+  if (receipt.state === 'failed' && receipt.ok !== false) return undefined;
+  return receipt;
 }
 
 export function parseRunMessageMetadata(
@@ -134,6 +252,33 @@ export function parseRunMessageMetadata(
       }
       parsed.execution = execution;
     }
+  }
+
+  const operationReceiptsDropped = finiteInteger(
+    value.operationReceiptsDropped,
+  );
+  if (operationReceiptsDropped !== undefined && operationReceiptsDropped > 0)
+    parsed.operationReceiptsDropped = operationReceiptsDropped;
+
+  if (Array.isArray(value.operationReceipts)) {
+    const receipts: RunOperationReceipt[] = [];
+    const count = Math.min(
+      value.operationReceipts.length,
+      RUN_OPERATION_RECEIPT_MAX_COUNT,
+    );
+    let valid = true;
+    for (let index = 0; index < count; index++) {
+      const receipt = parseOperationReceipt(
+        value.operationReceipts[index],
+        index,
+      );
+      if (!receipt) {
+        valid = false;
+        break;
+      }
+      receipts.push(receipt);
+    }
+    if (valid) parsed.operationReceipts = receipts;
   }
 
   if (

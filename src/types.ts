@@ -14,7 +14,10 @@ import type {
   BuiltinModuleRegistry,
   RuntimeProfile,
 } from './builtin-modules.js';
-import type { SandboxExecutionMetadata } from './sandbox/metadata.js';
+import type {
+  RunOperationReceipt,
+  SandboxExecutionMetadata,
+} from './sandbox/metadata.js';
 import type { WorkerSession } from './worker/spawn.js';
 import type { WorkerMailboxMessage } from './worker/mailbox.js';
 import type {
@@ -63,6 +66,9 @@ export interface RunResult {
   /** The channel().send() calls made during this run, retained for console
    * rendering, feedback localization, transcript recovery, and detached futures. */
   sends?: { channel: string; text: string }[];
+  /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
+  operationReceipts?: RunOperationReceipt[];
+  operationReceiptsDropped?: number;
 }
 
 export interface SandboxLateProcessError {

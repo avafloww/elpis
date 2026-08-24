@@ -228,6 +228,24 @@ test('secretary turn renderer preserves ordinary request and response wire recor
   );
 });
 
+test('runtime command cards use only per-invocation receipts', () => {
+  const thread = read('src/console/client/components/thread.tsx');
+  assert.match(thread, /runtimeOperationReceipts\(result\)/);
+  assert.match(thread, /hasRuntimeOperationLedger\(result\)/);
+  assert.match(
+    thread,
+    /operation\.kind !== 'shell' && operation\.kind !== 'git'/,
+  );
+  assert.match(thread, /<pre>\{receipt\.stdout\}<\/pre>/);
+  assert.match(thread, /<pre>\{receipt\.stderr\}<\/pre>/);
+  assert.match(thread, /<pre>\{receipt\.error\}<\/pre>/);
+  assert.match(thread, /runtime-operation-omitted/);
+  assert.doesNotMatch(
+    thread,
+    /RuntimeOperationCard[\s\S]{0,400}result\.content/,
+  );
+});
+
 test('operations display bounded receipts without raw credentials or local paths', () => {
   const source = [
     'main.tsx',

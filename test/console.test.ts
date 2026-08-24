@@ -36,6 +36,9 @@ import { attachmentsOf, utterance } from '../src/console/client/envelope.js';
 import { wakePresentation } from '../src/console/client/run.js';
 import {
   codeLanguageForPath,
+  hasRuntimeOperationLedger,
+  runtimeOperationReceipts,
+  runtimeOperationReceiptsDropped,
   syntaxTokens,
 } from '../src/console/client/components/thread.js';
 import {
@@ -392,6 +395,49 @@ test('Preact thread renders backend event kinds and real watch frames without pe
   assert.match(thread, /<img[\s\S]*src=\{entry\.frameUrl\}/);
   assert.match(thread, /<InternalEventCard entry=\{entry\} \/>/);
   assert.doesNotMatch(thread, /entry\.author === 'harness'/);
+});
+
+test('runtime command receipts project actual invocations and explicit omissions', () => {
+  const entry = {
+    id: 1,
+    kind: 'tool',
+    role: 'tool',
+    channel: 'internal',
+    content: '[run ok]',
+    run: {
+      toolContractVersion: 'elpis-run-v4',
+      ok: true,
+      operationReceipts: [
+        {
+          sequence: 0,
+          kind: 'shell',
+          name: 'sh',
+          command: 'printf exact',
+          state: 'completed',
+          startedAt: 1,
+          durationMs: 2,
+          ok: true,
+          code: 0,
+          signal: null,
+          stdout: 'exact',
+        },
+      ],
+      operationReceiptsDropped: 2,
+    },
+  } as StreamEntry;
+  assert.deepEqual(
+    runtimeOperationReceipts(entry).map((receipt) => receipt.command),
+    ['printf exact'],
+  );
+  assert.equal(runtimeOperationReceiptsDropped(entry), 2);
+  assert.equal(hasRuntimeOperationLedger(entry), true);
+  assert.equal(
+    hasRuntimeOperationLedger({ ...entry, run: { operationReceipts: [] } }),
+    true,
+  );
+  assert.deepEqual(runtimeOperationReceipts(undefined), []);
+  assert.equal(hasRuntimeOperationLedger(undefined), false);
+  assert.equal(runtimeOperationReceiptsDropped(undefined), 0);
 });
 
 test('edit diff language detection follows the target path without executing code', () => {

@@ -344,6 +344,68 @@ type OperationReceipt = NonNullable<
   NonNullable<StreamEntry['toolCalls']>[number]['operations']
 >[number];
 
+export interface RuntimeOperationReceipt {
+  sequence: number;
+  kind: 'shell' | 'git';
+  name: string;
+  command: string;
+  commandBytes?: number;
+  commandTruncated?: boolean;
+  state: 'running' | 'completed' | 'failed';
+  startedAt: number;
+  durationMs?: number;
+  ok?: boolean;
+  code?: number | null;
+  signal?: string | null;
+  stdout?: string;
+  stderr?: string;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  error?: string;
+}
+
+export function runtimeOperationReceipts(
+  entry: StreamEntry | undefined,
+): RuntimeOperationReceipt[] {
+  const raw = object(entry?.run).operationReceipts;
+  if (!Array.isArray(raw)) return [];
+  const receipts: RuntimeOperationReceipt[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) break;
+    const source = value as Record<string, unknown>;
+    if (
+      source.sequence !== receipts.length ||
+      (source.kind !== 'shell' && source.kind !== 'git') ||
+      typeof source.name !== 'string' ||
+      typeof source.command !== 'string' ||
+      (source.state !== 'running' &&
+        source.state !== 'completed' &&
+        source.state !== 'failed') ||
+      typeof source.startedAt !== 'number'
+    )
+      break;
+    receipts.push(source as unknown as RuntimeOperationReceipt);
+  }
+  return receipts;
+}
+
+export function hasRuntimeOperationLedger(
+  entry: StreamEntry | undefined,
+): boolean {
+  return Array.isArray(object(entry?.run).operationReceipts);
+}
+
+export function runtimeOperationReceiptsDropped(
+  entry: StreamEntry | undefined,
+): number {
+  const value = object(entry?.run).operationReceiptsDropped;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : 0;
+}
+
 function mindOperationLabel(name: string): string {
   const action = name.split('.').at(-1) ?? 'operation';
   return (
@@ -502,6 +564,110 @@ function OperationCard({
         <span class='surface-spacer' />
         <code title={callId}>{callId}</code>
       </footer>
+    </div>
+  );
+}
+
+function runtimeReceiptState(receipt: RuntimeOperationReceipt): string {
+  if (receipt.state === 'running') return 'running';
+  if (receipt.state === 'failed') return 'failed';
+  if (receipt.signal) return receipt.signal.toLowerCase();
+  if (receipt.code !== undefined && receipt.code !== null)
+    return `exit ${receipt.code}`;
+  return receipt.ok ? 'completed' : 'failed';
+}
+
+function runtimeReceiptDuration(receipt: RuntimeOperationReceipt): string {
+  if (receipt.durationMs === undefined) return '';
+  if (receipt.durationMs < 1000) return `${receipt.durationMs}ms`;
+  return `${(receipt.durationMs / 1000).toFixed(receipt.durationMs < 10_000 ? 1 : 0)}s`;
+}
+
+function streamLabel(
+  shown: string | undefined,
+  total: number | undefined,
+  truncated: boolean | undefined,
+): string {
+  const shownBytes = new TextEncoder().encode(shown ?? '').length;
+  return truncated && total !== undefined
+    ? `${shownBytes.toLocaleString()} of ${total.toLocaleString()} bytes`
+    : `${(total ?? shownBytes).toLocaleString()} bytes`;
+}
+
+function RuntimeOperationCard({
+  receipt,
+  callId,
+}: {
+  receipt: RuntimeOperationReceipt;
+  callId: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = Boolean(receipt.stdout || receipt.stderr || receipt.error);
+  const label =
+    receipt.kind === 'git' ? `git · ${receipt.name}` : 'ran command';
+  const state = runtimeReceiptState(receipt);
+  const elapsed = runtimeReceiptDuration(receipt);
+  return (
+    <div
+      class={`runtime-operation runtime-operation-${receipt.state} ${receipt.ok === false ? 'runtime-operation-bad' : ''}`}
+    >
+      <button
+        class={`operation-compact operation-${receipt.kind}-compact`}
+        onClick={() => canExpand && setExpanded(!expanded)}
+        aria-expanded={canExpand ? expanded : undefined}
+        title={`${receipt.name} · ${callId} · invocation ${receipt.sequence + 1}`}
+      >
+        <span class='surface-label'>{label}</span>
+        <strong>
+          {receipt.command}
+          {receipt.commandTruncated ? '…' : ''}
+        </strong>
+        <span>{state}</span>
+        {elapsed ? <code>{elapsed}</code> : null}
+        {canExpand ? <i>{expanded ? '▾' : '▸'}</i> : null}
+      </button>
+      {expanded ? (
+        <div class='runtime-operation-output'>
+          {receipt.stdout ? (
+            <section>
+              <header>
+                <span>stdout</span>
+                <code>
+                  {streamLabel(
+                    receipt.stdout,
+                    receipt.stdoutBytes,
+                    receipt.stdoutTruncated,
+                  )}
+                </code>
+              </header>
+              <pre>{receipt.stdout}</pre>
+            </section>
+          ) : null}
+          {receipt.stderr ? (
+            <section class='runtime-stderr'>
+              <header>
+                <span>stderr</span>
+                <code>
+                  {streamLabel(
+                    receipt.stderr,
+                    receipt.stderrBytes,
+                    receipt.stderrTruncated,
+                  )}
+                </code>
+              </header>
+              <pre>{receipt.stderr}</pre>
+            </section>
+          ) : null}
+          {receipt.error ? (
+            <section class='runtime-stderr'>
+              <header>
+                <span>error</span>
+              </header>
+              <pre>{receipt.error}</pre>
+            </section>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -745,20 +911,42 @@ function Entry({
       ) : null}
       {(entry.toolCalls ?? []).map((call) => {
         const result = resultByCall.get(call.id);
+        const runtimeReceipts = runtimeOperationReceipts(result);
+        const runtimeReceiptsDropped = runtimeOperationReceiptsDropped(result);
+        const hasRuntimeCommands = hasRuntimeOperationLedger(result);
         return (
           <div class='tool-sequence' key={call.id}>
             <CodeCard call={call} result={result} startedAt={entry.ts} />
-            {(call.operations ?? []).map((operation, index) => (
-              <OperationCard
-                key={`${operation.name}-${index}`}
-                operation={operation}
-                result={result}
+            {(call.operations ?? [])
+              .filter(
+                (operation) =>
+                  !hasRuntimeCommands ||
+                  (operation.kind !== 'shell' && operation.kind !== 'git'),
+              )
+              .map((operation, index) => (
+                <OperationCard
+                  key={`${operation.name}-${index}`}
+                  operation={operation}
+                  result={result}
+                  callId={call.id}
+                  detail={call.detail}
+                  mindItems={mindItems}
+                  onOpenMind={onOpenMind}
+                />
+              ))}
+            {runtimeReceipts.map((receipt) => (
+              <RuntimeOperationCard
+                key={`${receipt.kind}-${receipt.sequence}`}
+                receipt={receipt}
                 callId={call.id}
-                detail={call.detail}
-                mindItems={mindItems}
-                onOpenMind={onOpenMind}
               />
             ))}
+            {runtimeReceiptsDropped ? (
+              <div class='runtime-operation-omitted'>
+                +{runtimeReceiptsDropped.toLocaleString()} more command
+                {runtimeReceiptsDropped === 1 ? '' : 's'} not retained
+              </div>
+            ) : null}
             {result ? <BackgroundCard entry={result} /> : null}
             {(result?.sends ?? []).map((send, index) => (
               <SendCard

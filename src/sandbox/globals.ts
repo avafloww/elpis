@@ -13,6 +13,14 @@ import * as path from 'node:path';
 import * as editor from '../lib/editor.js';
 import { fill } from '../lib/fill.js';
 import { preview } from './preview.js';
+import {
+  RUN_OPERATION_COMMAND_MAX_BYTES,
+  RUN_OPERATION_ERROR_MAX_BYTES,
+  RUN_OPERATION_RECEIPT_MAX_COUNT,
+  RUN_OPERATION_STREAM_MAX_BYTES,
+  type RunOperationReceipt,
+} from './metadata.js';
+
 import { createStalenessTracker } from './esm-staleness.js';
 import type { SandboxDeps } from '../types.js';
 import { isMindId, type MindId } from '../store/mind-id.js';
@@ -62,6 +70,8 @@ export interface RunScope {
   logbuf: string[];
   childPids: Set<number>;
   sends: { channel: string; text: string }[];
+  operationReceipts: RunOperationReceipt[];
+  operationReceiptsDropped: number;
   processError?: (kind: RunProcessErrorKind, error: unknown) => boolean;
 }
 export const runScope = new AsyncLocalStorage<RunScope>();
@@ -83,6 +93,112 @@ export function routeRunProcessError(
  * the old spawnSync maxBuffer (per-stream). Overridable via opts.maxBuffer for
  * tests. Beyond the cap we stop growing the buffer but let the process run. */
 export const SH_MAX_BUFFER = 32 * 1024 * 1024;
+
+type RunOperationDescriptor = Pick<
+  RunOperationReceipt,
+  'kind' | 'name' | 'command'
+>;
+
+function boundedReceiptText(
+  value: string,
+  maxBytes: number,
+): {
+  text: string;
+  bytes: number;
+  truncated: boolean;
+} {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes)
+    return { text: value, bytes: bytes.length, truncated: false };
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    text: bytes.subarray(0, end).toString('utf8'),
+    bytes: bytes.length,
+    truncated: true,
+  };
+}
+
+function beginOperationReceipt(
+  descriptor: RunOperationDescriptor | undefined,
+): RunOperationReceipt | undefined {
+  const scope = runScope.getStore();
+  if (!scope || !descriptor) return undefined;
+  if (scope.operationReceipts.length >= RUN_OPERATION_RECEIPT_MAX_COUNT) {
+    scope.operationReceiptsDropped++;
+    return undefined;
+  }
+  const command = boundedReceiptText(
+    descriptor.command,
+    RUN_OPERATION_COMMAND_MAX_BYTES,
+  );
+  const receipt: RunOperationReceipt = {
+    sequence: scope.operationReceipts.length,
+    kind: descriptor.kind,
+    name: descriptor.name,
+    command: command.text,
+    commandBytes: command.bytes,
+    commandTruncated: command.truncated || undefined,
+    state: 'running',
+    startedAt: Date.now(),
+  };
+  scope.operationReceipts.push(receipt);
+  return receipt;
+}
+
+function completeOperationReceipt(
+  receipt: RunOperationReceipt | undefined,
+  result: {
+    stdout: string;
+    stderr: string;
+    code: number | null;
+    signal: string | null;
+  },
+  source?: {
+    stdoutBytes?: number;
+    stderrBytes?: number;
+    stdoutTruncated?: boolean;
+    stderrTruncated?: boolean;
+  },
+): void {
+  if (!receipt) return;
+  const stdout = boundedReceiptText(
+    result.stdout,
+    RUN_OPERATION_STREAM_MAX_BYTES,
+  );
+  const stderr = boundedReceiptText(
+    result.stderr,
+    RUN_OPERATION_STREAM_MAX_BYTES,
+  );
+  receipt.state = 'completed';
+  receipt.durationMs = Math.max(0, Date.now() - receipt.startedAt);
+  receipt.ok = result.code === 0 && result.signal === null;
+  receipt.code = result.code;
+  receipt.signal = result.signal;
+  if (stdout.text) receipt.stdout = stdout.text;
+  if (stderr.text) receipt.stderr = stderr.text;
+  receipt.stdoutBytes = source?.stdoutBytes ?? stdout.bytes;
+  receipt.stderrBytes = source?.stderrBytes ?? stderr.bytes;
+  receipt.stdoutTruncated =
+    source?.stdoutTruncated || stdout.truncated || undefined;
+  receipt.stderrTruncated =
+    source?.stderrTruncated || stderr.truncated || undefined;
+}
+
+function failOperationReceipt(
+  receipt: RunOperationReceipt | undefined,
+  error: unknown,
+): void {
+  if (!receipt) return;
+  const message = boundedReceiptText(
+    error instanceof Error ? error.message : String(error),
+    RUN_OPERATION_ERROR_MAX_BYTES,
+  );
+  receipt.state = 'failed';
+  receipt.durationMs = Math.max(0, Date.now() - receipt.startedAt);
+  receipt.ok = false;
+  receipt.error = message.text;
+}
 
 // require rooted at the harness module: resolves `node:` builtins and any npm
 // package installed alongside the harness. The VM context IS the sandbox
@@ -343,14 +459,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   async function shImpl(
     cmd: string,
     opts: { cwd?: string; timeout?: number; maxBuffer?: number } = {},
+    descriptor?: RunOperationDescriptor,
   ): Promise<ShResult> {
     const timeoutMs = opts.timeout ?? 60_000;
     const maxBuffer = opts.maxBuffer ?? SH_MAX_BUFFER;
     const { promise, resolve, reject } = Promise.withResolvers<ShResult>();
+    const receipt = beginOperationReceipt(descriptor);
     // detached: true puts the shell in its OWN process group so a timeout can
     // signal the whole tree (grandchildren the shell spawned), not just the
     // direct shell. Killing -pid targets the group.
-    const child = spawn(cmd, { shell: true, cwd: opts.cwd, detached: true });
+    let child;
+    try {
+      child = spawn(cmd, { shell: true, cwd: opts.cwd, detached: true });
+    } catch (error) {
+      failOperationReceipt(receipt, error);
+      throw error;
+    }
     // Kill the child's process group, falling back to the child itself if the
     // group signal fails (pid gone / no group).
     const killGroup = (sig: NodeJS.Signals) => {
@@ -378,6 +502,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     };
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let stdoutTrunc = false;
     let stderrTrunc = false;
     let done = false;
@@ -414,17 +540,25 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         // of "never throws"; the agent checks .signal/.code). Append a visible
         // marker to stderr too: an agent that only inspects .stdout otherwise
         // sees empty output and can't tell timeout from silence.
-        resolve({
+        const result = {
           stdout,
           stderr:
             stderr +
             `\n[elpis.sh TIMED OUT after ${timeoutMs}ms — output above is partial]`,
           code: null,
           signal: 'TIMEOUT',
+        };
+        completeOperationReceipt(receipt, result, {
+          stdoutBytes,
+          stderrBytes,
+          stdoutTruncated: stdoutTrunc,
+          stderrTruncated: stderrTrunc,
         });
+        resolve(result);
       }
     }, timeoutMs);
     child.stdout?.on('data', (d: Buffer) => {
+      stdoutBytes += d.length;
       [stdout, stdoutTrunc] = appendCapped(
         stdout,
         d.toString('utf8'),
@@ -432,6 +566,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       );
     });
     child.stderr?.on('data', (d: Buffer) => {
+      stderrBytes += d.length;
       [stderr, stderrTrunc] = appendCapped(
         stderr,
         d.toString('utf8'),
@@ -447,6 +582,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         done = true;
         clearTimeout(timer);
         unregister();
+        failOperationReceipt(receipt, err);
         reject(err);
       }
     });
@@ -461,7 +597,14 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         done = true;
         clearTimeout(timer);
         unregister();
-        resolve({ stdout, stderr, code, signal: signal ?? null });
+        const result = { stdout, stderr, code, signal: signal ?? null };
+        completeOperationReceipt(receipt, result, {
+          stdoutBytes,
+          stderrBytes,
+          stdoutTruncated: stdoutTrunc,
+          stderrTruncated: stderrTrunc,
+        });
+        resolve(result);
       }
     });
     return promise;
@@ -502,7 +645,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const sh = ((
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => guardShPromise(shImpl(cmd, opts), 'elpis.sh')) as ((
+  ) =>
+    guardShPromise(
+      shImpl(cmd, opts, { kind: 'shell', name: 'sh', command: cmd }),
+      'elpis.sh',
+    )) as ((
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
   ) => Promise<ShResult>) & { q: (s: unknown) => string };
@@ -515,7 +662,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const sudo = (
     cmd: string,
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => guardShPromise(shImpl(`sudo ${cmd}`, opts), 'elpis.sudo');
+  ) =>
+    guardShPromise(
+      shImpl(`sudo ${cmd}`, opts, {
+        kind: 'shell',
+        name: 'sudo',
+        command: cmd,
+      }),
+      'elpis.sudo',
+    );
   if (!profile.restricted) e.sudo = sudo;
 
   // grep(pattern, opts?) — recursive text search, defaulting to the harness
@@ -1215,10 +1370,16 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // (elpis.deploy handles its own cwd).
   type GitOpts = { cwd?: string; timeout?: number };
   async function gitRun(args: string, opts: GitOpts = {}): Promise<ShResult> {
-    return shImpl(`git ${args}`, {
-      cwd: opts.cwd ?? deps.config.paths.dataDirectory,
-      timeout: opts.timeout ?? 60_000,
-    });
+    const command = `git ${args}`;
+    const action = args.trim().split(/\s+/, 1)[0] || 'command';
+    return shImpl(
+      command,
+      {
+        cwd: opts.cwd ?? deps.config.paths.dataDirectory,
+        timeout: opts.timeout ?? 60_000,
+      },
+      { kind: 'git', name: action, command },
+    );
   }
   const gitApi = {
     status: async (opts?: GitOpts) => {
