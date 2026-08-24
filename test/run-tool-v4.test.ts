@@ -64,7 +64,9 @@ function runResponse(
   };
 }
 
-function scripted(responses: CompleteResult[]): LLM & { calls: number } {
+type ScriptedResponse = CompleteResult | (() => CompleteResult);
+
+function scripted(responses: ScriptedResponse[]): LLM & { calls: number } {
   let index = 0;
   let calls = 0;
   return {
@@ -81,7 +83,7 @@ function scripted(responses: CompleteResult[]): LLM & { calls: number } {
       calls++;
       const response = responses[Math.min(index++, responses.length - 1)];
       await new Promise<void>((resolve) => setImmediate(resolve));
-      return response;
+      return typeof response === 'function' ? response() : response;
     },
     summarize: async () => 'SUMMARY',
   } as LLM & { calls: number };
@@ -110,6 +112,19 @@ function inbound(
 
 async function settle(ms = 100): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function awaitCondition(
+  condition: () => boolean,
+  message: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(message);
 }
 
 function success(code: string): RunResult {
@@ -287,9 +302,15 @@ test('failed and detached runs reject wake and continue until completed code arm
 });
 
 test('absolute target elapsed during execution returns success without yielding', async () => {
-  const at = new Date(Date.now() + 200).toISOString();
+  let target = 0;
   const llm = scripted([
-    runResponse({ code: 'slow', wake: { at } }, 'slow'),
+    () => {
+      target = Date.now() + 250;
+      return runResponse(
+        { code: 'slow', wake: { at: new Date(target).toISOString() } },
+        'slow',
+      );
+    },
     runResponse({ code: 'done', wake: { after: '1h' } }, 'done'),
   ]);
   const h = buildTestAgent({
@@ -298,8 +319,9 @@ test('absolute target elapsed during execution returns success without yielding'
     agentDeps: {
       sandbox: {
         run: async ({ code }) => {
-          if (code === 'slow')
-            await new Promise((resolve) => setTimeout(resolve, 260));
+          while (code === 'slow' && Date.now() <= target) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          }
           return success(code);
         },
       },
@@ -307,7 +329,12 @@ test('absolute target elapsed during execution returns success without yielding'
   });
   void h.agent.loop();
   h.agent.enqueue(inbound());
-  await settle(400);
+  await awaitCondition(() => {
+    const states = h.agent.messagesForTest
+      .filter((message) => message.role === 'tool')
+      .map((message) => message.run?.wake?.state);
+    return states[0] === 'elapsed' && states[1] === 'armed';
+  }, 'agent did not record elapsed then armed wake states');
   h.agent.stop();
   const tools = h.agent.messagesForTest.filter(
     (message) => message.role === 'tool',
