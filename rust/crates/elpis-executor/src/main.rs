@@ -12,9 +12,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "embedded-python")]
-static PYTHON_ARCHIVE: &[u8] = include_bytes!(env!("ELPIS_PYTHON_ARCHIVE"));
-#[cfg(feature = "embedded-python")]
-static PYTHON_MANIFEST: &[u8] = include_bytes!(env!("ELPIS_PYTHON_MANIFEST"));
+include!(concat!(env!("OUT_DIR"), "/python_bundle.rs"));
 
 struct ExecutorRuntime {
     python: PythonRuntime,
@@ -39,6 +37,9 @@ fn load_runtime() -> Result<ExecutorRuntime, String> {
     let generation = payload
         .ensure(&state.join("python-runtime"))
         .map_err(|error| error.to_string())?;
+    if generation.payload_sha256 != PYTHON_ARCHIVE_SHA256 {
+        return Err("embedded runtime generation hash mismatch".into());
+    }
     let executable = generation
         .open_verified_executable()
         .map_err(|error| error.to_string())?;
@@ -77,6 +78,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    #[cfg(feature = "embedded-python")]
+    info!(
+        archive_sha256 = PYTHON_ARCHIVE_SHA256,
+        manifest_sha256 = PYTHON_MANIFEST_SHA256,
+        "executor runtime ready"
+    );
+    #[cfg(not(feature = "embedded-python"))]
     info!("executor runtime ready");
     let mut contexts: HashMap<String, PythonContext> = HashMap::new();
     loop {

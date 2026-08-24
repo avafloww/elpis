@@ -83,7 +83,10 @@ dependencies = [
  "elpis-protocol",
  "elpis-python",
  "elpis-runtime",
+ "hex",
+ "serde",
  "serde_json",
+ "sha2",
  "tracing",
  "tracing-subscriber",
 ]

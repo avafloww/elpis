@@ -1,0 +1,79 @@
+{
+  "format": 1,
+  "python": {
+    "version": "3.13.15",
+    "source_archive_sha256": "aaca2af2ab4d7b68a712660d1334c0cfd5ec13c0312ccd30c29122d8d0342320"
+  },
+  "payload": {
+    "archive_sha256": "b6617923f42f9b226bcd937540c3e442cff0767d4fcc9553c3f657ecad5e0fc6",
+    "archive_bytes": 60683828,
+    "manifest_sha256": "e590ba013e764d2097969b400f4b72b64aac787d9ef1945dd9273b795577261e",
+    "manifest_bytes": 929228
+  },
+  "packages": [
+    {
+      "name": "certifi",
+      "version": "2026.7.22",
+      "dist_info": "certifi-2026.7.22.dist-info",
+      "wheel": "certifi-2026.7.22-py3-none-any.whl",
+      "wheel_sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "license_dir": "certifi-2026.7.22.dist-info/licenses"
+    },
+    {
+      "name": "charset_normalizer",
+      "version": "3.5.1",
+      "dist_info": "charset_normalizer-3.5.1.dist-info",
+      "wheel": "charset_normalizer-3.5.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "wheel_sha256": "62b55f6722735a6c472f88361cde6640608773d9443cebdbb51abf436a1fcdd3",
+      "license_dir": "charset_normalizer-3.5.1.dist-info/licenses"
+    },
+    {
+      "name": "idna",
+      "version": "3.19",
+      "dist_info": "idna-3.19.dist-info",
+      "wheel": "idna-3.19-py3-none-any.whl",
+      "wheel_sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+      "license_dir": "idna-3.19.dist-info/licenses"
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.2",
+      "dist_info": "numpy-2.5.2.dist-info",
+      "wheel": "numpy-2.5.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "wheel_sha256": "29b86ff8a6cc556b47ec6b64b194815cc80e6bf5eedcc6cddfd65318cb0b4eee",
+      "license_dir": "numpy-2.5.2.dist-info/licenses"
+    },
+    {
+      "name": "Pillow",
+      "version": "12.3.0",
+      "dist_info": "pillow-12.3.0.dist-info",
+      "wheel": "pillow-12.3.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "wheel_sha256": "0847a763afefb695bc912d7c131e7e0632d4edc1d8698f58ddabec8e46b8b6d3",
+      "license_dir": "pillow-12.3.0.dist-info/licenses"
+    },
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "dist_info": "pyyaml-6.0.3.dist-info",
+      "wheel": "pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "wheel_sha256": "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6",
+      "license_dir": "pyyaml-6.0.3.dist-info/licenses"
+    },
+    {
+      "name": "requests",
+      "version": "2.34.2",
+      "dist_info": "requests-2.34.2.dist-info",
+      "wheel": "requests-2.34.2-py3-none-any.whl",
+      "wheel_sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "license_dir": "requests-2.34.2.dist-info/licenses"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.7.0",
+      "dist_info": "urllib3-2.7.0.dist-info",
+      "wheel": "urllib3-2.7.0-py3-none-any.whl",
+      "wheel_sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
+      "license_dir": "urllib3-2.7.0.dist-info/licenses"
+    }
+  ]
+}
