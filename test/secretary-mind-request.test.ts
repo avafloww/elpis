@@ -10,13 +10,26 @@ import type { SecretaryProposalInput } from '../src/secretary/mind.js';
 function service() {
   const proposals: SecretaryProposalInput[] = [];
   const reads: unknown[][] = [];
+  const writes: unknown[][] = [];
   const value: SecretaryMindService = {
     get(...args) {
       reads.push(args);
       return { binding: {} as never, item: {} as never };
     },
+    list(...args) {
+      reads.push(args);
+      return {} as never;
+    },
     tree(...args) {
       reads.push(args);
+      return {} as never;
+    },
+    comment(...args) {
+      writes.push(args);
+      return {} as never;
+    },
+    reply(...args) {
+      writes.push(args);
       return {} as never;
     },
     propose(_token, input) {
@@ -24,7 +37,7 @@ function service() {
       return { binding: {} as never, item: {} as never };
     },
   };
-  return { value, proposals, reads };
+  return { value, proposals, reads, writes };
 }
 
 function rejected(value: unknown): void {
@@ -35,6 +48,7 @@ function rejected(value: unknown): void {
   );
   assert.deepEqual(f.proposals, []);
   assert.deepEqual(f.reads, []);
+  assert.deepEqual(f.writes, []);
 }
 
 test('proposal dispatcher passes only one bounded fixed write shape', () => {
@@ -112,5 +126,88 @@ test('read operations retain exact bounded request shapes', () => {
     ['token', 'elm-00000001'],
     ['token', undefined, 2, 3],
   ]);
+  dispatchSecretaryMindRequest(f.value, 'token', {
+    protocol: 1,
+    operation: 'list',
+    query: 'current',
+    statuses: ['open', 'in_progress'],
+    kinds: ['task'],
+    includeArchived: false,
+    limit: 7,
+    offset: 2,
+  });
+  assert.deepEqual(f.reads, [
+    ['token', 'elm-00000001'],
+    ['token', undefined, 2, 3],
+    [
+      'token',
+      {
+        query: 'current',
+        statuses: ['open', 'in_progress'],
+        kinds: ['task'],
+        includeArchived: false,
+        limit: 7,
+        offset: 2,
+      },
+    ],
+  ]);
   assert.deepEqual(f.proposals, []);
+});
+
+test('comment and reply dispatchers pass only bounded attributed write inputs', () => {
+  const f = service();
+  dispatchSecretaryMindRequest(f.value, 'token', {
+    protocol: 1,
+    operation: 'comment',
+    id: 'elm-00000001',
+    body: 'note',
+  });
+  dispatchSecretaryMindRequest(f.value, 'token', {
+    protocol: 1,
+    operation: 'reply',
+    id: 'elm-00000001',
+    commentId: 9,
+    body: 'reply',
+  });
+  assert.deepEqual(f.writes, [
+    ['token', 'elm-00000001', 'note'],
+    ['token', 'elm-00000001', 9, 'reply'],
+  ]);
+});
+
+test('Secretary write and list operations reject structural authority fields pre-effect', () => {
+  for (const value of [
+    {
+      protocol: 1,
+      operation: 'comment',
+      id: 'elm-00000001',
+      body: 'x',
+      status: 'done',
+    },
+    {
+      protocol: 1,
+      operation: 'reply',
+      id: 'elm-00000001',
+      commentId: 1,
+      body: 'x',
+      actor: 'admin',
+    },
+    { protocol: 1, operation: 'list', query: 'x', dueAt: 1 },
+    { protocol: 1, operation: 'list', statuses: ['invalid'] },
+    { protocol: 1, operation: 'comment', id: 'elm-short', body: 'x' },
+    {
+      protocol: 1,
+      operation: 'reply',
+      id: 'elm-00000001',
+      commentId: 0,
+      body: 'x',
+    },
+    {
+      protocol: 1,
+      operation: 'comment',
+      id: 'elm-00000001',
+      body: 'x'.repeat(20_001),
+    },
+  ])
+    rejected(value);
 });

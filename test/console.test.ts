@@ -39,6 +39,7 @@ import {
   hasRuntimeOperationLedger,
   runtimeOperationReceipts,
   runtimeOperationReceiptsDropped,
+  parseMemoryContext,
   syntaxTokens,
 } from '../src/console/client/components/thread.js';
 import {
@@ -440,6 +441,36 @@ test('runtime command receipts project actual invocations and explicit omissions
   assert.equal(runtimeOperationReceiptsDropped(undefined), 0);
 });
 
+test('client projects bounded file receipts from the runtime ledger', () => {
+  const entry = {
+    id: 2,
+    kind: 'tool',
+    role: 'tool',
+    channel: 'internal',
+    content: '[run ok]',
+    run: {
+      operationReceipts: [
+        {
+          sequence: 0,
+          kind: 'file',
+          name: 'read',
+          command: 'src/agent.ts',
+          state: 'completed',
+          startedAt: 1,
+          durationMs: 1,
+          ok: true,
+          code: 0,
+          signal: null,
+          stdout: '1: hello',
+        },
+      ],
+    },
+  } as StreamEntry;
+  assert.deepEqual(runtimeOperationReceipts(entry), [
+    entry.run.operationReceipts[0],
+  ]);
+});
+
 test('edit diff language detection follows the target path without executing code', () => {
   assert.equal(codeLanguageForPath('src/view.tsx'), 'javascript');
   assert.equal(codeLanguageForPath('package.json'), 'json');
@@ -453,12 +484,33 @@ test('edit diff language detection follows the target path without executing cod
     syntaxTokens("const answer = 'yes' // kept", 'javascript')
       .filter((token) => token.className)
       .map((token) => token.className),
-    ['syntax-keyword', 'syntax-string', 'syntax-comment'],
+    ['syntax-keyword', 'syntax-identifier', 'syntax-string', 'syntax-comment'],
   );
   assert.ok(
-    syntaxTokens('color: #d8b877;', 'css').some(
-      (token) => token.className === 'syntax-number',
+    syntaxTokens(
+      '({ item: { id: item.id, status: item.status }, files })',
+      'javascript',
+    ).some(
+      (token) =>
+        token.value === 'files' && token.className === 'syntax-identifier',
     ),
+  );
+});
+
+test('memory context parser separates source frontmatter and Markdown body', () => {
+  assert.deepEqual(
+    parseMemoryContext(
+      '[person-memory — first appearance]\n--- people/example.md ---\n---\nname: Example\nids: ["1"]\n---\n# Notes\n\n**kept** body',
+    ),
+    {
+      heading: '[person-memory — first appearance]',
+      source: 'people/example.md',
+      frontmatter: [
+        { key: 'name', value: 'Example' },
+        { key: 'ids', value: '["1"]' },
+      ],
+      markdown: '# Notes\n\n**kept** body',
+    },
   );
 });
 
@@ -484,7 +536,9 @@ test('Preact stream keeps thinking transient until real content exists', () => {
   assert.match(thread, /streaming-copy/);
   assert.doesNotMatch(thread, /live\.content \|\| 'thinking'/);
   assert.match(main, /<ActivityStrip[\s\S]*is thinking/);
-  assert.match(chat, /class=\{`activity-strip activity-\$\{tone\}`\}/);
+  assert.match(chat, /class=\{`activity-row activity-\$\{tone\}`\}/);
+  assert.match(chat, /message-avatar agent-avatar activity-avatar/);
+  assert.match(thread, /runtime-no-output[^]*no output/);
   assert.doesNotMatch(main, /StatusBar|mobile-thread-status/);
   assert.match(hook, /case 'streamStart'/);
   assert.match(hook, /case 'delta'/);
@@ -1495,7 +1549,7 @@ test('v2 room rail is an observational lens with no duplicate moderation authori
   );
   assert.match(
     main,
-    /actions\.setRoom\(id\);[\s\S]*actions\.setView\('thread'\)/,
+    /actions\.setRoom\(roomAfterSelection\(state\.room, id\)\);[\s\S]*actions\.setView\('thread'\)/,
   );
   assert.doesNotMatch(main, /['"](?:moderate|mute|deafen|undeafen)['"]/);
 });

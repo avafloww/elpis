@@ -179,8 +179,25 @@ test('successful control receipts upsert sessions and append Secretary turns imm
     ],
   );
   const source = read('src/console/client/use-console.ts');
-  for (const op of ['start', 'send', 'dismiss', 'enqueue', 'close'])
+  for (const op of ['start', 'send', 'followup', 'dismiss', 'enqueue', 'close'])
     assert.match(source, new RegExp(`frame\\.op === '${op}'`));
+});
+
+test('image viewer and worker mandate use real bounded content', () => {
+  const thread = read('src/console/client/components/thread.tsx');
+  const workers = read('src/console/client/components/workers.tsx');
+  const styles = read('src/console/client/styles.css');
+  assert.match(thread, /class='image-viewer'/);
+  assert.match(thread, /event\.key === 'Escape'/);
+  assert.match(thread, /class='memory-context-surface'/);
+  assert.match(thread, /<Markdown value=\{memory\.markdown\}/);
+  assert.match(styles, /\.image-viewer-layer[\s\S]*position: fixed/);
+  assert.match(styles, /\.memory-context-body table/);
+  assert.match(workers, /state\.mindItems\.find[\s\S]*\.body/);
+  assert.doesNotMatch(workers, /Mandate text is not exposed/);
+  assert.match(workers, /Fresh same-Mind follow-up/);
+  assert.match(workers, /hidden model context is not resumed/);
+  assert.match(workers, /actions\.control\('worker', 'followup'/);
 });
 
 test('Secretary pending state drives bounded refresh and honest activity labels', () => {
@@ -234,7 +251,7 @@ test('runtime command cards use only per-invocation receipts', () => {
   assert.match(thread, /hasRuntimeOperationLedger\(result\)/);
   assert.match(
     thread,
-    /operation\.kind !== 'shell' && operation\.kind !== 'git'/,
+    /operation\.kind !== 'shell'[\s\S]*operation\.kind !== 'git'[\s\S]*operation\.kind !== 'file'/,
   );
   assert.match(thread, /<pre>\{receipt\.stdout\}<\/pre>/);
   assert.match(thread, /<pre>\{receipt\.stderr\}<\/pre>/);

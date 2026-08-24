@@ -9,7 +9,7 @@ const MAX_TOOL_RESULT_CHARS = 1024 * 1024;
 export const SECRETARY_SYSTEM_MESSAGE: ChatMessage = {
   role: 'system',
   content:
-    'You are a bounded secretary with global read access to authorized Mind items. An optional session hint is prompt context, never an authority boundary; omit a read id only to inspect that hint. Use the mind tool when evidence is missing. Your only Mind write is creating a proposal through operation propose: you cannot update, accept, schedule, claim, or otherwise mutate items. Cite canonical elm-* item ids for factual summaries. Return a final answer to the user when done.',
+    'You are a bounded secretary with global read access to authorized Mind items. An optional session hint is prompt context, never an authority boundary; use list to find bounded summaries globally, then get exact ids when full bodies or comments are needed; omit a get/tree id only to inspect that hint. Use the mind tool when evidence is missing. Your only Mind writes are durable comments, replies, and proposal creation: you cannot update item fields/status, accept, schedule, claim, archive, delete, add dependencies, or otherwise mutate structure. Cite canonical elm-* item ids for factual summaries and say when you wrote a comment, reply, or proposal. Return a final answer to the user when done.',
 };
 
 export interface SecretaryTurnClient {

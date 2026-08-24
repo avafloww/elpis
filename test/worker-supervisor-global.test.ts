@@ -15,6 +15,10 @@ function deps(surface: 'full' | 'core' | 'worker') {
       calls.push(['send', ref, text]);
       return { id: 1 } as never;
     },
+    async followup(ref: string, text?: string) {
+      calls.push(['followup', ref, text]);
+      return { continuity: 'fresh_same_mind' } as never;
+    },
     async list() {
       calls.push(['list']);
       return [];
@@ -58,6 +62,7 @@ test('full sandbox exposes a frozen forwarding worker supervisor', async () => {
   assert.deepEqual(Object.keys(elpis.worker).sort(), [
     'artifact',
     'dismiss',
+    'followup',
     'list',
     'send',
     'start',
@@ -65,6 +70,7 @@ test('full sandbox exposes a frozen forwarding worker supervisor', async () => {
   ]);
   await elpis.worker.start('elm-a1b2c3d4', { modelRef: 'p/model' });
   await elpis.worker.send('quiet-otter', 'steer');
+  await elpis.worker.followup('quiet-otter', 'continue durably');
   await elpis.worker.status('quiet-otter');
   await elpis.worker.artifact('quiet-otter', 'workspace.patch.gz');
   await elpis.worker.list();
@@ -72,6 +78,7 @@ test('full sandbox exposes a frozen forwarding worker supervisor', async () => {
   assert.deepEqual(f.calls, [
     ['start', 'elm-a1b2c3d4', { modelRef: 'p/model' }],
     ['send', 'quiet-otter', 'steer'],
+    ['followup', 'quiet-otter', 'continue durably'],
     ['status', 'quiet-otter'],
     ['artifact', 'quiet-otter', 'workspace.patch.gz'],
     ['list'],

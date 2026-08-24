@@ -153,7 +153,7 @@ export function codeLanguageForPath(target: string): CodeLanguage {
 
 function syntaxPattern(language: CodeLanguage): RegExp | null {
   if (language === 'javascript')
-    return /((?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)|\b(?:const|let|var|return|await|async|if|else|for|while|new|throw|try|catch|true|false|null|undefined|elpis|fs|console|process|require|JSON|Object|Array|Promise)\b|\b\d+(?:\.\d+)?\b|\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g;
+    return /((?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)|\b(?:const|let|var|return|await|async|if|else|for|while|new|throw|try|catch|true|false|null|undefined|elpis|fs|console|process|require|JSON|Object|Array|Promise)\b|\b\d+(?:\.\d+)?\b|\/\/[^\n]*|\/\*[\s\S]*?\*\/|\b[A-Za-z_$][A-Za-z0-9_$]*\b)/g;
   if (language === 'json')
     return /("(?:[^"\\]|\\.)*"|\b(?:true|false|null)\b|-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)/gi;
   if (language === 'css')
@@ -189,6 +189,8 @@ function syntaxClass(token: string, language: CodeLanguage): string {
     (language === 'markdown' && /^(?:#|>|\[)/.test(token))
   )
     return 'syntax-object';
+  if (language === 'javascript' && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(token))
+    return 'syntax-identifier';
   return '';
 }
 
@@ -346,7 +348,7 @@ type OperationReceipt = NonNullable<
 
 export interface RuntimeOperationReceipt {
   sequence: number;
-  kind: 'shell' | 'git';
+  kind: 'shell' | 'git' | 'file';
   name: string;
   command: string;
   commandBytes?: number;
@@ -377,7 +379,9 @@ export function runtimeOperationReceipts(
     const source = value as Record<string, unknown>;
     if (
       source.sequence !== receipts.length ||
-      (source.kind !== 'shell' && source.kind !== 'git') ||
+      (source.kind !== 'shell' &&
+        source.kind !== 'git' &&
+        source.kind !== 'file') ||
       typeof source.name !== 'string' ||
       typeof source.command !== 'string' ||
       (source.state !== 'running' &&
@@ -570,6 +574,7 @@ function OperationCard({
 
 function runtimeReceiptState(receipt: RuntimeOperationReceipt): string {
   if (receipt.state === 'running') return 'running';
+  if (receipt.kind === 'file' && receipt.state === 'completed') return 'read';
   if (receipt.state === 'failed') return 'failed';
   if (receipt.signal) return receipt.signal.toLowerCase();
   if (receipt.code !== undefined && receipt.code !== null)
@@ -602,9 +607,15 @@ function RuntimeOperationCard({
   callId: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const canExpand = Boolean(receipt.stdout || receipt.stderr || receipt.error);
+  const canExpand = receipt.state !== 'running';
   const label =
-    receipt.kind === 'git' ? `git · ${receipt.name}` : 'ran command';
+    receipt.kind === 'git'
+      ? `git · ${receipt.name}`
+      : receipt.kind === 'file'
+        ? receipt.name === 'grep'
+          ? 'searched files'
+          : 'read file'
+        : 'ran command';
   const state = runtimeReceiptState(receipt);
   const elapsed = runtimeReceiptDuration(receipt);
   return (
@@ -665,6 +676,9 @@ function RuntimeOperationCard({
               </header>
               <pre>{receipt.error}</pre>
             </section>
+          ) : null}
+          {!receipt.stdout && !receipt.stderr && !receipt.error ? (
+            <div class='runtime-no-output'>no output</div>
           ) : null}
         </div>
       ) : null}
@@ -731,33 +745,74 @@ function AttachmentCards({
 }: {
   attachments: ReturnType<typeof attachmentsOf>;
 }) {
+  const [viewer, setViewer] = useState<{ url: string; name: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!viewer) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setViewer(null);
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [viewer]);
   return (
-    <div class='attachment-grid'>
-      {attachments.map((attachment, index) => {
-        const url = attachmentUrl(attachment.localPath);
-        const image = attachment.contentType.startsWith('image/');
-        return (
-          <div class='attachment-surface' key={`${attachment.name}-${index}`}>
+    <>
+      <div class='attachment-grid'>
+        {attachments.map((attachment, index) => {
+          const url = attachmentUrl(attachment.localPath);
+          const image = attachment.contentType.startsWith('image/');
+          return (
+            <div class='attachment-surface' key={`${attachment.name}-${index}`}>
+              <header>
+                <span class='surface-label'>
+                  {image ? 'image' : 'attachment'}
+                </span>
+                <strong>{attachment.name}</strong>
+                <span class='surface-spacer' />
+                <span>{attachment.size.toLocaleString()} bytes</span>
+              </header>
+              {image && url ? (
+                <button
+                  class='attachment-image-button'
+                  onClick={() => setViewer({ url, name: attachment.name })}
+                  aria-label={`View ${attachment.name}`}
+                >
+                  <img src={url} alt={attachment.name} loading='lazy' />
+                </button>
+              ) : null}
+              {url ? (
+                <a href={url} target='_blank' rel='noreferrer'>
+                  open attachment
+                </a>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {viewer ? (
+        <div class='image-viewer-layer' onClick={() => setViewer(null)}>
+          <div
+            class='image-viewer'
+            role='dialog'
+            aria-modal='true'
+            aria-label={viewer.name}
+            onClick={(event) => event.stopPropagation()}
+          >
             <header>
-              <span class='surface-label'>
-                {image ? 'image' : 'attachment'}
-              </span>
-              <strong>{attachment.name}</strong>
-              <span class='surface-spacer' />
-              <span>{attachment.size.toLocaleString()} bytes</span>
-            </header>
-            {image && url ? (
-              <img src={url} alt={attachment.name} loading='lazy' />
-            ) : null}
-            {url ? (
-              <a href={url} target='_blank' rel='noreferrer'>
-                open attachment
+              <strong>{viewer.name}</strong>
+              <a href={viewer.url} target='_blank' rel='noreferrer'>
+                open original
               </a>
-            ) : null}
+              <button onClick={() => setViewer(null)} aria-label='Close image'>
+                ×
+              </button>
+            </header>
+            <img src={viewer.url} alt={viewer.name} />
           </div>
-        );
-      })}
-    </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -797,6 +852,73 @@ function WatchSurface({ entry }: { entry: StreamEntry }) {
   );
 }
 
+export interface ParsedMemoryContext {
+  heading: string;
+  source: string | null;
+  frontmatter: Array<{ key: string; value: string }>;
+  markdown: string;
+}
+
+export function parseMemoryContext(value: string): ParsedMemoryContext {
+  const lines = value.trim().split('\n');
+  const heading = /^\[person-memory[^\]]*\]$/.test(lines[0] ?? '')
+    ? (lines.shift() ?? 'memory context')
+    : 'memory context';
+  const sourceMatch = (lines[0] ?? '').match(/^---\s+(.+?)\s+---$/);
+  const source = sourceMatch ? (lines.shift(), sourceMatch[1] ?? null) : null;
+  const frontmatter: Array<{ key: string; value: string }> = [];
+  if (lines[0]?.trim() === '---') {
+    lines.shift();
+    while (lines.length && lines[0]?.trim() !== '---') {
+      const line = lines.shift() ?? '';
+      const colon = line.indexOf(':');
+      if (colon > 0)
+        frontmatter.push({
+          key: line.slice(0, colon).trim(),
+          value: line.slice(colon + 1).trim(),
+        });
+    }
+    if (lines[0]?.trim() === '---') lines.shift();
+  }
+  return {
+    heading,
+    source,
+    frontmatter,
+    markdown: lines.join('\n').trim(),
+  };
+}
+
+function MemoryContextCard({ entry }: { entry: StreamEntry }) {
+  const memory = parseMemoryContext(utterance(entry.content));
+  return (
+    <details class='memory-context-surface' open>
+      <summary>
+        <span>◆</span>
+        <strong>memory context</strong>
+        {memory.source ? <code>{memory.source}</code> : null}
+        <span class='surface-spacer' />
+        <time>{clock(entry.ts)}</time>
+      </summary>
+      <div class='memory-context-body'>
+        <small>{memory.heading}</small>
+        {memory.frontmatter.length ? (
+          <table>
+            <tbody>
+              {memory.frontmatter.map((field) => (
+                <tr key={field.key}>
+                  <th>{field.key}</th>
+                  <td>{field.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        <Markdown value={memory.markdown} className='memory-markdown' />
+      </div>
+    </details>
+  );
+}
+
 function InternalEventCard({ entry }: { entry: StreamEntry }) {
   const labels = {
     harness: 'harness event',
@@ -808,6 +930,7 @@ function InternalEventCard({ entry }: { entry: StreamEntry }) {
     entry.eventKind === 'person' || entry.eventKind === 'watch'
       ? 'harness'
       : (entry.eventKind ?? 'harness');
+  if (kind === 'memory') return <MemoryContextCard entry={entry} />;
   const body = utterance(entry.content);
   const preview = body.split('\n', 1)[0] || labels[kind];
   return (
@@ -921,7 +1044,9 @@ function Entry({
               .filter(
                 (operation) =>
                   !hasRuntimeCommands ||
-                  (operation.kind !== 'shell' && operation.kind !== 'git'),
+                  (operation.kind !== 'shell' &&
+                    operation.kind !== 'git' &&
+                    operation.kind !== 'file'),
               )
               .map((operation, index) => (
                 <OperationCard
@@ -1098,7 +1223,7 @@ export function ThreadView({
         live={state.live}
         mindItems={state.mindItems}
         onOpenMind={(id) => {
-          actions.selectMind(id);
+          actions.selectMind(id, { view: 'thread', room: state.room });
           actions.setView('mind');
         }}
       />

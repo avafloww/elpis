@@ -1,10 +1,19 @@
-import { MIND_KINDS, type MindDetail, type MindKind } from '../store/mind.js';
+import {
+  MIND_KINDS,
+  MIND_STATUSES,
+  type MindDetail,
+  type MindKind,
+  type MindListFilter,
+  type MindStatus,
+} from '../store/mind.js';
 import { isMindId, type MindId } from '../store/mind-id.js';
 import type { SecretarySessionBinding } from './session.js';
 import {
   SECRETARY_MIND_MAX_DEPTH,
   SECRETARY_MIND_MAX_ITEMS,
+  type SecretaryMindList,
   type SecretaryMindTree,
+  type SecretaryMindWrite,
   type SecretaryProposalInput,
 } from './mind.js';
 
@@ -20,12 +29,20 @@ export interface SecretaryMindService {
     token: string,
     id?: MindId,
   ): { binding: SecretarySessionBinding; item: MindDetail };
+  list(token: string, filter: MindListFilter): SecretaryMindList;
   tree(
     token: string,
     id?: MindId,
     depth?: number,
     limit?: number,
   ): SecretaryMindTree;
+  comment(token: string, id: MindId, body: string): SecretaryMindWrite;
+  reply(
+    token: string,
+    id: MindId,
+    commentId: number,
+    body: string,
+  ): SecretaryMindWrite;
   propose(
     token: string,
     input: SecretaryProposalInput,
@@ -53,6 +70,34 @@ function optionalId(value: unknown): MindId | undefined {
   return value;
 }
 
+function requiredId(value: unknown): MindId {
+  const id = optionalId(value);
+  if (!id) throw new SecretaryMindRequestError('id is required');
+  return id;
+}
+
+function optionalBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean')
+    throw new SecretaryMindRequestError(`${label} must be a boolean`);
+  return value;
+}
+
+function enumArray<T extends string>(
+  value: unknown,
+  label: string,
+  allowed: readonly T[],
+): T[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > allowed.length)
+    throw new SecretaryMindRequestError(`${label} must be a bounded array`);
+  return value.map((entry) => {
+    if (typeof entry !== 'string' || !allowed.includes(entry as T))
+      throw new SecretaryMindRequestError(`${label} contains an invalid value`);
+    return entry as T;
+  });
+}
+
 function integer(
   value: unknown,
   label: string,
@@ -72,7 +117,7 @@ function integer(
   return Number(value);
 }
 
-function proposalText(
+function boundedText(
   value: unknown,
   label: string,
   maximum: number,
@@ -81,12 +126,21 @@ function proposalText(
   if (value === undefined && !required) return undefined;
   if (typeof value !== 'string')
     throw new SecretaryMindRequestError(`${label} must be a string`);
-  const text = label === 'title' ? value.trim() : value;
-  if ((required && text.length === 0) || text.length > maximum)
+  const text = label === 'title' || label === 'query' ? value.trim() : value;
+  if ((required && text.trim().length === 0) || text.length > maximum)
     throw new SecretaryMindRequestError(
       `${label} must contain ${required ? '1' : '0'} to ${maximum} characters`,
     );
   return text;
+}
+
+function proposalText(
+  value: unknown,
+  label: string,
+  maximum: number,
+  required = false,
+): string | undefined {
+  return boundedText(value, label, maximum, required);
 }
 
 function proposalKind(value: unknown): MindKind | undefined {
@@ -132,6 +186,35 @@ export function dispatchSecretaryMindRequest(
     case 'get':
       exact(input, ['protocol', 'operation', 'id']);
       return { protocol: 1, ...service.get(token, optionalId(input.id)) };
+    case 'list':
+      exact(input, [
+        'protocol',
+        'operation',
+        'query',
+        'statuses',
+        'kinds',
+        'includeArchived',
+        'limit',
+        'offset',
+      ]);
+      return {
+        protocol: 1,
+        ...service.list(token, {
+          query: boundedText(input.query, 'query', 500),
+          statuses: enumArray<MindStatus>(
+            input.statuses,
+            'statuses',
+            MIND_STATUSES,
+          ),
+          kinds: enumArray<MindKind>(input.kinds, 'kinds', MIND_KINDS),
+          includeArchived: optionalBoolean(
+            input.includeArchived,
+            'includeArchived',
+          ),
+          limit: integer(input.limit, 'limit', 1, 100, 50),
+          offset: integer(input.offset, 'offset', 0, 10_000, 0),
+        }),
+      };
     case 'tree':
       exact(input, ['protocol', 'operation', 'id', 'depth', 'limit']);
       return {
@@ -153,6 +236,27 @@ export function dispatchSecretaryMindRequest(
             SECRETARY_MIND_MAX_ITEMS,
             SECRETARY_MIND_MAX_ITEMS,
           ),
+        ),
+      };
+    case 'comment':
+      exact(input, ['protocol', 'operation', 'id', 'body']);
+      return {
+        protocol: 1,
+        ...service.comment(
+          token,
+          requiredId(input.id),
+          boundedText(input.body, 'body', 20_000, true)!,
+        ),
+      };
+    case 'reply':
+      exact(input, ['protocol', 'operation', 'id', 'commentId', 'body']);
+      return {
+        protocol: 1,
+        ...service.reply(
+          token,
+          requiredId(input.id),
+          integer(input.commentId, 'commentId', 1, Number.MAX_SAFE_INTEGER, 0),
+          boundedText(input.body, 'body', 20_000, true)!,
         ),
       };
     case 'propose':
@@ -179,7 +283,7 @@ export function dispatchSecretaryMindRequest(
       };
     default:
       throw new SecretaryMindRequestError(
-        'operation must be get, tree, or propose',
+        'operation must be get, list, tree, comment, reply, or propose',
       );
   }
 }

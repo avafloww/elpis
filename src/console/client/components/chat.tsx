@@ -59,17 +59,16 @@ export function ActivityStrip({
   tone?: 'thinking' | 'waiting' | 'compacting';
 }) {
   return (
-    <details class={`activity-strip activity-${tone}`} role='status'>
-      <summary>
+    <div class={`activity-row activity-${tone}`} role='status' title={detail}>
+      <div class='message-avatar agent-avatar activity-avatar'>◆</div>
+      <div class='activity-copy'>
         <span class='activity-dots' aria-hidden='true'>
           <i />
           <i />
           <i />
         </span>
         <strong>{label}</strong>
-        {detail ? <span>details</span> : null}
-      </summary>
-      {detail ? <div>{detail}</div> : null}
-    </details>
+      </div>
+    </div>
   );
 }

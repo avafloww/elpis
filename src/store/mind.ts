@@ -130,6 +130,25 @@ export interface MindEvent {
   createdAt: number;
 }
 
+export interface SecretaryMindActivity {
+  eventId: number;
+  itemId: MindId;
+  title: string;
+  status: MindStatus;
+  type: 'comment.added' | 'item.created';
+  actor: string;
+  commentId: number | null;
+  replyToId: number | null;
+  body: string | null;
+  createdAt: number;
+}
+
+export interface SecretaryMindActivityBatch {
+  events: SecretaryMindActivity[];
+  latestEventId: number;
+  truncated: boolean;
+}
+
 export interface MindReminder {
   id: number;
   itemId: MindId;
@@ -459,6 +478,70 @@ export class MindStore {
         'INSERT INTO mind_events (item_id, type, actor, data_json, created_at) VALUES (?, ?, ?, ?, ?)',
       )
       .run(itemId, type, actor, JSON.stringify(data), at);
+  }
+
+  secretaryActivity(afterEventId = 0, limit = 6): SecretaryMindActivityBatch {
+    const after = Number.isSafeInteger(afterEventId)
+      ? Math.max(0, afterEventId)
+      : 0;
+    const boundedLimit = Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(20, limit))
+      : 6;
+    const rows = (
+      this.db
+        .prepare(
+          `SELECT e.id AS event_id, e.item_id, e.type, e.actor, e.data_json,
+                  e.created_at, i.title, i.status
+           FROM mind_events e
+           JOIN mind_items i ON i.id = e.item_id
+           WHERE e.id > ? AND e.actor LIKE 'secretary:%'
+             AND e.type IN ('comment.added', 'item.created')
+           ORDER BY e.id DESC LIMIT ?`,
+        )
+        .all(after, boundedLimit + 1) as Array<Record<string, unknown>>
+    ).reverse();
+    const truncated = rows.length > boundedLimit;
+    const selected = rows.slice(Math.max(0, rows.length - boundedLimit));
+    const events = selected.map((row): SecretaryMindActivity => {
+      let data: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(row.data_json));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          data = parsed as Record<string, unknown>;
+      } catch {
+        data = {};
+      }
+      const rawCommentId = Number(data.commentId);
+      const commentId =
+        Number.isSafeInteger(rawCommentId) && rawCommentId > 0
+          ? rawCommentId
+          : null;
+      const comment = commentId
+        ? (this.db
+            .prepare(
+              'SELECT body, reply_to_id FROM mind_comments WHERE id = ? AND deleted_at IS NULL',
+            )
+            .get(commentId) as
+            { body: string; reply_to_id: number | null } | undefined)
+        : undefined;
+      return {
+        eventId: Number(row.event_id),
+        itemId: String(row.item_id) as MindId,
+        title: String(row.title),
+        status: String(row.status) as MindStatus,
+        type: String(row.type) as SecretaryMindActivity['type'],
+        actor: String(row.actor),
+        commentId,
+        replyToId: comment?.reply_to_id ?? null,
+        body: comment?.body ?? null,
+        createdAt: Number(row.created_at),
+      };
+    });
+    return {
+      events,
+      latestEventId: events.at(-1)?.eventId ?? after,
+      truncated,
+    };
   }
 
   private tagsFor(id: MindId): string[] {
@@ -2001,6 +2084,9 @@ export class MindService {
     const ids = this.store.expireClaims(now);
     if (ids.length) this.changed(undefined);
     return ids;
+  }
+  secretaryActivity(afterEventId = 0, limit = 6): SecretaryMindActivityBatch {
+    return this.store.secretaryActivity(afterEventId, limit);
   }
   stats(): MindStats {
     return this.store.stats();

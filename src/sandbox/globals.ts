@@ -707,14 +707,31 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       ? Math.max(1, Math.floor(opts.max as number))
       : 200;
     const cmd = `grep ${flags.join(' ')} -e ${sh.q(pattern)} ${sh.q(where)} 2>/dev/null | head -n ${max}`;
-    const r = await shImpl(cmd, {
-      cwd: deps.config.paths.harnessRoot,
-      timeout: 30_000,
+    const receipt = beginOperationReceipt({
+      kind: 'file',
+      name: 'grep',
+      command: `${pattern} · ${where}`,
     });
-    const hits = r.stdout.trimEnd();
-    if (!hits)
-      return `grep: no matches for ${JSON.stringify(pattern)} in ${where}`;
-    return hits;
+    try {
+      const r = await shImpl(cmd, {
+        cwd: deps.config.paths.harnessRoot,
+        timeout: 30_000,
+      });
+      const hits = r.stdout.trimEnd();
+      const out = hits
+        ? hits
+        : `grep: no matches for ${JSON.stringify(pattern)} in ${where}`;
+      completeOperationReceipt(receipt, {
+        stdout: out,
+        stderr: r.stderr,
+        code: r.code,
+        signal: r.signal,
+      });
+      return out;
+    } catch (error) {
+      failOperationReceipt(receipt, error);
+      throw error;
+    }
   };
 
   // ssh — persistent remote sessions over OpenSSH ControlMaster/ControlPersist.
@@ -814,16 +831,32 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     p: string,
     opts: { from?: number; to?: number; numbers?: boolean } = {},
   ) => {
-    const out = formatRead(
-      p,
-      fs.readFileSync(p, 'utf8'),
-      opts,
-      deps.config.sandbox.previewMaxBytes,
-    );
-    // Tee into the run's log buffer: only the run's FINAL value is previewed, so
-    // a read assigned to a variable used to vanish from view entirely.
-    (runScope.getStore()?.logbuf ?? deps.logbuf).push(out);
-    return out;
+    const receipt = beginOperationReceipt({
+      kind: 'file',
+      name: 'read',
+      command: p,
+    });
+    try {
+      const out = formatRead(
+        p,
+        fs.readFileSync(p, 'utf8'),
+        opts,
+        deps.config.sandbox.previewMaxBytes,
+      );
+      completeOperationReceipt(receipt, {
+        stdout: out,
+        stderr: '',
+        code: 0,
+        signal: null,
+      });
+      // Tee into the run's log buffer: only the run's FINAL value is previewed,
+      // so a read assigned to a variable used to vanish from view entirely.
+      (runScope.getStore()?.logbuf ?? deps.logbuf).push(out);
+      return out;
+    } catch (error) {
+      failOperationReceipt(receipt, error);
+      throw error;
+    }
   };
 
   // ponder/ — open questions / thinking-in-progress, one file per thread.
@@ -2059,6 +2092,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       start: (mindId: unknown, options?: unknown) =>
         deps.worker!.start(mindId, options),
       send: (ref: string, text: string) => deps.worker!.send(ref, text),
+      followup: (ref: string, text?: string) =>
+        deps.worker!.followup(ref, text),
       list: () => deps.worker!.list(),
       status: (ref: string) => deps.worker!.status(ref),
       artifact: (ref: string, key?: string) => deps.worker!.artifact(ref, key),

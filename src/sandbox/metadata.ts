@@ -7,7 +7,7 @@ export const RUN_OPERATION_ERROR_MAX_BYTES = 1_024;
 
 export interface RunOperationReceipt {
   sequence: number;
-  kind: 'shell' | 'git';
+  kind: 'shell' | 'git' | 'file';
   name: string;
   command: string;
   commandBytes?: number;
@@ -106,7 +106,12 @@ function parseOperationReceipt(
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const source = raw as Record<string, unknown>;
   if (finiteInteger(source.sequence) !== expectedSequence) return undefined;
-  if (source.kind !== 'shell' && source.kind !== 'git') return undefined;
+  if (
+    source.kind !== 'shell' &&
+    source.kind !== 'git' &&
+    source.kind !== 'file'
+  )
+    return undefined;
   const name = boundedUtf8String(source.name, 64);
   const command = boundedUtf8String(
     source.command,

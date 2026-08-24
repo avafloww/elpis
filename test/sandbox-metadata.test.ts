@@ -131,6 +131,32 @@ test('run metadata parser restores bounded execution and wake attribution', () =
   });
 });
 
+test('run metadata parser accepts bounded file-read receipts', () => {
+  const parsed = parseRunMessageMetadata({
+    toolContractVersion: 'elpis-run-v4',
+    ok: true,
+    operationReceipts: [
+      {
+        sequence: 0,
+        kind: 'file',
+        name: 'read',
+        command: 'src/agent.ts',
+        state: 'completed',
+        startedAt: 10,
+        durationMs: 2,
+        ok: true,
+        code: 0,
+        signal: null,
+        stdout: 'src/agent.ts (1 line)\n1: hello',
+        stdoutBytes: 33,
+        stderrBytes: 0,
+      },
+    ],
+  });
+  assert.equal(parsed?.operationReceipts?.[0]?.kind, 'file');
+  assert.match(parsed?.operationReceipts?.[0]?.stdout ?? '', /1: hello/);
+});
+
 test('run metadata parser rejects envelopes and drops malformed nested fields', () => {
   assert.equal(parseRunMessageMetadata(null), undefined);
   assert.equal(parseRunMessageMetadata({ ok: true }), undefined);

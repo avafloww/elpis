@@ -101,10 +101,6 @@ test('operation receipts optimize for human navigation instead of data volume', 
   assert.match(source, /if \(!mindId\) return null/);
   assert.match(source, /item\?\.title \|\| mindId/);
   assert.match(source, /onOpenMind\(mindId\)/);
-  assert.match(
-    source,
-    /actions\.selectMind\(id\)[\s\S]*actions\.setView\('mind'\)/,
-  );
   assert.match(styles, /\.operation-compact/);
   assert.match(styles, /min-height: 38px/);
   assert.doesNotMatch(source, /resultSummary\(result\.content, 260\)/);

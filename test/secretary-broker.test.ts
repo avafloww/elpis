@@ -88,6 +88,85 @@ test('secretary Mind reads globally while an optional hint remains prompt contex
   close(f);
 });
 
+test('secretary lists globally and writes only attributed comments and replies', () => {
+  const f = fixture();
+  const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));
+  const listed = broker.list(f.token, {
+    query: 'sibling1',
+    limit: 10,
+    offset: 0,
+  });
+  assert.deepEqual(
+    listed.items.map((item) => item.id),
+    ['elm-sibling1'],
+  );
+  assert.equal(Object.hasOwn(listed.items[0], 'body'), false);
+  assert.equal(typeof listed.items[0].bodyPreview, 'string');
+  assert.equal(typeof listed.items[0].bodyTruncated, 'boolean');
+  const written = broker.comment(
+    f.token,
+    'elm-sibling1',
+    'Secretary found a relevant follow-up.',
+  );
+  assert.equal(
+    written.comment.author,
+    `secretary:${written.binding.sessionId}`,
+  );
+  assert.equal(
+    written.item.comments.at(-1)?.body,
+    'Secretary found a relevant follow-up.',
+  );
+  const replied = broker.reply(
+    f.token,
+    'elm-sibling1',
+    written.comment.id,
+    'Bounded reply.',
+  );
+  assert.equal(replied.comment.replyToId, written.comment.id);
+  assert.equal(
+    replied.comment.author,
+    `secretary:${replied.binding.sessionId}`,
+  );
+  const events = f.db
+    .prepare(
+      "SELECT actor, type FROM mind_events WHERE item_id='elm-sibling1' AND type='comment.added' ORDER BY id",
+    )
+    .all() as Array<{ actor: string; type: string }>;
+  assert.equal(events.length, 2);
+  assert.ok(
+    events.every(
+      (event) => event.actor === `secretary:${written.binding.sessionId}`,
+    ),
+  );
+  const activity = new MindStore(f.db).secretaryActivity(0, 2);
+  assert.deepEqual(
+    activity.events.map((event) => ({
+      itemId: event.itemId,
+      body: event.body,
+      replyToId: event.replyToId,
+    })),
+    [
+      {
+        itemId: 'elm-sibling1',
+        body: 'Secretary found a relevant follow-up.',
+        replyToId: null,
+      },
+      {
+        itemId: 'elm-sibling1',
+        body: 'Bounded reply.',
+        replyToId: written.comment.id,
+      },
+    ],
+  );
+  assert.throws(
+    () =>
+      broker.reply(f.token, 'elm-root0001', written.comment.id, 'wrong item'),
+    (error) =>
+      error instanceof SecretaryMindError && error.code === 'invalid_request',
+  );
+  close(f);
+});
+
 test('secretary proposal creation derives attribution and preserves proposal invariants', () => {
   const f = fixture();
   const broker = new SecretaryMindBroker(f.db, new MindStore(f.db));

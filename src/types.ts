@@ -200,8 +200,20 @@ export interface SandboxDeps {
     list(): Promise<WorkerSession[]>;
     status(ref: string): Promise<{
       session: WorkerSession;
+      mindTitle: string;
+      mandate: string;
       messages: WorkerMailboxMessage[];
       artifacts: Array<Omit<WorkerArtifactReceipt, 'relativePath'>>;
+    }>;
+    followup(
+      ref: string,
+      text?: string,
+    ): Promise<{
+      continuity: 'fresh_same_mind';
+      priorSessionId: string;
+      mindId: MindId;
+      commentId: number;
+      session: WorkerSession;
     }>;
     artifact(ref: string, key?: string): Promise<WorkerArtifactFile>;
     dismiss(ref: string): Promise<WorkerSession>;

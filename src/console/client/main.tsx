@@ -9,6 +9,7 @@ import { ThreadView } from './components/thread.js';
 import { WorkersView } from './components/workers.js';
 import type { ConsoleActions } from './use-console.js';
 import type { ConsoleState, JsonObject, MindItem, ViewName } from './types.js';
+import { roomAfterSelection } from './navigation.js';
 import { clampLogRailHeight } from './scroll.js';
 import { number, text } from './types.js';
 import { useConsole } from './use-console.js';
@@ -151,7 +152,7 @@ function Rooms({
 }) {
   const total = state.rooms.reduce((sum, room) => sum + room.count, 0);
   const choose = (id: string): void => {
-    actions.setRoom(id);
+    actions.setRoom(roomAfterSelection(state.room, id));
     actions.selectMind(null);
     actions.selectWorker(null);
     actions.setView('thread');

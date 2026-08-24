@@ -6,6 +6,7 @@ import type {
   LiveStream,
   LogLine,
   MindItem,
+  MindOrigin,
   RoomFact,
   ServerFrame,
   StreamEntry,
@@ -46,6 +47,7 @@ const initialState: ConsoleState = {
   mindStats: null,
   mindDetail: null,
   selectedMindId: null,
+  mindOrigin: null,
   workers: EMPTY_CONTROL,
   secretary: EMPTY_CONTROL,
   selectedWorkerRef: null,
@@ -60,7 +62,7 @@ type Action =
   | { type: 'room'; value: string }
   | { type: 'history-loading'; value: boolean }
   | { type: 'context-request'; reqId: number }
-  | { type: 'select-mind'; id: string | null }
+  | { type: 'select-mind'; id: string | null; origin: MindOrigin | null }
   | { type: 'select-worker'; ref: string | null }
   | { type: 'select-secretary'; id: string | null }
   | { type: 'notice'; value: string | null };
@@ -77,11 +79,14 @@ function controlSnapshot(value: unknown): ControlSnapshot {
 
 export function workerDetailFromControl(value: unknown): JsonObject {
   const result = object(value);
-  return {
+  const detail: JsonObject = {
     ...object(result.session),
     messages: array<JsonObject>(result.messages),
     artifacts: array<JsonObject>(result.artifacts),
   };
+  if (typeof result.mindTitle === 'string') detail.mindTitle = result.mindTitle;
+  if (typeof result.mandate === 'string') detail.mandate = result.mandate;
+  return detail;
 }
 
 export function secretaryIdFromControl(value: unknown): string | null {
@@ -310,8 +315,10 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
             workerDetail: workerDetailFromControl(frame.result),
             notice: null,
           } as ConsoleState;
-        if (frame.op === 'start') {
-          const session = object(frame.result);
+        if (frame.op === 'start' || frame.op === 'followup') {
+          const result = object(frame.result);
+          const session =
+            frame.op === 'followup' ? object(result.session) : result;
           const ref = workerRefFromSession(session);
           return {
             ...state,
@@ -409,6 +416,7 @@ function reducer(state: ConsoleState, action: Action): ConsoleState {
         ...state,
         selectedMindId: action.id,
         mindDetail: action.id ? state.mindDetail : null,
+        mindOrigin: action.id ? action.origin : null,
       };
     case 'select-worker':
       return { ...state, selectedWorkerRef: action.ref };
@@ -429,7 +437,7 @@ export interface ConsoleActions {
   requestMindDetail(id: string): void;
   mind(op: string, payload?: JsonObject): void;
   control(lane: 'worker' | 'secretary', op: string, payload?: JsonObject): void;
-  selectMind(id: string | null): void;
+  selectMind(id: string | null, origin?: MindOrigin | null): void;
   selectWorker(ref: string | null): void;
   selectSecretary(id: string | null): void;
   clearNotice(): void;
@@ -595,8 +603,8 @@ export function useConsole(): [ConsoleState, ConsoleActions] {
       send({ t: 'mind', op, reqId: ++requestId.current, ...payload }),
     control: (lane, op, payload = {}) =>
       send({ t: 'control', lane, op, reqId: ++requestId.current, ...payload }),
-    selectMind: (id) => {
-      dispatch({ type: 'select-mind', id });
+    selectMind: (id, origin = null) => {
+      dispatch({ type: 'select-mind', id, origin });
       if (id) send({ t: 'mind', op: 'get', id, reqId: ++requestId.current });
     },
     selectWorker: (ref) => {

@@ -1,8 +1,11 @@
 import type { Database } from '../store/db.js';
 import type {
+  MindComment,
   MindDetail,
+  MindItem,
   MindKind,
   MindLink,
+  MindListFilter,
   MindService,
 } from '../store/mind.js';
 import type { MindId } from '../store/mind-id.js';
@@ -43,10 +46,40 @@ export interface SecretaryProposalInput {
   tags?: string[];
 }
 
+export interface SecretaryMindListItem {
+  id: MindId;
+  title: string;
+  bodyPreview: string;
+  bodyTruncated: boolean;
+  kind: MindItem['kind'];
+  status: MindItem['status'];
+  effectiveStatus: MindItem['effectiveStatus'];
+  priority: number;
+  parentId: MindId | null;
+  tags: string[];
+  dueAt: number | null;
+  archivedAt: number | null;
+  updatedAt: number;
+}
+
+export interface SecretaryMindList {
+  binding: SecretarySessionBinding;
+  items: SecretaryMindListItem[];
+}
+
+export interface SecretaryMindWrite {
+  binding: SecretarySessionBinding;
+  comment: MindComment;
+  item: MindDetail;
+}
+
 export class SecretaryMindBroker {
   constructor(
     private readonly db: Database,
-    private readonly mind: Pick<MindService, 'get' | 'create'>,
+    private readonly mind: Pick<
+      MindService,
+      'get' | 'list' | 'create' | 'addComment' | 'addReply'
+    >,
   ) {}
 
   private binding(token: string): SecretarySessionBinding {
@@ -119,6 +152,70 @@ export class SecretaryMindBroker {
       throw new SecretaryMindError('not_found', 'Mind item does not exist');
     return this.bounded({
       binding,
+      item: this.project(item, this.allowedLinks(item)),
+    });
+  }
+
+  list(token: string, filter: MindListFilter): SecretaryMindList {
+    const binding = this.binding(token);
+    const items = this.mind.list(filter).map((item) => {
+      const bodyPreview = item.body.slice(0, 500);
+      return {
+        id: item.id,
+        title: item.title,
+        bodyPreview,
+        bodyTruncated: bodyPreview.length < item.body.length,
+        kind: item.kind,
+        status: item.status,
+        effectiveStatus: item.effectiveStatus,
+        priority: item.priority,
+        parentId: item.parentId,
+        tags: item.tags,
+        dueAt: item.dueAt,
+        archivedAt: item.archivedAt,
+        updatedAt: item.updatedAt,
+      };
+    });
+    return this.bounded({ binding, items });
+  }
+
+  comment(token: string, id: MindId, body: string): SecretaryMindWrite {
+    const binding = this.binding(token);
+    if (!this.mind.get(id))
+      throw new SecretaryMindError('not_found', 'Mind item does not exist');
+    const author = `secretary:${binding.sessionId}`;
+    const comment = this.mind.addComment(id, body, author);
+    const item = this.mind.get(id)!;
+    return this.bounded({
+      binding,
+      comment,
+      item: this.project(item, this.allowedLinks(item)),
+    });
+  }
+
+  reply(
+    token: string,
+    id: MindId,
+    commentId: number,
+    body: string,
+  ): SecretaryMindWrite {
+    const binding = this.binding(token);
+    if (!this.mind.get(id))
+      throw new SecretaryMindError('not_found', 'Mind item does not exist');
+    const author = `secretary:${binding.sessionId}`;
+    let comment: MindComment;
+    try {
+      comment = this.mind.addReply(id, commentId, body, author);
+    } catch (error) {
+      throw new SecretaryMindError(
+        'invalid_request',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const item = this.mind.get(id)!;
+    return this.bounded({
+      binding,
+      comment,
       item: this.project(item, this.allowedLinks(item)),
     });
   }

@@ -79,6 +79,11 @@ function WorkerDetail({
     detail.artifacts ?? detail.artifactReceipts,
   );
   const mindId = text(detail.mindId);
+  const mandate =
+    text(detail.prompt) ||
+    text(detail.mandate) ||
+    state.mindItems.find((item) => item.id === mindId)?.body ||
+    'Mandate unavailable in this snapshot.';
   return (
     <div class='reference-scroll'>
       <article class='worker-detail reference-column'>
@@ -126,14 +131,7 @@ function WorkerDetail({
         </button>
         <section class='worker-section'>
           <div class='section-label'>Mandate</div>
-          <Markdown
-            value={
-              detail.prompt ??
-              detail.mandate ??
-              'Mandate text is not exposed in this receipt.'
-            }
-            className='mandate-body'
-          />
+          <Markdown value={mandate} className='mandate-body' />
         </section>
         <section class='worker-section'>
           <div class='section-label'>Thread</div>
@@ -171,7 +169,33 @@ function WorkerDetail({
               <button disabled={!steering.trim()}>Send</button>
             </div>
           </form>
-        ) : null}
+        ) : (
+          <form
+            class='steering-box followup-box'
+            onSubmit={(event) => {
+              event.preventDefault();
+              actions.control('worker', 'followup', {
+                ref,
+                content: steering.trim() || undefined,
+              });
+              setSteering('');
+            }}
+          >
+            <div class='section-label'>Fresh same-Mind follow-up</div>
+            <small>
+              Starts a new bounded worker from this Mind item's durable record;
+              hidden model context is not resumed.
+            </small>
+            <div>
+              <input
+                value={steering}
+                onInput={(event) => setSteering(event.currentTarget.value)}
+                placeholder='Optional follow-up instruction…'
+              />
+              <button>Start follow-up</button>
+            </div>
+          </form>
+        )}
         <section class='worker-section'>
           <div class='section-label'>Artifacts</div>
           {artifacts.length ? (

@@ -1,6 +1,7 @@
 import { useMemo } from 'preact/hooks';
 import type { ConsoleActions } from '../use-console.js';
-import type { ConsoleState, MindItem } from '../types.js';
+import { mindBackTarget } from '../navigation.js';
+import type { ConsoleState, MindItem, MindOrigin } from '../types.js';
 import {
   Empty,
   Markdown,
@@ -38,17 +39,28 @@ function MindDetail({
   item,
   actions,
   onAsk,
+  origin,
 }: {
   item: MindItem;
   actions: ConsoleActions;
   onAsk(item: MindItem): void;
+  origin: MindOrigin | null;
 }) {
+  const backTarget = mindBackTarget(origin);
+  const back = (): void => {
+    actions.selectMind(null);
+    if (backTarget.view === 'thread') actions.setRoom(backTarget.room);
+    actions.setView(backTarget.view);
+  };
   const dependencies = item.dependencies ?? item.blockedBy ?? [];
   return (
     <div class='reference-scroll'>
       <article class='mind-detail reference-column'>
-        <button class='reference-back' onClick={() => actions.selectMind(null)}>
-          ← <span>All Mind items</span>
+        <button class='reference-back' onClick={back}>
+          ←{' '}
+          <span>
+            {backTarget.view === 'thread' ? 'Thread' : 'All Mind items'}
+          </span>
         </button>
         <header class='mind-detail-head'>
           <h1>{item.title}</h1>
@@ -75,7 +87,7 @@ function MindDetail({
             <span>⟂</span>
             <div>
               {dependencies.map((dep) => (
-                <button onClick={() => actions.selectMind(dep.id)}>
+                <button onClick={() => actions.selectMind(dep.id, origin)}>
                   {dep.title ?? dep.id}
                 </button>
               ))}
@@ -173,7 +185,12 @@ export function MindView({
   );
   if (selected)
     return (
-      <MindDetail item={selected} actions={actions} onAsk={onAskSecretary} />
+      <MindDetail
+        item={selected}
+        actions={actions}
+        onAsk={onAskSecretary}
+        origin={state.mindOrigin}
+      />
     );
   return (
     <div class='reference-scroll'>
@@ -189,7 +206,7 @@ export function MindView({
               {group.items.map((item) => (
                 <button
                   class={`mind-row ${item.status === 'proposal' ? 'proposal-row' : ''}`}
-                  onClick={() => actions.selectMind(item.id)}
+                  onClick={() => actions.selectMind(item.id, null)}
                 >
                   <i
                     class={`tone-dot tone-${statusTone(item.effectiveStatus ?? item.status)}`}

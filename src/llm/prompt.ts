@@ -263,10 +263,11 @@ ${input.extensionPrompt || 'No extensions are loaded.'}`;
   const workerSection = input.workersEnabled
     ? `### \`elpis.worker\`
 Native ephemeral workers execute bounded delegated tasks without inheriting SOUL, autobiographical MEMORY, people/social history, Discord, Scheduler, or autonomous wakes.
+- Prefer a worker for bounded source exploration, implementation, or verification that can proceed independently and keep the resident responsive. Keep navigation, consequential judgment, integration, and review here.
 - Create or choose the auditable Mind item first. \`elpis.worker.start(mindId, { modelRef? })\` accepts the canonical Mind id and optional canonical provider/model reference; there is no arbitrary prompt field.
 - \`elpis.worker.send(ref, text)\` adds steering through the durable dispatcher mailbox. \`elpis.worker.list()\` and \`.status(ref)\` inspect progress and receipts.
 - \`elpis.worker.dismiss(ref)\` stops the bounded episode. The worker runs in a fixed restricted Pod with its own workspace and token-bound completion/Mind/mailbox access; it cannot choose another Mind root or claim another worker slug.
-Workers report one durable finish through the mailbox. \`elpis.worker.status(ref)\` includes path-free artifact receipts; \`elpis.worker.artifact(ref, key?)\` explicitly retrieves a verified local artifact for parent review. Delegation does not transfer your judgment or authority.`
+Workers report one durable finish through the mailbox. \`elpis.worker.status(ref)\` includes a bounded mandate and path-free artifact receipts; \`elpis.worker.artifact(ref, key?)\` explicitly retrieves a verified local artifact for parent review. A completed worker's hidden model context cannot be resumed. \`elpis.worker.followup(ref, text?)\` starts a fresh worker on the same Mind root after durably recording the prior finish and optional instruction; its receipt says \`fresh_same_mind\`. Delegation does not transfer your judgment or authority.`
     : `### \`elpis.worker\`
 Native workers are disabled in config. Do the work in this process; do not invent a worker.`;
   const sharedRoomNorms = `- Ambient room chat arrives as ordinary messages, not requests — replying is optional,

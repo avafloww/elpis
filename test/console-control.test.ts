@@ -123,6 +123,15 @@ function worker(
     async send() {
       return { id: 1 } as any;
     },
+    async followup() {
+      return {
+        continuity: 'fresh_same_mind',
+        priorSessionId: workerSession.id,
+        mindId: workerSession.mindId,
+        commentId: 1,
+        session: workerSession,
+      } as any;
+    },
     async dismiss() {
       return workerSession as any;
     },
@@ -347,6 +356,17 @@ test('control operations validate bounded identities/content and delegate exact 
       calls.push(['worker.send', ...args]);
       return { id: 4, sessionId: workerSession.id, body: args[1] } as any;
     },
+    followup: async (...args: any[]) => {
+      calls.push(['worker.followup', ...args]);
+      return {
+        continuity: 'fresh_same_mind',
+        priorSessionId: workerSession.id,
+        mindId: workerSession.mindId,
+        commentId: 7,
+        session: { ...workerSession, id: 'wrk-87654321' },
+        localPath: '/tmp/forbidden',
+      } as any;
+    },
     dismiss: async (...args: any[]) => {
       calls.push(['worker.dismiss', ...args]);
       return workerSession as any;
@@ -393,10 +413,20 @@ test('control operations validate bounded identities/content and delegate exact 
     ref: 'worker:quiet-fox',
     content: 'bounded hello',
   });
+  const followup = await control(hub, c, {
+    lane: 'worker',
+    op: 'followup',
+    reqId: 12,
+    ref: 'worker:quiet-fox',
+    content: 'check the edge',
+  });
+  assert.equal(followup.result.continuity, 'fresh_same_mind');
+  assert.equal(followup.result.session.id, 'wrk-87654321');
+  assert.doesNotMatch(JSON.stringify(followup), /localPath|forbidden/);
   await control(hub, c, {
     lane: 'worker',
     op: 'dismiss',
-    reqId: 12,
+    reqId: 16,
     ref: 'wrk-12345678',
   });
   await control(hub, c, {
@@ -421,6 +451,7 @@ test('control operations validate bounded identities/content and delegate exact 
   assert.deepEqual(calls, [
     ['worker.start', 'elm-1234abcd', { modelRef: 'configured/model' }],
     ['worker.send', 'worker:quiet-fox', 'bounded hello'],
+    ['worker.followup', 'worker:quiet-fox', 'check the edge'],
     ['worker.dismiss', 'wrk-12345678'],
     ['secretary.start', 'elm-1234abcd'],
     ['secretary.enqueue', secretaryId, { role: 'user', content: 'question' }],
@@ -440,6 +471,13 @@ test('control operations validate bounded identities/content and delegate exact 
       lane: 'worker',
       op: 'send',
       reqId: 22,
+      ref: 'wrk-12345678',
+      content: '😀'.repeat(9000),
+    },
+    {
+      lane: 'worker',
+      op: 'followup',
+      reqId: 25,
       ref: 'wrk-12345678',
       content: '😀'.repeat(9000),
     },

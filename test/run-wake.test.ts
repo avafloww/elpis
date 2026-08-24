@@ -354,7 +354,31 @@ test('resident context serves once per outer turn before inbound, not on tool co
     commentCount: 0,
     reminderCount: 0,
   } as const;
+  const activityCursors: number[] = [];
   const mind = {
+    secretaryActivity: (afterEventId = 0) => {
+      activityCursors.push(afterEventId);
+      return afterEventId >= 17
+        ? { events: [], latestEventId: afterEventId, truncated: false }
+        : {
+            events: [
+              {
+                eventId: 17,
+                itemId: 'elm-child001',
+                title: 'Secretary changed <this>',
+                status: 'open',
+                type: 'comment.added',
+                actor: 'secretary:sec-test',
+                commentId: 9,
+                replyToId: null,
+                body: 'bounded & durable',
+                createdAt: 1,
+              },
+            ],
+            latestEventId: 17,
+            truncated: false,
+          };
+    },
     stats: () => ({
       active: 1,
       ready: 0,
@@ -397,6 +421,15 @@ test('resident context serves once per outer turn before inbound, not on tool co
     config.paths.soulPath,
     '---\nname: Echo\nreanchor: Again is truer than forever.\n---\n\n# Soul\n',
   );
+  assert.match(
+    String(agent.contextSnapshot().messages.at(-1)?.content),
+    /<secretary-mind-activity/,
+  );
+  assert.match(
+    String(agent.contextSnapshot().messages.at(-1)?.content),
+    /Secretary changed &lt;this&gt;/,
+  );
+  assert.deepEqual(activityCursors, [0, 0], 'context previews do not consume');
   agent.enqueue({ ...userMsg(), guildId: 'g-home' });
   agent.enqueue({
     ...userMsg(),
@@ -409,9 +442,10 @@ test('resident context serves once per outer turn before inbound, not on tool co
   assert.equal(llm.calls, 2);
   assert.match(
     String(llm.requests[0].at(-4)?.content),
-    /^<mind-frontier>[\s\S]*<resident-reanchor>Again is truer than forever\.<\/resident-reanchor>$/,
-    'combined resident context sits before the whole current inbound batch',
+    /^<mind-frontier>[\s\S]*<secretary-mind-activity[\s\S]*bounded &amp; durable[\s\S]*<resident-reanchor>Again is truer than forever\.<\/resident-reanchor>$/,
+    'combined resident context surfaces Secretary activity before the inbound batch',
   );
+  assert.deepEqual(activityCursors, [0, 0, 0], 'real request consumes once');
   assert.match(
     String(llm.requests[0].at(-3)?.content),
     /^\[person-memory/,
@@ -450,6 +484,12 @@ test('resident context serves once per outer turn before inbound, not on tool co
     /^<mind-frontier>[\s\S]*<resident-reanchor>/,
     'turn end re-arms the next resident context card',
   );
+  assert.doesNotMatch(
+    String(llm.requests[2].at(-2)?.content),
+    /<secretary-mind-activity/,
+    'already surfaced Secretary activity is not repeated next turn',
+  );
+  assert.equal(activityCursors.at(-1), 17);
   assert.match(
     String(llm.requests[2].at(-1)?.content),
     /new outer turn/,

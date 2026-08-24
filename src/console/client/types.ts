@@ -4,6 +4,11 @@ export type ViewName =
   'thread' | 'context' | 'mind' | 'workers' | 'secretary' | 'logs';
 export type JsonObject = Record<string, unknown>;
 
+export interface MindOrigin {
+  view: 'thread';
+  room: string;
+}
+
 export interface RoomFact {
   id: string;
   name: string;
@@ -138,6 +143,7 @@ export interface ConsoleState {
   mindStats: JsonObject | null;
   mindDetail: MindItem | null;
   selectedMindId: string | null;
+  mindOrigin: MindOrigin | null;
   workers: ControlSnapshot;
   secretary: ControlSnapshot;
   selectedWorkerRef: string | null;

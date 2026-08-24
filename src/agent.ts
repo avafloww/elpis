@@ -50,7 +50,11 @@ import type { Compactor } from './llm/compactor.js';
 import type { DensityModel } from './llm/density.js';
 import type { TranscriptStore } from './store/sessions.js';
 import { MAIN_TRANSCRIPT_ID } from './store/sessions.js';
-import type { MindItem, MindService } from './store/mind.js';
+import type {
+  MindItem,
+  MindService,
+  SecretaryMindActivityBatch,
+} from './store/mind.js';
 import {
   build as buildPrompt,
   buildPersonMemoryContent,
@@ -335,6 +339,40 @@ export function formatMindFrontier(
   add('waiting commitments', waiting);
   add('held thoughts', thoughts);
   lines.push('</mind-frontier>');
+  return lines.join('\n');
+}
+
+function escapeResidentContext(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+export function formatSecretaryMindActivity(
+  batch: SecretaryMindActivityBatch,
+): string | null {
+  if (batch.events.length === 0) return null;
+  const lines = [
+    `<secretary-mind-activity latest-event="${batch.latestEventId}"${batch.truncated ? ' truncated="true"' : ''}>`,
+    'Durable Secretary-authored Mind changes not yet surfaced in this process:',
+  ];
+  for (const event of batch.events) {
+    const target = `#${event.itemId} [${event.status}] ${event.title}`;
+    const action =
+      event.type === 'item.created'
+        ? 'created proposal'
+        : event.replyToId
+          ? `replied to comment ${event.replyToId}`
+          : 'added comment';
+    const body = event.body
+      ? ` · ${JSON.stringify(event.body.replace(/\s+/g, ' ').slice(0, 240))}`
+      : '';
+    lines.push(
+      `- event ${event.eventId} · ${action} on ${escapeResidentContext(target)}${escapeResidentContext(body)} · ${new Date(event.createdAt).toISOString()}`,
+    );
+  }
+  lines.push('</secretary-mind-activity>');
   return lines.join('\n');
 }
 
@@ -754,6 +792,10 @@ export class Agent {
   /** Number of newly-drained inbound messages that must stay AFTER the frontier
    * on the first request, so current conversation outranks ambient work state. */
   private mindFrontierTailMessagesThisTurn = 0;
+  /** Process-local delivery cursor for durable Secretary-authored Mind events.
+   * A restart may resurface the newest bounded batch; console context previews
+   * never advance it. */
+  private secretaryActivityEventId = 0;
   /** External thinking is forced at most once, and only on a person-shaped outer turn. */
   private externalThinkForcedThisTurn = false;
   /** Count of no-run-call responses nudged since the last successful yield
@@ -2108,6 +2150,7 @@ export class Agent {
       const requestMessages = this.buildRequestMessages(
         systemMessage,
         !this.mindFrontierDeliveredThisTurn,
+        true,
       );
       this.logger.info(
         `[agent] llm request built | duration=${formatDuration(Date.now() - requestBuildStart)} | request_messages=${requestMessages.length}`,
@@ -3001,7 +3044,9 @@ export class Agent {
    * it once per turn, before the retry loop, for prefix-cache stability) and
    * contextSnapshot (the console's context-explorer view) — so what the
    * explorer shows can never drift from what a turn actually sends. */
-  private buildResidentContextMessage(): ChatMessage | null {
+  private buildResidentContextMessage(
+    consumeSecretaryActivity = false,
+  ): ChatMessage | null {
     const sections: string[] = [];
     if (
       this.deps.mind &&
@@ -3014,14 +3059,22 @@ export class Agent {
     ) {
       const frontier = formatMindFrontier(this.deps.mind);
       if (frontier) sections.push(frontier);
+      const activity = this.deps.mind.secretaryActivity?.(
+        this.secretaryActivityEventId,
+        6,
+      );
+      const formatted = activity ? formatSecretaryMindActivity(activity) : null;
+      if (formatted && activity) {
+        sections.push(formatted);
+        if (consumeSecretaryActivity)
+          this.secretaryActivityEventId = activity.latestEventId;
+      }
     }
     const reanchor = parseSoul(readFileOr(this.config.paths.soulPath)).reanchor;
     if (reanchor) {
-      const escaped = reanchor
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
-      sections.push(`<resident-reanchor>${escaped}</resident-reanchor>`);
+      sections.push(
+        `<resident-reanchor>${escapeResidentContext(reanchor)}</resident-reanchor>`,
+      );
     }
     return sections.length === 0 ? null : user(sections.join('\n'));
   }
@@ -3033,10 +3086,13 @@ export class Agent {
   private buildRequestMessages(
     systemMessage = this.buildSystemMessage(),
     includeMindFrontier = !this.mindFrontierDeliveredThisTurn,
+    consumeSecretaryActivity = false,
   ): ChatMessage[] {
     const messages = [systemMessage, ...this.messages];
     if (includeMindFrontier) {
-      const residentContext = this.buildResidentContextMessage();
+      const residentContext = this.buildResidentContextMessage(
+        consumeSecretaryActivity,
+      );
       if (residentContext) {
         const tail = Math.min(
           this.mindFrontierTailMessagesThisTurn,

@@ -844,6 +844,11 @@ test('B4: elpis.read() returns line-numbered file contents', async () => {
   assert.match(r.preview || '', /lines\.txt \(3 lines/);
   assert.match(r.preview || '', /1: one/);
   assert.match(r.preview || '', /3: three/);
+  assert.equal(r.operationReceipts?.length, 1);
+  assert.equal(r.operationReceipts?.[0]?.kind, 'file');
+  assert.equal(r.operationReceipts?.[0]?.name, 'read');
+  assert.equal(r.operationReceipts?.[0]?.command, f);
+  assert.match(r.operationReceipts?.[0]?.stdout ?? '', /3: three/);
 });
 
 test('B4: elpis.read() honors from/to slice', async () => {
@@ -1333,10 +1338,18 @@ test('grep: finds matches in a path, returns raw file:line hits', async () => {
   );
   assert.equal(hit.ok, true, String(hit.error));
   assert.match(hit.preview ?? '', /a\.txt:2:NEEDLE here/);
+  assert.equal(hit.operationReceipts?.[0]?.kind, 'file');
+  assert.equal(hit.operationReceipts?.[0]?.name, 'grep');
+  assert.match(
+    hit.operationReceipts?.[0]?.stdout ?? '',
+    /a\.txt:2:NEEDLE here/,
+  );
   const miss = await sb.run(
     `await elpis.grep("nothinghere", { path: ${JSON.stringify(dir)} })`,
   );
   assert.match(miss.preview ?? '', /no matches/);
+  assert.equal(miss.operationReceipts?.[0]?.kind, 'file');
+  assert.match(miss.operationReceipts?.[0]?.stdout ?? '', /no matches/);
 });
 
 // ---------- reserved list ⇔ injected globals ⇔ documented globals ----------

@@ -52,6 +52,14 @@ test('secretary turn executes only bounded Mind calls then returns final answer'
   assert.equal(answer, 'final from elm-root0001');
   assert.deepEqual(reads, [{ operation: 'tree', depth: 2 }]);
   assert.equal(completions[0][0].role, 'system');
+  assert.match(
+    completions[0][0].content,
+    /use list to find bounded summaries globally/,
+  );
+  assert.match(
+    completions[0][0].content,
+    /durable comments, replies, and proposal creation/,
+  );
   assert.equal(completions[1].at(-1)?.role, 'tool');
   assert.equal(completions[1].at(-1)?.tool_call_id, 'mind-1');
 });

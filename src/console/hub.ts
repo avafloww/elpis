@@ -208,7 +208,7 @@ export interface SandboxOperation {
  * are excluded at the type boundary as well as from the frame dispatcher. */
 export type ConsoleWorkerControl = Pick<
   NonNullable<SandboxDeps['worker']>,
-  'start' | 'send' | 'list' | 'status' | 'dismiss'
+  'start' | 'send' | 'followup' | 'list' | 'status' | 'dismiss'
 >;
 
 /** Secretary control stays split across the real spawn broker and durable
@@ -587,7 +587,13 @@ export class ConsoleHub {
     m: Record<string, unknown>,
   ): Promise<unknown> {
     if (op === 'snapshot' || op === 'list') return this.workerSnapshot();
-    if (op !== 'status' && op !== 'start' && op !== 'send' && op !== 'dismiss')
+    if (
+      op !== 'status' &&
+      op !== 'start' &&
+      op !== 'send' &&
+      op !== 'followup' &&
+      op !== 'dismiss'
+    )
       throw new Error(`unknown worker operation ${JSON.stringify(op)}`);
     const worker = this.sources?.worker;
     if (!worker) throw new Error('worker control unavailable');
@@ -615,6 +621,15 @@ export class ConsoleHub {
       const text = boundedControlText(m.content ?? m.text, 'content');
       return publicWorkerMessage(
         await worker.send(controlWorkerRef(m.ref), text),
+      );
+    }
+    if (op === 'followup') {
+      const text =
+        m.content === undefined && m.text === undefined
+          ? undefined
+          : boundedControlText(m.content ?? m.text, 'content');
+      return publicWorkerFollowup(
+        await worker.followup(controlWorkerRef(m.ref), text),
       );
     }
     return publicWorkerSession(await worker.dismiss(controlWorkerRef(m.ref)));
@@ -1267,17 +1282,44 @@ function publicWorkerArtifact(value: unknown): Record<string, unknown> {
   ]);
 }
 function publicWorkerStatus(value: unknown): Record<string, unknown> {
-  const status = picked(value, ['session', 'messages', 'artifacts']);
+  const status = picked(value, [
+    'session',
+    'mindTitle',
+    'mandate',
+    'messages',
+    'artifacts',
+  ]);
   if (!Array.isArray(status.messages) || !Array.isArray(status.artifacts))
     throw new Error('worker status returned invalid collections');
   return {
     session: publicWorkerSession(status.session),
+    mindTitle: boundedControlPreview(status.mindTitle),
+    mandate: boundedControlPreview(status.mandate),
     messages: status.messages
       .slice(-CONTROL_MESSAGE_LIMIT)
       .map(publicWorkerMessage),
     artifacts: status.artifacts
       .slice(-CONTROL_MESSAGE_LIMIT)
       .map(publicWorkerArtifact),
+  };
+}
+
+function publicWorkerFollowup(value: unknown): Record<string, unknown> {
+  const result = picked(value, [
+    'continuity',
+    'priorSessionId',
+    'mindId',
+    'commentId',
+    'session',
+  ]);
+  if (result.continuity !== 'fresh_same_mind')
+    throw new Error('worker follow-up returned invalid continuity');
+  return {
+    continuity: result.continuity,
+    priorSessionId: result.priorSessionId,
+    mindId: result.mindId,
+    commentId: result.commentId,
+    session: publicWorkerSession(result.session),
   };
 }
 

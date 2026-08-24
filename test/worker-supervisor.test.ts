@@ -77,6 +77,7 @@ function fixture() {
     runtime,
     requests,
     cleaned,
+    states,
     mailbox: new WorkerMailboxBroker(db),
     workspace: new WorkerWorkspaceStore({
       db,
@@ -104,12 +105,20 @@ test('supervisor owns spawn, live refresh, mailbox steering, and dismissal', asy
     runtime: f.runtime,
   });
   assert.ok(runtime);
-  const item = f.mind.create({ title: 'bounded worker task' });
+  const longMandate = '😀'.repeat(5000);
+  const item = f.mind.create({
+    title: 'bounded worker task',
+    body: longMandate,
+  });
   const session = await runtime.api.start(item.id);
   const token = f.requests[0].token;
   f.mailbox.postFromWorker(token, 'progress-1', 'message', 'evidence ready');
   const status = await runtime.api.status(session.id);
   assert.equal(status.session.status, 'running');
+  assert.equal(status.mindTitle, 'bounded worker task');
+  assert.match(status.mandate, /mandate truncated for receipt/);
+  assert.ok(Buffer.byteLength(status.mandate, 'utf8') <= 8192);
+  assert.ok(longMandate.startsWith(status.mandate.split('\n…', 1)[0]));
   assert.equal(status.messages[0].body, 'evidence ready');
   assert.deepEqual(status.artifacts, []);
 
@@ -147,6 +156,60 @@ test('supervisor owns spawn, live refresh, mailbox steering, and dismissal', asy
   const dismissed = await runtime.api.dismiss(session.slug);
   assert.equal(dismissed.status, 'dismissed');
   assert.deepEqual(f.cleaned, [session.id]);
+  f.close();
+});
+
+test('completed worker follow-up starts a fresh same-Mind episode from durable context', async () => {
+  const f = fixture();
+  const runtime = await startWorkerSupervisor({
+    db: f.db,
+    config: f.config,
+    mind: f.mind,
+    mailbox: f.mailbox,
+    workspace: f.workspace,
+    logger: noopLogger,
+    runtime: f.runtime,
+  });
+  assert.ok(runtime);
+  const item = f.mind.create({
+    title: 'follow-up task',
+    body: 'Original bounded mandate.',
+  });
+  const prior = await runtime.api.start(item.id);
+  const priorToken = f.requests[0].token;
+  await assert.rejects(
+    () => runtime.api.followup(prior.id),
+    /still active; send steering instead/,
+  );
+  f.mailbox.postFromWorker(
+    priorToken,
+    'finish-1',
+    'finish',
+    'Prior worker found the edge case.',
+  );
+  f.states.set(prior.id, { state: 'succeeded' });
+
+  const receipt = await runtime.api.followup(
+    prior.worker,
+    'Verify the repair against the original fixture.',
+  );
+  assert.equal(receipt.continuity, 'fresh_same_mind');
+  assert.equal(receipt.priorSessionId, prior.id);
+  assert.equal(receipt.mindId, item.id);
+  assert.notEqual(receipt.session.id, prior.id);
+  assert.equal(receipt.session.mindId, item.id);
+  assert.equal(receipt.session.modelRef, prior.modelRef);
+  assert.equal(f.requests.length, 2);
+  const comment = f.mind
+    .get(item.id)!
+    .comments.find((candidate) => candidate.id === receipt.commentId);
+  assert.equal(comment?.author, 'dispatcher:worker-followup');
+  assert.match(comment?.body ?? '', /does not resume hidden model context/);
+  assert.match(comment?.body ?? '', /Prior worker found the edge case/);
+  assert.match(comment?.body ?? '', /Verify the repair/);
+  const freshStatus = await runtime.api.status(receipt.session.id);
+  assert.equal(freshStatus.mandate, 'Original bounded mandate.');
+  await runtime.api.dismiss(receipt.session.id);
   f.close();
 });
 
