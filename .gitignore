@@ -11,3 +11,4 @@ dist/
 .superpowers/
 test-tmp/
 .playwright-cli/
+rust/target/

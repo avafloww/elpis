@@ -1,0 +1,15 @@
+[package]
+name = "elpis-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+embedded-python = ["dep:elpis-runtime"]
+
+[dependencies]
+elpis-protocol = { path = "../elpis-protocol" }
+elpis-python = { path = "../elpis-python" }
+elpis-runtime = { path = "../elpis-runtime", optional = true }
+serde_json.workspace = true
