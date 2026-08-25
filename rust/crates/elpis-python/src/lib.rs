@@ -18,6 +18,17 @@ pub use actor::{
 
 const BOOTSTRAP: &str = include_str!("bootstrap.py");
 
+/// Limits for the deliberately small, synchronous guest-to-host bridge. These
+/// are below the child protocol frame limit so every valid value fits one frame.
+pub const MAX_HOST_CALLS_PER_RUN: usize = 64;
+pub const MAX_HOST_CAPABILITY_BYTES: usize = 120;
+pub const MAX_HOST_ARGV_ITEMS: usize = 64;
+pub const MAX_HOST_ARG_BYTES: usize = 4096;
+pub const MAX_HOST_ARGV_BYTES: usize = 65_536;
+pub const MAX_HOST_STDIN_BYTES: usize = 65_536;
+pub const MAX_HOST_RESULT_BYTES: usize = 65_536;
+pub const MAX_HOST_ERROR_BYTES: usize = 4096;
+
 #[derive(Debug, Error)]
 pub enum PythonError {
     #[error("python executable is unavailable: {0}")]
@@ -46,6 +57,116 @@ pub enum PythonError {
     Cancelled,
     #[error("python context actor is closed")]
     ActorClosed,
+    #[error("python host-call protocol is invalid: {0}")]
+    InvalidHostCall(&'static str),
+    #[error("python host-call service returned an invalid result: {0}")]
+    InvalidHostResult(&'static str),
+}
+
+/// One validated request made by guest Python during a Run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostCall {
+    pub call_index: u64,
+    pub capability: String,
+    pub argv: Vec<String>,
+    pub stdin: String,
+}
+
+impl HostCall {
+    pub fn validate(&self) -> Result<(), PythonError> {
+        validate_id(
+            "host capability",
+            &self.capability,
+            MAX_HOST_CAPABILITY_BYTES,
+        )
+        .map_err(|_| PythonError::InvalidHostCall("invalid capability"))?;
+        if self.argv.len() > MAX_HOST_ARGV_ITEMS {
+            return Err(PythonError::InvalidHostCall("too many argv items"));
+        }
+        let mut argv_bytes = 0usize;
+        for argument in &self.argv {
+            if argument.len() > MAX_HOST_ARG_BYTES {
+                return Err(PythonError::InvalidHostCall("argv item is too large"));
+            }
+            if argument.as_bytes().contains(&0) {
+                return Err(PythonError::InvalidHostCall("argv item contains NUL"));
+            }
+            argv_bytes = argv_bytes
+                .checked_add(argument.len())
+                .ok_or(PythonError::InvalidHostCall("argv is too large"))?;
+        }
+        if argv_bytes > MAX_HOST_ARGV_BYTES {
+            return Err(PythonError::InvalidHostCall("argv is too large"));
+        }
+        if self.stdin.len() > MAX_HOST_STDIN_BYTES {
+            return Err(PythonError::InvalidHostCall("stdin is too large"));
+        }
+        Ok(())
+    }
+}
+
+/// The only value a host service can deliver back to guest Python.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostResult {
+    pub ok: bool,
+    #[serde(default)]
+    pub result: String,
+    pub error: Option<String>,
+}
+
+impl HostResult {
+    pub fn accepted(result: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            result: result.into(),
+            error: None,
+        }
+    }
+
+    pub fn rejected(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            result: String::new(),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), PythonError> {
+        if self.result.len() > MAX_HOST_RESULT_BYTES {
+            return Err(PythonError::InvalidHostResult("result is too large"));
+        }
+        match (self.ok, self.error.as_deref()) {
+            (true, None) => Ok(()),
+            (false, Some(error))
+                if self.result.is_empty()
+                    && !error.is_empty()
+                    && error.len() <= MAX_HOST_ERROR_BYTES =>
+            {
+                Ok(())
+            }
+            (false, Some(error)) if error.len() > MAX_HOST_ERROR_BYTES => {
+                Err(PythonError::InvalidHostResult("error is too large"))
+            }
+            _ => Err(PythonError::InvalidHostResult("invalid result shape")),
+        }
+    }
+}
+
+/// A synchronous host implementation supplied for one Run.
+pub trait HostCallService: Send {
+    fn call(&mut self, call: &HostCall) -> HostResult;
+}
+
+/// Explicit rejecting service used by the ordinary, effect-free Run API.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RejectHostCalls;
+
+impl HostCallService for RejectHostCalls {
+    fn call(&mut self, _call: &HostCall) -> HostResult {
+        HostResult::rejected("host calls are disabled for this run")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +199,22 @@ pub struct RunResult {
     pub error: Option<String>,
 }
 
+impl RunResult {
+    fn validate_terminal(&self) -> Result<(), PythonError> {
+        match (
+            self.ok,
+            self.kind.as_str(),
+            self.failure_kind.as_deref(),
+            self.error.as_deref(),
+        ) {
+            (true, "completed", None, None) => Ok(()),
+            (false, "failed", Some("preparse"), Some(_))
+            | (false, "failed", Some("runtime"), Some(_)) => Ok(()),
+            _ => Err(PythonError::InvalidHostCall("unexpected terminal frame")),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ChildRun<'a> {
     op: &'static str,
@@ -89,6 +226,32 @@ struct ChildRun<'a> {
 #[derive(Serialize)]
 struct ChildClose {
     op: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildHostCall {
+    op: String,
+    call_index: u64,
+    capability: String,
+    argv: Vec<String>,
+    stdin: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChildFrame {
+    HostCall(ChildHostCall),
+    Terminal(RunResult),
+}
+
+#[derive(Serialize)]
+struct ChildHostResult<'a> {
+    op: &'static str,
+    call_index: u64,
+    ok: bool,
+    result: &'a str,
+    error: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +405,29 @@ impl PythonContext {
         source: &str,
         preview_max_bytes: usize,
     ) -> Result<RunResult, PythonError> {
+        let mut service = RejectHostCalls;
+        self.run_with_host_service(
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+            &mut service,
+        )
+    }
+
+    /// Run guest code while synchronously servicing its bounded host calls.
+    /// The service is borrowed only for this Run and is never retained by the
+    /// context. Calls are serialized in exact call_index order.
+    pub fn run_with_host_service(
+        &mut self,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+        source: &str,
+        preview_max_bytes: usize,
+        service: &mut dyn HostCallService,
+    ) -> Result<RunResult, PythonError> {
         if self.closed || context_id != self.context_id || generation != self.generation {
             return Err(PythonError::Binding);
         }
@@ -252,13 +438,83 @@ impl PythonContext {
         if !self.seen_runs.insert(run_id.to_string()) {
             return Err(PythonError::DuplicateRun);
         }
+        if !self.output.buffer().is_empty() {
+            self.fail_closed();
+            return Err(PythonError::InvalidHostCall("unexpected pending frame"));
+        }
         self.write_frame(&ChildRun {
             op: "run",
             run_id,
             source,
             preview_max_bytes,
         })?;
-        self.read_frame()
+
+        let result = self.host_frame_loop(service);
+        if result.is_err() {
+            // A malformed frame can leave the child blocked waiting for a reply.
+            // Killing the dedicated group makes every protocol failure terminal
+            // without attempting to continue on a desynchronized stream.
+            self.fail_closed();
+        }
+        result
+    }
+
+    fn fail_closed(&mut self) {
+        self.closed = true;
+        // Process groups are the Linux containment boundary. Killing the leader
+        // as well guarantees EOF on platforms where group signalling is not
+        // available, so a blocked bridge read cannot deadlock close/drop.
+        let _ = self.signal_group(libc::SIGKILL);
+        let _ = self.child.kill();
+    }
+
+    fn host_frame_loop(
+        &mut self,
+        service: &mut dyn HostCallService,
+    ) -> Result<RunResult, PythonError> {
+        let mut expected_index = 0u64;
+        loop {
+            match self.read_frame::<ChildFrame>()? {
+                ChildFrame::Terminal(result) => {
+                    result.validate_terminal()?;
+                    return Ok(result);
+                }
+                ChildFrame::HostCall(frame) => {
+                    if frame.op != "host_call" {
+                        return Err(PythonError::InvalidHostCall("unexpected frame operation"));
+                    }
+                    if frame.call_index != expected_index {
+                        return Err(PythonError::InvalidHostCall(
+                            "call_index is not the next index",
+                        ));
+                    }
+                    if usize::try_from(expected_index)
+                        .map_or(true, |index| index >= MAX_HOST_CALLS_PER_RUN)
+                    {
+                        return Err(PythonError::InvalidHostCall("too many calls in one run"));
+                    }
+                    let call = HostCall {
+                        call_index: frame.call_index,
+                        capability: frame.capability,
+                        argv: frame.argv,
+                        stdin: frame.stdin,
+                    };
+                    call.validate()?;
+                    let host_result = service.call(&call);
+                    host_result.validate()?;
+                    self.write_frame(&ChildHostResult {
+                        op: "host_result",
+                        call_index: expected_index,
+                        ok: host_result.ok,
+                        result: &host_result.result,
+                        error: host_result.error.as_deref(),
+                    })?;
+                    expected_index = expected_index
+                        .checked_add(1)
+                        .ok_or(PythonError::InvalidHostCall("call_index overflow"))?;
+                }
+            }
+        }
     }
 
     pub fn close(&mut self) -> Result<(), PythonError> {
@@ -506,6 +762,267 @@ mod tests {
         assert!(result.preview_truncated);
         assert!(result.preview.len() <= 11);
         assert!(!result.preview.contains('�'));
+    }
+
+    #[derive(Default)]
+    struct FakeService {
+        calls: Vec<HostCall>,
+    }
+
+    impl HostCallService for FakeService {
+        fn call(&mut self, call: &HostCall) -> HostResult {
+            self.calls.push(call.clone());
+            HostResult::accepted(format!("{}:{}", call.call_index, call.stdin))
+        }
+    }
+
+    #[test]
+    fn host_call_and_result_bounds_reject_invalid_values() {
+        let valid = HostCall {
+            call_index: 0,
+            capability: "test.echo".into(),
+            argv: vec!["arg".into()],
+            stdin: "input".into(),
+        };
+        valid.validate().unwrap();
+
+        let mut invalid_capability = valid.clone();
+        invalid_capability.capability.clear();
+        assert!(invalid_capability.validate().is_err());
+
+        let mut too_many_items = valid.clone();
+        too_many_items.argv = vec![String::new(); MAX_HOST_ARGV_ITEMS + 1];
+        assert!(too_many_items.validate().is_err());
+
+        let mut oversized_item = valid.clone();
+        oversized_item.argv = vec!["x".repeat(MAX_HOST_ARG_BYTES + 1)];
+        assert!(oversized_item.validate().is_err());
+
+        let mut oversized_aggregate = valid.clone();
+        oversized_aggregate.argv = vec!["x".repeat(MAX_HOST_ARG_BYTES); MAX_HOST_ARGV_ITEMS];
+        assert!(oversized_aggregate.validate().is_err());
+
+        let mut nul_argument = valid.clone();
+        nul_argument.argv = vec!["a\0b".into()];
+        assert!(nul_argument.validate().is_err());
+
+        let mut oversized_stdin = valid;
+        oversized_stdin.stdin = "x".repeat(MAX_HOST_STDIN_BYTES + 1);
+        assert!(oversized_stdin.validate().is_err());
+
+        HostResult::accepted("x".repeat(MAX_HOST_RESULT_BYTES))
+            .validate()
+            .unwrap();
+        assert!(
+            HostResult::accepted("x".repeat(MAX_HOST_RESULT_BYTES + 1))
+                .validate()
+                .is_err()
+        );
+        assert!(HostResult::rejected("").validate().is_err());
+        assert!(
+            HostResult {
+                ok: true,
+                result: String::new(),
+                error: Some("contradiction".into()),
+            }
+            .validate()
+            .is_err()
+        );
+
+        let escaped = "\u{1}";
+        let worst_argv =
+            vec![escaped.repeat(MAX_HOST_ARG_BYTES); MAX_HOST_ARGV_BYTES / MAX_HOST_ARG_BYTES];
+        let worst_call = HostCall {
+            call_index: u64::MAX,
+            capability: "test.escape".into(),
+            argv: worst_argv,
+            stdin: escaped.repeat(MAX_HOST_STDIN_BYTES),
+        };
+        worst_call.validate().unwrap();
+        let call_frame = serde_json::to_vec(&serde_json::json!({
+            "op": "host_call",
+            "call_index": worst_call.call_index,
+            "capability": worst_call.capability,
+            "argv": worst_call.argv,
+            "stdin": worst_call.stdin,
+        }))
+        .unwrap();
+        assert!(call_frame.len() <= MAX_FRAME_BYTES);
+
+        let worst_result = HostResult::accepted(escaped.repeat(MAX_HOST_RESULT_BYTES));
+        worst_result.validate().unwrap();
+        let result_frame = serde_json::to_vec(&ChildHostResult {
+            op: "host_result",
+            call_index: u64::MAX,
+            ok: worst_result.ok,
+            result: &worst_result.result,
+            error: worst_result.error.as_deref(),
+        })
+        .unwrap();
+        assert!(result_frame.len() <= MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn services_multiple_ordered_calls_and_reuses_context() {
+        let mut context = PythonContext::open(&runtime(), "host-ctx".into(), 1).unwrap();
+        let mut service = FakeService::default();
+        let result = context
+            .run_with_host_service(
+                "host-ctx",
+                1,
+                "host-run-1",
+                concat!(
+                    "a = host_call('test.echo', ['one'], 'a')\n",
+                    "b = host_call('test.echo', ['two'], 'b')\n",
+                    "a + '|' + b"
+                ),
+                1024,
+                &mut service,
+            )
+            .unwrap();
+        assert_eq!(result.preview, "'0:a|1:b'");
+        assert_eq!(service.calls.len(), 2);
+        assert_eq!(service.calls[0].call_index, 0);
+        assert_eq!(service.calls[1].call_index, 1);
+        assert_eq!(service.calls[1].argv, ["two"]);
+
+        let reused = context
+            .run_with_host_service(
+                "host-ctx",
+                1,
+                "host-run-2",
+                "host_call('test.echo', [], 'again')",
+                1024,
+                &mut service,
+            )
+            .unwrap();
+        assert_eq!(reused.preview, "'0:again'");
+        assert_eq!(service.calls[2].call_index, 0);
+    }
+
+    #[test]
+    fn ordinary_run_explicitly_rejects_host_calls_and_remains_reusable() {
+        let mut context = PythonContext::open(&runtime(), "no-host".into(), 1).unwrap();
+        let rejected = context
+            .run(
+                "no-host",
+                1,
+                "no-host-1",
+                "host_call('test.echo', [], '')",
+                1024,
+            )
+            .unwrap();
+        assert!(!rejected.ok);
+        assert!(rejected.error.unwrap().contains("host calls are disabled"));
+        let ordinary = context
+            .run("no-host", 1, "no-host-2", "6 * 7", 1024)
+            .unwrap();
+        assert_eq!(ordinary.preview, "42");
+    }
+
+    #[test]
+    fn bridge_restores_hidden_standard_stream_bindings_each_run() {
+        let mut context = PythonContext::open(&runtime(), "hidden".into(), 1).unwrap();
+        let mutated = context
+            .run(
+                "hidden",
+                1,
+                "hidden-1",
+                concat!(
+                    "import sys\n",
+                    "sys.stdin = sys.__stdin__ = 'poison'\n",
+                    "sys.stdout = sys.__stdout__ = 'poison'\n",
+                    "sys.stderr = sys.__stderr__ = 'poison'\n",
+                    "host_call = 'poison'\n",
+                    "1"
+                ),
+                1024,
+            )
+            .unwrap();
+        assert_eq!(mutated.preview, "1");
+
+        let restored = context
+            .run(
+                "hidden",
+                1,
+                "hidden-2",
+                concat!(
+                    "import sys\n",
+                    "(sys.stdin is sys.__stdin__, sys.stdin.read(), ",
+                    "type(sys.stdin).__name__, callable(host_call), ",
+                    "hasattr(host_call, 'wire'), hasattr(host_call, 'fileno'))"
+                ),
+                1024,
+            )
+            .unwrap();
+        assert_eq!(
+            restored.preview,
+            "(True, '', 'StringIO', True, False, False)"
+        );
+    }
+
+    #[test]
+    fn oversized_call_never_reaches_service_and_fails_closed() {
+        let mut context = PythonContext::open(&runtime(), "bounded".into(), 1).unwrap();
+        let mut service = FakeService::default();
+        let source = format!(
+            "host_call('test.echo', [], '{}')",
+            "x".repeat(MAX_HOST_STDIN_BYTES + 1)
+        );
+        let error = context
+            .run_with_host_service("bounded", 1, "bounded-1", &source, 1024, &mut service)
+            .unwrap_err();
+        assert!(matches!(error, PythonError::InvalidHostCall(_)));
+        assert!(service.calls.is_empty());
+        assert!(matches!(
+            context.run("bounded", 1, "bounded-2", "1", 1024),
+            Err(PythonError::Binding)
+        ));
+    }
+
+    #[test]
+    fn too_many_calls_stop_before_the_service_and_reap_the_child() {
+        let mut context = PythonContext::open(&runtime(), "many-calls".into(), 1).unwrap();
+        let mut service = FakeService::default();
+        let source = format!(
+            "for _index in range({}):\n    host_call('test.echo', [], '')",
+            MAX_HOST_CALLS_PER_RUN + 1
+        );
+        let error = context
+            .run_with_host_service("many-calls", 1, "many-calls-1", &source, 1024, &mut service)
+            .unwrap_err();
+        assert!(matches!(error, PythonError::InvalidHostCall(_)));
+        assert_eq!(service.calls.len(), MAX_HOST_CALLS_PER_RUN);
+        assert!(matches!(
+            context.run("many-calls", 1, "many-calls-2", "1", 1024),
+            Err(PythonError::Binding)
+        ));
+    }
+
+    #[test]
+    fn invalid_service_result_is_not_delivered() {
+        struct OversizedResult;
+        impl HostCallService for OversizedResult {
+            fn call(&mut self, _call: &HostCall) -> HostResult {
+                HostResult::accepted("x".repeat(MAX_HOST_RESULT_BYTES + 1))
+            }
+        }
+        let mut context = PythonContext::open(&runtime(), "bad-result".into(), 1).unwrap();
+        let error = context
+            .run_with_host_service(
+                "bad-result",
+                1,
+                "bad-result-1",
+                "host_call('test.echo', [], '')",
+                1024,
+                &mut OversizedResult,
+            )
+            .unwrap_err();
+        assert!(matches!(error, PythonError::InvalidHostResult(_)));
+        assert!(matches!(
+            context.run("bad-result", 1, "bad-result-2", "1", 1024),
+            Err(PythonError::Binding)
+        ));
     }
 
     #[test]
