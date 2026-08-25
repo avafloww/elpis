@@ -1,12 +1,16 @@
 //! Bounded coordination for executor requests.
 
-use elpis_protocol::{Request, Response};
+use elpis_protocol::{
+    Request, Response,
+    v2::{CompletedEffectReceipt, EffectAmbiguity, MAX_COMPLETED_EFFECTS, MAX_TOTAL_RECEIPT_BYTES},
+};
 use elpis_python::{
     CancelOutcome, HostCallService, PythonContext, PythonContextActor, PythonError,
     PythonRunHandle, PythonRuntime, RejectHostCalls, RunResult,
 };
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
 /// Absolute process-local limit accepted for `CoordinatorConfig::max_contexts`.
@@ -121,29 +125,169 @@ impl RunBinding {
 #[error("host service factory failed")]
 pub struct HostServiceFactoryError;
 
+/// A host service tried to report an invalid or no-longer-owned effect outcome.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum HostEffectReportError {
+    #[error("host effect outcome is invalid")]
+    Invalid,
+    #[error("host effect reporter is sealed")]
+    Sealed,
+}
+
+#[derive(Debug)]
+struct RunEffectState {
+    binding: RunBinding,
+    completed: Vec<CompletedEffectReceipt>,
+    ambiguity: Option<EffectAmbiguity>,
+    total_receipt_bytes: usize,
+    sealed: bool,
+}
+
+#[derive(Debug, Default)]
+struct RunEffectOutcomes {
+    completed: Vec<CompletedEffectReceipt>,
+    ambiguity: Option<EffectAmbiguity>,
+}
+
+/// Cloneable, run-bound sink for durable effect receipts and ambiguities.
+///
+/// The coordinator seals it before constructing the terminal Run response.
+#[derive(Clone, Debug)]
+pub struct RunEffectReporter {
+    inner: Arc<Mutex<RunEffectState>>,
+}
+
+impl RunEffectReporter {
+    fn new(binding: RunBinding) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RunEffectState {
+                binding,
+                completed: Vec::new(),
+                ambiguity: None,
+                total_receipt_bytes: 0,
+                sealed: false,
+            })),
+        }
+    }
+
+    pub fn completed(&self, receipt: CompletedEffectReceipt) -> Result<(), HostEffectReportError> {
+        let receipt_bytes = receipt
+            .receipt_bytes()
+            .map_err(|_| HostEffectReportError::Invalid)?
+            .len();
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if state.ambiguity.is_some()
+            || !effect_binding_matches(&state.binding, &receipt.binding)
+            || state.completed.len() >= MAX_COMPLETED_EFFECTS
+            || state
+                .completed
+                .last()
+                .is_some_and(|prior| prior.binding.call_index >= receipt.binding.call_index)
+            || state
+                .completed
+                .iter()
+                .any(|prior| prior.binding.effect_id == receipt.binding.effect_id)
+        {
+            return Err(HostEffectReportError::Invalid);
+        }
+        let total_receipt_bytes = state
+            .total_receipt_bytes
+            .checked_add(receipt_bytes)
+            .filter(|total| *total <= MAX_TOTAL_RECEIPT_BYTES)
+            .ok_or(HostEffectReportError::Invalid)?;
+        state.total_receipt_bytes = total_receipt_bytes;
+        state.completed.push(receipt);
+        Ok(())
+    }
+
+    pub fn ambiguous(&self, ambiguity: EffectAmbiguity) -> Result<(), HostEffectReportError> {
+        ambiguity
+            .validate()
+            .map_err(|_| HostEffectReportError::Invalid)?;
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if state.ambiguity.is_some()
+            || !effect_binding_matches(&state.binding, &ambiguity.binding)
+            || state
+                .completed
+                .last()
+                .is_some_and(|prior| prior.binding.call_index >= ambiguity.binding.call_index)
+            || state
+                .completed
+                .iter()
+                .any(|prior| prior.binding.effect_id == ambiguity.binding.effect_id)
+        {
+            return Err(HostEffectReportError::Invalid);
+        }
+        state.ambiguity = Some(ambiguity);
+        Ok(())
+    }
+
+    fn finish(&self) -> RunEffectOutcomes {
+        let mut state = lock_effects(&self.inner);
+        state.sealed = true;
+        RunEffectOutcomes {
+            completed: std::mem::take(&mut state.completed),
+            ambiguity: state.ambiguity.take(),
+        }
+    }
+
+    fn seal(&self) {
+        lock_effects(&self.inner).sealed = true;
+    }
+}
+
+fn lock_effects(inner: &Mutex<RunEffectState>) -> MutexGuard<'_, RunEffectState> {
+    inner
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn effect_binding_matches(
+    binding: &RunBinding,
+    effect: &elpis_protocol::v2::EffectBinding,
+) -> bool {
+    effect.request_id == binding.request_id
+        && effect.context_id == binding.context_id
+        && effect.generation == binding.generation
+        && effect.run_id == binding.run_id
+}
+
 /// Process-local factory for a host service bound to exactly one validated Run.
 pub trait HostServiceFactory: Send {
     fn build(
         &mut self,
         binding: &RunBinding,
+        effects: RunEffectReporter,
     ) -> Result<Box<dyn HostCallService>, HostServiceFactoryError>;
 }
 
 impl<F> HostServiceFactory for F
 where
-    F: FnMut(&RunBinding) -> Result<Box<dyn HostCallService>, HostServiceFactoryError> + Send,
+    F: FnMut(
+            &RunBinding,
+            RunEffectReporter,
+        ) -> Result<Box<dyn HostCallService>, HostServiceFactoryError>
+        + Send,
 {
     fn build(
         &mut self,
         binding: &RunBinding,
+        effects: RunEffectReporter,
     ) -> Result<Box<dyn HostCallService>, HostServiceFactoryError> {
-        self(binding)
+        self(binding, effects)
     }
 }
 
 struct ActiveRun {
     binding: RunBinding,
     handle: PythonRunHandle,
+    effects: RunEffectReporter,
     pending_cancel: Option<PendingCancel>,
 }
 
@@ -218,9 +362,13 @@ pub struct Coordinator {
 impl Coordinator {
     /// Construct a coordinator whose Runs reject every host call.
     pub fn new(runtime: PythonRuntime, config: CoordinatorConfig) -> Self {
-        Self::with_host_service_factory(runtime, config, |_binding: &RunBinding| {
-            Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
-        })
+        Self::with_host_service_factory(
+            runtime,
+            config,
+            |_binding: &RunBinding, _effects: RunEffectReporter| {
+                Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
+            },
+        )
     }
 
     /// Construct a coordinator with a process-local per-Run host-service factory.
@@ -262,6 +410,9 @@ impl Coordinator {
 
     pub fn close_all(&mut self) -> usize {
         let context_count = self.contexts.len();
+        for active in self.active.values() {
+            active.effects.seal();
+        }
         self.active.clear();
         self.active_by_context.clear();
         self.active_order.clear();
@@ -472,9 +623,11 @@ impl Coordinator {
             generation,
             run_id: run_id.clone(),
         };
-        let service = match self.host_service_factory.build(&binding) {
+        let effects = RunEffectReporter::new(binding.clone());
+        let service = match self.host_service_factory.build(&binding, effects.clone()) {
             Ok(service) => service,
             Err(_) => {
+                effects.seal();
                 return single(Response::failure(
                     Some(request_id),
                     "failed",
@@ -494,6 +647,7 @@ impl Coordinator {
         let handle = match scheduled {
             Ok(handle) => handle,
             Err(error) => {
+                effects.seal();
                 let invalid = !actor.is_valid();
                 if invalid {
                     self.remove_context(&context_id);
@@ -510,6 +664,7 @@ impl Coordinator {
             ActiveRun {
                 binding,
                 handle,
+                effects,
                 pending_cancel: None,
             },
         );
@@ -675,11 +830,14 @@ impl Coordinator {
         {
             self.active_by_context.remove(&active.binding.context_id);
         }
-        let group = terminal_completion(&active.binding, active.pending_cancel, terminal);
-        if self
-            .contexts
-            .get(&active.binding.context_id)
-            .is_some_and(|actor| !actor.is_valid())
+        let outcomes = active.effects.finish();
+        let effect_ambiguous = outcomes.ambiguity.is_some();
+        let group = terminal_completion(&active.binding, active.pending_cancel, terminal, outcomes);
+        if effect_ambiguous
+            || self
+                .contexts
+                .get(&active.binding.context_id)
+                .is_some_and(|actor| !actor.is_valid())
         {
             self.remove_context(&active.binding.context_id);
         }
@@ -741,40 +899,74 @@ fn terminal_completion(
     binding: &RunBinding,
     pending_cancel: Option<PendingCancel>,
     terminal: Result<RunResult, PythonError>,
+    outcomes: RunEffectOutcomes,
 ) -> CompletionGroup {
-    let Some(pending) = pending_cancel else {
-        return CompletionGroup::Single(Box::new(run_terminal_response(
+    let mut group = match pending_cancel {
+        None => CompletionGroup::Single(Box::new(run_terminal_response(
             binding.request_id.clone(),
             terminal,
-        )));
-    };
-    match pending.mode {
-        PendingCancelMode::CompletionWon => CompletionGroup::Pair(Box::new([
-            run_terminal_response(binding.request_id.clone(), terminal),
-            cancel_already_terminal(pending.request_id, binding.request_id.clone()),
-        ])),
-        PendingCancelMode::Owned {
-            started,
-            context_invalidated,
-        } if matches!(&terminal, Err(PythonError::Cancelled)) => CompletionGroup::Pair(Box::new([
-            cancelled_run_response(binding.request_id.clone(), started, context_invalidated),
-            cancel_success(
-                pending.request_id,
-                binding.request_id.clone(),
+        ))),
+        Some(pending) => match pending.mode {
+            PendingCancelMode::CompletionWon => CompletionGroup::Pair(Box::new([
+                run_terminal_response(binding.request_id.clone(), terminal),
+                cancel_already_terminal(pending.request_id, binding.request_id.clone()),
+            ])),
+            PendingCancelMode::Owned {
                 started,
                 context_invalidated,
-            ),
-        ])),
-        PendingCancelMode::Owned { .. } => CompletionGroup::Pair(Box::new([
-            run_terminal_response(binding.request_id.clone(), terminal),
-            Response::failure(
-                Some(pending.request_id),
-                "failed",
-                "state_mismatch",
-                "run reached an unexpected terminal state after cancellation",
-            ),
-        ])),
+            } if matches!(&terminal, Err(PythonError::Cancelled)) => {
+                CompletionGroup::Pair(Box::new([
+                    cancelled_run_response(
+                        binding.request_id.clone(),
+                        started,
+                        context_invalidated,
+                    ),
+                    cancel_success(
+                        pending.request_id,
+                        binding.request_id.clone(),
+                        started,
+                        context_invalidated,
+                    ),
+                ]))
+            }
+            PendingCancelMode::Owned { .. } => CompletionGroup::Pair(Box::new([
+                run_terminal_response(binding.request_id.clone(), terminal),
+                Response::failure(
+                    Some(pending.request_id),
+                    "failed",
+                    "state_mismatch",
+                    "run reached an unexpected terminal state after cancellation",
+                ),
+            ])),
+        },
+    };
+    let run_response = match &mut group {
+        CompletionGroup::Single(response) => response.as_mut(),
+        CompletionGroup::Pair(responses) => &mut responses[0],
+    };
+    attach_effect_outcomes(run_response, outcomes);
+    group
+}
+
+fn attach_effect_outcomes(response: &mut Response, outcomes: RunEffectOutcomes) {
+    if outcomes.completed.is_empty() && outcomes.ambiguity.is_none() {
+        return;
     }
+    if let Some(ambiguity) = outcomes.ambiguity {
+        let request_id = response
+            .request_id
+            .clone()
+            .expect("terminal Run responses always retain request_id");
+        *response = Response::failure(
+            Some(request_id),
+            "failed",
+            "effect_ambiguous",
+            "host effect outcome is ambiguous",
+        );
+        response.ambiguity = Some(ambiguity);
+    }
+    response.completed_effects = outcomes.completed;
+    debug_assert!(response.validate().is_ok());
 }
 
 fn run_terminal_response(request_id: String, terminal: Result<RunResult, PythonError>) -> Response {
@@ -864,7 +1056,10 @@ fn run_result_response(request_id: String, result: RunResult) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elpis_protocol::{DEFAULT_PREVIEW_BYTES, PROTOCOL_VERSION};
+    use elpis_protocol::{
+        DEFAULT_PREVIEW_BYTES, PROTOCOL_VERSION,
+        v2::{EffectAmbiguityReason, EffectBinding},
+    };
     use elpis_python::{HostCall, HostResult};
     use std::sync::{
         Arc, Mutex,
@@ -882,6 +1077,98 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             HostResult::accepted(self.result)
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReportMode {
+        Completed,
+        Ambiguous,
+        CompletedThenAmbiguous,
+    }
+
+    struct ReportingHostService {
+        binding: RunBinding,
+        effects: RunEffectReporter,
+        calls: Arc<AtomicUsize>,
+        mode: ReportMode,
+    }
+
+    impl HostCallService for ReportingHostService {
+        fn call(&mut self, call: &HostCall) -> HostResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                ReportMode::Completed => {
+                    self.effects
+                        .completed(completed_receipt(&self.binding, call.call_index))
+                        .expect("test receipt is valid");
+                    HostResult::accepted(format!("done-{}", call.call_index))
+                }
+                ReportMode::Ambiguous => {
+                    self.effects
+                        .ambiguous(effect_ambiguity(&self.binding, call.call_index))
+                        .expect("test ambiguity is valid");
+                    HostResult::rejected("effect outcome is ambiguous")
+                }
+                ReportMode::CompletedThenAmbiguous if call.call_index == 0 => {
+                    self.effects
+                        .completed(completed_receipt(&self.binding, call.call_index))
+                        .expect("test receipt is valid");
+                    HostResult::accepted("done-0")
+                }
+                ReportMode::CompletedThenAmbiguous => {
+                    self.effects
+                        .ambiguous(effect_ambiguity(&self.binding, call.call_index))
+                        .expect("test ambiguity is valid");
+                    HostResult::rejected("later effect outcome is ambiguous")
+                }
+            }
+        }
+    }
+
+    fn effect_binding(binding: &RunBinding, call_index: u64) -> EffectBinding {
+        EffectBinding {
+            effect_id: format!("{:064x}", call_index + 1),
+            request_id: binding.request_id.clone(),
+            context_id: binding.context_id.clone(),
+            generation: binding.generation,
+            run_id: binding.run_id.clone(),
+            call_index,
+            capability: "test.effect".into(),
+            request_sha256: format!("{:064x}", call_index + 101),
+        }
+    }
+
+    fn completed_receipt(binding: &RunBinding, call_index: u64) -> CompletedEffectReceipt {
+        CompletedEffectReceipt {
+            binding: effect_binding(binding, call_index),
+            receipt: String::new(),
+            receipt_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .into(),
+        }
+    }
+
+    fn effect_ambiguity(binding: &RunBinding, call_index: u64) -> EffectAmbiguity {
+        EffectAmbiguity {
+            binding: effect_binding(binding, call_index),
+            reason: EffectAmbiguityReason::ExecutorLost,
+            may_have_occurred: true,
+            context_invalidated: true,
+        }
+    }
+
+    fn reporting_coordinator(mode: ReportMode, calls: Arc<AtomicUsize>) -> Coordinator {
+        Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 3).unwrap(),
+            move |binding: &RunBinding, effects: RunEffectReporter| {
+                Ok(Box::new(ReportingHostService {
+                    binding: binding.clone(),
+                    effects,
+                    calls: Arc::clone(&calls),
+                    mode,
+                }) as Box<dyn HostCallService>)
+            },
+        )
     }
 
     fn coordinator(max_contexts: usize) -> Coordinator {
@@ -1493,9 +1780,12 @@ mod tests {
             "error": null
         }))
         .unwrap();
-        let CompletionGroup::Pair(responses) =
-            terminal_completion(&binding, Some(pending), Ok(result))
-        else {
+        let CompletionGroup::Pair(responses) = terminal_completion(
+            &binding,
+            Some(pending),
+            Ok(result),
+            RunEffectOutcomes::default(),
+        ) else {
             panic!("owned cancellation always has two logical responses");
         };
         assert!(responses[0].ok);
@@ -1554,7 +1844,7 @@ mod tests {
         let mut coordinator = Coordinator::with_host_service_factory(
             PythonRuntime::system("python3"),
             CoordinatorConfig::new(1, 3).unwrap(),
-            move |binding: &RunBinding| {
+            move |binding: &RunBinding, _effects: RunEffectReporter| {
                 captured_bindings.lock().unwrap().push(binding.clone());
                 Ok(Box::new(CountingHostService {
                     calls: Arc::clone(&captured_calls),
@@ -1598,6 +1888,269 @@ mod tests {
     }
 
     #[test]
+    fn effect_reporter_enforces_binding_order_capacity_ambiguity_and_sealing() {
+        let binding = RunBinding {
+            request_id: "request-effects".into(),
+            context_id: "context-effects".into(),
+            generation: 7,
+            run_id: "run-effects".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        let mut mismatched = completed_receipt(&binding, 0);
+        mismatched.binding.request_id = "other-request".into();
+        assert_eq!(
+            reporter.completed(mismatched),
+            Err(HostEffectReportError::Invalid)
+        );
+        assert!(reporter.completed(completed_receipt(&binding, 1)).is_ok());
+        assert_eq!(
+            reporter.completed(completed_receipt(&binding, 0)),
+            Err(HostEffectReportError::Invalid)
+        );
+        assert!(reporter.ambiguous(effect_ambiguity(&binding, 2)).is_ok());
+        assert_eq!(
+            reporter.completed(completed_receipt(&binding, 3)),
+            Err(HostEffectReportError::Invalid)
+        );
+        assert_eq!(
+            reporter.ambiguous(effect_ambiguity(&binding, 3)),
+            Err(HostEffectReportError::Invalid)
+        );
+        let outcomes = reporter.finish();
+        assert_eq!(outcomes.completed.len(), 1);
+        assert!(outcomes.ambiguity.is_some());
+        assert_eq!(
+            reporter.completed(completed_receipt(&binding, 3)),
+            Err(HostEffectReportError::Sealed)
+        );
+
+        let bounded = RunEffectReporter::new(binding.clone());
+        for call_index in 0..MAX_COMPLETED_EFFECTS as u64 {
+            bounded
+                .completed(completed_receipt(&binding, call_index))
+                .unwrap();
+        }
+        assert_eq!(
+            bounded.completed(completed_receipt(&binding, MAX_COMPLETED_EFFECTS as u64)),
+            Err(HostEffectReportError::Invalid)
+        );
+    }
+
+    #[test]
+    fn completed_effects_are_ordered_and_survive_later_python_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = reporting_coordinator(ReportMode::Completed, Arc::clone(&calls));
+        assert!(only(coordinator.submit(open("context-effects", "open-effects", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-effects",
+                    "request-effects-1",
+                    1,
+                    "run-effects-1",
+                    concat!(
+                        "a = host_call('test.effect', [], '')\n",
+                        "b = host_call('test.effect', [], '')\n",
+                        "a + '|' + b"
+                    ),
+                ))
+                .is_none()
+        );
+        let completed = wait_for(&mut coordinator, 1).remove(0);
+        assert!(completed.ok);
+        assert_eq!(
+            completed
+                .completed_effects
+                .iter()
+                .map(|receipt| receipt.binding.call_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        completed.validate().unwrap();
+
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-effects",
+                    "request-effects-2",
+                    1,
+                    "run-effects-2",
+                    "host_call('test.effect', [], '')\n1 / 0",
+                ))
+                .is_none()
+        );
+        let failed = wait_for(&mut coordinator, 1).remove(0);
+        assert!(!failed.ok);
+        assert_eq!(failed.failure_kind.as_deref(), Some("runtime"));
+        assert_eq!(failed.completed_effects.len(), 1);
+        assert_eq!(failed.completed_effects[0].binding.call_index, 0);
+        failed.validate().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn ambiguity_dominates_terminal_failure_and_invalidates_context() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = reporting_coordinator(ReportMode::Ambiguous, Arc::clone(&calls));
+        assert!(only(coordinator.submit(open("context-ambiguous", "open-ambiguous", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-ambiguous",
+                    "request-ambiguous",
+                    1,
+                    "run-ambiguous",
+                    "host_call('test.effect', [], '')",
+                ))
+                .is_none()
+        );
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert!(!response.ok);
+        assert_eq!(response.failure_kind.as_deref(), Some("effect_ambiguous"));
+        assert!(response.completed_effects.is_empty());
+        assert!(response.ambiguity.is_some());
+        response.validate().unwrap();
+        assert_eq!(coordinator.context_count(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let missing = only(coordinator.submit(run_request(
+            "context-ambiguous",
+            "request-after-ambiguity",
+            1,
+            "run-after-ambiguity",
+            "1",
+        )));
+        assert_eq!(missing.failure_kind.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn earlier_receipts_survive_later_ambiguity_and_context_fence() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator =
+            reporting_coordinator(ReportMode::CompletedThenAmbiguous, Arc::clone(&calls));
+        assert!(only(coordinator.submit(open("context-mixed", "open-mixed", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-mixed",
+                    "request-mixed",
+                    1,
+                    "run-mixed",
+                    concat!(
+                        "host_call('test.effect', [], '')\n",
+                        "host_call('test.effect', [], '')"
+                    ),
+                ))
+                .is_none()
+        );
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(response.failure_kind.as_deref(), Some("effect_ambiguous"));
+        assert_eq!(response.completed_effects.len(), 1);
+        assert_eq!(response.completed_effects[0].binding.call_index, 0);
+        assert_eq!(
+            response
+                .ambiguity
+                .as_ref()
+                .map(|ambiguity| ambiguity.binding.call_index),
+            Some(1)
+        );
+        response.validate().unwrap();
+        assert_eq!(coordinator.context_count(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn close_all_seals_reporter_clones_before_actor_shutdown() {
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_factory = Arc::clone(&captured);
+        let mut coordinator = Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 3).unwrap(),
+            move |_binding: &RunBinding, effects: RunEffectReporter| {
+                *captured_for_factory.lock().unwrap() = Some(effects);
+                Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
+            },
+        );
+        assert!(only(coordinator.submit(open("context-seal", "open-seal", 1))).ok);
+        assert!(
+            coordinator
+                .schedule_run(
+                    "request-seal".into(),
+                    "context-seal".into(),
+                    1,
+                    "run-seal".into(),
+                    "1".into(),
+                    DEFAULT_PREVIEW_BYTES,
+                    false,
+                )
+                .is_none()
+        );
+        let reporter = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("factory captured reporter");
+        assert_eq!(coordinator.close_all(), 1);
+        let binding = RunBinding {
+            request_id: "request-seal".into(),
+            context_id: "context-seal".into(),
+            generation: 1,
+            run_id: "run-seal".into(),
+        };
+        assert_eq!(
+            reporter.completed(completed_receipt(&binding, 0)),
+            Err(HostEffectReportError::Sealed)
+        );
+    }
+
+    #[test]
+    fn cancellation_preserves_receipts_completed_before_python_interrupt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = reporting_coordinator(ReportMode::Completed, Arc::clone(&calls));
+        assert!(
+            only(coordinator.submit(open("context-cancel-effects", "open-cancel-effects", 1))).ok
+        );
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-cancel-effects",
+                    "request-cancel-effects",
+                    1,
+                    "run-cancel-effects",
+                    concat!(
+                        "host_call('test.effect', [], '')\n",
+                        "import time\n",
+                        "while True: time.sleep(1)"
+                    ),
+                ))
+                .is_none()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "host effect did not complete");
+            std::thread::yield_now();
+        }
+        assert!(
+            coordinator
+                .submit(cancel_request(
+                    "cancel-effects",
+                    "context-cancel-effects",
+                    1,
+                    "request-cancel-effects",
+                    "run-cancel-effects",
+                ))
+                .is_none()
+        );
+        let responses = wait_for(&mut coordinator, 2);
+        let run = &responses[0];
+        assert_eq!(run.failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(run.completed_effects.len(), 1);
+        assert_eq!(run.completed_effects[0].binding.call_index, 0);
+        run.validate().unwrap();
+        assert!(responses[1].ok);
+        assert!(responses[1].completed_effects.is_empty());
+    }
+
+    #[test]
     fn default_constructor_remains_exact_host_call_rejection() {
         let mut coordinator = coordinator(1);
         assert!(only(coordinator.submit(open("context-default", "open-default", 1))).ok);
@@ -1632,7 +2185,7 @@ mod tests {
         let mut coordinator = Coordinator::with_host_service_factory(
             PythonRuntime::system("python3"),
             CoordinatorConfig::new(1, 3).unwrap(),
-            move |_binding: &RunBinding| {
+            move |_binding: &RunBinding, _effects: RunEffectReporter| {
                 if captured_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     return Err(HostServiceFactoryError);
                 }
@@ -1687,7 +2240,7 @@ mod tests {
         let mut coordinator = Coordinator::with_host_service_factory(
             PythonRuntime::system("python3"),
             CoordinatorConfig::new(1, 3).unwrap(),
-            move |_binding: &RunBinding| {
+            move |_binding: &RunBinding, _effects: RunEffectReporter| {
                 captured_factory_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(CountingHostService {
                     calls: Arc::clone(&captured_service_calls),
@@ -1794,7 +2347,9 @@ mod tests {
         let mut injected = Coordinator::with_host_service_factory(
             PythonRuntime::system("python3"),
             config,
-            |_binding: &RunBinding| Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>),
+            |_binding: &RunBinding, _effects: RunEffectReporter| {
+                Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
+            },
         );
         assert!(only(default.submit(open("context-parity", "open-parity", 1))).ok);
         assert!(only(injected.submit(open("context-parity", "open-parity", 1))).ok);
