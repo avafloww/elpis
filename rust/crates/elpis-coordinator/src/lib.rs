@@ -2,8 +2,8 @@
 
 use elpis_protocol::{Request, Response};
 use elpis_python::{
-    CancelOutcome, PythonContext, PythonContextActor, PythonError, PythonRunHandle, PythonRuntime,
-    RunResult,
+    CancelOutcome, HostCallService, PythonContext, PythonContextActor, PythonError,
+    PythonRunHandle, PythonRuntime, RejectHostCalls, RunResult,
 };
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -86,12 +86,59 @@ impl CompletionGroup {
     }
 }
 
+/// Validated identity of one Run presented to its host-service factory.
+///
+/// The coordinator constructs this only after protocol validation and after
+/// duplicate, context-binding, and busy checks have passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RunBinding {
+pub struct RunBinding {
     request_id: String,
     context_id: String,
     generation: u64,
     run_id: String,
+}
+
+impl RunBinding {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn context_id(&self) -> &str {
+        &self.context_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
+/// Bounded failure returned when a per-Run host service cannot be built.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("host service factory failed")]
+pub struct HostServiceFactoryError;
+
+/// Process-local factory for a host service bound to exactly one validated Run.
+pub trait HostServiceFactory: Send {
+    fn build(
+        &mut self,
+        binding: &RunBinding,
+    ) -> Result<Box<dyn HostCallService>, HostServiceFactoryError>;
+}
+
+impl<F> HostServiceFactory for F
+where
+    F: FnMut(&RunBinding) -> Result<Box<dyn HostCallService>, HostServiceFactoryError> + Send,
+{
+    fn build(
+        &mut self,
+        binding: &RunBinding,
+    ) -> Result<Box<dyn HostCallService>, HostServiceFactoryError> {
+        self(binding)
+    }
 }
 
 struct ActiveRun {
@@ -165,10 +212,30 @@ pub struct Coordinator {
     active_by_context: HashMap<String, String>,
     active_order: VecDeque<String>,
     tombstones: Tombstones,
+    host_service_factory: Box<dyn HostServiceFactory>,
 }
 
 impl Coordinator {
+    /// Construct a coordinator whose Runs reject every host call.
     pub fn new(runtime: PythonRuntime, config: CoordinatorConfig) -> Self {
+        Self::with_host_service_factory(runtime, config, |_binding: &RunBinding| {
+            Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
+        })
+    }
+
+    /// Construct a coordinator with a process-local per-Run host-service factory.
+    ///
+    /// The factory is invoked only after the Run request and its context binding
+    /// have passed the coordinator's admission checks. A factory error produces
+    /// a fixed, bounded failure and does not schedule or record the Run.
+    pub fn with_host_service_factory<F>(
+        runtime: PythonRuntime,
+        config: CoordinatorConfig,
+        factory: F,
+    ) -> Self
+    where
+        F: HostServiceFactory + 'static,
+    {
         Self {
             runtime,
             config,
@@ -177,6 +244,7 @@ impl Coordinator {
             active_by_context: HashMap::with_capacity(config.max_contexts()),
             active_order: VecDeque::with_capacity(config.max_contexts()),
             tombstones: Tombstones::new(config.max_tombstones()),
+            host_service_factory: Box::new(factory),
         }
     }
 
@@ -398,8 +466,31 @@ impl Coordinator {
             ));
         }
 
-        let scheduled =
-            actor.schedule_deferred(&context_id, generation, &run_id, &source, preview_max_bytes);
+        let binding = RunBinding {
+            request_id: request_id.clone(),
+            context_id: context_id.clone(),
+            generation,
+            run_id: run_id.clone(),
+        };
+        let service = match self.host_service_factory.build(&binding) {
+            Ok(service) => service,
+            Err(_) => {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "runtime",
+                    "host service factory failed",
+                ));
+            }
+        };
+        let scheduled = actor.schedule_deferred_with_host_service(
+            &context_id,
+            generation,
+            &run_id,
+            &source,
+            preview_max_bytes,
+            service,
+        );
         let handle = match scheduled {
             Ok(handle) => handle,
             Err(error) => {
@@ -411,12 +502,6 @@ impl Coordinator {
             }
         };
         let control = handle.control();
-        let binding = RunBinding {
-            request_id: request_id.clone(),
-            context_id: context_id.clone(),
-            generation,
-            run_id,
-        };
         self.active_by_context
             .insert(context_id, request_id.clone());
         self.active_order.push_back(request_id.clone());
@@ -780,7 +865,24 @@ fn run_result_response(request_id: String, result: RunResult) -> Response {
 mod tests {
     use super::*;
     use elpis_protocol::{DEFAULT_PREVIEW_BYTES, PROTOCOL_VERSION};
+    use elpis_python::{HostCall, HostResult};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct CountingHostService {
+        calls: Arc<AtomicUsize>,
+        result: &'static str,
+    }
+
+    impl HostCallService for CountingHostService {
+        fn call(&mut self, _call: &HostCall) -> HostResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            HostResult::accepted(self.result)
+        }
+    }
 
     fn coordinator(max_contexts: usize) -> Coordinator {
         Coordinator::new(
@@ -1441,6 +1543,273 @@ mod tests {
         assert_eq!(coordinator.active_run_count(), 0);
         assert_eq!(coordinator.tombstone_count(), 2);
         assert!(coordinator.poll().is_empty());
+    }
+
+    #[test]
+    fn injected_service_receives_exact_validated_run_binding() {
+        let bindings = Arc::new(Mutex::new(Vec::new()));
+        let service_calls = Arc::new(AtomicUsize::new(0));
+        let captured_bindings = Arc::clone(&bindings);
+        let captured_calls = Arc::clone(&service_calls);
+        let mut coordinator = Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 3).unwrap(),
+            move |binding: &RunBinding| {
+                captured_bindings.lock().unwrap().push(binding.clone());
+                Ok(Box::new(CountingHostService {
+                    calls: Arc::clone(&captured_calls),
+                    result: "bound",
+                }) as Box<dyn HostCallService>)
+            },
+        );
+        assert!(only(coordinator.submit(open("context-bound", "open-bound", 7))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-bound",
+                    "request-bound",
+                    7,
+                    "run-bound",
+                    "host_call('test.bound', [], '')",
+                ))
+                .is_none()
+        );
+
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert!(response.ok);
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("preview"))
+                .and_then(|preview| preview.as_str()),
+            Some("'bound'")
+        );
+        assert_eq!(service_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *bindings.lock().unwrap(),
+            [RunBinding {
+                request_id: "request-bound".into(),
+                context_id: "context-bound".into(),
+                generation: 7,
+                run_id: "run-bound".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn default_constructor_remains_exact_host_call_rejection() {
+        let mut coordinator = coordinator(1);
+        assert!(only(coordinator.submit(open("context-default", "open-default", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-default",
+                    "request-default",
+                    1,
+                    "run-default",
+                    "host_call('test.echo', [], '')",
+                ))
+                .is_none()
+        );
+
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert!(!response.ok);
+        assert_eq!(response.failure_kind.as_deref(), Some("runtime"));
+        assert!(
+            response
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("host calls are disabled for this run")
+        );
+    }
+
+    #[test]
+    fn factory_failure_is_bounded_and_does_not_start_or_record_run() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let captured_calls = Arc::clone(&factory_calls);
+        let mut coordinator = Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 3).unwrap(),
+            move |_binding: &RunBinding| {
+                if captured_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(HostServiceFactoryError);
+                }
+                Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>)
+            },
+        );
+        assert!(only(coordinator.submit(open("context-factory", "open-factory", 1))).ok);
+        let failed = only(coordinator.submit(run_request(
+            "context-factory",
+            "request-failed",
+            1,
+            "run-failed",
+            "factory_source_started = True",
+        )));
+        assert_eq!(failed.failure_kind.as_deref(), Some("runtime"));
+        assert_eq!(failed.error.as_deref(), Some("host service factory failed"));
+        failed.validate().unwrap();
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 0);
+        assert_eq!(coordinator.context_count(), 1);
+
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-factory",
+                    "request-failed",
+                    1,
+                    "run-failed",
+                    "globals().get('factory_source_started', 'clean')",
+                ))
+                .is_none()
+        );
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert!(response.ok);
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("preview"))
+                .and_then(|preview| preview.as_str()),
+            Some("'clean'")
+        );
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn admission_failures_do_not_build_services_and_deferred_cancel_never_calls_one() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let service_calls = Arc::new(AtomicUsize::new(0));
+        let captured_factory_calls = Arc::clone(&factory_calls);
+        let captured_service_calls = Arc::clone(&service_calls);
+        let mut coordinator = Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 3).unwrap(),
+            move |_binding: &RunBinding| {
+                captured_factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(CountingHostService {
+                    calls: Arc::clone(&captured_service_calls),
+                    result: "unexpected",
+                }) as Box<dyn HostCallService>)
+            },
+        );
+
+        let missing = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-missing",
+            2,
+            "run-missing",
+            "1",
+        )));
+        assert_eq!(missing.failure_kind.as_deref(), Some("not_found"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(only(coordinator.submit(open("context-guarded", "open-guarded", 2))).ok);
+        let stale = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-stale",
+            1,
+            "run-stale",
+            "1",
+        )));
+        assert_eq!(stale.failure_kind.as_deref(), Some("binding"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+        assert!(
+            coordinator
+                .schedule_run(
+                    "request-active".into(),
+                    "context-guarded".into(),
+                    2,
+                    "run-active".into(),
+                    "host_call('test.deferred', [], '')".into(),
+                    DEFAULT_PREVIEW_BYTES,
+                    false,
+                )
+                .is_none()
+        );
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        let duplicate = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-active",
+            2,
+            "run-active",
+            "1",
+        )));
+        assert_eq!(duplicate.failure_kind.as_deref(), Some("conflict"));
+        let conflicting = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-active",
+            2,
+            "run-conflicting",
+            "1",
+        )));
+        assert_eq!(conflicting.failure_kind.as_deref(), Some("conflict"));
+        let busy = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-busy",
+            2,
+            "run-busy",
+            "1",
+        )));
+        assert_eq!(busy.failure_kind.as_deref(), Some("busy"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+
+        assert!(
+            coordinator
+                .submit(cancel_request(
+                    "cancel-active",
+                    "context-guarded",
+                    2,
+                    "request-active",
+                    "run-active",
+                ))
+                .is_none()
+        );
+        let responses = wait_for(&mut coordinator, 2);
+        assert_eq!(responses[0].failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(
+            responses[0].result,
+            Some(json!({"started": false, "context_invalidated": false}))
+        );
+        assert_eq!(service_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(coordinator.tombstone_count(), 1);
+
+        let terminal_duplicate = only(coordinator.submit(run_request(
+            "context-guarded",
+            "request-active",
+            2,
+            "run-active",
+            "1",
+        )));
+        assert_eq!(terminal_duplicate.failure_kind.as_deref(), Some("conflict"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn injected_factory_preserves_ordinary_run_response_parity() {
+        let config = CoordinatorConfig::new(1, 3).unwrap();
+        let mut default = Coordinator::new(PythonRuntime::system("python3"), config);
+        let mut injected = Coordinator::with_host_service_factory(
+            PythonRuntime::system("python3"),
+            config,
+            |_binding: &RunBinding| Ok(Box::new(RejectHostCalls) as Box<dyn HostCallService>),
+        );
+        assert!(only(default.submit(open("context-parity", "open-parity", 1))).ok);
+        assert!(only(injected.submit(open("context-parity", "open-parity", 1))).ok);
+        let request = run_request(
+            "context-parity",
+            "request-parity",
+            1,
+            "run-parity",
+            "40 + 2",
+        );
+        assert!(default.submit(request.clone()).is_none());
+        assert!(injected.submit(request).is_none());
+        let default_response = wait_for(&mut default, 1).remove(0);
+        let injected_response = wait_for(&mut injected, 1).remove(0);
+        assert_eq!(injected_response, default_response);
     }
 
     #[test]
