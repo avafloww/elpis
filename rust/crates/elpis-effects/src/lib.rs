@@ -241,6 +241,61 @@ pub enum PrepareOutcome {
     Ambiguous,
 }
 
+#[derive(Debug)]
+pub enum AmbiguityFallback {
+    Marked,
+    AlreadyAmbiguous,
+    AlreadyCompleted,
+    Unconfirmed(Box<EffectError>),
+}
+
+impl fmt::Display for AmbiguityFallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Marked => f.write_str("marked ambiguous"),
+            Self::AlreadyAmbiguous => f.write_str("already ambiguous"),
+            Self::AlreadyCompleted => f.write_str("already completed"),
+            Self::Unconfirmed(error) => write!(f, "could not confirm ambiguity: {error}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CompletionFailure {
+    completion_error: Box<EffectError>,
+    ambiguity_fallback: AmbiguityFallback,
+}
+
+impl CompletionFailure {
+    pub fn completion_error(&self) -> &EffectError {
+        self.completion_error.as_ref()
+    }
+
+    pub fn ambiguity_fallback(&self) -> &AmbiguityFallback {
+        &self.ambiguity_fallback
+    }
+
+    pub fn into_parts(self) -> (EffectError, AmbiguityFallback) {
+        (*self.completion_error, self.ambiguity_fallback)
+    }
+}
+
+impl fmt::Display for CompletionFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "effect completion failed: {}; ambiguity fallback {}",
+            self.completion_error, self.ambiguity_fallback
+        )
+    }
+}
+
+impl std::error::Error for CompletionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.completion_error.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectLedgerState {
     pub effect_count: u64,
@@ -384,6 +439,10 @@ impl EffectLedger {
     /// effect. Reopening the ledger will conservatively recover any row that remained
     /// prepared.
     pub fn mark_ambiguous(&mut self, token: ExecutionToken) -> Result<(), EffectError> {
+        self.mark_ambiguous_inner(&token)
+    }
+
+    fn mark_ambiguous_inner(&mut self, token: &ExecutionToken) -> Result<(), EffectError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -418,7 +477,38 @@ impl EffectLedger {
         token: ExecutionToken,
         canonical_receipt_bytes: impl AsRef<[u8]>,
     ) -> Result<StoredReceipt, EffectError> {
-        let bytes = canonical_receipt_bytes.as_ref();
+        self.complete_inner(&token, canonical_receipt_bytes.as_ref())
+    }
+
+    /// Consumes one execution token into either a durable receipt or a bounded
+    /// account of the attempted ambiguity fallback.
+    pub fn complete_or_mark_ambiguous(
+        &mut self,
+        token: ExecutionToken,
+        canonical_receipt_bytes: impl AsRef<[u8]>,
+    ) -> Result<StoredReceipt, CompletionFailure> {
+        match self.complete_inner(&token, canonical_receipt_bytes.as_ref()) {
+            Ok(receipt) => Ok(receipt),
+            Err(completion_error) => {
+                let ambiguity_fallback = match self.mark_ambiguous_inner(&token) {
+                    Ok(()) => AmbiguityFallback::Marked,
+                    Err(EffectError::Ambiguous(_)) => AmbiguityFallback::AlreadyAmbiguous,
+                    Err(EffectError::AlreadyCompleted(_)) => AmbiguityFallback::AlreadyCompleted,
+                    Err(error) => AmbiguityFallback::Unconfirmed(Box::new(error)),
+                };
+                Err(CompletionFailure {
+                    completion_error: Box::new(completion_error),
+                    ambiguity_fallback,
+                })
+            }
+        }
+    }
+
+    fn complete_inner(
+        &mut self,
+        token: &ExecutionToken,
+        bytes: &[u8],
+    ) -> Result<StoredReceipt, EffectError> {
         if bytes.len() > MAX_RECEIPT_BYTES {
             return Err(EffectError::FieldTooLarge("canonical_receipt_bytes"));
         }
@@ -1142,6 +1232,13 @@ mod tests {
         }
     }
 
+    fn duplicate_token(token: &ExecutionToken) -> ExecutionToken {
+        ExecutionToken {
+            effect_id: token.effect_id,
+            request_sha256: token.request_sha256,
+        }
+    }
+
     #[test]
     fn exact_replay_executes_external_effect_once() {
         let temp = TempDir::new().unwrap();
@@ -1157,6 +1254,244 @@ mod tests {
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         assert_eq!(replay, PrepareOutcome::Completed(first));
         assert_eq!(ledger.state().unwrap().effect_count, 1);
+    }
+
+    #[test]
+    fn completion_fallback_success_returns_exact_receipt() {
+        let temp = TempDir::new().unwrap();
+        let mut ledger = EffectLedger::open(path(&temp), EffectLimits::default()).unwrap();
+        let identity = identity(b"helper success");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+
+        let receipt = ledger
+            .complete_or_mark_ambiguous(token, b"exact helper receipt")
+            .unwrap();
+
+        assert_eq!(receipt.bytes, b"exact helper receipt");
+        assert_eq!(
+            ledger.prepare(&identity).unwrap(),
+            PrepareOutcome::Completed(receipt)
+        );
+    }
+
+    #[test]
+    fn validation_and_capacity_failures_durably_mark_ambiguity() {
+        let temp = TempDir::new().unwrap();
+        let mut ledger = EffectLedger::open(path(&temp), EffectLimits::default()).unwrap();
+        let oversized_identity = identity(b"oversized receipt");
+        let token = new_token(ledger.prepare(&oversized_identity).unwrap());
+        let before = ledger.state().unwrap();
+        let failure = ledger
+            .complete_or_mark_ambiguous(token, vec![0; MAX_RECEIPT_BYTES + 1])
+            .unwrap_err();
+        assert!(matches!(
+            failure.completion_error(),
+            EffectError::FieldTooLarge("canonical_receipt_bytes")
+        ));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::Marked
+        ));
+        assert_eq!(ledger.state().unwrap(), before);
+        let stored = ledger
+            .effect(oversized_identity.effect_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, EffectStatus::Ambiguous);
+        assert!(stored.receipt.is_none());
+
+        let limited_temp = TempDir::new().unwrap();
+        let limits = EffectLimits {
+            max_effects: 1,
+            max_bytes: 120,
+        };
+        let mut limited = EffectLedger::open(path(&limited_temp), limits).unwrap();
+        let limited_identity = identity(b"x");
+        let token = new_token(limited.prepare(&limited_identity).unwrap());
+        let before = limited.state().unwrap();
+        let failure = limited
+            .complete_or_mark_ambiguous(token, b"receipt")
+            .unwrap_err();
+        assert!(matches!(
+            failure.completion_error(),
+            EffectError::StorageLimit
+        ));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::Marked
+        ));
+        assert_eq!(limited.state().unwrap(), before);
+        assert_eq!(
+            limited
+                .effect(limited_identity.effect_id())
+                .unwrap()
+                .unwrap()
+                .status,
+            EffectStatus::Ambiguous
+        );
+    }
+
+    #[test]
+    fn completion_storage_fault_marks_ambiguity_and_preserves_original_error() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        let identity = identity(b"completion fault");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        let before = ledger.state().unwrap();
+        let fault = Connection::open(&db).unwrap();
+        fault
+            .execute_batch(
+                "CREATE TRIGGER injected_completion_fault
+                 BEFORE UPDATE OF status ON effects WHEN NEW.status = 'completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected completion fault'); END;",
+            )
+            .unwrap();
+
+        let failure = ledger
+            .complete_or_mark_ambiguous(token, b"receipt")
+            .unwrap_err();
+        assert!(matches!(failure.completion_error(), EffectError::Sql(_)));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::Marked
+        ));
+        assert_eq!(ledger.state().unwrap(), before);
+        let stored = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Ambiguous);
+        assert!(stored.receipt.is_none());
+    }
+
+    #[test]
+    fn failed_completion_and_fallback_leave_no_second_token_and_reopen_ambiguous() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let identity = identity(b"double persistence fault");
+        let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        let fault = Connection::open(&db).unwrap();
+        fault
+            .execute_batch(
+                "CREATE TRIGGER injected_completion_fault
+                 BEFORE UPDATE OF status ON effects WHEN NEW.status = 'completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected completion fault'); END;
+                 CREATE TRIGGER injected_ambiguity_fault
+                 BEFORE UPDATE OF status ON effects WHEN NEW.status = 'ambiguous'
+                 BEGIN SELECT RAISE(ABORT, 'injected ambiguity fault'); END;",
+            )
+            .unwrap();
+
+        let failure = ledger
+            .complete_or_mark_ambiguous(token, b"receipt")
+            .unwrap_err();
+        let (completion_error, ambiguity_fallback) = failure.into_parts();
+        assert!(
+            completion_error
+                .to_string()
+                .contains("injected completion fault")
+        );
+        let AmbiguityFallback::Unconfirmed(ambiguity_error) = ambiguity_fallback else {
+            panic!("expected unconfirmed ambiguity fallback");
+        };
+        assert!(
+            ambiguity_error
+                .to_string()
+                .contains("injected ambiguity fault")
+        );
+        let stored = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Prepared);
+        assert!(stored.receipt.is_none());
+        assert_eq!(ledger.prepare(&identity).unwrap(), PrepareOutcome::Prepared);
+
+        fault
+            .execute_batch(
+                "DROP TRIGGER injected_completion_fault;
+                 DROP TRIGGER injected_ambiguity_fault;",
+            )
+            .unwrap();
+        drop(fault);
+        drop(ledger);
+        let reopened = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        assert_eq!(
+            reopened
+                .effect(identity.effect_id())
+                .unwrap()
+                .unwrap()
+                .status,
+            EffectStatus::Ambiguous
+        );
+    }
+
+    #[test]
+    fn completion_fallback_reports_already_terminal_and_unknown_tokens() {
+        let temp = TempDir::new().unwrap();
+        let mut ledger = EffectLedger::open(path(&temp), EffectLimits::default()).unwrap();
+
+        let ambiguous_identity = identity(b"already ambiguous");
+        let token = new_token(ledger.prepare(&ambiguous_identity).unwrap());
+        let stale = duplicate_token(&token);
+        ledger.mark_ambiguous(token).unwrap();
+        let failure = ledger
+            .complete_or_mark_ambiguous(stale, b"receipt")
+            .unwrap_err();
+        assert!(matches!(
+            failure.completion_error(),
+            EffectError::Ambiguous(id) if *id == ambiguous_identity.effect_id()
+        ));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::AlreadyAmbiguous
+        ));
+
+        let completed_identity = EffectIdentity::new(
+            "request-2",
+            "context-1",
+            7,
+            "run-1",
+            1,
+            "mail.send",
+            b"already completed".to_vec(),
+        )
+        .unwrap();
+        let token = new_token(ledger.prepare(&completed_identity).unwrap());
+        let stale = duplicate_token(&token);
+        let receipt = ledger.complete(token, b"stored receipt").unwrap();
+        let failure = ledger
+            .complete_or_mark_ambiguous(stale, b"replacement")
+            .unwrap_err();
+        assert!(matches!(
+            failure.completion_error(),
+            EffectError::AlreadyCompleted(id) if *id == completed_identity.effect_id()
+        ));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::AlreadyCompleted
+        ));
+        assert_eq!(
+            ledger
+                .effect(completed_identity.effect_id())
+                .unwrap()
+                .unwrap()
+                .receipt,
+            Some(receipt)
+        );
+
+        let unknown = ExecutionToken {
+            effect_id: EffectId::from_bytes([0x88; 32]),
+            request_sha256: [0x99; 32],
+        };
+        let failure = ledger
+            .complete_or_mark_ambiguous(unknown, b"receipt")
+            .unwrap_err();
+        assert!(matches!(
+            failure.completion_error(),
+            EffectError::UnknownToken
+        ));
+        assert!(matches!(
+            failure.ambiguity_fallback(),
+            AmbiguityFallback::Unconfirmed(error)
+                if matches!(error.as_ref(), EffectError::UnknownToken)
+        ));
     }
 
     #[test]
