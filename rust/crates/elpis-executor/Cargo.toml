@@ -9,12 +9,23 @@ repository.workspace = true
 embedded-python = ["dep:elpis-runtime"]
 
 [dependencies]
+elpis-identity = { path = "../elpis-identity" }
+elpis-journal = { path = "../elpis-journal" }
+elpis-link = { path = "../elpis-link" }
 elpis-protocol = { path = "../elpis-protocol" }
 elpis-python = { path = "../elpis-python" }
 elpis-runtime = { path = "../elpis-runtime", optional = true }
+hex.workspace = true
+libc.workspace = true
+ring.workspace = true
+rustix.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 hex.workspace = true

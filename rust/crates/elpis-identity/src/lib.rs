@@ -44,6 +44,8 @@ const MAX_CLOCK_SKEW: Duration = Duration::from_secs(60 * 60);
 pub enum IdentityError {
     #[error("identity state I/O failed")]
     Io(#[from] std::io::Error),
+    #[error("identity state is already in use")]
+    InUse,
     #[error("identity state permissions or file type are unsafe: {0}")]
     UnsafeState(&'static str),
     #[error("local Ed25519 key is invalid")]
@@ -306,7 +308,13 @@ impl IdentityStore {
         let dir = path.as_ref().to_path_buf();
         ensure_private_dir(&dir)?;
         let lock = open_secure_file(&dir.join(LOCK_FILE), true)?;
-        FileExt::lock_exclusive(&lock)?;
+        FileExt::try_lock_exclusive(&lock).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                IdentityError::InUse
+            } else {
+                IdentityError::Io(error)
+            }
+        })?;
         verify_secure_file(&lock)?;
 
         let key_path = dir.join(KEY_FILE);
@@ -975,6 +983,20 @@ mod tests {
         assert_eq!(fs::read(state.join(KEY_FILE)).unwrap(), private);
         let debug = format!("{store:?}");
         assert!(!debug.contains(&hex::encode(private)));
+    }
+
+    #[test]
+    fn duplicate_identity_state_open_fails_without_waiting() {
+        let temp = tempfile::tempdir().unwrap();
+        let ca = test_ca();
+        let state = temp.path().join("identity");
+        let first = IdentityStore::open(&state, policy(ca.der())).unwrap();
+        assert!(matches!(
+            IdentityStore::open(&state, policy(ca.der())),
+            Err(IdentityError::InUse)
+        ));
+        drop(first);
+        assert!(IdentityStore::open(&state, policy(ca.der())).is_ok());
     }
 
     #[test]
