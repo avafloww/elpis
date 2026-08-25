@@ -4,10 +4,17 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use thiserror::Error;
+
+mod actor;
+pub use actor::{
+    CancelOutcome, PythonContextActor, PythonRunControl, PythonRunHandle, RunState, RunTerminal,
+};
 
 const BOOTSTRAP: &str = include_str!("bootstrap.py");
 
@@ -31,6 +38,14 @@ pub enum PythonError {
     SourceTooLarge,
     #[error("python syntax validation failed: {0}")]
     Syntax(String),
+    #[error("python context already has an active run")]
+    Busy,
+    #[error("python context is invalid")]
+    InvalidContext,
+    #[error("python run was cancelled")]
+    Cancelled,
+    #[error("python context actor is closed")]
+    ActorClosed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +152,7 @@ pub struct PythonContext {
     output: BufReader<ChildStdout>,
     seen_runs: HashSet<String>,
     closed: bool,
+    reaped: bool,
 }
 
 impl PythonContext {
@@ -177,14 +193,23 @@ impl PythonContext {
         if generation == 0 {
             return Err(PythonError::Binding);
         }
-        let mut child = runtime
-            .command()
+        let mut command = runtime.command();
+        command
             .args(["-u", "-c", BOOTSTRAP])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(PythonError::Unavailable)?;
+            .stderr(Stdio::null());
+        #[cfg(target_os = "linux")]
+        // SAFETY: this closure only invokes the async-signal-safe setpgid syscall.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(PythonError::Unavailable)?;
         let input = child
             .stdin
             .take()
@@ -201,6 +226,7 @@ impl PythonContext {
             output,
             seen_runs: HashSet::new(),
             closed: false,
+            reaped: false,
         })
     }
 
@@ -236,19 +262,105 @@ impl PythonContext {
     }
 
     pub fn close(&mut self) -> Result<(), PythonError> {
-        if self.closed {
+        if self.closed && self.reaped {
             return Ok(());
         }
         self.closed = true;
-        let _ = self.write_frame(&ChildClose { op: "close" });
-        let _ = self.read_frame::<RunResult>();
-        match self.child.try_wait()? {
-            Some(_) => Ok(()),
-            None => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                Ok(())
+
+        // A graceful close gives the interpreter a chance to emit its final frame.  We
+        // still terminate the group before reaping the leader: guest code may have left
+        // descendants behind, and a pgid is safe to address only while our leader is an
+        // unreaped child.
+        if !self.reaped {
+            let _ = self.write_frame(&ChildClose { op: "close" });
+            let _ = self.read_frame::<RunResult>();
+            let _ = self.signal_group(libc::SIGKILL);
+            self.wait_reaped()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn leader_pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn signal_group(&self, signal: libc::c_int) -> io::Result<()> {
+        if self.reaped {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pid = libc::pid_t::try_from(self.child.id())
+                .map_err(|_| io::Error::other("python child pid is out of range"))?;
+            // SAFETY: kill is called with the dedicated child process group's negative id.
+            let result = unsafe { libc::kill(-pid, signal) };
+            if result == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
             }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "python context cancellation requires Linux process groups",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wait_reaped(&mut self) -> io::Result<std::process::ExitStatus> {
+        if self.reaped {
+            return Err(io::Error::other("python child was already reaped"));
+        }
+        let status = loop {
+            match self.child.wait() {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        self.reaped = true;
+        self.closed = true;
+        Ok(status)
+    }
+
+    pub(crate) fn was_reaped(&self) -> bool {
+        self.reaped
+    }
+
+    pub(crate) fn has_exited_unreaped(&self) -> io::Result<bool> {
+        if self.reaped {
+            return Ok(true);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pid = libc::id_t::try_from(self.child.id())
+                .map_err(|_| io::Error::other("python child pid is out of range"))?;
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: waitid writes one siginfo_t and WNOWAIT preserves the child as unreaped.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful waitid initialized the zeroed siginfo_t.
+            let info = unsafe { info.assume_init() };
+            Ok(unsafe { info.si_pid() } != 0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "python context exit polling requires Linux waitid",
+            ))
         }
     }
 
