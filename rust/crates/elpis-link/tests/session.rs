@@ -1161,6 +1161,296 @@ fn completed_send_uncertainty_reconnects_and_resends_exact_bytes_without_effect(
     assert_eq!(second_server.join().unwrap(), stored);
 }
 
+struct PendingSupervisorDispatcher {
+    observer: Journal,
+    submitted: mpsc::Sender<()>,
+    pending: bool,
+}
+
+impl DeferredDispatcher for PendingSupervisorDispatcher {
+    fn submit(&mut self, _request: Request) -> Option<DispatchGroup> {
+        assert_eq!(
+            self.observer.request(1).unwrap().unwrap().status,
+            elpis_journal::RequestStatus::Prepared
+        );
+        self.pending = true;
+        self.submitted.send(()).unwrap();
+        None
+    }
+
+    fn poll(&mut self) -> Option<DispatchGroup> {
+        None
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+    }
+}
+
+#[test]
+fn supervisor_transport_loss_with_pending_request_fails_without_reconnect() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Pending Loss Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let (submitted, observed) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let socket = websocket.into_inner().sock;
+        let _ = socket.shutdown(Shutdown::Both);
+    });
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            &store,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+        ),
+        EPOCH,
+        DrainSignal::new(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let mut dispatcher = PendingSupervisorDispatcher {
+        observer,
+        submitted,
+        pending: false,
+    };
+    assert_eq!(
+        supervisor.run(&store, &mut journal, &mut dispatcher),
+        Err(SupervisorError::Link(LinkError::StateMismatch))
+    );
+    server.join().unwrap();
+    assert!(dispatcher.pending);
+    assert_eq!(
+        journal.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Prepared
+    );
+    let journal_path = journal.path().to_owned();
+    drop(journal);
+    let recovered = Journal::open(journal_path, JournalLimits::default()).unwrap();
+    assert_eq!(
+        recovered.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Ambiguous
+    );
+}
+
+#[test]
+fn supervisor_drain_with_pending_request_makes_no_completion_claim() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Pending Drain Root");
+    let store = Arc::new(installed_store(&temp.path().join("identity"), &authority));
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let (submitted, observed) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        loop {
+            match websocket.read() {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    let drain = DrainSignal::new();
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            store.as_ref(),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+        ),
+        EPOCH,
+        drain.clone(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let runner_store = store.clone();
+    let runner = thread::spawn(move || {
+        let mut dispatcher = PendingSupervisorDispatcher {
+            observer,
+            submitted,
+            pending: false,
+        };
+        let result = supervisor.run(runner_store.as_ref(), &mut journal, &mut dispatcher);
+        (result, journal, dispatcher.pending)
+    });
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    drain.request();
+    let (result, journal, pending) = runner.join().unwrap();
+    assert_eq!(result, Ok(SupervisorExit::Drained));
+    assert!(pending);
+    assert_eq!(
+        journal.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Prepared
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn supervisor_server_silence_with_pending_request_fails_closed() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Pending Silence Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let (submitted, _observed) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        loop {
+            match websocket.read() {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            &store,
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(350),
+            Duration::from_millis(100),
+        ),
+        EPOCH,
+        DrainSignal::new(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let mut dispatcher = PendingSupervisorDispatcher {
+        observer,
+        submitted,
+        pending: false,
+    };
+    assert_eq!(
+        supervisor.run(&store, &mut journal, &mut dispatcher),
+        Err(SupervisorError::Link(LinkError::StateMismatch))
+    );
+    assert!(dispatcher.pending);
+    assert_eq!(
+        journal.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Prepared
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn supervisor_rotation_with_pending_request_fails_without_second_connection() {
+    let temp = TempDir::new().unwrap();
+    let authority = Arc::new(TestAuthority::new("Pending Rotation Root"));
+    let store = Arc::new(installed_store(
+        &temp.path().join("identity"),
+        authority.as_ref(),
+    ));
+    let root_sha256 = store.credential_metadata().unwrap().unwrap().root_sha256;
+    let (listener, port) = listener();
+    let config = server_config(authority.as_ref(), "localhost", authority.as_ref());
+    let (submitted, observed) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        loop {
+            match websocket.read() {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            store.as_ref(),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        ),
+        EPOCH,
+        DrainSignal::new(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let runner_store = store.clone();
+    let runner = thread::spawn(move || {
+        let mut dispatcher = PendingSupervisorDispatcher {
+            observer,
+            submitted,
+            pending: false,
+        };
+        let result = supervisor.run(runner_store.as_ref(), &mut journal, &mut dispatcher);
+        (result, journal, dispatcher.pending)
+    });
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    install_client_credentials(
+        store.as_ref(),
+        authority.as_ref(),
+        "rotated-pending",
+        &root_sha256,
+    );
+    let (result, journal, pending) = runner.join().unwrap();
+    assert_eq!(result, Err(SupervisorError::Link(LinkError::StateMismatch)));
+    assert!(pending);
+    assert_eq!(
+        journal.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Prepared
+    );
+    server.join().unwrap();
+}
+
 #[test]
 fn supervisor_sends_heartbeat_and_gracefully_drains_active_session() {
     let temp = TempDir::new().unwrap();

@@ -232,6 +232,9 @@ impl Supervisor {
             if self.drain.is_requested() {
                 return Ok(SupervisorExit::Drained);
             }
+            if dispatcher.has_pending() {
+                return Err(SupervisorError::Link(LinkError::StateMismatch));
+            }
             let credential = current_credential(identity)?;
             let session = Session::connect(&self.config.link, identity, journal, &self.boot_epoch);
             let mut session = match session {
@@ -260,6 +263,10 @@ impl Supervisor {
                     return Ok(SupervisorExit::Drained);
                 }
                 ActiveOutcome::Rotated => {
+                    if owns_pending(&session, dispatcher) {
+                        let _ = session.close();
+                        return Err(SupervisorError::Link(LinkError::StateMismatch));
+                    }
                     let _ = session.close();
                     attempt = 0;
                 }
@@ -268,6 +275,10 @@ impl Supervisor {
                     return Err(SupervisorError::CredentialsUnavailable);
                 }
                 ActiveOutcome::Retry => {
+                    if owns_pending(&session, dispatcher) {
+                        let _ = session.close();
+                        return Err(SupervisorError::Link(LinkError::StateMismatch));
+                    }
                     let stable = connected_at.elapsed() >= self.config.stable_connection;
                     let _ = session.close();
                     if stable {
@@ -305,22 +316,27 @@ impl Supervisor {
                     Ok(Some(current)) if &current == credential => {
                         last_credential_poll = now;
                     }
+                    Ok(Some(_)) if owns_pending(session, dispatcher) => {
+                        return ActiveOutcome::Fatal(LinkError::StateMismatch);
+                    }
                     Ok(Some(_)) => return ActiveOutcome::Rotated,
                     Ok(None) | Err(_) => return ActiveOutcome::CredentialsUnavailable,
                 }
             }
             if now.duration_since(last_server_activity) >= self.config.server_silence_timeout {
-                return ActiveOutcome::Retry;
+                return retry_or_pending_fatal(owns_pending(session, dispatcher));
             }
             if now.duration_since(last_heartbeat) >= self.config.heartbeat_interval {
                 if let Err(error) = session.send_heartbeat(journal) {
-                    return active_from_link_error(error);
+                    return active_from_link_error(error, owns_pending(session, dispatcher));
                 }
                 last_heartbeat = now;
             }
             match session.step(journal, dispatcher) {
                 Ok(SessionEvent::Idle) => {}
-                Ok(SessionEvent::Closed) => return ActiveOutcome::Retry,
+                Ok(SessionEvent::Closed) => {
+                    return retry_or_pending_fatal(owns_pending(session, dispatcher));
+                }
                 Ok(
                     SessionEvent::Control
                     | SessionEvent::ServerHeartbeat { .. }
@@ -345,7 +361,9 @@ impl Supervisor {
                         ..
                     },
                 ) => {}
-                Err(error) => return active_from_link_error(error),
+                Err(error) => {
+                    return active_from_link_error(error, owns_pending(session, dispatcher));
+                }
             }
         }
     }
@@ -423,8 +441,21 @@ fn classify_link_error(error: LinkError) -> LinkDisposition {
     }
 }
 
-fn active_from_link_error(error: LinkError) -> ActiveOutcome {
+fn owns_pending(session: &Session, dispatcher: &impl DeferredDispatcher) -> bool {
+    session.has_pending() || dispatcher.has_pending()
+}
+
+fn retry_or_pending_fatal(pending: bool) -> ActiveOutcome {
+    if pending {
+        ActiveOutcome::Fatal(LinkError::StateMismatch)
+    } else {
+        ActiveOutcome::Retry
+    }
+}
+
+fn active_from_link_error(error: LinkError, pending: bool) -> ActiveOutcome {
     match classify_link_error(error) {
+        LinkDisposition::Retry if pending => ActiveOutcome::Fatal(LinkError::StateMismatch),
         LinkDisposition::Retry => ActiveOutcome::Retry,
         LinkDisposition::Credentials => ActiveOutcome::CredentialsUnavailable,
         LinkDisposition::Fatal(error) => ActiveOutcome::Fatal(error),
