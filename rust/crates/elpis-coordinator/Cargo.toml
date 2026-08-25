@@ -1,0 +1,12 @@
+[package]
+name = "elpis-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+elpis-protocol = { path = "../elpis-protocol" }
+elpis-python = { path = "../elpis-python" }
+serde_json.workspace = true
+thiserror.workspace = true

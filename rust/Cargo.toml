@@ -4,6 +4,7 @@ members = [
   "crates/elpis-transport",
   "crates/elpis-journal",
   "crates/elpis-python",
+  "crates/elpis-coordinator",
   "crates/elpis-executor",
   "crates/elpis-runtime",
   "crates/elpis-identity",
