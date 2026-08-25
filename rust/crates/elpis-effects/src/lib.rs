@@ -2,9 +2,11 @@
 //!
 //! This database intentionally has no dependency on the transport journal or
 //! protocol. A caller must durably prepare an effect before executing it and
-//! must durably complete it before delivering the receipt. A prepared effect
-//! becomes ambiguous whenever the database is reopened, so a process can
-//! never silently execute it again after losing whether the effect occurred.
+//! must durably complete it before delivering the receipt. If execution becomes
+//! uncertain, the caller must consume its execution token to durably mark that
+//! exact effect ambiguous before releasing ownership. A prepared effect also
+//! becomes ambiguous whenever the database is reopened, so a process can never
+//! silently execute it again after losing whether the effect occurred.
 
 use std::fmt;
 use std::fs;
@@ -372,6 +374,42 @@ impl EffectLedger {
             effect_id,
             request_sha256: identity.canonical_request_sha256,
         }))
+    }
+
+    /// Durably relinquishes execution authority after an effect may have occurred.
+    ///
+    /// This transition is deliberately one-shot rather than idempotent: the token is
+    /// consumed on every outcome, and a row that is already ambiguous is rejected.
+    /// Thus an error can never return execution authority for a possibly performed
+    /// effect. Reopening the ledger will conservatively recover any row that remained
+    /// prepared.
+    pub fn mark_ambiguous(&mut self, token: ExecutionToken) -> Result<(), EffectError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored =
+            load_by_effect_id(&transaction, token.effect_id)?.ok_or(EffectError::UnknownToken)?;
+        if stored.identity.canonical_request_sha256 != token.request_sha256 {
+            return Err(EffectError::UnknownToken);
+        }
+        match stored.status {
+            EffectStatus::Prepared => {}
+            EffectStatus::Ambiguous => return Err(EffectError::Ambiguous(token.effect_id)),
+            EffectStatus::Completed => return Err(EffectError::AlreadyCompleted(token.effect_id)),
+        }
+        let changed = transaction.execute(
+            "UPDATE effects SET status = 'ambiguous'
+             WHERE effect_id = ?1 AND request_sha256 = ?2 AND status = 'prepared'",
+            params![
+                token.effect_id.as_bytes().as_slice(),
+                token.request_sha256.as_slice()
+            ],
+        )?;
+        if changed != 1 {
+            return Err(EffectError::ConcurrentChange);
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Stores exact receipt bytes durably before they can be delivered.
@@ -1144,6 +1182,226 @@ mod tests {
                 .status,
             EffectStatus::Ambiguous
         );
+    }
+
+    #[test]
+    fn token_marks_exact_prepared_effect_ambiguous_without_mutating_identity_or_receipt() {
+        let temp = TempDir::new().unwrap();
+        let mut ledger = EffectLedger::open(path(&temp), EffectLimits::default()).unwrap();
+        let identity = identity(b"possibly sent");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        let before_state = ledger.state().unwrap();
+        let before = ledger.effect(identity.effect_id()).unwrap().unwrap();
+
+        ledger.mark_ambiguous(token).unwrap();
+
+        let after = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(after.effect_id, before.effect_id);
+        assert_eq!(after.identity, before.identity);
+        assert_eq!(after.status, EffectStatus::Ambiguous);
+        assert!(before.receipt.is_none());
+        assert!(after.receipt.is_none());
+        assert_eq!(ledger.state().unwrap(), before_state);
+        assert_eq!(
+            ledger.prepare(&identity).unwrap(),
+            PrepareOutcome::Ambiguous
+        );
+    }
+
+    #[test]
+    fn explicit_ambiguity_persists_and_recovery_does_not_retransition_it() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let identity = identity(b"uncertain result");
+        {
+            let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+            let token = new_token(ledger.prepare(&identity).unwrap());
+            ledger.mark_ambiguous(token).unwrap();
+        }
+
+        let mut reopened = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        assert_eq!(reopened.recover_prepared().unwrap(), 0);
+        let stored = reopened.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Ambiguous);
+        assert!(stored.receipt.is_none());
+        assert_eq!(
+            reopened.prepare(&identity).unwrap(),
+            PrepareOutcome::Ambiguous
+        );
+    }
+
+    #[test]
+    fn ambiguity_rejects_wrong_unknown_completed_and_already_ambiguous_tokens() {
+        let temp = TempDir::new().unwrap();
+        let mut ledger = EffectLedger::open(path(&temp), EffectLimits::default()).unwrap();
+        let prepared = identity(b"prepared");
+        let token = new_token(ledger.prepare(&prepared).unwrap());
+
+        let wrong_hash = ExecutionToken {
+            effect_id: token.effect_id,
+            request_sha256: [0x55; 32],
+        };
+        assert!(matches!(
+            ledger.mark_ambiguous(wrong_hash),
+            Err(EffectError::UnknownToken)
+        ));
+        assert_eq!(
+            ledger.effect(prepared.effect_id()).unwrap().unwrap().status,
+            EffectStatus::Prepared
+        );
+
+        let unknown = ExecutionToken {
+            effect_id: EffectId::from_bytes([0x77; 32]),
+            request_sha256: prepared.canonical_request_sha256(),
+        };
+        assert!(matches!(
+            ledger.mark_ambiguous(unknown),
+            Err(EffectError::UnknownToken)
+        ));
+
+        let ambiguous_id = token.effect_id;
+        let ambiguous_hash = token.request_sha256;
+        ledger.mark_ambiguous(token).unwrap();
+        assert!(matches!(
+            ledger.mark_ambiguous(ExecutionToken {
+                effect_id: ambiguous_id,
+                request_sha256: ambiguous_hash,
+            }),
+            Err(EffectError::Ambiguous(id)) if id == ambiguous_id
+        ));
+
+        let completed = EffectIdentity::new(
+            "request-2",
+            "context-1",
+            7,
+            "run-1",
+            1,
+            "mail.send",
+            b"completed".to_vec(),
+        )
+        .unwrap();
+        let completed_token = new_token(ledger.prepare(&completed).unwrap());
+        let stale_token = ExecutionToken {
+            effect_id: completed_token.effect_id,
+            request_sha256: completed_token.request_sha256,
+        };
+        let receipt = ledger.complete(completed_token, b"exact receipt").unwrap();
+        assert!(matches!(
+            ledger.mark_ambiguous(stale_token),
+            Err(EffectError::AlreadyCompleted(id)) if id == completed.effect_id()
+        ));
+        let stored = ledger.effect(completed.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Completed);
+        assert_eq!(stored.receipt, Some(receipt));
+    }
+
+    #[test]
+    fn ambiguity_storage_fault_rolls_back_the_transition() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        let identity = identity(b"storage fault");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        let before = ledger.state().unwrap();
+        let fault = Connection::open(&db).unwrap();
+        fault
+            .execute_batch(
+                "CREATE TRIGGER injected_ambiguity_fault
+                 BEFORE UPDATE OF status ON effects WHEN NEW.status = 'ambiguous'
+                 BEGIN SELECT RAISE(ABORT, 'injected ambiguity fault'); END;",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ledger.mark_ambiguous(token),
+            Err(EffectError::Sql(_))
+        ));
+        assert_eq!(ledger.state().unwrap(), before);
+        let stored = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Prepared);
+        assert!(stored.receipt.is_none());
+        assert_eq!(ledger.prepare(&identity).unwrap(), PrepareOutcome::Prepared);
+
+        fault
+            .execute_batch("DROP TRIGGER injected_ambiguity_fault")
+            .unwrap();
+        drop(fault);
+        drop(ledger);
+        let reopened = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        assert_eq!(
+            reopened
+                .effect(identity.effect_id())
+                .unwrap()
+                .unwrap()
+                .status,
+            EffectStatus::Ambiguous
+        );
+    }
+
+    #[test]
+    fn ambiguity_transaction_acquisition_failure_leaves_row_prepared() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        let identity = identity(b"transaction fault");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        ledger.connection.busy_timeout(Duration::ZERO).unwrap();
+        let blocker = Connection::open(&db).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        assert!(matches!(
+            ledger.mark_ambiguous(token),
+            Err(EffectError::Sql(_))
+        ));
+        let stored = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Prepared);
+        assert!(stored.receipt.is_none());
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(ledger.prepare(&identity).unwrap(), PrepareOutcome::Prepared);
+
+        drop(blocker);
+        drop(ledger);
+        let reopened = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        assert_eq!(
+            reopened
+                .effect(identity.effect_id())
+                .unwrap()
+                .unwrap()
+                .status,
+            EffectStatus::Ambiguous
+        );
+    }
+
+    #[test]
+    fn ambiguity_detects_a_concurrent_state_change_and_rolls_it_back() {
+        let temp = TempDir::new().unwrap();
+        let db = path(&temp);
+        let mut ledger = EffectLedger::open(&db, EffectLimits::default()).unwrap();
+        let identity = identity(b"concurrent transition");
+        let token = new_token(ledger.prepare(&identity).unwrap());
+        ledger
+            .connection
+            .pragma_update(None, "recursive_triggers", "OFF")
+            .unwrap();
+        let fault = Connection::open(&db).unwrap();
+        fault
+            .execute_batch(
+                "CREATE TRIGGER injected_concurrent_ambiguity
+                 BEFORE UPDATE OF status ON effects WHEN NEW.status = 'ambiguous'
+                 BEGIN
+                   UPDATE effects SET status = 'ambiguous' WHERE effect_id = OLD.effect_id;
+                   SELECT RAISE(IGNORE);
+                 END;",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ledger.mark_ambiguous(token),
+            Err(EffectError::ConcurrentChange)
+        ));
+        let stored = ledger.effect(identity.effect_id()).unwrap().unwrap();
+        assert_eq!(stored.status, EffectStatus::Prepared);
+        assert!(stored.receipt.is_none());
     }
 
     #[test]
