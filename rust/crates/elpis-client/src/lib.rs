@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use elpis_protocol::{PROTOCOL_VERSION, Request, Response, validate_id};
+use elpis_protocol::{PROTOCOL_VERSION, Request, Response, v2::EffectBinding, validate_id};
 use thiserror::Error;
 
 const MAX_BOUND: usize = 65_536;
@@ -85,6 +85,12 @@ pub enum SettlementOutcome {
         cancel_response: Response,
         started: bool,
         context_invalidated: bool,
+    },
+    /// A validated protocol-2 effect ambiguity. Full responses are retained so
+    /// completed receipts and ambiguity provenance remain exact.
+    EffectAmbiguous {
+        response: Response,
+        correlated_response: Option<Response>,
     },
     Ambiguous {
         reason: Uncertainty,
@@ -398,9 +404,29 @@ impl RemoteRunOwner {
             };
         }
         if let Some(run_request_id) = self.cancel_to_run.get(&response_id).cloned() {
+            let active = self
+                .active
+                .get(&run_request_id)
+                .ok_or(ClientError::UnknownResponse)?;
+            if !effect_bindings_match(&response, &active.key, &response_id) {
+                return Err(ClientError::InvalidResponse);
+            }
+            if response.ambiguity.is_some() {
+                return self
+                    .finish_effect_ambiguous(&run_request_id, response)
+                    .map(settled);
+            }
             return self.accept_cancel_response(&run_request_id, response);
         }
-        if self.active.contains_key(&response_id) {
+        if let Some(active) = self.active.get(&response_id) {
+            if !effect_bindings_match(&response, &active.key, &response_id) {
+                return Err(ClientError::InvalidResponse);
+            }
+            if response.ambiguity.is_some() {
+                return self
+                    .finish_effect_ambiguous(&response_id, response)
+                    .map(settled);
+            }
             return self.accept_run_response(&response_id, response);
         }
         Err(ClientError::UnknownResponse)
@@ -759,6 +785,58 @@ impl RemoteRunOwner {
         ))
     }
 
+    fn finish_effect_ambiguous(
+        &mut self,
+        request_id: &str,
+        response: Response,
+    ) -> Result<Settlement, ClientError> {
+        let response_id = response
+            .request_id
+            .clone()
+            .ok_or(ClientError::UnknownResponse)?;
+        let correlated_response = {
+            let active = self.active.get(request_id).ok_or(ClientError::UnknownRun)?;
+            match &active.state {
+                ActiveState::Detached {
+                    cancel: Some(cancel),
+                    ..
+                } if response_id == active.key.request_id => cancel.cancel_response.clone(),
+                ActiveState::Detached {
+                    cancel: Some(cancel),
+                    ..
+                } if response_id == cancel.request_id => cancel.run_response.clone(),
+                _ => None,
+            }
+        };
+        let correlated_tombstone = correlated_response
+            .as_ref()
+            .map(|correlated| {
+                correlated
+                    .request_id
+                    .clone()
+                    .map(|id| (id, Some(correlated.clone())))
+                    .ok_or(ClientError::UnknownResponse)
+            })
+            .transpose()?;
+        let active = self
+            .active
+            .remove(request_id)
+            .ok_or(ClientError::UnknownRun)?;
+        let mut responses = vec![(response_id, Some(response.clone()))];
+        if let Some(correlated) = correlated_tombstone {
+            responses.push(correlated);
+        }
+        Ok(self.finish_removed(
+            active,
+            SettlementOutcome::EffectAmbiguous {
+                response,
+                correlated_response,
+            },
+            true,
+            responses,
+        ))
+    }
+
     fn finish_ambiguous(
         &mut self,
         request_id: &str,
@@ -874,6 +952,33 @@ impl RemoteRunOwner {
     }
 }
 
+fn effect_bindings_match(
+    response: &Response,
+    key: &RemoteRunKey,
+    response_request_id: &str,
+) -> bool {
+    response
+        .completed_effects
+        .iter()
+        .all(|receipt| effect_binding_matches(&receipt.binding, key, response_request_id))
+        && response.ambiguity.as_ref().is_none_or(|ambiguity| {
+            effect_binding_matches(&ambiguity.binding, key, response_request_id)
+        })
+}
+
+fn effect_binding_matches(
+    binding: &EffectBinding,
+    key: &RemoteRunKey,
+    response_request_id: &str,
+) -> bool {
+    // A Cancel response's effects bind to the Cancel request ID, while the
+    // execution identity remains that of the active Run.
+    binding.request_id == response_request_id
+        && binding.context_id == key.context_id
+        && binding.generation == key.generation
+        && binding.run_id == key.run_id
+}
+
 fn settled(settlement: Settlement) -> ResponseEvent {
     ResponseEvent::Settled(Box::new(settlement))
 }
@@ -976,6 +1081,73 @@ mod tests {
                 "already_terminal": true,
             }),
         )
+    }
+
+    fn effect_binding(
+        request_id: &str,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+        call_index: u64,
+        effect_digit: char,
+    ) -> EffectBinding {
+        EffectBinding {
+            effect_id: effect_digit.to_string().repeat(64),
+            request_id: request_id.into(),
+            context_id: context_id.into(),
+            generation,
+            run_id: run_id.into(),
+            call_index,
+            capability: "synthetic.effect".into(),
+            request_sha256: "c".repeat(64),
+        }
+    }
+
+    fn completed_effect(
+        request_id: &str,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+    ) -> Response {
+        use elpis_protocol::v2::CompletedEffectReceipt;
+
+        let mut response = completed(request_id, 42);
+        response.completed_effects.push(CompletedEffectReceipt {
+            binding: effect_binding(request_id, context_id, generation, run_id, 0, 'a'),
+            receipt: "cmVjZWlwdC1ieXRlcw".into(),
+            receipt_sha256: "d6c0441a88ceb80ec9b25000d405a1c9357a51cf3fbedf27e32335f104194c1c"
+                .into(),
+        });
+        response
+    }
+
+    fn effect_ambiguous(
+        request_id: &str,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+    ) -> Response {
+        use elpis_protocol::v2::{CompletedEffectReceipt, EffectAmbiguity, EffectAmbiguityReason};
+
+        let mut response = Response::failure(
+            Some(request_id.into()),
+            "failed",
+            "effect_ambiguous",
+            "effect outcome is uncertain",
+        );
+        response.completed_effects.push(CompletedEffectReceipt {
+            binding: effect_binding(request_id, context_id, generation, run_id, 0, 'a'),
+            receipt: "cmVjZWlwdC1ieXRlcw".into(),
+            receipt_sha256: "d6c0441a88ceb80ec9b25000d405a1c9357a51cf3fbedf27e32335f104194c1c"
+                .into(),
+        });
+        response.ambiguity = Some(EffectAmbiguity {
+            binding: effect_binding(request_id, context_id, generation, run_id, 1, 'b'),
+            reason: EffectAmbiguityReason::ExecutorLost,
+            may_have_occurred: true,
+            context_invalidated: true,
+        });
+        response
     }
 
     #[test]
@@ -1310,6 +1482,205 @@ mod tests {
         );
         assert!(settlement.context_fenced);
         assert_eq!(owner.fenced_through("context-1"), Some(4));
+    }
+
+    #[test]
+    fn exact_settlement_retains_completed_effect_receipt_verbatim() {
+        let mut owner = owner();
+        owner
+            .register_run(&run("request-1", "context-1", 3, "run-1"))
+            .unwrap();
+        let response = completed_effect("request-1", "context-1", 3, "run-1");
+        assert_eq!(response.validate(), Ok(()));
+
+        let ResponseEvent::Settled(settlement) = owner.accept_response(response.clone()).unwrap()
+        else {
+            panic!("completed effect response did not settle");
+        };
+        assert_eq!(
+            settlement.outcome,
+            SettlementOutcome::Exact {
+                response: response.clone(),
+                cancel_response: None,
+            }
+        );
+        let SettlementOutcome::Exact { response: kept, .. } = &settlement.outcome else {
+            unreachable!();
+        };
+        assert_eq!(kept, &response);
+        assert_eq!(kept.completed_effects[0].receipt, "cmVjZWlwdC1ieXRlcw");
+        assert_eq!(
+            owner.accept_response(response).unwrap(),
+            ResponseEvent::Duplicate
+        );
+    }
+
+    #[test]
+    fn run_effect_ambiguity_preempts_pending_cancel_and_retains_exact_response() {
+        let mut owner = owner();
+        owner
+            .register_run(&run("request-1", "context-1", 5, "run-1"))
+            .unwrap();
+        owner.detach("request-1", "future-1").unwrap();
+        owner.request_cancel("future-1", "cancel-1").unwrap();
+        let cancel_response = cancel_success("cancel-1", "request-1", true, true);
+        assert_eq!(
+            owner.accept_response(cancel_response.clone()).unwrap(),
+            ResponseEvent::Pending
+        );
+
+        let ambiguity = effect_ambiguous("request-1", "context-1", 5, "run-1");
+        assert_eq!(ambiguity.validate(), Ok(()));
+        let ResponseEvent::Settled(settlement) = owner.accept_response(ambiguity.clone()).unwrap()
+        else {
+            panic!("typed effect ambiguity did not settle");
+        };
+        assert_eq!(
+            settlement.outcome,
+            SettlementOutcome::EffectAmbiguous {
+                response: ambiguity.clone(),
+                correlated_response: Some(cancel_response.clone()),
+            }
+        );
+        let SettlementOutcome::EffectAmbiguous {
+            response,
+            correlated_response,
+        } = &settlement.outcome
+        else {
+            unreachable!();
+        };
+        assert_eq!(response.completed_effects[0].receipt, "cmVjZWlwdC1ieXRlcw");
+        assert_eq!(correlated_response.as_ref(), Some(&cancel_response));
+        assert!(settlement.context_fenced);
+        assert_eq!(owner.fenced_through("context-1"), Some(5));
+        assert_eq!(owner.fenced_context_count(), 1);
+        assert!(!owner.is_busy("context-1"));
+        assert_eq!(owner.active_count(), 0);
+
+        assert_eq!(
+            owner.accept_response(ambiguity.clone()).unwrap(),
+            ResponseEvent::Duplicate
+        );
+        assert_eq!(owner.fenced_context_count(), 1);
+        assert_eq!(
+            owner.accept_response(completed("request-1", 42)),
+            Err(ClientError::ConflictingTerminalResponse)
+        );
+        assert_eq!(
+            owner.accept_response(cancel_response).unwrap(),
+            ResponseEvent::Duplicate
+        );
+        assert_eq!(
+            owner.register_run(&run("request-2", "context-1", 5, "run-2")),
+            Err(ClientError::Fenced)
+        );
+        owner
+            .register_run(&run("request-3", "context-1", 6, "run-3"))
+            .unwrap();
+    }
+
+    #[test]
+    fn cancel_effect_ambiguity_preempts_waiting_run_and_uses_cancel_binding() {
+        let mut owner = owner();
+        owner
+            .register_run(&run("request-1", "context-1", 7, "run-1"))
+            .unwrap();
+        owner.detach("request-1", "future-1").unwrap();
+        owner.request_cancel("future-1", "cancel-1").unwrap();
+        let run_response = completed_effect("request-1", "context-1", 7, "run-1");
+        assert_eq!(
+            owner.accept_response(run_response.clone()).unwrap(),
+            ResponseEvent::Pending
+        );
+
+        // The effect request is the Cancel request, but context, generation,
+        // and run still correlate to the active Run key.
+        let ambiguity = effect_ambiguous("cancel-1", "context-1", 7, "run-1");
+        assert_eq!(ambiguity.validate(), Ok(()));
+        let ResponseEvent::Settled(settlement) = owner.accept_response(ambiguity.clone()).unwrap()
+        else {
+            panic!("Cancel-side effect ambiguity did not settle");
+        };
+        assert_eq!(settlement.future_id.as_deref(), Some("future-1"));
+        assert_eq!(
+            settlement.outcome,
+            SettlementOutcome::EffectAmbiguous {
+                response: ambiguity.clone(),
+                correlated_response: Some(run_response.clone()),
+            }
+        );
+        let SettlementOutcome::EffectAmbiguous {
+            correlated_response,
+            ..
+        } = &settlement.outcome
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            correlated_response.as_ref().unwrap().completed_effects[0].receipt,
+            "cmVjZWlwdC1ieXRlcw"
+        );
+        assert_eq!(owner.fenced_through("context-1"), Some(7));
+        assert!(!owner.is_busy("context-1"));
+        assert_eq!(
+            owner.accept_response(ambiguity.clone()).unwrap(),
+            ResponseEvent::Duplicate
+        );
+        assert_eq!(
+            owner.accept_response(run_response).unwrap(),
+            ResponseEvent::Duplicate
+        );
+        assert_eq!(
+            owner.accept_response(Response::failure(
+                Some("cancel-1".into()),
+                "failed",
+                "state_mismatch",
+                "different late result",
+            )),
+            Err(ClientError::ConflictingTerminalResponse)
+        );
+    }
+
+    #[test]
+    fn active_run_binding_mismatch_is_rejected_before_any_mutation() {
+        for (context_id, generation, run_id) in [
+            ("other-context", 9, "run-1"),
+            ("context-1", 10, "run-1"),
+            ("context-1", 9, "other-run"),
+        ] {
+            let mut owner = owner();
+            owner
+                .register_run(&run("request-1", "context-1", 9, "run-1"))
+                .unwrap();
+            owner.detach("request-1", "future-1").unwrap();
+            owner.request_cancel("future-1", "cancel-1").unwrap();
+
+            let mismatch = effect_ambiguous("cancel-1", context_id, generation, run_id);
+            assert_eq!(mismatch.validate(), Ok(()));
+            assert_eq!(
+                owner.accept_response(mismatch),
+                Err(ClientError::InvalidResponse)
+            );
+            assert!(owner.is_busy("context-1"));
+            assert_eq!(owner.fenced_through("context-1"), None);
+            assert_eq!(owner.active_count(), 1);
+            assert_eq!(
+                owner.future("future-1").unwrap().phase,
+                FuturePhase::CancelPending
+            );
+        }
+
+        let mut owner = owner();
+        owner
+            .register_run(&run("request-1", "context-1", 9, "run-1"))
+            .unwrap();
+        owner.detach("request-1", "future-1").unwrap();
+        owner.request_cancel("future-1", "cancel-1").unwrap();
+        let valid = effect_ambiguous("cancel-1", "context-1", 9, "run-1");
+        assert!(matches!(
+            owner.accept_response(valid).unwrap(),
+            ResponseEvent::Settled(_)
+        ));
     }
 
     #[test]
