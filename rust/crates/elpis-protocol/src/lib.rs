@@ -58,6 +58,14 @@ pub enum Request {
         #[serde(default = "default_preview_bytes")]
         preview_max_bytes: usize,
     },
+    Cancel {
+        protocol: u32,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        target_request_id: String,
+        run_id: String,
+    },
     Close {
         protocol: u32,
         request_id: String,
@@ -76,6 +84,7 @@ impl Request {
             Self::Validate { request_id, .. }
             | Self::Open { request_id, .. }
             | Self::Run { request_id, .. }
+            | Self::Cancel { request_id, .. }
             | Self::Close { request_id, .. } => request_id,
         }
     }
@@ -85,6 +94,7 @@ impl Request {
             Self::Validate { protocol, .. }
             | Self::Open { protocol, .. }
             | Self::Run { protocol, .. }
+            | Self::Cancel { protocol, .. }
             | Self::Close { protocol, .. } => *protocol,
         };
         if protocol != PROTOCOL_VERSION {
@@ -122,6 +132,18 @@ impl Request {
                     return Err(ProtocolError::InvalidPreviewLimit);
                 }
                 Ok(())
+            }
+            Self::Cancel {
+                context_id,
+                generation,
+                target_request_id,
+                run_id,
+                ..
+            } => {
+                validate_id("context_id", context_id, 120)?;
+                validate_generation(*generation)?;
+                validate_id("target_request_id", target_request_id, 120)?;
+                validate_id("run_id", run_id, 120)
             }
         }
     }
@@ -209,5 +231,32 @@ mod tests {
             preview_max_bytes: DEFAULT_PREVIEW_BYTES,
         };
         assert_eq!(request.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cancel_is_exact_and_validates_every_binding() {
+        let raw = r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#;
+        let request: Request = serde_json::from_str(raw).unwrap();
+        assert_eq!(request.validate(), Ok(()));
+        assert_eq!(serde_json::to_string(&request).unwrap(), raw);
+
+        for malformed in [
+            r#"{"op":"cancel","protocol":1,"request_id":"","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"bad/id","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":0,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"bad target","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":""}"#,
+        ] {
+            let request: Request = serde_json::from_str(malformed).unwrap();
+            assert!(request.validate().is_err(), "accepted {malformed}");
+        }
+
+        for invalid_shape in [
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1","extra":true}"#,
+            r#"{"op":"detach","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(invalid_shape).is_err());
+        }
     }
 }

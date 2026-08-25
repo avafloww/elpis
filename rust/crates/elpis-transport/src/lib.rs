@@ -1059,6 +1059,82 @@ mod tests {
     }
 
     #[test]
+    fn cancel_is_a_normal_sequenced_request_and_stale_or_malformed_frames_do_not_advance() {
+        let mut fence = fence_after(0);
+        fence.accept_server_frame(request_frame(1)).unwrap();
+        let cancel = ServerFrame::Request {
+            protocol: PROTOCOL_VERSION,
+            executor_id: "executor-1".into(),
+            boot_epoch: EPOCH.into(),
+            connection_id: "connection-1".into(),
+            seq: 2,
+            request: Request::Cancel {
+                protocol: PROTOCOL_VERSION,
+                request_id: "cancel-1".into(),
+                context_id: "context-1".into(),
+                generation: 1,
+                target_request_id: "request-1".into(),
+                run_id: "run-1".into(),
+            },
+        };
+        let dispatched = fence.accept_server_frame(cancel.clone()).unwrap().unwrap();
+        assert_eq!(dispatched.seq, 2);
+        assert_eq!(dispatched.request.request_id(), "cancel-1");
+        assert!(matches!(
+            fence.accept_server_frame(cancel),
+            Err(FenceError::StaleSequence {
+                expected: 3,
+                actual: 2
+            })
+        ));
+
+        let mut malformed = request_frame(3);
+        let ServerFrame::Request { request, .. } = &mut malformed else {
+            unreachable!()
+        };
+        *request = Request::Cancel {
+            protocol: PROTOCOL_VERSION,
+            request_id: "cancel-2".into(),
+            context_id: "context-1".into(),
+            generation: 1,
+            target_request_id: "bad target".into(),
+            run_id: "run-1".into(),
+        };
+        assert!(matches!(
+            fence.accept_server_frame(malformed),
+            Err(FenceError::InvalidRequest(ProtocolError::InvalidId(
+                "target_request_id",
+                120
+            )))
+        ));
+        assert_eq!(fence.next_server_seq(), 3);
+    }
+
+    #[test]
+    fn responses_may_be_built_out_of_server_order() {
+        let mut fence = fence_after(0);
+        fence.accept_server_frame(request_frame(1)).unwrap();
+        fence.accept_server_frame(request_frame(2)).unwrap();
+        assert!(matches!(
+            fence.build_response(2, response("request-2")).unwrap(),
+            ClientFrame::Response {
+                seq: 1,
+                request_seq: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            fence.build_response(1, response("request-1")).unwrap(),
+            ClientFrame::Response {
+                seq: 2,
+                request_seq: 1,
+                ..
+            }
+        ));
+        assert_eq!(fence.checkpoint().responded_request_seqs, vec![1, 2]);
+    }
+
+    #[test]
     fn response_is_once_per_request_and_client_sequence_is_shared() {
         let mut fence = fence_after(0);
         fence.accept_server_frame(request_frame(1)).unwrap();

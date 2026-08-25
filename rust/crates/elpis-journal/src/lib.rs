@@ -303,6 +303,9 @@ impl Journal {
         Ok(ClientHeartbeatOutcome::Existing)
     }
 
+    /// Completes one row, or returns its receipt for an exact frame replay.
+    /// Any difference in sequence, hash, or bytes is a conflict and is never
+    /// treated as idempotent success.
     pub fn complete(
         &mut self,
         prepared: &PreparedRequest,
@@ -402,6 +405,131 @@ impl Journal {
             }
             RequestStatus::Ambiguous => Err(JournalError::Ambiguous(request_seq)),
         }
+    }
+
+    /// Completes two distinct prepared rows atomically in caller-specified order.
+    ///
+    /// Frames must already have been built by the transport fence. Unlike
+    /// [`Self::complete`], this operation only accepts rows that are still
+    /// prepared; exact replay remains the single-row API's responsibility.
+    pub fn complete_pair(
+        &mut self,
+        first: (&PreparedRequest, &ClientFrame),
+        second: (&PreparedRequest, &ClientFrame),
+    ) -> Result<[StoredResponse; 2], JournalError> {
+        if first.0.server_seq == second.0.server_seq {
+            return Err(JournalError::DuplicatePairRequest(first.0.server_seq));
+        }
+        let completions = [first, second];
+        let limits = self.limits;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = load_state_transaction(&transaction)?;
+        let second_client_seq = state
+            .next_client_seq
+            .checked_add(1)
+            .ok_or(JournalError::SequenceExhausted)?;
+        let next_client_seq = second_client_seq
+            .checked_add(1)
+            .ok_or(JournalError::SequenceExhausted)?;
+        let expected_client_seqs = [state.next_client_seq, second_client_seq];
+
+        let mut rows = Vec::with_capacity(2);
+        let mut responses = Vec::with_capacity(2);
+        let mut added_bytes = 0_u64;
+        for (index, (prepared, frame)) in completions.into_iter().enumerate() {
+            let (binding, client_seq, request_seq, response_request_id) = match frame {
+                ClientFrame::Response {
+                    executor_id,
+                    boot_epoch,
+                    connection_id,
+                    seq,
+                    request_seq,
+                    response,
+                    ..
+                } => (
+                    Binding::new(executor_id, boot_epoch, connection_id),
+                    *seq,
+                    *request_seq,
+                    response.request_id.as_deref(),
+                ),
+                ClientFrame::Heartbeat { .. } => return Err(JournalError::ExpectedResponse),
+            };
+            if request_seq != prepared.server_seq {
+                return Err(JournalError::ResponseRequestMismatch {
+                    expected: prepared.server_seq,
+                    actual: request_seq,
+                });
+            }
+            bind_or_verify(&transaction, &binding)?;
+            let stored = load_request_transaction(&transaction, prepared.server_seq)?
+                .ok_or(JournalError::UnknownRequest(prepared.server_seq))?;
+            if stored.request_sha256 != prepared.request_sha256 {
+                return Err(JournalError::RequestConflict(prepared.server_seq));
+            }
+            match stored.status {
+                RequestStatus::Prepared => {}
+                RequestStatus::Completed => {
+                    return Err(JournalError::AlreadyCompleted(prepared.server_seq));
+                }
+                RequestStatus::Ambiguous => {
+                    return Err(JournalError::Ambiguous(prepared.server_seq));
+                }
+            }
+            if response_request_id != Some(stored.request_id.as_str()) {
+                return Err(JournalError::ResponseIdMismatch);
+            }
+            if client_seq != expected_client_seqs[index] {
+                return Err(JournalError::ClientSequenceMismatch {
+                    expected: expected_client_seqs[index],
+                    actual: client_seq,
+                });
+            }
+            let bytes = frame.to_json()?;
+            added_bytes = added_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or(JournalError::StorageLimit)?;
+            responses.push(StoredResponse {
+                client_seq,
+                sha256: sha256(&bytes),
+                bytes,
+            });
+            rows.push(prepared.server_seq);
+        }
+        enforce_capacity(limits, &state, added_bytes, 0)?;
+
+        for (server_seq, response) in rows.into_iter().zip(&responses) {
+            let changed = transaction.execute(
+                "UPDATE journal_requests
+                 SET status = 'completed', response_sha256 = ?1,
+                     response_bytes = ?2, client_seq = ?3
+                 WHERE server_seq = ?4 AND status = 'prepared'",
+                params![
+                    response.sha256.as_slice(),
+                    response.bytes.as_slice(),
+                    seq_blob(response.client_seq),
+                    seq_blob(server_seq),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(JournalError::ConcurrentChange);
+            }
+        }
+        let changed = transaction.execute(
+            "UPDATE journal_state
+             SET next_client_seq = ?1, total_bytes = total_bytes + ?2
+             WHERE singleton = 1",
+            params![seq_blob(next_client_seq), added_bytes as i64],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::ConcurrentChange);
+        }
+        transaction.commit()?;
+
+        responses
+            .try_into()
+            .map_err(|_| JournalError::Corrupt("paired completion cardinality changed".into()))
     }
 
     pub fn request(&self, server_seq: u64) -> Result<Option<StoredRequest>, JournalError> {
@@ -527,6 +655,10 @@ pub enum JournalError {
     ObservedServerSequenceMismatch { expected: u64, actual: u64 },
     #[error("request sequence {0} is ambiguous and cannot be completed")]
     Ambiguous(u64),
+    #[error("request sequence {0} is duplicated in a paired completion")]
+    DuplicatePairRequest(u64),
+    #[error("request sequence {0} is already completed and cannot join a pair")]
+    AlreadyCompleted(u64),
     #[error("request sequence {0} already has different response bytes")]
     ResponseConflict(u64),
     #[error("journal storage limit exceeded")]
@@ -1103,6 +1235,7 @@ fn update_committed_sequence(
 mod tests {
     use super::*;
     use elpis_protocol::{PROTOCOL_VERSION, Request, Response};
+    use elpis_transport::ExecutorFence;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1144,6 +1277,10 @@ mod tests {
         }
     }
 
+    fn response_value(request_id: &str) -> Response {
+        Response::success(request_id.into(), "validate", json!({"valid": true}))
+    }
+
     fn response(client_seq: u64, request_seq: u64, request_id: &str) -> ClientFrame {
         ClientFrame::Response {
             protocol: PROTOCOL_VERSION,
@@ -1152,7 +1289,7 @@ mod tests {
             connection_id: "connection-1".into(),
             seq: client_seq,
             request_seq,
-            response: Response::success(request_id.into(), "validate", json!({"valid": true})),
+            response: response_value(request_id),
         }
     }
 
@@ -1447,6 +1584,294 @@ mod tests {
             RequestStatus::Prepared
         );
         assert_eq!(journal.state().unwrap().next_client_seq, 1);
+    }
+
+    #[test]
+    fn paired_completion_uses_fence_frame_order_and_consecutive_client_sequences() {
+        let temp = TempDir::new().unwrap();
+        let mut journal = open(&temp);
+        let first = match journal.prepare(&request(1, "request-1", "x")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = match journal.prepare(&request(2, "request-2", "y")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let checkpoint = journal
+            .fence_checkpoint("executor-1", EPOCH, "connection-1")
+            .unwrap();
+        let mut fence = ExecutorFence::restore(checkpoint).unwrap();
+        let second_response = fence
+            .build_response(2, response_value("request-2"))
+            .unwrap();
+        let first_response = fence
+            .build_response(1, response_value("request-1"))
+            .unwrap();
+
+        let stored = journal
+            .complete_pair((&second, &second_response), (&first, &first_response))
+            .unwrap();
+        assert_eq!([stored[0].client_seq, stored[1].client_seq], [1, 2]);
+        assert_eq!(stored[0].bytes, second_response.to_json().unwrap());
+        assert_eq!(stored[1].bytes, first_response.to_json().unwrap());
+        assert_eq!(
+            journal.request(1).unwrap().unwrap().response,
+            Some(stored[1].clone())
+        );
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().response,
+            Some(stored[0].clone())
+        );
+        assert_eq!(journal.state().unwrap().next_client_seq, 3);
+        assert_eq!(
+            journal
+                .fence_checkpoint("executor-1", EPOCH, "connection-1")
+                .unwrap()
+                .responded_request_seqs,
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn paired_completion_rejects_frame_and_row_mismatches_atomically() {
+        let temp = TempDir::new().unwrap();
+        let mut journal = open(&temp);
+        let first = match journal.prepare(&request(1, "request-1", "x")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = match journal.prepare(&request(2, "request-2", "y")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let response_1 = response(1, 1, "request-1");
+        let response_2 = response(2, 2, "request-2");
+
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&first, &response_2)),
+            Err(JournalError::DuplicatePairRequest(1))
+        ));
+        let wrong_request_id = response(2, 2, "request-1");
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &wrong_request_id)),
+            Err(JournalError::ResponseIdMismatch)
+        ));
+        let wrong_request_seq = response(2, 1, "request-2");
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &wrong_request_seq)),
+            Err(JournalError::ResponseRequestMismatch {
+                expected: 2,
+                actual: 1
+            })
+        ));
+        let wrong_client_seq = response(7, 2, "request-2");
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &wrong_client_seq)),
+            Err(JournalError::ClientSequenceMismatch {
+                expected: 2,
+                actual: 7
+            })
+        ));
+        let wrong_binding = ClientFrame::Response {
+            protocol: PROTOCOL_VERSION,
+            executor_id: "other-executor".into(),
+            boot_epoch: EPOCH.into(),
+            connection_id: "connection-1".into(),
+            seq: 2,
+            request_seq: 2,
+            response: response_value("request-2"),
+        };
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &wrong_binding)),
+            Err(JournalError::BindingMismatch)
+        ));
+        let heartbeat = ClientFrame::Heartbeat {
+            protocol: PROTOCOL_VERSION,
+            executor_id: "executor-1".into(),
+            boot_epoch: EPOCH.into(),
+            connection_id: "connection-1".into(),
+            seq: 2,
+            observed_server_seq: 2,
+        };
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &heartbeat)),
+            Err(JournalError::ExpectedResponse)
+        ));
+        let conflicting = PreparedRequest {
+            server_seq: second.server_seq,
+            request_sha256: [7; 32],
+        };
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&conflicting, &response_2)),
+            Err(JournalError::RequestConflict(2))
+        ));
+        assert_eq!(journal.state().unwrap().next_client_seq, 1);
+        assert_eq!(
+            journal.request(1).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+
+        let completed = journal.complete(&first, &response_1).unwrap();
+        assert_eq!(journal.complete(&first, &response_1).unwrap(), completed);
+        let first_after_completion = response(2, 1, "request-1");
+        let second_after_completion = response(3, 2, "request-2");
+        assert!(matches!(
+            journal.complete_pair(
+                (&first, &first_after_completion),
+                (&second, &second_after_completion),
+            ),
+            Err(JournalError::AlreadyCompleted(1))
+        ));
+        assert_eq!(journal.state().unwrap().next_client_seq, 2);
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+    }
+
+    #[test]
+    fn paired_completion_rejects_ambiguous_rows_without_completing_the_other() {
+        let temp = TempDir::new().unwrap();
+        let first = {
+            let mut journal = open(&temp);
+            match journal.prepare(&request(1, "request-1", "x")).unwrap() {
+                PrepareOutcome::New(prepared) => prepared,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        let mut journal = open(&temp);
+        let second = match journal.prepare(&request(2, "request-2", "y")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second_response = response(1, 2, "request-2");
+        let first_response = response(2, 1, "request-1");
+        assert!(matches!(
+            journal.complete_pair((&second, &second_response), (&first, &first_response)),
+            Err(JournalError::Ambiguous(1))
+        ));
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+        assert_eq!(journal.state().unwrap().next_client_seq, 1);
+    }
+
+    #[test]
+    fn paired_completion_capacity_failure_rolls_back_both_rows() {
+        let temp = TempDir::new().unwrap();
+        let first_frame = request(1, "request-1", "x");
+        let second_frame = request(2, "request-2", "y");
+        let request_bytes = [&first_frame, &second_frame]
+            .into_iter()
+            .map(|frame| match frame {
+                ServerFrame::Request { request, .. } => serde_json::to_vec(request).unwrap().len(),
+                ServerFrame::Heartbeat { .. } => unreachable!(),
+            })
+            .sum::<usize>();
+        let response_1 = response(1, 1, "request-1");
+        let response_2 = response(2, 2, "request-2");
+        let mut journal = Journal::open(
+            database(&temp),
+            JournalLimits {
+                max_requests: 2,
+                max_bytes: i64::MAX as u64,
+            },
+        )
+        .unwrap();
+        let first = match journal.prepare(&first_frame).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = match journal.prepare(&second_frame).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let would_store = journal
+            .complete_pair((&first, &response_1), (&second, &response_2))
+            .unwrap();
+        let response_bytes = would_store
+            .iter()
+            .map(|stored| stored.bytes.len())
+            .sum::<usize>();
+        drop(journal);
+
+        let second_temp = TempDir::new().unwrap();
+        let mut journal = Journal::open(
+            database(&second_temp),
+            JournalLimits {
+                max_requests: 2,
+                max_bytes: (request_bytes + response_bytes - 1) as u64,
+            },
+        )
+        .unwrap();
+        let first = match journal.prepare(&first_frame).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = match journal.prepare(&second_frame).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &response_2)),
+            Err(JournalError::StorageLimit)
+        ));
+        assert_eq!(
+            journal.request(1).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+        assert_eq!(journal.state().unwrap().next_client_seq, 1);
+        assert_eq!(journal.state().unwrap().total_bytes, request_bytes as u64);
+    }
+
+    #[test]
+    fn paired_completion_sql_fault_rolls_back_first_update_and_state() {
+        let temp = TempDir::new().unwrap();
+        let mut journal = open(&temp);
+        let first = match journal.prepare(&request(1, "request-1", "x")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = match journal.prepare(&request(2, "request-2", "y")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            other => panic!("unexpected {other:?}"),
+        };
+        let before = journal.state().unwrap();
+        journal
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_second_pair_update
+                 BEFORE UPDATE ON journal_requests
+                 WHEN NEW.server_seq = x'0000000000000002' AND NEW.status = 'completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected pair failure'); END;",
+            )
+            .unwrap();
+        let response_1 = response(1, 1, "request-1");
+        let response_2 = response(2, 2, "request-2");
+
+        assert!(matches!(
+            journal.complete_pair((&first, &response_1), (&second, &response_2)),
+            Err(JournalError::Sql(_))
+        ));
+        assert_eq!(journal.state().unwrap(), before);
+        assert_eq!(
+            journal.request(1).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
+        assert_eq!(
+            journal.request(2).unwrap().unwrap().status,
+            RequestStatus::Prepared
+        );
     }
 
     #[test]

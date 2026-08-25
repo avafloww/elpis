@@ -548,6 +548,12 @@ fn handle_request(
                 }
             }
         }
+        Request::Cancel { .. } => Response::failure(
+            Some(request_id),
+            "failed",
+            "unsupported",
+            "cancellation coordinator is not active",
+        ),
         Request::Close {
             context_id,
             generation,
@@ -623,6 +629,27 @@ mod tests {
             &mut contexts,
         );
         assert!(closed.ok);
+    }
+
+    #[test]
+    fn cancel_is_explicitly_unsupported_until_coordinator_is_active() {
+        let mut contexts = HashMap::new();
+        let response = request(
+            json!({
+                "op": "cancel",
+                "protocol": PROTOCOL_VERSION,
+                "request_id": "cancel-1",
+                "context_id": "context-1",
+                "generation": 1,
+                "target_request_id": "request-1",
+                "run_id": "run-1"
+            }),
+            &mut contexts,
+        );
+        assert!(!response.ok);
+        assert_eq!(response.kind, "failed");
+        assert_eq!(response.failure_kind.as_deref(), Some("unsupported"));
+        assert!(contexts.is_empty());
     }
 
     #[test]
