@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   prepareReleaseWorkflow,
+  releaseNotesForResult,
+  renderReleaseNotes,
   runReleaseWorkflowCli,
   RELEASE_BOT_IDENTITY,
   RELEASE_BOT_LOGIN,
@@ -104,6 +106,68 @@ const addWork = async (root: string): Promise<string> => {
   return sha;
 };
 
+test('release notes render bounded escaped work commits with abbreviated hashes', () => {
+  const notes = renderReleaseNotes([
+    { sha: 'a'.repeat(40), subject: 'fix: plain' },
+    {
+      sha: 'b'.repeat(40),
+      subject: 'feat: tensor @name [link](x) `tick` <tag> & star*',
+    },
+  ]);
+  assert.equal(
+    notes,
+    [
+      '## Changes',
+      '',
+      '- `aaaaaaa` fix: plain',
+      '- `bbbbbbb` feat: tensor &#64;name \\[link\\]\\(x\\) \\`tick\\` &lt;tag&gt; &amp; star\\*',
+      '',
+    ].join('\n'),
+  );
+  assert.equal(
+    renderReleaseNotes([
+      { sha: `${'a'.repeat(7)}b${'0'.repeat(32)}`, subject: 'fix: first' },
+      { sha: `${'a'.repeat(7)}c${'0'.repeat(32)}`, subject: 'fix: second' },
+    ]),
+    [
+      '## Changes',
+      '',
+      '- `aaaaaaab` fix: first',
+      '- `aaaaaaac` fix: second',
+      '',
+    ].join('\n'),
+  );
+  assert.throws(
+    () =>
+      renderReleaseNotes([
+        { sha: 'd'.repeat(40), subject: 'fix: first' },
+        { sha: 'd'.repeat(40), subject: 'fix: second' },
+      ]),
+    ReleaseWorkflowError,
+  );
+  assert.throws(
+    () => renderReleaseNotes([{ sha: 'bad', subject: 'fix: work' }]),
+    ReleaseWorkflowError,
+  );
+  assert.throws(
+    () =>
+      renderReleaseNotes([
+        { sha: 'c'.repeat(40), subject: 'fix: first\nsecond' },
+      ]),
+    ReleaseWorkflowError,
+  );
+  assert.throws(
+    () =>
+      renderReleaseNotes(
+        Array.from({ length: 513 }, (_, index) => ({
+          sha: index.toString(16).padStart(40, '0'),
+          subject: 'fix: work',
+        })),
+      ),
+    ReleaseWorkflowError,
+  );
+});
+
 test('no reachable tag is a successful no-release bootstrap boundary', async (t) => {
   const root = await fixture(false);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -119,11 +183,22 @@ test('CLI writes exact bounded no-release GitHub outputs', async (t) => {
   const root = await fixture(false);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const output = path.join(root, '.git/release-output');
+  const notes = path.join(root, '.git/release-notes.md');
   await fs.writeFile(output, '');
   const sha = await git(root, ['rev-parse', 'HEAD']);
   let receipt = '';
   await runReleaseWorkflowCli(
-    ['prepare', '--root', root, '--tested-sha', sha, '--output', output],
+    [
+      'prepare',
+      '--root',
+      root,
+      '--tested-sha',
+      sha,
+      '--output',
+      output,
+      '--notes-output',
+      notes,
+    ],
     (text) => {
       receipt += text;
     },
@@ -133,6 +208,8 @@ test('CLI writes exact bounded no-release GitHub outputs', async (t) => {
     await fs.readFile(output, 'utf8'),
     /^mode=none\nbase_sha=[0-9a-f]{40}\n/,
   );
+  assert.match(await fs.readFile(output, 'utf8'), /release_notes_sha256=\n/);
+  await assert.rejects(fs.lstat(notes), { code: 'ENOENT' });
 });
 
 test('explicit bootstrap creates only deterministic v0.1.0 tag and supports recovery', async (t) => {
@@ -178,6 +255,7 @@ test('CLI bootstrap flag is exact and emits bootstrap outputs', async (t) => {
   const root = await fixture(false);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const output = path.join(root, '.git/bootstrap-output');
+  const notes = path.join(root, '.git/bootstrap-notes.md');
   await fs.writeFile(output, '');
   const sha = await git(root, ['rev-parse', 'HEAD']);
   let receipt = '';
@@ -192,13 +270,22 @@ test('CLI bootstrap flag is exact and emits bootstrap outputs', async (t) => {
       'true',
       '--output',
       output,
+      '--notes-output',
+      notes,
     ],
     (text) => {
       receipt += text;
     },
   );
-  assert.equal(JSON.parse(receipt).mode, 'bootstrap');
-  assert.match(await fs.readFile(output, 'utf8'), /^mode=bootstrap\n/);
+  const parsed = JSON.parse(receipt);
+  assert.equal(parsed.mode, 'bootstrap');
+  const body = await fs.readFile(notes, 'utf8');
+  assert.equal(body, `## Changes\n\n- \`${sha.slice(0, 7)}\` feat: initial\n`);
+  assert.equal((await fs.stat(notes)).mode & 0o777, 0o600);
+  assert.match(
+    await fs.readFile(output, 'utf8'),
+    new RegExp(`release_notes_sha256=${parsed.releaseNotesSha256}\\n`),
+  );
   await assert.rejects(
     runReleaseWorkflowCli([
       'prepare',
@@ -272,6 +359,12 @@ test('release preparation creates and validates exact deterministic bot commit a
       'rust/Cargo.toml',
     ].sort(),
   );
+  const freshNotes = await releaseNotesForResult(root, value);
+  assert.equal(
+    freshNotes,
+    `## Changes\n\n- \`${baseSha.slice(0, 7)}\` fix: work\n`,
+  );
+  assert.doesNotMatch(freshNotes, new RegExp(value.releaseSha.slice(0, 7)));
 
   await git(root, ['update-ref', 'refs/remotes/origin/main', value.releaseSha]);
   const resumed = await prepareReleaseWorkflow(
@@ -282,6 +375,7 @@ test('release preparation creates and validates exact deterministic bot commit a
   assert.equal(resumed.mode, 'resume');
   assert.equal(resumed.releaseSha, value.releaseSha);
   assert.equal(resumed.tag, value.tag);
+  assert.equal(await releaseNotesForResult(root, resumed), freshNotes);
 });
 
 test('release commit and annotated tag reproduce across independent repositories', async (t) => {

@@ -131,12 +131,24 @@ jobs:
           BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap || false }}
         run: |
           actor=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.committer.login // ""')
+          notes="$RUNNER_TEMP/elpis-release-notes.md"
+          rm -f "$notes"
           npm run release:workflow -- prepare \
             --root "$GITHUB_WORKSPACE" \
             --tested-sha "$GITHUB_SHA" \
             --actor-login "$actor" \
             --bootstrap "$BOOTSTRAP" \
-            --output "$GITHUB_OUTPUT"
+            --output "$GITHUB_OUTPUT" \
+            --notes-output "$notes"
+          mode=$(sed -n 's/^mode=//p' "$GITHUB_OUTPUT")
+          if [ "$mode" = none ]; then
+            test ! -e "$notes"
+          else
+            test -f "$notes"
+            test "$(stat -c %a "$notes")" = 600
+            notes_sha=$(sha256sum "$notes" | cut -d' ' -f1)
+            grep -Fx "release_notes_sha256=$notes_sha" "$GITHUB_OUTPUT"
+          fi
       - name: No version tag yet
         if: steps.prep.outputs.mode == 'none'
         run: echo 'No reachable version tag; bootstrap remains a separate explicit operation.'
@@ -262,18 +274,23 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/commits/${{ steps.prep.outputs.release_sha }}" \
             --jq '.committer.login // ""')
           output="$RUNNER_TEMP/elpis-post-push-output"
+          notes="$RUNNER_TEMP/elpis-post-push-notes.md"
           : >"$output"
+          rm -f "$notes"
           npm run release:workflow -- prepare \
             --root "$GITHUB_WORKSPACE" \
             --tested-sha "${{ steps.prep.outputs.release_sha }}" \
             --actor-login "$actor" \
             --bootstrap "$BOOTSTRAP" \
-            --output "$output"
+            --output "$output" \
+            --notes-output "$notes"
           expected=resume
           if [ "$BOOTSTRAP" = true ]; then expected=bootstrap; fi
           grep -Fx "mode=$expected" "$output"
           grep -Fx 'release_sha=${{ steps.prep.outputs.release_sha }}' "$output"
           grep -Fx 'tag=${{ steps.prep.outputs.tag }}' "$output"
+          grep -Fx 'release_notes_sha256=${{ steps.prep.outputs.release_notes_sha256 }}' "$output"
+          cmp -s "$RUNNER_TEMP/elpis-release-notes.md" "$notes"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         if: steps.prep.outputs.mode != 'none'
         with:
@@ -288,6 +305,10 @@ jobs:
           mapfile -t assets < <(find "$RUNNER_TEMP/elpis-release-dist" \
             -maxdepth 1 -type f -print | sort)
           test "${#assets[@]}" -eq 4
+          notes="$RUNNER_TEMP/elpis-release-notes.md"
+          test -f "$notes"
+          test "$(sha256sum "$notes" | cut -d' ' -f1)" = \
+            '${{ steps.prep.outputs.release_notes_sha256 }}'
           if details=$(gh release view "${{ steps.prep.outputs.tag }}" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName,.isDraft,.isPrerelease] | @tsv' 2>/dev/null); then
@@ -301,6 +322,8 @@ jobs:
             for name in "${present[@]}"; do
               printf '%s\n' "${allowed[@]}" | grep -Fx "$name" >/dev/null
             done
+            gh release edit "${{ steps.prep.outputs.tag }}" \
+              --notes-file "$notes"
             gh release upload "${{ steps.prep.outputs.tag }}" \
               "${assets[@]}" --clobber
           else
@@ -308,8 +331,21 @@ jobs:
               "${assets[@]}" \
               --verify-tag \
               --title "Elpis ${{ steps.prep.outputs.tag }}" \
-              --generate-notes
+              --notes-file "$notes"
           fi
+          release_json="$RUNNER_TEMP/elpis-release.json"
+          remote_notes="$RUNNER_TEMP/elpis-release-remote-notes.md"
+          rm -f "$release_json" "$remote_notes"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${{ steps.prep.outputs.tag }}" \
+            >"$release_json"
+          node -e '
+            const fs = require("node:fs");
+            const [source, target] = process.argv.slice(1);
+            const body = JSON.parse(fs.readFileSync(source, "utf8")).body;
+            if (typeof body !== "string") process.exit(1);
+            fs.writeFileSync(target, body, { encoding: "utf8", mode: 0o600 });
+          ' "$release_json" "$remote_notes"
+          cmp -s "$notes" "$remote_notes"
           mapfile -t published < <(gh release view "${{ steps.prep.outputs.tag }}" \
             --json assets --jq '.assets[].name' | sort)
           test "${#published[@]}" -eq 4

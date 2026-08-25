@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import {
 } from '../src/release-sync.js';
 import {
   RELEASE_OWNED_PATHS,
+  classifyRelease,
   validateOwnedReleaseCommit,
   type GitIdentity,
   type OwnedReleaseCommitFacts,
@@ -23,6 +25,9 @@ const SHA = /^[0-9a-f]{40}$/;
 const TAG = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
 const MAX_GIT_OUTPUT = 8 * 1024 * 1024;
+const MAX_RELEASE_NOTE_COMMITS = 512;
+const MAX_RELEASE_NOTE_SUBJECT_BYTES = 512;
+const MAX_RELEASE_NOTES_BYTES = 64 * 1024;
 
 export const RELEASE_BOT_LOGIN = 'github-actions[bot]';
 export const RELEASE_BOT_IDENTITY: GitIdentity = Object.freeze({
@@ -205,17 +210,32 @@ export async function prepareReleaseWorkflow(
 export async function runReleaseWorkflowCli(
   args: readonly string[],
   write: (text: string) => void = (text) => process.stdout.write(text),
+  dependencies: ReleaseWorkflowDependencies = {},
 ): Promise<void> {
   const parsed = parseArgs(args);
   const value = await prepareReleaseWorkflow(
     parsed.root,
     parsed.testedSha,
     parsed.actorLogin,
-    {},
+    dependencies,
     parsed.bootstrap,
   );
-  if (parsed.output !== '') await appendGitHubOutput(parsed.output, value);
-  write(`${JSON.stringify(value)}\n`);
+  const notes =
+    value.mode === 'none'
+      ? ''
+      : await releaseNotesForResult(parsed.root, value);
+  const releaseNotesSha256 = notes === '' ? '' : sha256(notes);
+  if (parsed.notesOutput !== '') {
+    if (notes === '') {
+      await requireAbsent(parsed.notesOutput, 'release notes output');
+    } else {
+      await writeExclusivePrivateFile(parsed.notesOutput, notes);
+    }
+  }
+  if (parsed.output !== '') {
+    await appendGitHubOutput(parsed.output, value, releaseNotesSha256);
+  }
+  write(`${JSON.stringify({ ...value, releaseNotesSha256 })}\n`);
 }
 
 async function prepareBootstrapTag(
@@ -449,11 +469,18 @@ async function commitsBetween(
   previousTag: string,
   testedSha: string,
 ): Promise<Array<{ sha: string; subject: string }>> {
+  return commitsInRange(root, `${previousTag}..${testedSha}`);
+}
+
+async function commitsInRange(
+  root: string,
+  range: string,
+): Promise<Array<{ sha: string; subject: string }>> {
   const encoded = await git(root, [
     'log',
     '--reverse',
     '--format=%H%x00%s%x00',
-    `${previousTag}..${testedSha}`,
+    range,
   ]);
   const fields = encoded.split('\0');
   const commits: Array<{ sha: string; subject: string }> = [];
@@ -465,6 +492,80 @@ async function commitsBetween(
     commits.push({ sha, subject });
   }
   return commits;
+}
+
+export async function releaseNotesForResult(
+  inputRoot: string,
+  value: ReleaseWorkflowResult,
+): Promise<string> {
+  if (value.mode === 'none') {
+    throw new ReleaseWorkflowError('no-release result has no release notes');
+  }
+  requireSha(value.releaseSha, 'release notes release SHA');
+  if (value.previousTag !== '') requireTag(value.previousTag);
+  const root = await canonicalRoot(inputRoot);
+  const terminal =
+    value.mode === 'bootstrap'
+      ? value.releaseSha
+      : await git(root, ['rev-parse', `${value.releaseSha}^`]);
+  const commits =
+    value.previousTag === ''
+      ? await commitsInRange(root, terminal)
+      : await commitsBetween(root, value.previousTag, terminal);
+  const work =
+    value.previousTag === ''
+      ? commits
+      : classifyRelease(value.previousVersion, commits).commits;
+  return renderReleaseNotes(work);
+}
+
+export function renderReleaseNotes(
+  commits: readonly { sha: string; subject: string }[],
+): string {
+  if (commits.length === 0 || commits.length > MAX_RELEASE_NOTE_COMMITS) {
+    throw new ReleaseWorkflowError('release note commit count is invalid');
+  }
+  const seen = new Set<string>();
+  for (const commit of commits) {
+    requireSha(commit.sha, 'release note commit SHA');
+    if (seen.has(commit.sha)) {
+      throw new ReleaseWorkflowError('release note commit SHA is duplicated');
+    }
+    seen.add(commit.sha);
+    if (
+      commit.subject === '' ||
+      /[\u0000-\u001f\u007f\u2028\u2029]/.test(commit.subject) ||
+      Buffer.byteLength(commit.subject, 'utf8') > MAX_RELEASE_NOTE_SUBJECT_BYTES
+    ) {
+      throw new ReleaseWorkflowError('release note commit subject is invalid');
+    }
+  }
+  let abbreviationBytes = 7;
+  while (
+    abbreviationBytes < 40 &&
+    new Set(commits.map((commit) => commit.sha.slice(0, abbreviationBytes)))
+      .size < commits.length
+  ) {
+    abbreviationBytes += 1;
+  }
+  const lines = commits.map(
+    (commit) =>
+      `- \`${commit.sha.slice(0, abbreviationBytes)}\` ${escapeReleaseSubject(commit.subject)}`,
+  );
+  const body = `## Changes\n\n${lines.join('\n')}\n`;
+  if (Buffer.byteLength(body, 'utf8') > MAX_RELEASE_NOTES_BYTES) {
+    throw new ReleaseWorkflowError('release notes exceed their byte limit');
+  }
+  return body;
+}
+
+function escapeReleaseSubject(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('@', '&#64;')
+    .replace(/([\\`*_[\]{}()!|~])/g, '\\$1');
 }
 
 async function changedWorktreePaths(root: string): Promise<string[]> {
@@ -539,6 +640,7 @@ function releaseIdentityEnvironment(date: string): NodeJS.ProcessEnv {
 async function appendGitHubOutput(
   output: string,
   value: ReleaseWorkflowResult,
+  releaseNotesSha256: string,
 ): Promise<void> {
   if (!path.isAbsolute(output) || path.normalize(output) !== output) {
     throw new ReleaseWorkflowError('GitHub output path must be absolute');
@@ -553,6 +655,7 @@ async function appendGitHubOutput(
     previous_version: value.previousVersion,
     minor_tag: value.minorTag,
     short_sha: value.shortSha,
+    release_notes_sha256: releaseNotesSha256,
   };
   await fs.appendFile(
     output,
@@ -638,13 +741,14 @@ type ParsedArgs = {
   testedSha: string;
   actorLogin: string;
   output: string;
+  notesOutput: string;
   bootstrap: boolean;
 };
 
 function parseArgs(args: readonly string[]): ParsedArgs {
   if (args[0] !== 'prepare') {
     throw new ReleaseWorkflowError(
-      'usage: release-workflow prepare --root ABSOLUTE --tested-sha SHA [--actor-login LOGIN] [--output ABSOLUTE] [--bootstrap true|false]',
+      'usage: release-workflow prepare --root ABSOLUTE --tested-sha SHA [--actor-login LOGIN] [--output ABSOLUTE] [--notes-output ABSOLUTE] [--bootstrap true|false]',
     );
   }
   const values = new Map<string, string>();
@@ -658,7 +762,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
   }
   if (
     values.size < 2 ||
-    values.size > 5 ||
+    values.size > 6 ||
     !values.get('--root') ||
     !values.get('--tested-sha') ||
     [...values.keys()].some(
@@ -668,6 +772,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
           '--tested-sha',
           '--actor-login',
           '--output',
+          '--notes-output',
           '--bootstrap',
         ].includes(key),
     )
@@ -679,8 +784,48 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     testedSha: values.get('--tested-sha')!,
     actorLogin: values.get('--actor-login') ?? '',
     output: values.get('--output') ?? '',
+    notesOutput: values.get('--notes-output') ?? '',
     bootstrap: parseBoolean(values.get('--bootstrap') ?? 'false'),
   };
+}
+
+async function requireAbsent(value: string, label: string): Promise<void> {
+  requireSafeAbsoluteOutput(value, label);
+  try {
+    await fs.lstat(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new ReleaseWorkflowError(`${label} is unavailable`);
+  }
+  throw new ReleaseWorkflowError(`${label} must not already exist`);
+}
+
+async function writeExclusivePrivateFile(
+  value: string,
+  contents: string,
+): Promise<void> {
+  requireSafeAbsoluteOutput(value, 'release notes output');
+  try {
+    await fs.writeFile(value, contents, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch {
+    throw new ReleaseWorkflowError('release notes output could not be created');
+  }
+}
+
+function requireSafeAbsoluteOutput(value: string, label: string): void {
+  if (!path.isAbsolute(value) || path.normalize(value) !== value) {
+    throw new ReleaseWorkflowError(
+      `${label} path must be a safe absolute path`,
+    );
+  }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function parseBoolean(value: string): boolean {

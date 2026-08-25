@@ -88,6 +88,14 @@ test('workflow builds each release artifact once and publishes through guarded e
   assert.match(text, /origin\/main\).*base_sha|base_sha/);
   assert.match(text, /gh release upload/);
   assert.match(text, /gh release create/);
+  assert.match(text, /gh release edit/);
+  assert.match(text, /--notes-output/);
+  assert.match(text, /--notes-file/);
+  assert.match(text, /release_notes_sha256/);
+  assert.match(text, /elpis-release-notes\.md/);
+  assert.match(text, /cmp -s/);
+  assert.doesNotMatch(text, /--generate-notes/);
+
   assert.match(text, /docker image inspect --format '\{\{\.Id\}\}'/);
   assert.equal(
     (text.match(/--output "type=docker,name=\$local_image"/g) ?? []).length,
