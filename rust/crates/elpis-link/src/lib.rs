@@ -16,6 +16,11 @@ use tungstenite::protocol::{Message, WebSocketConfig};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Connector, WebSocket, client_tls_with_config};
 
+mod supervisor;
+pub use supervisor::{
+    BackoffPolicy, DrainSignal, Supervisor, SupervisorConfig, SupervisorError, SupervisorExit,
+};
+
 const MAX_ENDPOINT_BYTES: usize = 2048;
 const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 const READ_BUFFER_BYTES: usize = 16 * 1024;

@@ -302,6 +302,7 @@ dependencies = [
  "elpis-protocol",
  "elpis-transport",
  "rcgen",
+ "ring",
  "rustls",
  "serde_json",
  "tempfile",

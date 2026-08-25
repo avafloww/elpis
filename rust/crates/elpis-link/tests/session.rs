@@ -2,13 +2,16 @@ use std::fs;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use elpis_identity::{CredentialPolicy, IdentityStore, IssuedCredentials, RevocationEvidence};
 use elpis_journal::{Journal, JournalLimits};
-use elpis_link::{LinkConfig, LinkError, Session, SessionEvent};
+use elpis_link::{
+    BackoffPolicy, DrainSignal, LinkConfig, LinkError, Session, SessionEvent, Supervisor,
+    SupervisorConfig, SupervisorError, SupervisorExit,
+};
 use elpis_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
 use elpis_transport::{ClientFrame, ClientHello, ServerFrame, ServerWelcome};
 use rcgen::{
@@ -61,9 +64,22 @@ fn installed_store(path: &Path, authority: &TestAuthority) -> IdentityStore {
     .unwrap();
     let root_sha256 = policy.root_sha256().to_owned();
     let store = IdentityStore::open(path, policy).unwrap();
+    install_client_credentials(&store, authority, "initial", &root_sha256);
+    store
+}
+
+fn install_client_credentials(
+    store: &IdentityStore,
+    authority: &TestAuthority,
+    common_name: &str,
+    root_sha256: &str,
+) {
     let request = store.certificate_request().unwrap();
     let request_der = CertificateSigningRequestDer::from(request.as_der());
     let mut params = CertificateSigningRequestParams::from_der(&request_der).unwrap();
+    let mut distinguished_name = DistinguishedName::new();
+    distinguished_name.push(DnType::CommonName, common_name);
+    params.params.distinguished_name = distinguished_name;
     params.params.is_ca = IsCa::ExplicitNoCa;
     params.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -86,7 +102,6 @@ fn installed_store(path: &Path, authority: &TestAuthority) -> IdentityStore {
             .unwrap(),
         )
         .unwrap();
-    store
 }
 
 fn uninstalled_store(path: &Path, authority: &TestAuthority) -> IdentityStore {
@@ -169,6 +184,31 @@ fn link_config(port: u16, store: &IdentityStore) -> LinkConfig {
         store,
         Duration::from_secs(5),
         Duration::from_millis(500),
+    )
+    .unwrap()
+}
+
+fn supervisor_config(
+    port: u16,
+    store: &IdentityStore,
+    io_timeout: Duration,
+    heartbeat: Duration,
+    silence: Duration,
+    credential_poll: Duration,
+) -> SupervisorConfig {
+    SupervisorConfig::new(
+        LinkConfig::new(
+            format!("wss://localhost:{port}/link"),
+            store,
+            Duration::from_secs(5),
+            io_timeout,
+        )
+        .unwrap(),
+        heartbeat,
+        silence,
+        credential_poll,
+        Duration::from_millis(500),
+        BackoffPolicy::new(Duration::from_millis(10), Duration::from_millis(50), 10).unwrap(),
     )
     .unwrap()
 }
@@ -380,6 +420,30 @@ fn endpoint_and_journal_binding_preflight_fail_before_network() {
     .unwrap();
     assert_eq!(valid.host(), "localhost");
     assert_eq!(valid.port(), 443);
+    let supervisor_timing = SupervisorConfig::new(
+        valid.clone(),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        BackoffPolicy::new(Duration::from_millis(10), Duration::from_secs(1), 10).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Supervisor::new(supervisor_timing, "not-a-boot-epoch", DrainSignal::new()),
+        Err(SupervisorError::InvalidConfiguration)
+    ));
+    assert!(matches!(
+        SupervisorConfig::new(
+            valid.clone(),
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            BackoffPolicy::new(Duration::from_millis(10), Duration::from_secs(1), 10).unwrap(),
+        ),
+        Err(SupervisorError::InvalidConfiguration)
+    ));
     assert!(matches!(
         LinkConfig::new(
             "wss://localhost:443/link",
@@ -586,4 +650,259 @@ fn completed_send_uncertainty_reconnects_and_resends_exact_bytes_without_effect(
     );
     assert_eq!(dispatches.get(), 1);
     assert_eq!(second_server.join().unwrap(), stored);
+}
+
+#[test]
+fn supervisor_sends_heartbeat_and_gracefully_drains_active_session() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Supervisor Root");
+    let store = Arc::new(installed_store(&temp.path().join("identity"), &authority));
+    let (listener, port) = listener();
+    let server_config = server_config(&authority, "localhost", &authority);
+    let (heartbeat_sender, heartbeat_receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(server_config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        let closed = loop {
+            match websocket.read() {
+                Ok(Message::Binary(bytes)) => {
+                    if matches!(
+                        ClientFrame::from_json(&bytes).unwrap(),
+                        ClientFrame::Heartbeat { .. }
+                    ) {
+                        heartbeat_sender.send(()).unwrap();
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break true,
+                Ok(_) => {}
+            }
+        };
+        (hello, closed)
+    });
+    let drain = DrainSignal::new();
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            store.as_ref(),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_millis(200),
+        ),
+        EPOCH,
+        drain.clone(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let runner_store = store.clone();
+    let runner = thread::spawn(move || {
+        let mut dispatcher = |_request: Request| -> Response { panic!("unexpected request") };
+        supervisor.run(runner_store.as_ref(), &mut journal, &mut dispatcher)
+    });
+    heartbeat_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    drain.request();
+    assert_eq!(runner.join().unwrap(), Ok(SupervisorExit::Drained));
+    let (hello, closed) = server.join().unwrap();
+    assert_eq!(hello.boot_epoch(), EPOCH);
+    assert!(closed);
+}
+
+#[test]
+fn supervisor_reconnects_after_server_silence_with_stable_boot_epoch() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Supervisor Root");
+    let store = Arc::new(installed_store(&temp.path().join("identity"), &authority));
+    let (listener, port) = listener();
+    let server_config = server_config(&authority, "localhost", &authority);
+    let (connection_sender, connection_receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut hellos = Vec::new();
+        for index in 0..2 {
+            let (socket, _) = listener.accept().unwrap();
+            let stream = tls_stream(server_config.clone(), socket);
+            let mut websocket = tungstenite::accept(stream).unwrap();
+            let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+            websocket
+                .send(Message::binary(welcome(&hello).to_json().unwrap()))
+                .unwrap();
+            hellos.push(hello);
+            connection_sender.send(index).unwrap();
+            loop {
+                match websocket.read() {
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+        hellos
+    });
+    let drain = DrainSignal::new();
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            store.as_ref(),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(500),
+            Duration::from_millis(200),
+        ),
+        EPOCH,
+        drain.clone(),
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let runner_store = store.clone();
+    let runner = thread::spawn(move || {
+        let mut dispatcher = |_request: Request| -> Response { panic!("unexpected request") };
+        supervisor.run(runner_store.as_ref(), &mut journal, &mut dispatcher)
+    });
+    assert_eq!(
+        connection_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        1
+    );
+    drain.request();
+    assert_eq!(runner.join().unwrap(), Ok(SupervisorExit::Drained));
+    let hellos = server.join().unwrap();
+    assert_eq!(hellos.len(), 2);
+    assert_eq!(hellos[0].boot_epoch(), hellos[1].boot_epoch());
+    assert_eq!(hellos[0].executor_id(), hellos[1].executor_id());
+}
+
+#[test]
+fn supervisor_rotates_same_key_certificate_then_fails_closed_on_invalidation() {
+    let temp = TempDir::new().unwrap();
+    let authority = Arc::new(TestAuthority::new("Supervisor Root"));
+    let store = Arc::new(installed_store(
+        &temp.path().join("identity"),
+        authority.as_ref(),
+    ));
+    let root_sha256 = store.credential_metadata().unwrap().unwrap().root_sha256;
+    let (listener, port) = listener();
+    let server_config = server_config(authority.as_ref(), "localhost", authority.as_ref());
+    let (connection_sender, connection_receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut observations = Vec::new();
+        for index in 0..2 {
+            let (socket, _) = listener.accept().unwrap();
+            let stream = tls_stream(server_config.clone(), socket);
+            let mut websocket = tungstenite::accept(stream).unwrap();
+            let peer = websocket.get_ref().conn.peer_certificates().unwrap()[0]
+                .as_ref()
+                .to_vec();
+            let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+            websocket
+                .send(Message::binary(welcome(&hello).to_json().unwrap()))
+                .unwrap();
+            observations.push((peer, hello));
+            connection_sender.send(index).unwrap();
+            loop {
+                match websocket.read() {
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+        observations
+    });
+    let drain = DrainSignal::new();
+    let supervisor = Supervisor::new(
+        supervisor_config(
+            port,
+            store.as_ref(),
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+        ),
+        EPOCH,
+        drain,
+    )
+    .unwrap();
+    let mut journal = journal(&temp);
+    let runner_store = store.clone();
+    let runner = thread::spawn(move || {
+        let mut dispatcher = |_request: Request| -> Response { panic!("unexpected request") };
+        supervisor.run(runner_store.as_ref(), &mut journal, &mut dispatcher)
+    });
+    assert_eq!(
+        connection_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        0
+    );
+    install_client_credentials(store.as_ref(), authority.as_ref(), "rotated", &root_sha256);
+    assert_eq!(
+        connection_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap(),
+        1
+    );
+    assert!(store.invalidate_credentials().unwrap());
+    assert_eq!(
+        runner.join().unwrap(),
+        Err(SupervisorError::CredentialsUnavailable)
+    );
+    let observations = server.join().unwrap();
+    assert_ne!(observations[0].0, observations[1].0);
+    assert_eq!(
+        observations[0].1.executor_id(),
+        observations[1].1.executor_id()
+    );
+    assert_eq!(
+        observations[0].1.boot_epoch(),
+        observations[1].1.boot_epoch()
+    );
+}
+
+#[test]
+fn direct_and_broker_endpoints_emit_identical_protocol_hello() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Supervisor Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let mut hellos = Vec::new();
+    for (index, path) in ["direct", "broker"].into_iter().enumerate() {
+        let (listener, port) = listener();
+        let server_config = server_config(&authority, "localhost", &authority);
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let stream = tls_stream(server_config, socket);
+            let mut websocket = tungstenite::accept(stream).unwrap();
+            let bytes = websocket.read().unwrap().into_data().to_vec();
+            let hello = ClientHello::from_json(&bytes).unwrap();
+            websocket
+                .send(Message::binary(welcome(&hello).to_json().unwrap()))
+                .unwrap();
+            let _ = websocket.read();
+            bytes
+        });
+        let config = LinkConfig::new(
+            format!("wss://localhost:{port}/{path}"),
+            &store,
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert!(config.endpoint().ends_with(path));
+        let journal_temp = TempDir::new().unwrap();
+        let journal = journal(&journal_temp);
+        let mut session = Session::connect(&config, &store, &journal, EPOCH).unwrap();
+        session.close().unwrap();
+        hellos.push((index, server.join().unwrap()));
+    }
+    assert_eq!(hellos[0].1, hellos[1].1);
 }

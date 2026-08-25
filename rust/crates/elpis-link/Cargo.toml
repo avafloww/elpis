@@ -10,6 +10,7 @@ elpis-identity = { path = "../elpis-identity" }
 elpis-journal = { path = "../elpis-journal" }
 elpis-protocol = { path = "../elpis-protocol" }
 elpis-transport = { path = "../elpis-transport" }
+ring.workspace = true
 tungstenite.workspace = true
 thiserror.workspace = true
 
