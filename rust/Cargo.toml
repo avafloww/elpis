@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/elpis-protocol",
+  "crates/elpis-client",
   "crates/elpis-transport",
   "crates/elpis-journal",
   "crates/elpis-python",

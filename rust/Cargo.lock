@@ -245,6 +245,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-client"
+version = "0.1.0"
+dependencies = [
+ "elpis-protocol",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "elpis-coordinator"
 version = "0.1.0"
 dependencies = [
