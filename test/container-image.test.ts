@@ -49,11 +49,14 @@ test('container entrypoint fails closed around sentinel config and writable data
   assert.match(entry, /exec "\$@"/);
 });
 
-test('GHCR workflow publishes the official repository while PRs only build', () => {
-  const workflow = read('.github/workflows/container.yml');
-  assert.match(workflow, /ghcr\.io\/avafloww\/elpis/);
-  assert.match(
-    workflow,
-    /push: \$\{\{ github\.event_name != 'pull_request' \}\}/,
-  );
+test('unified workflow limits PRs to no-push builds and release publication to GHCR', () => {
+  const workflow = read('.github/workflows/release.yml');
+  assert.match(workflow, /Build pull-request container without push/);
+  assert.match(workflow, /if: github\.event_name == 'pull_request'/);
+  assert.match(workflow, /docker buildx build --load --tag "elpis-pr:/);
+  assert.match(workflow, /packages: write/);
+  assert.match(workflow, /docker\/login-action@[0-9a-f]{40}/);
+  assert.match(workflow, /image="ghcr\.io\/\$\{GITHUB_REPOSITORY,,\}"/);
+  assert.equal((workflow.match(/docker push "\$target"/g) ?? []).length, 1);
+  assert.doesNotMatch(workflow, /^\s+tags:\s*\[?'v\*'/m);
 });

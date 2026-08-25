@@ -24,6 +24,8 @@
     "bench:check": "tsc -p bench/tsconfig.json",
     "feedback": "tsx scripts/feedback.ts",
     "release:sync": "tsx scripts/release-sync.ts",
+    "release:workflow": "tsx scripts/release-workflow.ts",
+    "tools:check": "tsc -p tsconfig.tools.json",
     "oauth-login": "tsx scripts/oauth-login.ts",
     "replay-policy-denial": "tsx scripts/replay-policy-denial.ts",
     "toggle-external-thinking": "tsx scripts/toggle-external-thinking.ts"

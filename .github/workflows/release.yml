@@ -1,0 +1,276 @@
+name: ci-release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('elpis-pr-{0}', github.event.pull_request.number) || 'elpis-main-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: "24"
+  RUST_VERSION: "1.94.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run tools:check
+      - run: npm run build
+      - run: npm run bench:check
+      - run: npm audit --omit=dev --audit-level=moderate
+      - name: Install exact Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+          test "$(rustc --version | cut -d' ' -f2)" = "$RUST_VERSION"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: rust-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - name: Rust gates
+        working-directory: rust
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: github.event_name == 'pull_request'
+      - name: Build pull-request container without push
+        if: github.event_name == 'pull_request'
+        run: |
+          docker buildx build --load --tag "elpis-pr:${GITHUB_SHA}" .
+
+  release:
+    name: release
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Install exact Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+          test "$(rustc --version | cut -d' ' -f2)" = "$RUST_VERSION"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: rust-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/elpis/dist
+          key: dist-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock', 'rust/python-runtime.lock.json') }}-x86_64-unknown-linux-gnu
+          restore-keys: dist-${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - name: Normalize owned dist cache
+        run: |
+          mkdir -p "$HOME/.cache/elpis/dist"
+          chmod 0700 "$HOME/.cache/elpis/dist"
+      - name: Refetch live main and tags
+        run: |
+          git fetch --force origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            '+refs/tags/*:refs/tags/*'
+      - name: Prepare or resume release
+        id: prep
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          actor=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.committer.login // ""')
+          npm run release:workflow -- prepare \
+            --root "$GITHUB_WORKSPACE" \
+            --tested-sha "$GITHUB_SHA" \
+            --actor-login "$actor" \
+            --output "$GITHUB_OUTPUT"
+      - name: No version tag yet
+        if: steps.prep.outputs.mode == 'none'
+        run: echo 'No reachable version tag; bootstrap remains a separate explicit operation.'
+      - name: Exact release commit Node gates
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          npm run test:unit
+          npm run tools:check
+          npm run build
+          npm run bench:check
+          npm audit --omit=dev --audit-level=moderate
+      - name: Exact release commit Rust gates
+        if: steps.prep.outputs.mode != 'none'
+        working-directory: rust
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+      - name: Build executor distribution once
+        if: steps.prep.outputs.mode != 'none'
+        working-directory: rust
+        run: |
+          rm -rf "$RUNNER_TEMP/elpis-release-dist"
+          cargo xtask dist \
+            --cache-dir "$HOME/.cache/elpis/dist" \
+            --dist-dir "$RUNNER_TEMP/elpis-release-dist"
+          stem="elpis-executor-v${{ steps.prep.outputs.version }}-x86_64-unknown-linux-gnu"
+          test -x "$RUNNER_TEMP/elpis-release-dist/$stem"
+          test -f "$RUNNER_TEMP/elpis-release-dist/$stem.sha256"
+          test -f "$RUNNER_TEMP/elpis-release-dist/$stem.receipt.json"
+          test -f "$RUNNER_TEMP/elpis-release-dist/$stem.sbom.json"
+          test "$(find "$RUNNER_TEMP/elpis-release-dist" -maxdepth 1 -type f | wc -l)" -eq 4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: steps.prep.outputs.mode != 'none'
+      - name: Build and load release container once
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
+          docker buildx build \
+            --load \
+            --tag "$local_image" \
+            --label "org.opencontainers.image.revision=${{ steps.prep.outputs.release_sha }}" \
+            --label "org.opencontainers.image.version=${{ steps.prep.outputs.version }}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --cache-from type=gha,scope=release-container \
+            --cache-to type=gha,mode=max,scope=release-container \
+            .
+          docker image inspect "$local_image" >/dev/null
+      - name: Refetch and atomically publish release refs
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          if [ "${{ steps.prep.outputs.mode }}" = release ]; then
+            test "$(git rev-parse refs/remotes/origin/main)" = "${{ steps.prep.outputs.base_sha }}"
+            if git ls-remote --exit-code --tags origin \
+              "refs/tags/${{ steps.prep.outputs.tag }}" >/dev/null 2>&1; then
+              echo 'Release tag appeared before compare-and-swap.' >&2
+              exit 1
+            fi
+            git push --atomic origin \
+              "${{ steps.prep.outputs.release_sha }}:refs/heads/main" \
+              "refs/tags/${{ steps.prep.outputs.tag }}:refs/tags/${{ steps.prep.outputs.tag }}"
+          fi
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "${{ steps.prep.outputs.release_sha }}"
+          peeled=$(git ls-remote origin \
+            "refs/tags/${{ steps.prep.outputs.tag }}^{}" | cut -f1)
+          test "$peeled" = "${{ steps.prep.outputs.release_sha }}"
+      - name: Validate pushed bot-associated commit before publication
+        if: steps.prep.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          actor=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${{ steps.prep.outputs.release_sha }}" \
+            --jq '.committer.login // ""')
+          output="$RUNNER_TEMP/elpis-post-push-output"
+          : >"$output"
+          npm run release:workflow -- prepare \
+            --root "$GITHUB_WORKSPACE" \
+            --tested-sha "${{ steps.prep.outputs.release_sha }}" \
+            --actor-login "$actor" \
+            --output "$output"
+          grep -Fx 'mode=resume' "$output"
+          grep -Fx 'release_sha=${{ steps.prep.outputs.release_sha }}' "$output"
+          grep -Fx 'tag=${{ steps.prep.outputs.tag }}' "$output"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        if: steps.prep.outputs.mode != 'none'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish GitHub release assets
+        if: steps.prep.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t assets < <(find "$RUNNER_TEMP/elpis-release-dist" \
+            -maxdepth 1 -type f -print | sort)
+          test "${#assets[@]}" -eq 4
+          if details=$(gh release view "${{ steps.prep.outputs.tag }}" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName,.isDraft,.isPrerelease] | @tsv' 2>/dev/null); then
+            IFS=$'\t' read -r existing draft prerelease <<<"$details"
+            test "$existing" = "${{ steps.prep.outputs.tag }}"
+            test "$draft" = false
+            test "$prerelease" = false
+            mapfile -t allowed < <(printf '%s\n' "${assets[@]##*/}" | sort)
+            mapfile -t present < <(gh release view "${{ steps.prep.outputs.tag }}" \
+              --json assets --jq '.assets[].name' | sort)
+            for name in "${present[@]}"; do
+              printf '%s\n' "${allowed[@]}" | grep -Fx "$name" >/dev/null
+            done
+            gh release upload "${{ steps.prep.outputs.tag }}" \
+              "${assets[@]}" --clobber
+          else
+            gh release create "${{ steps.prep.outputs.tag }}" \
+              "${assets[@]}" \
+              --verify-tag \
+              --title "Elpis ${{ steps.prep.outputs.tag }}" \
+              --generate-notes
+          fi
+          mapfile -t published < <(gh release view "${{ steps.prep.outputs.tag }}" \
+            --json assets --jq '.assets[].name' | sort)
+          test "${#published[@]}" -eq 4
+          test "$(printf '%s\n' "${published[@]}")" = \
+            "$(printf '%s\n' "${assets[@]##*/}" | sort)"
+      - name: Publish same loaded image to GHCR
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
+          source_id=$(docker image inspect --format '{{.Id}}' "$local_image")
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags=(
+            "$image:${{ steps.prep.outputs.tag }}"
+            "$image:${{ steps.prep.outputs.minor_tag }}"
+            "$image:sha-${{ steps.prep.outputs.short_sha }}"
+            "$image:latest"
+          )
+          for target in "${tags[@]}"; do
+            docker tag "$local_image" "$target"
+            test "$(docker image inspect --format '{{.Id}}' "$target")" = "$source_id"
+            docker push "$target"
+          done

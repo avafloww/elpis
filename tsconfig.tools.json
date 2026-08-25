@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "outDir": null,
+    "rootDir": "."
+  },
+  "include": ["scripts/release-sync.ts", "scripts/release-workflow.ts"],
+  "exclude": ["node_modules", "dist"]
+}
