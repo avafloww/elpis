@@ -9,6 +9,7 @@ repository.workspace = true
 embedded-python = ["dep:elpis-runtime"]
 
 [dependencies]
+elpis-coordinator = { path = "../elpis-coordinator" }
 elpis-identity = { path = "../elpis-identity" }
 elpis-journal = { path = "../elpis-journal" }
 elpis-link = { path = "../elpis-link" }

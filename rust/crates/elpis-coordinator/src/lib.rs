@@ -192,6 +192,17 @@ impl Coordinator {
         self.active.len()
     }
 
+    pub fn close_all(&mut self) -> usize {
+        let context_count = self.contexts.len();
+        self.active.clear();
+        self.active_by_context.clear();
+        self.active_order.clear();
+        for (_, actor) in self.contexts.drain() {
+            let _ = actor.close();
+        }
+        context_count
+    }
+
     pub fn tombstone_count(&self) -> usize {
         self.tombstones.len()
     }
@@ -633,11 +644,7 @@ impl Coordinator {
 
 impl Drop for Coordinator {
     fn drop(&mut self) {
-        // ActorInner also has a defensive Drop implementation. Draining and
-        // closing here makes coordinator teardown synchronous and deterministic.
-        for (_, actor) in self.contexts.drain() {
-            let _ = actor.close();
-        }
+        self.close_all();
     }
 }
 
@@ -899,6 +906,31 @@ mod tests {
         assert_eq!(limits.max_tombstones(), HARD_MAX_TOMBSTONES);
         assert!(CoordinatorConfig::default().max_contexts() <= HARD_MAX_CONTEXTS);
         assert!(CoordinatorConfig::default().max_tombstones() <= HARD_MAX_TOMBSTONES);
+    }
+
+    #[test]
+    fn close_all_cancels_active_work_reaps_contexts_and_is_idempotent() {
+        let mut coordinator = coordinator(2);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(only(coordinator.submit(open("context-2", "open-2", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-1",
+                    "run-1",
+                    1,
+                    "run-a",
+                    "import time; time.sleep(30)",
+                ))
+                .is_none()
+        );
+        assert_eq!(coordinator.context_count(), 2);
+        assert_eq!(coordinator.active_run_count(), 1);
+        assert_eq!(coordinator.close_all(), 2);
+        assert_eq!(coordinator.context_count(), 0);
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert!(coordinator.poll().is_empty());
+        assert_eq!(coordinator.close_all(), 0);
     }
 
     #[test]

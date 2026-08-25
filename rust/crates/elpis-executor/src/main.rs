@@ -1,24 +1,25 @@
 #[cfg(all(not(feature = "embedded-python"), not(debug_assertions)))]
 compile_error!("release builds require the embedded-python feature");
 
+use elpis_coordinator::{CompletionGroup, Coordinator, CoordinatorConfig};
 use elpis_identity::{CredentialPolicy, IdentityStore};
 use elpis_journal::{Journal, JournalLimits};
 use elpis_link::{
-    BackoffPolicy, Dispatcher, DrainSignal, LinkConfig, Supervisor, SupervisorConfig,
-    SupervisorExit,
+    BackoffPolicy, DeferredDispatcher, DispatchGroup, DrainSignal, LinkConfig, Supervisor,
+    SupervisorConfig, SupervisorExit,
 };
 use elpis_protocol::{MAX_FRAME_BYTES, Request, Response};
-use elpis_python::{PythonContext, PythonError, PythonRuntime};
+use elpis_python::PythonRuntime;
 use ring::rand::{SecureRandom, SystemRandom};
-use serde_json::json;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -29,6 +30,7 @@ include!(concat!(env!("OUT_DIR"), "/python_bundle.rs"));
 
 const MAX_ROOT_DER_BYTES: u64 = 64 * 1024;
 const MAX_CREDENTIAL_LIFETIME: Duration = Duration::from_secs(31 * 24 * 60 * 60);
+const STDIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModeConfig {
@@ -204,10 +206,7 @@ fn main() {
     info!("executor runtime ready");
     let mut executor = ExecutorDispatcher::new(runtime);
     let outcome = match &config.mode {
-        ModeConfig::Stdin => {
-            run_stdin(&mut executor);
-            Ok(())
-        }
+        ModeConfig::Stdin => run_stdin(&mut executor),
         ModeConfig::Outbound(outbound) => match config.state_dir.as_deref() {
             Some(state_dir) => run_outbound(&mut executor, state_dir, outbound),
             None => Err("validated outbound state is unavailable".into()),
@@ -222,58 +221,154 @@ fn main() {
 }
 
 struct ExecutorDispatcher {
-    runtime: ExecutorRuntime,
-    contexts: HashMap<String, PythonContext>,
+    _runtime: Option<ExecutorRuntime>,
+    coordinator: Coordinator,
+    ready: VecDeque<DispatchGroup>,
 }
 
 impl ExecutorDispatcher {
     fn new(runtime: ExecutorRuntime) -> Self {
+        let coordinator = Coordinator::new(runtime.python.clone(), CoordinatorConfig::default());
         Self {
-            runtime,
-            contexts: HashMap::new(),
+            _runtime: Some(runtime),
+            coordinator,
+            ready: VecDeque::new(),
         }
     }
 
-    fn handle_line(&mut self, line: &str) -> Response {
-        handle(line, &mut self.contexts, &self.runtime.python)
+    #[cfg(test)]
+    fn for_test(runtime: PythonRuntime) -> Self {
+        Self {
+            _runtime: None,
+            coordinator: Coordinator::new(runtime, CoordinatorConfig::default()),
+            ready: VecDeque::new(),
+        }
     }
 
     fn close_all(&mut self) -> usize {
-        let open_contexts = self.contexts.len();
-        for context in self.contexts.values_mut() {
-            let _ = context.close();
+        self.ready.clear();
+        self.coordinator.close_all()
+    }
+}
+
+impl DeferredDispatcher for ExecutorDispatcher {
+    fn submit(&mut self, request: Request) -> Option<DispatchGroup> {
+        self.coordinator.submit(request).map(dispatch_group)
+    }
+
+    fn poll(&mut self) -> Option<DispatchGroup> {
+        if self.ready.is_empty() {
+            self.ready
+                .extend(self.coordinator.poll().into_iter().map(dispatch_group));
         }
-        self.contexts.clear();
-        open_contexts
+        self.ready.pop_front()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.coordinator.active_run_count() > 0 || !self.ready.is_empty()
     }
 }
 
-impl Dispatcher for ExecutorDispatcher {
-    fn dispatch(&mut self, request: Request) -> Response {
-        handle_request(request, &mut self.contexts, &self.runtime.python)
+fn dispatch_group(group: CompletionGroup) -> DispatchGroup {
+    match group {
+        CompletionGroup::Single(response) => DispatchGroup::Single(response),
+        CompletionGroup::Pair(responses) => DispatchGroup::Pair(responses),
     }
 }
 
-fn run_stdin(executor: &mut ExecutorDispatcher) {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
+enum StdinInput {
+    Frame(Vec<u8>),
+    Transport(String),
+    Eof,
+}
+
+fn run_stdin(executor: &mut ExecutorDispatcher) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = thread::Builder::new()
+        .name("elpis-executor-stdin".into())
+        .spawn(move || {
+            let stdin = io::stdin();
+            let mut input = stdin.lock();
+            loop {
+                let message = match read_request_frame(&mut input) {
+                    Ok(Some(frame)) => StdinInput::Frame(frame),
+                    Ok(None) => StdinInput::Eof,
+                    Err(error) => StdinInput::Transport(error.to_string()),
+                };
+                let terminal = !matches!(message, StdinInput::Frame(_));
+                if sender.send(message).is_err() || terminal {
+                    break;
+                }
+            }
+        })
+        .map_err(|_| "stdin reader thread could not start".to_string())?;
     let mut stdout = io::stdout().lock();
+    pump_stdin(executor, &receiver, &mut stdout);
+    reader
+        .join()
+        .map_err(|_| "stdin reader thread failed".to_string())?;
+    Ok(())
+}
+
+fn pump_stdin(
+    executor: &mut ExecutorDispatcher,
+    receiver: &Receiver<StdinInput>,
+    output: &mut impl Write,
+) {
     loop {
-        let frame = match read_request_frame(&mut input) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => break,
-            Err(error) => {
-                warn!(error = %error, "protocol transport failed");
-                let response = Response::failure(None, "protocol", "transport", error.to_string());
-                write_response(&mut stdout, &response);
+        while let Some(group) = executor.poll() {
+            write_group(output, &group);
+        }
+        match receiver.recv_timeout(STDIN_POLL_INTERVAL) {
+            Ok(StdinInput::Frame(frame)) => match decode_request(&frame) {
+                Ok(request) => {
+                    if let Some(group) = executor.submit(request) {
+                        write_group(output, &group);
+                    }
+                }
+                Err(response) => write_response(output, &response),
+            },
+            Ok(StdinInput::Transport(error)) => {
+                warn!(error, "protocol transport failed");
+                write_response(
+                    output,
+                    &Response::failure(None, "protocol", "transport", error),
+                );
                 break;
             }
-        };
-        let response = match std::str::from_utf8(&frame) {
-            Ok(line) => executor.handle_line(line),
-            Err(error) => Response::failure(None, "protocol", "protocol", error.to_string()),
-        };
-        write_response(&mut stdout, &response);
+            Ok(StdinInput::Eof) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn decode_request(frame: &[u8]) -> Result<Request, Box<Response>> {
+    let line = std::str::from_utf8(frame).map_err(|error| {
+        Box::new(Response::failure(
+            None,
+            "protocol",
+            "protocol",
+            error.to_string(),
+        ))
+    })?;
+    serde_json::from_str(line).map_err(|error| {
+        Box::new(Response::failure(
+            None,
+            "protocol",
+            "protocol",
+            error.to_string(),
+        ))
+    })
+}
+
+fn write_group(output: &mut impl Write, group: &DispatchGroup) {
+    match group {
+        DispatchGroup::Single(response) => write_response(output, response),
+        DispatchGroup::Pair(responses) => {
+            for response in responses {
+                write_response(output, response);
+            }
+        }
     }
 }
 
@@ -451,136 +546,6 @@ fn read_request_frame(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> 
     }
 }
 
-fn handle(
-    line: &str,
-    contexts: &mut HashMap<String, PythonContext>,
-    runtime: &PythonRuntime,
-) -> Response {
-    let request = match serde_json::from_str::<Request>(line) {
-        Ok(request) => request,
-        Err(error) => return Response::failure(None, "protocol", "protocol", error.to_string()),
-    };
-    handle_request(request, contexts, runtime)
-}
-
-fn handle_request(
-    request: Request,
-    contexts: &mut HashMap<String, PythonContext>,
-    runtime: &PythonRuntime,
-) -> Response {
-    let request_id = request.request_id().to_string();
-    if let Err(error) = request.validate() {
-        return Response::failure(Some(request_id), "protocol", "protocol", error.to_string());
-    }
-    match request {
-        Request::Validate { source, .. } => {
-            match PythonContext::validate_source(runtime, &source) {
-                Ok(()) => Response::success(request_id, "validated", json!({})),
-                Err(PythonError::Syntax(error)) => {
-                    Response::failure(Some(request_id), "failed", "preparse", error)
-                }
-                Err(error) => {
-                    Response::failure(Some(request_id), "failed", "runtime", error.to_string())
-                }
-            }
-        }
-        Request::Open {
-            context_id,
-            generation,
-            ..
-        } => {
-            if contexts.contains_key(&context_id) {
-                return Response::failure(
-                    Some(request_id),
-                    "failed",
-                    "conflict",
-                    "context is already open",
-                );
-            }
-            match PythonContext::open(runtime, context_id.clone(), generation) {
-                Ok(context) => {
-                    contexts.insert(context_id.clone(), context);
-                    Response::success(
-                        request_id,
-                        "opened",
-                        json!({"context_id": context_id, "generation": generation}),
-                    )
-                }
-                Err(error) => {
-                    Response::failure(Some(request_id), "failed", "runtime", error.to_string())
-                }
-            }
-        }
-        Request::Run {
-            context_id,
-            generation,
-            run_id,
-            source,
-            preview_max_bytes,
-            ..
-        } => {
-            let Some(context) = contexts.get_mut(&context_id) else {
-                return Response::failure(
-                    Some(request_id),
-                    "failed",
-                    "not_found",
-                    "context is not open",
-                );
-            };
-            match context.run(&context_id, generation, &run_id, &source, preview_max_bytes) {
-                Ok(result) if result.ok => match serde_json::to_value(result) {
-                    Ok(value) => Response::success(request_id, "completed", value),
-                    Err(error) => Response::failure(
-                        Some(request_id),
-                        "failed",
-                        "serialization",
-                        error.to_string(),
-                    ),
-                },
-                Ok(result) => Response::failure(
-                    Some(request_id),
-                    result.kind,
-                    result.failure_kind.unwrap_or_else(|| "runtime".into()),
-                    result.error.unwrap_or_else(|| "python run failed".into()),
-                ),
-                Err(error) => {
-                    Response::failure(Some(request_id), "failed", "runtime", error.to_string())
-                }
-            }
-        }
-        Request::Cancel { .. } => Response::failure(
-            Some(request_id),
-            "failed",
-            "unsupported",
-            "cancellation coordinator is not active",
-        ),
-        Request::Close {
-            context_id,
-            generation,
-            ..
-        } => {
-            let Some(mut context) = contexts.remove(&context_id) else {
-                return Response::success(request_id, "closed", json!({"already_closed": true}));
-            };
-            if context.binding() != (context_id.as_str(), generation) {
-                contexts.insert(context_id, context);
-                return Response::failure(
-                    Some(request_id),
-                    "failed",
-                    "binding",
-                    "context generation mismatch",
-                );
-            }
-            match context.close() {
-                Ok(()) => Response::success(request_id, "closed", json!({"already_closed": false})),
-                Err(error) => {
-                    Response::failure(Some(request_id), "failed", "runtime", error.to_string())
-                }
-            }
-        }
-    }
-}
-
 fn write_response(output: &mut impl Write, response: &Response) {
     let Ok(mut bytes) = serde_json::to_vec(response) else {
         return;
@@ -595,73 +560,265 @@ mod tests {
     use super::*;
     use elpis_protocol::PROTOCOL_VERSION;
 
-    fn request(
+    fn executor() -> ExecutorDispatcher {
+        ExecutorDispatcher::for_test(PythonRuntime::system("python3"))
+    }
+
+    fn only(group: Option<DispatchGroup>) -> Response {
+        match group.expect("request returned no immediate response") {
+            DispatchGroup::Single(response) => response,
+            DispatchGroup::Pair(_) => panic!("request returned an unexpected response pair"),
+        }
+    }
+
+    fn submit_json(
+        executor: &mut ExecutorDispatcher,
         value: serde_json::Value,
-        contexts: &mut HashMap<String, PythonContext>,
-    ) -> Response {
-        handle(
-            &value.to_string(),
-            contexts,
-            &PythonRuntime::system("python3"),
-        )
+    ) -> Option<DispatchGroup> {
+        match decode_request(value.to_string().as_bytes()) {
+            Ok(request) => executor.submit(request),
+            Err(response) => Some(DispatchGroup::Single(*response)),
+        }
+    }
+
+    fn wait_group(executor: &mut ExecutorDispatcher) -> DispatchGroup {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(group) = executor.poll() {
+                return group;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "executor completion timed out"
+            );
+            thread::yield_now();
+        }
+    }
+
+    struct CaptureWriter {
+        bytes: Vec<u8>,
+        lines: mpsc::Sender<()>,
+    }
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            for _ in bytes.iter().filter(|byte| **byte == b'\n') {
+                let _ = self.lines.send(());
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CaptureWriter {
+        fn responses(&self) -> Vec<Response> {
+            self.bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect()
+        }
+    }
+
+    fn frame(value: serde_json::Value) -> StdinInput {
+        StdinInput::Frame(serde_json::to_vec(&value).unwrap())
+    }
+
+    fn wait_for_line(receiver: &mpsc::Receiver<()>) {
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stdin pump response timed out");
+    }
+
+    #[test]
+    fn stdin_pump_emits_natural_completion_without_later_input() {
+        let mut executor = executor();
+        let (input_sender, input_receiver) = mpsc::sync_channel(1);
+        let (line_sender, line_receiver) = mpsc::channel();
+        let sender = thread::spawn(move || {
+            input_sender
+                .send(frame(serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"open-1","context_id":"context-1","generation":1})))
+                .unwrap();
+            wait_for_line(&line_receiver);
+            input_sender
+                .send(frame(serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"run-1","context_id":"context-1","generation":1,"run_id":"run-a","source":"import time; time.sleep(0.05); 42"})))
+                .unwrap();
+            wait_for_line(&line_receiver);
+            input_sender.send(StdinInput::Eof).unwrap();
+        });
+        let mut output = CaptureWriter {
+            bytes: Vec::new(),
+            lines: line_sender,
+        };
+        pump_stdin(&mut executor, &input_receiver, &mut output);
+        sender.join().unwrap();
+        let responses = output.responses();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].request_id.as_deref(), Some("open-1"));
+        assert_eq!(responses[1].request_id.as_deref(), Some("run-1"));
+        assert_eq!(responses[1].result.as_ref().unwrap()["preview"], "42");
+        assert!(!executor.has_pending());
+        assert_eq!(executor.close_all(), 1);
+    }
+
+    #[test]
+    fn stdin_pump_keeps_cancel_readable_and_writes_ordered_pair() {
+        let mut executor = executor();
+        let (input_sender, input_receiver) = mpsc::sync_channel(1);
+        let (line_sender, line_receiver) = mpsc::channel();
+        let sender = thread::spawn(move || {
+            input_sender
+                .send(frame(serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"open-1","context_id":"context-1","generation":1})))
+                .unwrap();
+            wait_for_line(&line_receiver);
+            input_sender
+                .send(frame(serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"run-1","context_id":"context-1","generation":1,"run_id":"run-a","source":"import time; time.sleep(30)"})))
+                .unwrap();
+            input_sender
+                .send(frame(serde_json::json!({"op":"cancel","protocol":PROTOCOL_VERSION,"request_id":"cancel-1","context_id":"context-1","generation":1,"target_request_id":"run-1","run_id":"run-a"})))
+                .unwrap();
+            wait_for_line(&line_receiver);
+            wait_for_line(&line_receiver);
+            input_sender.send(StdinInput::Eof).unwrap();
+        });
+        let mut output = CaptureWriter {
+            bytes: Vec::new(),
+            lines: line_sender,
+        };
+        pump_stdin(&mut executor, &input_receiver, &mut output);
+        sender.join().unwrap();
+        let responses = output.responses();
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[1].request_id.as_deref(), Some("run-1"));
+        assert_eq!(responses[1].failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(responses[2].request_id.as_deref(), Some("cancel-1"));
+        assert!(responses[2].ok);
+        assert!(!executor.has_pending());
+        let contexts = executor.coordinator.context_count();
+        assert!(contexts <= 1);
+        assert_eq!(executor.close_all(), contexts);
+    }
+
+    #[test]
+    fn stdin_eof_cancels_and_reaps_without_fake_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("python.pid");
+        let python_path = serde_json::to_string(pid_file.to_str().unwrap()).unwrap();
+        let source = format!(
+            "import os,time; open({python_path}, 'w').write(str(os.getpid())); time.sleep(30)"
+        );
+        let mut executor = executor();
+        let (input_sender, input_receiver) = mpsc::sync_channel(1);
+        let (line_sender, line_receiver) = mpsc::channel();
+        let sender_pid_file = pid_file.clone();
+        let sender = thread::spawn(move || {
+            input_sender
+                .send(frame(serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"open-1","context_id":"context-1","generation":1})))
+                .unwrap();
+            wait_for_line(&line_receiver);
+            input_sender
+                .send(frame(serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"run-1","context_id":"context-1","generation":1,"run_id":"run-a","source":source})))
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while fs::read_to_string(&sender_pid_file)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_none()
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "python PID witness timed out"
+                );
+                thread::yield_now();
+            }
+            input_sender.send(StdinInput::Eof).unwrap();
+        });
+        let mut output = CaptureWriter {
+            bytes: Vec::new(),
+            lines: line_sender,
+        };
+        pump_stdin(&mut executor, &input_receiver, &mut output);
+        sender.join().unwrap();
+        let responses = output.responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].request_id.as_deref(), Some("open-1"));
+        assert!(executor.has_pending());
+        let pid: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        assert_eq!(executor.close_all(), 1);
+        assert!(!executor.has_pending());
+        assert!(!Path::new("/proc").join(pid.to_string()).exists());
     }
 
     #[test]
     fn opens_runs_and_closes_persistent_context() {
-        let mut contexts = HashMap::new();
-        let opened = request(
-            json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"r1","context_id":"c1","generation":1}),
-            &mut contexts,
-        );
+        let mut executor = executor();
+        let opened = only(submit_json(
+            &mut executor,
+            serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"r1","context_id":"c1","generation":1}),
+        ));
         assert!(opened.ok);
-        let assigned = request(
-            json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"r2","context_id":"c1","generation":1,"run_id":"run-1","source":"x = 21"}),
-            &mut contexts,
+        assert!(
+            submit_json(
+                &mut executor,
+                serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"r2","context_id":"c1","generation":1,"run_id":"run-1","source":"x = 21"}),
+            )
+            .is_none()
         );
-        assert!(assigned.ok);
-        let value = request(
-            json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"r3","context_id":"c1","generation":1,"run_id":"run-2","source":"x * 2"}),
-            &mut contexts,
+        assert!(only(Some(wait_group(&mut executor))).ok);
+        assert!(
+            submit_json(
+                &mut executor,
+                serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"r3","context_id":"c1","generation":1,"run_id":"run-2","source":"x * 2"}),
+            )
+            .is_none()
         );
+        let value = only(Some(wait_group(&mut executor)));
         assert_eq!(value.result.unwrap()["preview"], "42");
-        let closed = request(
-            json!({"op":"close","protocol":PROTOCOL_VERSION,"request_id":"r4","context_id":"c1","generation":1}),
-            &mut contexts,
-        );
+        let closed = only(submit_json(
+            &mut executor,
+            serde_json::json!({"op":"close","protocol":PROTOCOL_VERSION,"request_id":"r4","context_id":"c1","generation":1}),
+        ));
         assert!(closed.ok);
     }
 
     #[test]
-    fn cancel_is_explicitly_unsupported_until_coordinator_is_active() {
-        let mut contexts = HashMap::new();
-        let response = request(
-            json!({
-                "op": "cancel",
-                "protocol": PROTOCOL_VERSION,
-                "request_id": "cancel-1",
-                "context_id": "context-1",
-                "generation": 1,
-                "target_request_id": "request-1",
-                "run_id": "run-1"
-            }),
-            &mut contexts,
+    fn cancel_is_active_and_returns_run_then_cancel_pair() {
+        let mut executor = executor();
+        assert!(only(submit_json(
+            &mut executor,
+            serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"open-1","context_id":"context-1","generation":1}),
+        )).ok);
+        assert!(submit_json(
+            &mut executor,
+            serde_json::json!({"op":"run","protocol":PROTOCOL_VERSION,"request_id":"request-1","context_id":"context-1","generation":1,"run_id":"run-1","source":"import time; time.sleep(30)"}),
+        ).is_none());
+        let immediate = submit_json(
+            &mut executor,
+            serde_json::json!({"op":"cancel","protocol":PROTOCOL_VERSION,"request_id":"cancel-1","context_id":"context-1","generation":1,"target_request_id":"request-1","run_id":"run-1"}),
         );
-        assert!(!response.ok);
-        assert_eq!(response.kind, "failed");
-        assert_eq!(response.failure_kind.as_deref(), Some("unsupported"));
-        assert!(contexts.is_empty());
+        let group = immediate.unwrap_or_else(|| wait_group(&mut executor));
+        let DispatchGroup::Pair([run, cancel]) = group else {
+            panic!("cancellation did not return an ordered pair");
+        };
+        assert_eq!(run.request_id.as_deref(), Some("request-1"));
+        assert_eq!(run.failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(cancel.request_id.as_deref(), Some("cancel-1"));
+        assert!(cancel.ok);
     }
 
     #[test]
     fn rejects_unknown_fields_before_effect() {
-        let mut contexts = HashMap::new();
-        let response = handle(
-            r#"{"op":"open","protocol":1,"request_id":"r1","context_id":"c1","generation":1,"unexpected":true}"#,
-            &mut contexts,
-            &PythonRuntime::system("python3"),
-        );
+        let mut executor = executor();
+        let response = only(submit_json(
+            &mut executor,
+            serde_json::json!({"op":"open","protocol":1,"request_id":"r1","context_id":"c1","generation":1,"unexpected":true}),
+        ));
         assert!(!response.ok);
-        assert!(contexts.is_empty());
+        assert_eq!(executor.coordinator.context_count(), 0);
     }
 
     #[test]
@@ -740,21 +897,12 @@ mod tests {
             request_id: "same-request".into(),
             source: "40 + 2".into(),
         };
-        let runtime = PythonRuntime::system("python3");
-        let mut parsed_contexts = HashMap::new();
-        let parsed = handle(
-            &serde_json::to_string(&request).unwrap(),
-            &mut parsed_contexts,
-            &runtime,
-        );
-        let mut linked_contexts = HashMap::new();
-        let linked = handle_request(request, &mut linked_contexts, &runtime);
-        assert_eq!(
-            serde_json::to_value(parsed).unwrap(),
-            serde_json::to_value(linked).unwrap()
-        );
-        assert!(parsed_contexts.is_empty());
-        assert!(linked_contexts.is_empty());
+        let mut parsed = executor();
+        let parsed_request = decode_request(&serde_json::to_vec(&request).unwrap()).unwrap();
+        let parsed = parsed.submit(parsed_request);
+        let mut linked = executor();
+        let linked = linked.submit(request);
+        assert_eq!(parsed, linked);
     }
 
     #[test]

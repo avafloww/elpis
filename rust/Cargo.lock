@@ -258,6 +258,7 @@ dependencies = [
 name = "elpis-executor"
 version = "0.1.0"
 dependencies = [
+ "elpis-coordinator",
  "elpis-identity",
  "elpis-journal",
  "elpis-link",

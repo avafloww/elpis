@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -862,7 +862,7 @@ fn executor_canary(binary: &Path, work: &Path) -> Result<(), DistError> {
         r#"{"op":"open","protocol":1,"request_id":"d1","context_id":"c1","generation":1}"#,
         r#"{"op":"run","protocol":1,"request_id":"d2","context_id":"c1","generation":1,"run_id":"r1","source":"(__import__('sys').version_info[:3],__import__('PIL').__version__,__import__('numpy').__version__,__import__('yaml').__version__,__import__('requests').__version__,6*7)"}"#,
         r#"{"op":"close","protocol":1,"request_id":"d3","context_id":"c1","generation":1}"#,
-    ].join("\n") + "\n";
+    ];
     let mut child = Command::new(binary)
         .env_clear()
         .env("PATH", "/nonexistent")
@@ -872,21 +872,34 @@ fn executor_canary(binary: &Path, work: &Path) -> Result<(), DistError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .ok_or(DistError::Command("canary stdin"))?
-        .write_all(frames.as_bytes())?;
+        .ok_or(DistError::Command("canary stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(DistError::Command("canary stdout"))?;
+    let mut stdout = BufReader::new(stdout);
+    let mut values = Vec::with_capacity(frames.len());
+    for frame in frames {
+        stdin.write_all(frame.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
+        let mut line = String::new();
+        if stdout.read_line(&mut line)? == 0 {
+            return Err(DistError::Invalid(
+                "executor canary response is absent".into(),
+            ));
+        }
+        values.push(serde_json::from_str::<serde_json::Value>(&line)?);
+    }
+    drop(stdin);
+    drop(stdout);
     let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(DistError::Command("PATH-empty executor canary"));
     }
-    let lines = String::from_utf8(output.stdout)
-        .map_err(|_| DistError::Invalid("canary stdout is not UTF-8".into()))?;
-    let values = lines
-        .lines()
-        .map(serde_json::from_str::<serde_json::Value>)
-        .collect::<Result<Vec<_>, _>>()?;
     if values.len() != 3
         || values
             .iter()
