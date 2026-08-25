@@ -309,6 +309,7 @@ impl PythonContextActor {
                 entry,
             },
             completion: completion_rx,
+            terminal_consumed: AtomicBool::new(false),
         })
     }
 
@@ -427,6 +428,7 @@ impl PythonRunControl {
 pub struct PythonRunHandle {
     control: PythonRunControl,
     completion: mpsc::Receiver<Result<RunResult, PythonError>>,
+    terminal_consumed: AtomicBool,
 }
 
 impl PythonRunHandle {
@@ -448,6 +450,22 @@ impl PythonRunHandle {
 
     pub fn cancel(&self) -> Result<CancelOutcome, PythonError> {
         self.control.cancel()
+    }
+
+    /// Poll once without blocking. A terminal receipt is consumed exactly once;
+    /// later polls report ActorClosed.
+    pub fn try_wait(&self) -> Result<Option<RunResult>, PythonError> {
+        if self.terminal_consumed.load(Ordering::Acquire) {
+            return Err(PythonError::ActorClosed);
+        }
+        match self.completion.try_recv() {
+            Ok(result) => {
+                self.terminal_consumed.store(true, Ordering::Release);
+                result.map(Some)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(PythonError::ActorClosed),
+        }
     }
 
     pub fn wait(self) -> Result<RunResult, PythonError> {
@@ -895,6 +913,66 @@ mod tests {
         drop(actor);
         assert!(matches!(run.wait(), Err(PythonError::Cancelled)));
         assert_eq!(control.wait_terminal(), RunTerminal::Cancelled);
+    }
+
+    #[test]
+    fn nonblocking_poll_returns_pending_then_terminal_cancellation() {
+        let actor = actor("poll-cancel");
+        let run = actor
+            .run(
+                "poll-cancel",
+                1,
+                "run-1",
+                "import time\nwhile True: time.sleep(1)",
+                1024,
+            )
+            .unwrap();
+        let control = run.control();
+        let mut state = control.state();
+        while state == RunState::Scheduled {
+            state = control.wait_for_change(state);
+        }
+        assert_eq!(state, RunState::Executing);
+        assert!(matches!(run.try_wait(), Ok(None)));
+        assert_eq!(
+            control.cancel().unwrap(),
+            CancelOutcome::RequestedWhileExecuting
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match run.try_wait() {
+                Err(PythonError::Cancelled) => break,
+                Ok(None) => {
+                    assert!(Instant::now() < deadline, "cancel receipt timed out");
+                    thread::yield_now();
+                }
+                other => panic!("unexpected poll result: {other:?}"),
+            }
+        }
+        assert_eq!(control.wait_terminal(), RunTerminal::Cancelled);
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn nonblocking_poll_returns_natural_result_once() {
+        let actor = actor("poll-complete");
+        let run = actor
+            .run("poll-complete", 1, "run-1", "40 + 2", 1024)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = loop {
+            match run.try_wait() {
+                Ok(Some(result)) => break result,
+                Ok(None) => {
+                    assert!(Instant::now() < deadline, "completion receipt timed out");
+                    thread::yield_now();
+                }
+                Err(error) => panic!("unexpected poll error: {error}"),
+            }
+        };
+        assert_eq!(result.preview, "42");
+        assert!(matches!(run.try_wait(), Err(PythonError::ActorClosed)));
+        actor.close().unwrap();
     }
 
     #[test]
