@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-journal",
  "elpis-protocol",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-coordinator"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-protocol",
  "elpis-python",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-effects"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hex",
  "rusqlite",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-executor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-coordinator",
  "elpis-identity",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-identity"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "fs2",
  "hex",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-journal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-protocol",
  "elpis-transport",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-link"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-identity",
  "elpis-journal",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-protocol"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "serde",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-protocol",
  "libc",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-runtime"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "fs2",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "elpis-transport"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-protocol",
  "serde",
@@ -1457,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "elpis-protocol",
  "elpis-runtime",
