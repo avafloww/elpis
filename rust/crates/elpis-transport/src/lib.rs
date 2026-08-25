@@ -756,31 +756,9 @@ fn validate_nonzero_seq(label: &'static str, seq: u64) -> Result<(), ValidationE
 }
 
 fn validate_response(response: &Response) -> Result<(), ValidationError> {
-    let request_id_valid = response
-        .request_id
-        .as_deref()
-        .is_none_or(|id| validate_id("request_id", id, 120).is_ok());
-    let kind_valid = validate_id("response kind", &response.kind, 120).is_ok();
-    let shape_valid = if response.ok {
-        response.request_id.is_some()
-            && response.result.is_some()
-            && response.failure_kind.is_none()
-            && response.error.is_none()
-    } else {
-        response.result.is_none()
-            && response
-                .failure_kind
-                .as_deref()
-                .is_some_and(|kind| validate_id("failure kind", kind, 120).is_ok())
-            && response
-                .error
-                .as_deref()
-                .is_some_and(|error| !error.is_empty())
-    };
-    if response.protocol != PROTOCOL_VERSION || !request_id_valid || !kind_valid || !shape_valid {
-        return Err(ValidationError::InvalidResponse);
-    }
-    Ok(())
+    response
+        .validate()
+        .map_err(|_| ValidationError::InvalidResponse)
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
@@ -921,6 +899,31 @@ mod tests {
                 ProtocolError::InvalidGeneration
             )))
         ));
+    }
+
+    #[test]
+    fn structured_cancelled_run_proof_roundtrips() {
+        let mut response = Response::failure(
+            Some("run-1".into()),
+            "failed",
+            "cancelled",
+            "python run was cancelled",
+        );
+        response.result = Some(serde_json::json!({
+            "started": true,
+            "context_invalidated": true,
+        }));
+        let frame = ClientFrame::Response {
+            protocol: PROTOCOL_VERSION,
+            executor_id: "executor-1".into(),
+            boot_epoch: EPOCH.into(),
+            connection_id: "connection-1".into(),
+            seq: 1,
+            request_seq: 1,
+            response,
+        };
+        let bytes = frame.to_json().unwrap();
+        assert_eq!(ClientFrame::from_json(&bytes).unwrap(), frame);
     }
 
     #[test]

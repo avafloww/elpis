@@ -324,10 +324,27 @@ impl DeferredDispatcher for DeferredPairDispatcher {
                     elpis_journal::RequestStatus::Prepared
                 );
                 self.run_pending = false;
-                let group = DispatchGroup::Pair([
-                    Response::success("run-request".into(), "cancelled", serde_json::json!({})),
-                    Response::success("cancel-request".into(), "cancel", serde_json::json!({})),
-                ]);
+                let mut run = Response::failure(
+                    Some("run-request".into()),
+                    "failed",
+                    "cancelled",
+                    "python run was cancelled",
+                );
+                run.result = Some(serde_json::json!({
+                    "started": true,
+                    "context_invalidated": true,
+                }));
+                let cancel = Response::success(
+                    "cancel-request".into(),
+                    "cancelled",
+                    serde_json::json!({
+                        "target_request_id": "run-request",
+                        "already_terminal": false,
+                        "started": true,
+                        "context_invalidated": true,
+                    }),
+                );
+                let group = DispatchGroup::Pair([run, cancel]);
                 if self.defer_pair {
                     self.completion = Some(group);
                     None
@@ -395,22 +412,46 @@ fn deferred_run_keeps_heartbeat_and_cancel_readable_then_commits_pair_before_sen
         let second_bytes = websocket.read().unwrap().into_data().to_vec();
         let first = ClientFrame::from_json(&first_bytes).unwrap();
         let second = ClientFrame::from_json(&second_bytes).unwrap();
-        assert!(matches!(
-            first,
-            ClientFrame::Response {
-                seq: 1,
-                request_seq: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            second,
-            ClientFrame::Response {
-                seq: 2,
-                request_seq: 3,
-                ..
-            }
-        ));
+        let ClientFrame::Response {
+            seq,
+            request_seq,
+            response,
+            ..
+        } = first
+        else {
+            panic!("Run cancellation proof was not a response frame");
+        };
+        assert_eq!((seq, request_seq), (1, 1));
+        assert!(!response.ok);
+        assert_eq!(response.failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({
+                "started": true,
+                "context_invalidated": true,
+            }))
+        );
+        let ClientFrame::Response {
+            seq,
+            request_seq,
+            response,
+            ..
+        } = second
+        else {
+            panic!("Cancel proof was not a response frame");
+        };
+        assert_eq!((seq, request_seq), (2, 3));
+        assert!(response.ok);
+        assert_eq!(response.kind, "cancelled");
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({
+                "target_request_id": "run-request",
+                "already_terminal": false,
+                "started": true,
+                "context_invalidated": true,
+            }))
+        );
     });
 
     let mut journal = journal(&temp);

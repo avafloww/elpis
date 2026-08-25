@@ -20,6 +20,8 @@ pub enum ProtocolError {
     SourceTooLarge,
     #[error("preview limit must be from 1 to {MAX_PREVIEW_BYTES} bytes")]
     InvalidPreviewLimit,
+    #[error("invalid response shape")]
+    InvalidResponse,
 }
 
 pub fn validate_id(label: &'static str, value: &str, max: usize) -> Result<(), ProtocolError> {
@@ -179,6 +181,49 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.protocol != PROTOCOL_VERSION
+            || self
+                .request_id
+                .as_deref()
+                .is_some_and(|id| validate_id("request_id", id, 120).is_err())
+            || validate_id("response kind", &self.kind, 120).is_err()
+        {
+            return Err(ProtocolError::InvalidResponse);
+        }
+        if self.ok {
+            if self.request_id.is_some()
+                && self.result.is_some()
+                && self.failure_kind.is_none()
+                && self.error.is_none()
+            {
+                return Ok(());
+            }
+            return Err(ProtocolError::InvalidResponse);
+        }
+        let Some(failure_kind) = self.failure_kind.as_deref() else {
+            return Err(ProtocolError::InvalidResponse);
+        };
+        if validate_id("failure kind", failure_kind, 120).is_err()
+            || self.error.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(ProtocolError::InvalidResponse);
+        }
+        match (failure_kind, self.result.as_ref()) {
+            ("cancelled", Some(Value::Object(proof)))
+                if proof.len() == 2
+                    && proof.get("started").is_some_and(Value::is_boolean)
+                    && proof
+                        .get("context_invalidated")
+                        .is_some_and(Value::is_boolean) =>
+            {
+                Ok(())
+            }
+            ("cancelled", _) | (_, Some(_)) => Err(ProtocolError::InvalidResponse),
+            (_, None) => Ok(()),
+        }
+    }
+
     pub fn success(request_id: String, kind: impl Into<String>, result: Value) -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
@@ -212,6 +257,42 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_validation_accepts_only_exact_cancelled_failure_proof() {
+        let mut cancelled = Response::failure(
+            Some("run-1".into()),
+            "failed",
+            "cancelled",
+            "python run was cancelled",
+        );
+        cancelled.result = Some(serde_json::json!({
+            "started": true,
+            "context_invalidated": true,
+        }));
+        assert_eq!(cancelled.validate(), Ok(()));
+
+        for result in [
+            serde_json::json!({"started": true}),
+            serde_json::json!({"started": true, "context_invalidated": false, "extra": true}),
+            serde_json::json!({"started": "yes", "context_invalidated": false}),
+            serde_json::json!([true, false]),
+        ] {
+            let mut malformed = cancelled.clone();
+            malformed.result = Some(result);
+            assert_eq!(malformed.validate(), Err(ProtocolError::InvalidResponse));
+        }
+        let mut missing = cancelled.clone();
+        missing.result = None;
+        assert_eq!(missing.validate(), Err(ProtocolError::InvalidResponse));
+        let mut arbitrary_failure =
+            Response::failure(Some("run-1".into()), "failed", "runtime", "failed");
+        arbitrary_failure.result = Some(serde_json::json!({}));
+        assert_eq!(
+            arbitrary_failure.validate(),
+            Err(ProtocolError::InvalidResponse)
+        );
+    }
 
     #[test]
     fn unknown_request_fields_are_rejected() {
