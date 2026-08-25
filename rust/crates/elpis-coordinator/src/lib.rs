@@ -2,7 +2,8 @@
 
 use elpis_protocol::{Request, Response};
 use elpis_python::{
-    PythonContext, PythonContextActor, PythonError, PythonRunHandle, PythonRuntime, RunResult,
+    CancelOutcome, PythonContext, PythonContextActor, PythonError, PythonRunHandle, PythonRuntime,
+    RunResult,
 };
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -96,6 +97,21 @@ struct RunBinding {
 struct ActiveRun {
     binding: RunBinding,
     handle: PythonRunHandle,
+    pending_cancel: Option<PendingCancel>,
+}
+
+struct PendingCancel {
+    request_id: String,
+    mode: PendingCancelMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingCancelMode {
+    Owned {
+        started: bool,
+        context_invalidated: bool,
+    },
+    CompletionWon,
 }
 
 struct Tombstones {
@@ -221,12 +237,21 @@ impl Coordinator {
                     preview_max_bytes,
                 );
             }
-            Request::Cancel { .. } => Response::failure(
-                Some(request_id),
-                "failed",
-                "unsupported",
-                "cancellation coordinator is not active",
-            ),
+            Request::Cancel {
+                context_id,
+                generation,
+                target_request_id,
+                run_id,
+                ..
+            } => {
+                return self.cancel(
+                    request_id,
+                    context_id,
+                    generation,
+                    target_request_id,
+                    run_id,
+                );
+            }
         };
         single(response)
     }
@@ -284,6 +309,28 @@ impl Coordinator {
         run_id: String,
         source: String,
         preview_max_bytes: usize,
+    ) -> Option<CompletionGroup> {
+        self.schedule_run(
+            request_id,
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn schedule_run(
+        &mut self,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        run_id: String,
+        source: String,
+        preview_max_bytes: usize,
+        release: bool,
     ) -> Option<CompletionGroup> {
         if let Some(active) = self.active.get(&request_id) {
             let exact = active.binding.context_id == context_id
@@ -362,9 +409,129 @@ impl Coordinator {
         self.active_by_context
             .insert(context_id, request_id.clone());
         self.active_order.push_back(request_id.clone());
+        self.active.insert(
+            request_id,
+            ActiveRun {
+                binding,
+                handle,
+                pending_cancel: None,
+            },
+        );
+        if release {
+            let _ = control.start();
+        }
+        None
+    }
+
+    fn cancel(
+        &mut self,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        target_request_id: String,
+        run_id: String,
+    ) -> Option<CompletionGroup> {
+        if let Some(active) = self.active.get(&target_request_id) {
+            if active.binding.context_id != context_id
+                || active.binding.generation != generation
+                || active.binding.run_id != run_id
+            {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "binding",
+                    "cancel target binding mismatch",
+                ));
+            }
+            if active.pending_cancel.is_some() {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "already_requested",
+                    "cancellation was already requested",
+                ));
+            }
+        } else if let Some(terminal) = self.tombstones.get(&target_request_id) {
+            if terminal.context_id != context_id
+                || terminal.generation != generation
+                || terminal.run_id != run_id
+            {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "binding",
+                    "cancel target binding mismatch",
+                ));
+            }
+            return single(cancel_already_terminal(request_id, target_request_id));
+        } else {
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "not_found",
+                "cancel target was not found",
+            ));
+        }
+
+        let terminal = self
+            .active
+            .get(&target_request_id)
+            .expect("the checked active target remains present")
+            .handle
+            .try_wait();
+        let terminal = match terminal {
+            Ok(Some(result)) => Some(Ok(result)),
+            Err(error) => Some(Err(error)),
+            Ok(None) => None,
+        };
+        if let Some(terminal) = terminal {
+            self.active
+                .get_mut(&target_request_id)
+                .expect("the completion-winning target remains active")
+                .pending_cancel = Some(PendingCancel {
+                request_id,
+                mode: PendingCancelMode::CompletionWon,
+            });
+            return Some(self.finish_active(&target_request_id, terminal));
+        }
+
+        let outcome = self
+            .active
+            .get(&target_request_id)
+            .expect("the probed active target remains present")
+            .handle
+            .cancel();
+        let mode = match outcome {
+            Ok(CancelOutcome::RequestedBeforeStart) => PendingCancelMode::Owned {
+                started: false,
+                context_invalidated: false,
+            },
+            Ok(CancelOutcome::RequestedWhileExecuting) => PendingCancelMode::Owned {
+                started: true,
+                context_invalidated: true,
+            },
+            Ok(CancelOutcome::AlreadyRequested) => {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "already_requested",
+                    "cancellation was already requested",
+                ));
+            }
+            Ok(CancelOutcome::Terminal) => PendingCancelMode::CompletionWon,
+            Err(error) => {
+                return single(Response::failure(
+                    Some(request_id),
+                    "failed",
+                    "runtime",
+                    error.to_string(),
+                ));
+            }
+        };
         self.active
-            .insert(request_id, ActiveRun { binding, handle });
-        let _ = control.start();
+            .get_mut(&target_request_id)
+            .expect("the cancelled active target remains present")
+            .pending_cancel = Some(PendingCancel { request_id, mode });
         None
     }
 
@@ -385,41 +552,43 @@ impl Coordinator {
                 .try_wait();
             match outcome {
                 Ok(None) => self.active_order.push_back(request_id),
-                terminal => {
-                    let active = self
-                        .active
-                        .remove(&request_id)
-                        .expect("terminal run remains active until removal");
-                    if self.active_by_context.get(&active.binding.context_id)
-                        == Some(&active.binding.request_id)
-                    {
-                        self.active_by_context.remove(&active.binding.context_id);
-                    }
-                    let response = match terminal {
-                        Ok(Some(result)) => {
-                            run_result_response(active.binding.request_id.clone(), result)
-                        }
-                        Err(error) => Response::failure(
-                            Some(active.binding.request_id.clone()),
-                            "failed",
-                            "runtime",
-                            error.to_string(),
-                        ),
-                        Ok(None) => unreachable!("pending runs were requeued"),
-                    };
-                    if self
-                        .contexts
-                        .get(&active.binding.context_id)
-                        .is_some_and(|actor| !actor.is_valid())
-                    {
-                        self.remove_context(&active.binding.context_id);
-                    }
-                    self.tombstones.insert(active.binding);
-                    completions.push(CompletionGroup::Single(response));
+                Ok(Some(result)) => {
+                    completions.push(self.finish_active(&request_id, Ok(result)));
+                }
+                Err(error) => {
+                    completions.push(self.finish_active(&request_id, Err(error)));
                 }
             }
         }
         completions
+    }
+
+    fn finish_active(
+        &mut self,
+        target_request_id: &str,
+        terminal: Result<RunResult, PythonError>,
+    ) -> CompletionGroup {
+        let active = self
+            .active
+            .remove(target_request_id)
+            .expect("terminal target remains active until finalization");
+        self.active_order
+            .retain(|request_id| request_id != target_request_id);
+        if self.active_by_context.get(&active.binding.context_id)
+            == Some(&active.binding.request_id)
+        {
+            self.active_by_context.remove(&active.binding.context_id);
+        }
+        let group = terminal_completion(&active.binding, active.pending_cancel, terminal);
+        if self
+            .contexts
+            .get(&active.binding.context_id)
+            .is_some_and(|actor| !actor.is_valid())
+        {
+            self.remove_context(&active.binding.context_id);
+        }
+        self.tombstones.insert(active.binding);
+        group
     }
 
     fn remove_context(&mut self, context_id: &str) {
@@ -474,6 +643,100 @@ impl Drop for Coordinator {
 
 fn single(response: Response) -> Option<CompletionGroup> {
     Some(CompletionGroup::Single(response))
+}
+
+fn terminal_completion(
+    binding: &RunBinding,
+    pending_cancel: Option<PendingCancel>,
+    terminal: Result<RunResult, PythonError>,
+) -> CompletionGroup {
+    let Some(pending) = pending_cancel else {
+        return CompletionGroup::Single(run_terminal_response(
+            binding.request_id.clone(),
+            terminal,
+        ));
+    };
+    match pending.mode {
+        PendingCancelMode::CompletionWon => CompletionGroup::Pair([
+            run_terminal_response(binding.request_id.clone(), terminal),
+            cancel_already_terminal(pending.request_id, binding.request_id.clone()),
+        ]),
+        PendingCancelMode::Owned {
+            started,
+            context_invalidated,
+        } if matches!(&terminal, Err(PythonError::Cancelled)) => CompletionGroup::Pair([
+            cancelled_run_response(binding.request_id.clone(), started, context_invalidated),
+            cancel_success(
+                pending.request_id,
+                binding.request_id.clone(),
+                started,
+                context_invalidated,
+            ),
+        ]),
+        PendingCancelMode::Owned { .. } => CompletionGroup::Pair([
+            run_terminal_response(binding.request_id.clone(), terminal),
+            Response::failure(
+                Some(pending.request_id),
+                "failed",
+                "state_mismatch",
+                "run reached an unexpected terminal state after cancellation",
+            ),
+        ]),
+    }
+}
+
+fn run_terminal_response(request_id: String, terminal: Result<RunResult, PythonError>) -> Response {
+    match terminal {
+        Ok(result) => run_result_response(request_id, result),
+        Err(error) => Response::failure(Some(request_id), "failed", "runtime", error.to_string()),
+    }
+}
+
+fn cancelled_run_response(
+    request_id: String,
+    started: bool,
+    context_invalidated: bool,
+) -> Response {
+    let mut response = Response::failure(
+        Some(request_id),
+        "failed",
+        "cancelled",
+        "python run was cancelled",
+    );
+    response.result = Some(json!({
+        "started": started,
+        "context_invalidated": context_invalidated,
+    }));
+    response
+}
+
+fn cancel_success(
+    request_id: String,
+    target_request_id: String,
+    started: bool,
+    context_invalidated: bool,
+) -> Response {
+    Response::success(
+        request_id,
+        "cancelled",
+        json!({
+            "target_request_id": target_request_id,
+            "already_terminal": false,
+            "started": started,
+            "context_invalidated": context_invalidated,
+        }),
+    )
+}
+
+fn cancel_already_terminal(request_id: String, target_request_id: String) -> Response {
+    Response::success(
+        request_id,
+        "cancelled",
+        json!({
+            "target_request_id": target_request_id,
+            "already_terminal": true,
+        }),
+    )
 }
 
 fn run_schedule_failure(request_id: String, error: PythonError) -> Response {
@@ -562,6 +825,23 @@ mod tests {
         }
     }
 
+    fn cancel_request(
+        request_id: &str,
+        context_id: &str,
+        generation: u64,
+        target_request_id: &str,
+        run_id: &str,
+    ) -> Request {
+        Request::Cancel {
+            protocol: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            context_id: context_id.into(),
+            generation,
+            target_request_id: target_request_id.into(),
+            run_id: run_id.into(),
+        }
+    }
+
     fn wait_for(coordinator: &mut Coordinator, count: usize) -> Vec<Response> {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut responses = Vec::new();
@@ -578,6 +858,22 @@ mod tests {
             }
         }
         responses
+    }
+
+    fn wait_group(coordinator: &mut Coordinator) -> CompletionGroup {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut groups = coordinator.poll();
+            if !groups.is_empty() {
+                assert_eq!(groups.len(), 1);
+                return groups.remove(0);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "coordinator group poll timed out"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -698,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_cancel_does_not_disturb_pending_run() {
+    fn executing_cancel_pairs_run_then_first_owner_and_invalidates_context() {
         let mut coordinator = coordinator(1);
         assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
         assert!(
@@ -712,18 +1008,365 @@ mod tests {
                 ))
                 .is_none()
         );
+        let control = coordinator
+            .active
+            .get("request-1")
+            .unwrap()
+            .handle
+            .control();
+        let state = control.state();
+        if state == elpis_python::RunState::Scheduled {
+            assert_eq!(
+                control.wait_for_change(state),
+                elpis_python::RunState::Executing
+            );
+        } else {
+            assert_eq!(state, elpis_python::RunState::Executing);
+        }
 
-        let cancel = only(coordinator.submit(Request::Cancel {
-            protocol: PROTOCOL_VERSION,
-            request_id: "cancel-1".into(),
+        assert!(
+            coordinator
+                .submit(cancel_request(
+                    "cancel-1",
+                    "context-1",
+                    1,
+                    "request-1",
+                    "run-1",
+                ))
+                .is_none()
+        );
+        let stale = only(coordinator.submit(cancel_request(
+            "cancel-stale",
+            "context-1",
+            2,
+            "request-1",
+            "run-1",
+        )));
+        assert_eq!(stale.failure_kind.as_deref(), Some("binding"));
+        let later = only(coordinator.submit(cancel_request(
+            "cancel-2",
+            "context-1",
+            1,
+            "request-1",
+            "run-1",
+        )));
+        assert_eq!(later.failure_kind.as_deref(), Some("already_requested"));
+
+        let responses = wait_for(&mut coordinator, 2);
+        assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
+        assert_eq!(responses[0].failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(
+            responses[0].result,
+            Some(json!({"started": true, "context_invalidated": true}))
+        );
+        assert_eq!(responses[1].request_id.as_deref(), Some("cancel-1"));
+        assert!(responses[1].ok);
+        assert_eq!(
+            responses[1].result,
+            Some(json!({
+                "target_request_id": "request-1",
+                "already_terminal": false,
+                "started": true,
+                "context_invalidated": true,
+            }))
+        );
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.context_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 1);
+    }
+
+    #[test]
+    fn prestart_cancel_proves_source_nonexecution_and_preserves_context() {
+        let mut coordinator = coordinator(1);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!(
+            "elpis-coordinator-cancel-marker-{}-{unique}",
+            std::process::id()
+        ));
+        let marker_literal = serde_json::to_string(marker.to_str().unwrap()).unwrap();
+        assert!(
+            coordinator
+                .schedule_run(
+                    "request-1".into(),
+                    "context-1".into(),
+                    1,
+                    "run-1".into(),
+                    format!("open({marker_literal}, 'w').write('executed')"),
+                    DEFAULT_PREVIEW_BYTES,
+                    false,
+                )
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.active.get("request-1").unwrap().handle.state(),
+            elpis_python::RunState::Scheduled
+        );
+        assert!(
+            coordinator
+                .submit(cancel_request(
+                    "cancel-1",
+                    "context-1",
+                    1,
+                    "request-1",
+                    "run-1",
+                ))
+                .is_none()
+        );
+        let responses = wait_for(&mut coordinator, 2);
+        assert_eq!(responses[0].failure_kind.as_deref(), Some("cancelled"));
+        assert_eq!(
+            responses[0].result,
+            Some(json!({"started": false, "context_invalidated": false}))
+        );
+        assert_eq!(
+            responses[1].result,
+            Some(json!({
+                "target_request_id": "request-1",
+                "already_terminal": false,
+                "started": false,
+                "context_invalidated": false,
+            }))
+        );
+        assert!(!marker.exists());
+        assert_eq!(coordinator.context_count(), 1);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-2", 1, "run-2", "2"))
+                .is_none()
+        );
+        assert!(wait_for(&mut coordinator, 1)[0].ok);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn cancel_lookup_distinguishes_missing_binding_and_terminal_target() {
+        let mut coordinator = coordinator(1);
+        let missing = only(coordinator.submit(cancel_request(
+            "cancel-missing",
+            "context-1",
+            1,
+            "request-1",
+            "run-1",
+        )));
+        assert_eq!(missing.failure_kind.as_deref(), Some("not_found"));
+
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "1"))
+                .is_none()
+        );
+        let active_mismatch = only(coordinator.submit(cancel_request(
+            "cancel-mismatch",
+            "context-1",
+            1,
+            "request-1",
+            "different-run",
+        )));
+        assert_eq!(active_mismatch.failure_kind.as_deref(), Some("binding"));
+        assert_eq!(coordinator.active_run_count(), 1);
+        assert!(wait_for(&mut coordinator, 1)[0].ok);
+
+        let terminal = only(coordinator.submit(cancel_request(
+            "cancel-terminal",
+            "context-1",
+            1,
+            "request-1",
+            "run-1",
+        )));
+        assert!(terminal.ok);
+        assert_eq!(terminal.kind, "cancelled");
+        assert_eq!(
+            terminal.result,
+            Some(json!({
+                "target_request_id": "request-1",
+                "already_terminal": true,
+            }))
+        );
+        let terminal_mismatch = only(coordinator.submit(cancel_request(
+            "cancel-terminal-mismatch",
+            "context-1",
+            2,
+            "request-1",
+            "run-1",
+        )));
+        assert_eq!(terminal_mismatch.failure_kind.as_deref(), Some("binding"));
+        assert_eq!(coordinator.tombstone_count(), 1);
+    }
+
+    #[test]
+    fn stale_cancel_cannot_touch_replacement_and_eviction_becomes_not_found() {
+        let mut coordinator = Coordinator::new(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 1).unwrap(),
+        );
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "1"))
+                .is_none()
+        );
+        assert!(wait_for(&mut coordinator, 1)[0].ok);
+        assert!(only(coordinator.submit(close("context-1", "close-1", 1))).ok);
+        assert!(only(coordinator.submit(open("context-1", "open-2", 2))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-1",
+                    "request-2",
+                    2,
+                    "run-2",
+                    "import time\nwhile True: time.sleep(1)",
+                ))
+                .is_none()
+        );
+        let control = coordinator
+            .active
+            .get("request-2")
+            .unwrap()
+            .handle
+            .control();
+        let state = control.state();
+        if state == elpis_python::RunState::Scheduled {
+            assert_eq!(
+                control.wait_for_change(state),
+                elpis_python::RunState::Executing
+            );
+        } else {
+            assert_eq!(state, elpis_python::RunState::Executing);
+        }
+
+        let old_terminal = only(coordinator.submit(cancel_request(
+            "cancel-old",
+            "context-1",
+            1,
+            "request-1",
+            "run-1",
+        )));
+        assert!(old_terminal.ok);
+        assert_eq!(
+            old_terminal.result,
+            Some(json!({
+                "target_request_id": "request-1",
+                "already_terminal": true,
+            }))
+        );
+        let stale_replacement = only(coordinator.submit(cancel_request(
+            "cancel-stale",
+            "context-1",
+            1,
+            "request-2",
+            "run-2",
+        )));
+        assert_eq!(stale_replacement.failure_kind.as_deref(), Some("binding"));
+        assert_eq!(coordinator.active_run_count(), 1);
+
+        assert!(
+            coordinator
+                .submit(cancel_request(
+                    "cancel-current",
+                    "context-1",
+                    2,
+                    "request-2",
+                    "run-2",
+                ))
+                .is_none()
+        );
+        let responses = wait_for(&mut coordinator, 2);
+        assert_eq!(responses[0].failure_kind.as_deref(), Some("cancelled"));
+        assert!(responses[1].ok);
+        assert_eq!(coordinator.tombstone_count(), 1);
+        assert!(coordinator.tombstones.get("request-1").is_none());
+        assert!(coordinator.tombstones.get("request-2").is_some());
+
+        let evicted = only(coordinator.submit(cancel_request(
+            "cancel-evicted",
+            "context-1",
+            1,
+            "request-1",
+            "run-1",
+        )));
+        assert_eq!(evicted.failure_kind.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn completion_observed_before_cancel_returns_run_then_already_terminal() {
+        let mut coordinator = coordinator(1);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "42"))
+                .is_none()
+        );
+        coordinator
+            .active
+            .get("request-1")
+            .unwrap()
+            .handle
+            .control()
+            .wait_terminal();
+        let group = coordinator
+            .submit(cancel_request(
+                "cancel-1",
+                "context-1",
+                1,
+                "request-1",
+                "run-1",
+            ))
+            .unwrap_or_else(|| wait_group(&mut coordinator));
+        let CompletionGroup::Pair(responses) = group else {
+            panic!("completion-winning cancel must preserve paired ordering");
+        };
+        assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
+        assert!(responses[0].ok);
+        assert_eq!(responses[1].request_id.as_deref(), Some("cancel-1"));
+        assert_eq!(
+            responses[1].result,
+            Some(json!({
+                "target_request_id": "request-1",
+                "already_terminal": true,
+            }))
+        );
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 1);
+        assert!(coordinator.poll().is_empty());
+    }
+
+    #[test]
+    fn unexpected_terminal_after_owned_cancel_fails_cancel_closed() {
+        let binding = RunBinding {
+            request_id: "request-1".into(),
             context_id: "context-1".into(),
             generation: 1,
-            target_request_id: "request-1".into(),
             run_id: "run-1".into(),
-        }));
-        assert_eq!(cancel.failure_kind.as_deref(), Some("unsupported"));
-        assert_eq!(coordinator.active_run_count(), 1);
-        assert_eq!(coordinator.context_count(), 1);
+        };
+        let pending = PendingCancel {
+            request_id: "cancel-1".into(),
+            mode: PendingCancelMode::Owned {
+                started: true,
+                context_invalidated: true,
+            },
+        };
+        let result: RunResult = serde_json::from_value(json!({
+            "ok": true,
+            "kind": "value",
+            "saved_as": null,
+            "failure_kind": null,
+            "error": null
+        }))
+        .unwrap();
+        let CompletionGroup::Pair(responses) =
+            terminal_completion(&binding, Some(pending), Ok(result))
+        else {
+            panic!("owned cancellation always has two logical responses");
+        };
+        assert!(responses[0].ok);
+        assert_eq!(responses[1].failure_kind.as_deref(), Some("state_mismatch"));
+        assert!(!responses[1].ok);
     }
 
     #[test]
@@ -741,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_same_tick_runs_emit_in_submission_order() {
+    fn concurrent_completed_runs_each_emit_exactly_once() {
         let mut coordinator = coordinator(2);
         assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
         assert!(only(coordinator.submit(open("context-2", "open-2", 1))).ok);
@@ -755,28 +1398,17 @@ mod tests {
                 .submit(run_request("context-2", "request-2", 1, "run-2", "2"))
                 .is_none()
         );
-        coordinator
-            .active
-            .get("request-1")
-            .unwrap()
-            .handle
-            .control()
-            .wait_terminal();
-        coordinator
-            .active
-            .get("request-2")
-            .unwrap()
-            .handle
-            .control()
-            .wait_terminal();
-        let responses: Vec<_> = coordinator
-            .poll()
-            .into_iter()
-            .flat_map(CompletionGroup::into_responses)
+        let responses = wait_for(&mut coordinator, 2);
+        let mut request_ids: Vec<_> = responses
+            .iter()
+            .map(|response| response.request_id.as_deref().unwrap())
             .collect();
-        assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
-        assert_eq!(responses[1].request_id.as_deref(), Some("request-2"));
+        request_ids.sort_unstable();
+        assert_eq!(request_ids, ["request-1", "request-2"]);
+        assert!(responses.iter().all(|response| response.ok));
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 2);
+        assert!(coordinator.poll().is_empty());
     }
 
     #[test]
