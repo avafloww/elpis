@@ -1,9 +1,11 @@
 //! Bounded coordination for executor requests.
 
 use elpis_protocol::{Request, Response};
-use elpis_python::{PythonContext, PythonContextActor, PythonError, PythonRuntime};
+use elpis_python::{
+    PythonContext, PythonContextActor, PythonError, PythonRunHandle, PythonRuntime, RunResult,
+};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 
 /// Absolute process-local limit accepted for `CoordinatorConfig::max_contexts`.
@@ -83,11 +85,70 @@ impl CompletionGroup {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunBinding {
+    request_id: String,
+    context_id: String,
+    generation: u64,
+    run_id: String,
+}
+
+struct ActiveRun {
+    binding: RunBinding,
+    handle: PythonRunHandle,
+}
+
+struct Tombstones {
+    capacity: usize,
+    order: VecDeque<String>,
+    entries: HashMap<String, RunBinding>,
+}
+
+impl Tombstones {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            entries: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn insert(&mut self, binding: RunBinding) {
+        if self.entries.contains_key(&binding.request_id) {
+            self.entries.insert(binding.request_id.clone(), binding);
+            return;
+        }
+        if self.entries.len() == self.capacity {
+            let oldest = self
+                .order
+                .pop_front()
+                .expect("full tombstones have an oldest key");
+            self.entries
+                .remove(&oldest)
+                .expect("tombstone order and entries stay synchronized");
+        }
+        self.order.push_back(binding.request_id.clone());
+        self.entries.insert(binding.request_id.clone(), binding);
+    }
+
+    fn get(&self, request_id: &str) -> Option<&RunBinding> {
+        self.entries.get(request_id)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Owns all Python context actors and the bounded coordination state.
 pub struct Coordinator {
     runtime: PythonRuntime,
     config: CoordinatorConfig,
     contexts: HashMap<String, PythonContextActor>,
+    active: HashMap<String, ActiveRun>,
+    active_by_context: HashMap<String, String>,
+    active_order: VecDeque<String>,
+    tombstones: Tombstones,
 }
 
 impl Coordinator {
@@ -96,6 +157,10 @@ impl Coordinator {
             runtime,
             config,
             contexts: HashMap::with_capacity(config.max_contexts()),
+            active: HashMap::with_capacity(config.max_contexts()),
+            active_by_context: HashMap::with_capacity(config.max_contexts()),
+            active_order: VecDeque::with_capacity(config.max_contexts()),
+            tombstones: Tombstones::new(config.max_tombstones()),
         }
     }
 
@@ -105,6 +170,14 @@ impl Coordinator {
 
     pub fn context_count(&self) -> usize {
         self.contexts.len()
+    }
+
+    pub fn active_run_count(&self) -> usize {
+        self.active.len()
+    }
+
+    pub fn tombstone_count(&self) -> usize {
+        self.tombstones.len()
     }
 
     /// Submit one decoded request. `None` is reserved for accepted asynchronous work.
@@ -131,12 +204,23 @@ impl Coordinator {
                 generation,
                 ..
             } => self.close(request_id, context_id, generation),
-            Request::Run { .. } => Response::failure(
-                Some(request_id),
-                "failed",
-                "unsupported",
-                "run coordinator is not active",
-            ),
+            Request::Run {
+                context_id,
+                generation,
+                run_id,
+                source,
+                preview_max_bytes,
+                ..
+            } => {
+                return self.run(
+                    request_id,
+                    context_id,
+                    generation,
+                    run_id,
+                    source,
+                    preview_max_bytes,
+                );
+            }
             Request::Cancel { .. } => Response::failure(
                 Some(request_id),
                 "failed",
@@ -192,6 +276,158 @@ impl Coordinator {
         }
     }
 
+    fn run(
+        &mut self,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        run_id: String,
+        source: String,
+        preview_max_bytes: usize,
+    ) -> Option<CompletionGroup> {
+        if let Some(active) = self.active.get(&request_id) {
+            let exact = active.binding.context_id == context_id
+                && active.binding.generation == generation
+                && active.binding.run_id == run_id;
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "conflict",
+                if exact {
+                    "run request is already active"
+                } else {
+                    "run request_id was already used"
+                },
+            ));
+        }
+        if let Some(terminal) = self.tombstones.get(&request_id) {
+            let exact = terminal.context_id == context_id
+                && terminal.generation == generation
+                && terminal.run_id == run_id;
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "conflict",
+                if exact {
+                    "run request already completed"
+                } else {
+                    "run request_id was already used"
+                },
+            ));
+        }
+        let Some(actor) = self.contexts.get(&context_id) else {
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "not_found",
+                "context is not open",
+            ));
+        };
+        if actor.binding() != (context_id.as_str(), generation) {
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "binding",
+                "context generation mismatch",
+            ));
+        }
+        if self.active_by_context.contains_key(&context_id) {
+            return single(Response::failure(
+                Some(request_id),
+                "failed",
+                "busy",
+                "context already has an active run",
+            ));
+        }
+
+        let scheduled =
+            actor.schedule_deferred(&context_id, generation, &run_id, &source, preview_max_bytes);
+        let handle = match scheduled {
+            Ok(handle) => handle,
+            Err(error) => {
+                let invalid = !actor.is_valid();
+                if invalid {
+                    self.remove_context(&context_id);
+                }
+                return single(run_schedule_failure(request_id, error));
+            }
+        };
+        let control = handle.control();
+        let binding = RunBinding {
+            request_id: request_id.clone(),
+            context_id: context_id.clone(),
+            generation,
+            run_id,
+        };
+        self.active_by_context
+            .insert(context_id, request_id.clone());
+        self.active_order.push_back(request_id.clone());
+        self.active
+            .insert(request_id, ActiveRun { binding, handle });
+        let _ = control.start();
+        None
+    }
+
+    /// Poll each currently active run at most once in fair FIFO order.
+    pub fn poll(&mut self) -> Vec<CompletionGroup> {
+        let mut completions = Vec::new();
+        let pending = self.active_order.len();
+        for _ in 0..pending {
+            let request_id = self
+                .active_order
+                .pop_front()
+                .expect("active order length was captured");
+            let outcome = self
+                .active
+                .get(&request_id)
+                .expect("active order and map stay synchronized")
+                .handle
+                .try_wait();
+            match outcome {
+                Ok(None) => self.active_order.push_back(request_id),
+                terminal => {
+                    let active = self
+                        .active
+                        .remove(&request_id)
+                        .expect("terminal run remains active until removal");
+                    if self.active_by_context.get(&active.binding.context_id)
+                        == Some(&active.binding.request_id)
+                    {
+                        self.active_by_context.remove(&active.binding.context_id);
+                    }
+                    let response = match terminal {
+                        Ok(Some(result)) => {
+                            run_result_response(active.binding.request_id.clone(), result)
+                        }
+                        Err(error) => Response::failure(
+                            Some(active.binding.request_id.clone()),
+                            "failed",
+                            "runtime",
+                            error.to_string(),
+                        ),
+                        Ok(None) => unreachable!("pending runs were requeued"),
+                    };
+                    if self
+                        .contexts
+                        .get(&active.binding.context_id)
+                        .is_some_and(|actor| !actor.is_valid())
+                    {
+                        self.remove_context(&active.binding.context_id);
+                    }
+                    self.tombstones.insert(active.binding);
+                    completions.push(CompletionGroup::Single(response));
+                }
+            }
+        }
+        completions
+    }
+
+    fn remove_context(&mut self, context_id: &str) {
+        if let Some(actor) = self.contexts.remove(context_id) {
+            let _ = actor.close();
+        }
+    }
+
     fn close(&mut self, request_id: String, context_id: String, generation: u64) -> Response {
         let Some(actor) = self.contexts.get(&context_id) else {
             return Response::success(request_id, "closed", json!({"already_closed": true}));
@@ -202,6 +438,14 @@ impl Coordinator {
                 "failed",
                 "binding",
                 "context generation mismatch",
+            );
+        }
+        if self.active_by_context.contains_key(&context_id) {
+            return Response::failure(
+                Some(request_id),
+                "failed",
+                "busy",
+                "context has an active run",
             );
         }
 
@@ -232,10 +476,41 @@ fn single(response: Response) -> Option<CompletionGroup> {
     Some(CompletionGroup::Single(response))
 }
 
+fn run_schedule_failure(request_id: String, error: PythonError) -> Response {
+    let (failure_kind, message) = match error {
+        PythonError::Binding => ("binding", "context generation mismatch".into()),
+        PythonError::Busy => ("busy", "context already has an active run".into()),
+        PythonError::DuplicateRun => ("conflict", "run_id was already used in this context".into()),
+        error => ("runtime", error.to_string()),
+    };
+    Response::failure(Some(request_id), "failed", failure_kind, message)
+}
+
+fn run_result_response(request_id: String, result: RunResult) -> Response {
+    if result.ok {
+        return match serde_json::to_value(result) {
+            Ok(value) => Response::success(request_id, "completed", value),
+            Err(error) => Response::failure(
+                Some(request_id),
+                "failed",
+                "serialization",
+                error.to_string(),
+            ),
+        };
+    }
+    Response::failure(
+        Some(request_id),
+        result.kind,
+        result.failure_kind.unwrap_or_else(|| "runtime".into()),
+        result.error.unwrap_or_else(|| "python run failed".into()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use elpis_protocol::{DEFAULT_PREVIEW_BYTES, PROTOCOL_VERSION};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn coordinator(max_contexts: usize) -> Coordinator {
         Coordinator::new(
@@ -267,6 +542,42 @@ mod tests {
             context_id: context_id.into(),
             generation,
         }
+    }
+
+    fn run_request(
+        context_id: &str,
+        request_id: &str,
+        generation: u64,
+        run_id: &str,
+        source: impl Into<String>,
+    ) -> Request {
+        Request::Run {
+            protocol: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            context_id: context_id.into(),
+            generation,
+            run_id: run_id.into(),
+            source: source.into(),
+            preview_max_bytes: DEFAULT_PREVIEW_BYTES,
+        }
+    }
+
+    fn wait_for(coordinator: &mut Coordinator, count: usize) -> Vec<Response> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut responses = Vec::new();
+        while responses.len() < count {
+            responses.extend(
+                coordinator
+                    .poll()
+                    .into_iter()
+                    .flat_map(CompletionGroup::into_responses),
+            );
+            if responses.len() < count {
+                assert!(Instant::now() < deadline, "coordinator poll timed out");
+                std::thread::yield_now();
+            }
+        }
+        responses
     }
 
     #[test]
@@ -387,20 +698,20 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_run_and_cancel_have_no_effect() {
+    fn unsupported_cancel_does_not_disturb_pending_run() {
         let mut coordinator = coordinator(1);
         assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
-
-        let run = only(coordinator.submit(Request::Run {
-            protocol: PROTOCOL_VERSION,
-            request_id: "request-1".into(),
-            context_id: "context-1".into(),
-            generation: 1,
-            run_id: "run-1".into(),
-            source: "raise SystemExit".into(),
-            preview_max_bytes: DEFAULT_PREVIEW_BYTES,
-        }));
-        assert_eq!(run.failure_kind.as_deref(), Some("unsupported"));
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-1",
+                    "request-1",
+                    1,
+                    "run-1",
+                    "import time\nwhile True: time.sleep(1)",
+                ))
+                .is_none()
+        );
 
         let cancel = only(coordinator.submit(Request::Cancel {
             protocol: PROTOCOL_VERSION,
@@ -411,7 +722,210 @@ mod tests {
             run_id: "run-1".into(),
         }));
         assert_eq!(cancel.failure_kind.as_deref(), Some("unsupported"));
+        assert_eq!(coordinator.active_run_count(), 1);
         assert_eq!(coordinator.context_count(), 1);
+    }
+
+    #[test]
+    fn run_rejects_missing_and_stale_contexts_before_scheduling() {
+        let mut coordinator = coordinator(1);
+        let missing =
+            only(coordinator.submit(run_request("context-1", "request-missing", 1, "run-1", "1")));
+        assert_eq!(missing.failure_kind.as_deref(), Some("not_found"));
+        assert!(only(coordinator.submit(open("context-1", "open-1", 2))).ok);
+        let stale =
+            only(coordinator.submit(run_request("context-1", "request-stale", 1, "run-2", "2")));
+        assert_eq!(stale.failure_kind.as_deref(), Some("binding"));
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 0);
+    }
+
+    #[test]
+    fn completed_same_tick_runs_emit_in_submission_order() {
+        let mut coordinator = coordinator(2);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(only(coordinator.submit(open("context-2", "open-2", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "1"))
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .submit(run_request("context-2", "request-2", 1, "run-2", "2"))
+                .is_none()
+        );
+        coordinator
+            .active
+            .get("request-1")
+            .unwrap()
+            .handle
+            .control()
+            .wait_terminal();
+        coordinator
+            .active
+            .get("request-2")
+            .unwrap()
+            .handle
+            .control()
+            .wait_terminal();
+        let responses: Vec<_> = coordinator
+            .poll()
+            .into_iter()
+            .flat_map(CompletionGroup::into_responses)
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
+        assert_eq!(responses[1].request_id.as_deref(), Some("request-2"));
+    }
+
+    #[test]
+    fn run_is_pending_then_completes_once_with_existing_response_shape() {
+        let mut coordinator = coordinator(1);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "40 + 2"))
+                .is_none()
+        );
+        assert_eq!(coordinator.active_run_count(), 1);
+
+        let responses = wait_for(&mut coordinator, 1);
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].ok);
+        assert_eq!(responses[0].kind, "completed");
+        assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
+        assert_eq!(
+            responses[0]
+                .result
+                .as_ref()
+                .and_then(|value| value.get("preview"))
+                .and_then(|value| value.as_str()),
+            Some("42")
+        );
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.tombstone_count(), 1);
+        assert!(coordinator.poll().is_empty());
+        assert!(only(coordinator.submit(close("context-1", "close-1", 1))).ok);
+    }
+
+    #[test]
+    fn active_run_rejects_duplicate_busy_and_close_without_cancelling() {
+        let mut coordinator = coordinator(1);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        let source = "import time\nwhile True: time.sleep(1)";
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", source))
+                .is_none()
+        );
+        let duplicate =
+            only(coordinator.submit(run_request("context-1", "request-1", 1, "run-1", "1")));
+        assert_eq!(duplicate.failure_kind.as_deref(), Some("conflict"));
+        let busy = only(coordinator.submit(run_request("context-1", "request-2", 1, "run-2", "2")));
+        assert_eq!(busy.failure_kind.as_deref(), Some("busy"));
+        let close = only(coordinator.submit(close("context-1", "close-1", 1)));
+        assert_eq!(close.failure_kind.as_deref(), Some("busy"));
+        assert_eq!(coordinator.active_run_count(), 1);
+        assert_eq!(coordinator.context_count(), 1);
+    }
+
+    #[test]
+    fn preparse_completion_preserves_context_and_tombstones_evict_fifo() {
+        let mut coordinator = Coordinator::new(
+            PythonRuntime::system("python3"),
+            CoordinatorConfig::new(1, 1).unwrap(),
+        );
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", "if:"))
+                .is_none()
+        );
+        let first = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(first.failure_kind.as_deref(), Some("preparse"));
+        assert_eq!(coordinator.context_count(), 1);
+        let binding = coordinator.tombstones.get("request-1").unwrap();
+        assert_eq!(binding.context_id, "context-1");
+        assert_eq!(binding.generation, 1);
+        assert_eq!(binding.run_id, "run-1");
+        let duplicate =
+            only(coordinator.submit(run_request("context-1", "request-1", 1, "run-1", "1")));
+        assert_eq!(duplicate.failure_kind.as_deref(), Some("conflict"));
+        let reused_run_id =
+            only(coordinator.submit(run_request("context-1", "request-other", 1, "run-1", "1")));
+        assert_eq!(reused_run_id.failure_kind.as_deref(), Some("conflict"));
+        assert_eq!(coordinator.active_run_count(), 0);
+        assert_eq!(coordinator.context_count(), 1);
+
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-2", 1, "run-2", "2"))
+                .is_none()
+        );
+        wait_for(&mut coordinator, 1);
+        assert!(coordinator.tombstones.get("request-1").is_none());
+        assert!(coordinator.tombstones.get("request-2").is_some());
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-3", "3"))
+                .is_none()
+        );
+        wait_for(&mut coordinator, 1);
+        assert!(coordinator.tombstones.get("request-2").is_none());
+        assert!(coordinator.tombstones.get("request-1").is_some());
+    }
+
+    #[test]
+    fn poll_is_fair_across_contexts_and_child_exit_invalidates_only_its_context() {
+        let mut coordinator = coordinator(3);
+        assert!(only(coordinator.submit(open("context-1", "open-1", 1))).ok);
+        assert!(only(coordinator.submit(open("context-2", "open-2", 1))).ok);
+        assert!(only(coordinator.submit(open("context-3", "open-3", 1))).ok);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let gate = std::env::temp_dir().join(format!(
+            "elpis-coordinator-gate-{}-{unique}",
+            std::process::id()
+        ));
+        let gate_literal = serde_json::to_string(gate.to_str().unwrap()).unwrap();
+        let blocked = format!(
+            "import pathlib, time\np = pathlib.Path({gate_literal})\nwhile not p.exists(): time.sleep(0.001)\n1"
+        );
+        assert!(
+            coordinator
+                .submit(run_request("context-1", "request-1", 1, "run-1", blocked))
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .submit(run_request("context-2", "request-2", 1, "run-2", "2"))
+                .is_none()
+        );
+        let first = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(first.request_id.as_deref(), Some("request-2"));
+        std::fs::write(&gate, b"go").unwrap();
+        let second = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(second.request_id.as_deref(), Some("request-1"));
+        let _ = std::fs::remove_file(&gate);
+
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-3",
+                    "request-3",
+                    1,
+                    "run-3",
+                    "import os\nos._exit(23)",
+                ))
+                .is_none()
+        );
+        let crashed = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(crashed.failure_kind.as_deref(), Some("runtime"));
+        assert_eq!(coordinator.context_count(), 2);
+        assert!(only(coordinator.submit(close("context-3", "close-3", 1))).ok);
     }
 
     #[test]
@@ -430,7 +944,6 @@ mod tests {
     #[test]
     fn dropping_coordinator_reaps_its_context_actors() {
         use std::os::unix::fs::PermissionsExt;
-        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
