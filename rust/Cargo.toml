@@ -6,6 +6,7 @@ members = [
   "crates/elpis-python",
   "crates/elpis-executor",
   "crates/elpis-runtime",
+  "crates/elpis-identity",
 ]
 resolver = "3"
 
@@ -24,6 +25,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
+ring = "=0.17.14"
+rustls = { version = "=0.23.37", default-features = false, features = ["std", "ring", "tls12"] }
+rcgen = { version = "=0.14.9", default-features = false, features = ["ring"] }
+x509-parser = "=0.18.1"
+rustix = { version = "=1.1.2", features = ["process"] }
+zeroize = "=1.8.1"
 tar = "0.4"
 thiserror = "2"
 tracing = "0.1"
