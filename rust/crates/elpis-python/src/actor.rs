@@ -1277,6 +1277,7 @@ mod tests {
             CancelOutcome::RequestedWhileExecuting
         );
         wait_until(|| cancelled.load(Ordering::SeqCst));
+        assert_eq!(run.cancel().unwrap(), CancelOutcome::AlreadyRequested);
         assert!(!reaped.load(Ordering::SeqCst));
         assert!(matches!(
             actor.run("host-active-cancel", 1, "run-2", "1", 1024),
