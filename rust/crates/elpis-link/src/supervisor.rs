@@ -8,7 +8,7 @@ use elpis_journal::Journal;
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 
-use crate::{Dispatcher, LinkConfig, LinkError, Session, SessionEvent};
+use crate::{DeferredDispatcher, LinkConfig, LinkError, Session, SessionEvent};
 
 const MAX_SUPERVISOR_DURATION: Duration = Duration::from_secs(60 * 60);
 const MAX_BACKOFF_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -225,7 +225,7 @@ impl Supervisor {
         &self,
         identity: &IdentityStore,
         journal: &mut Journal,
-        dispatcher: &mut impl Dispatcher,
+        dispatcher: &mut impl DeferredDispatcher,
     ) -> Result<SupervisorExit, SupervisorError> {
         let mut attempt = 0_u32;
         loop {
@@ -289,7 +289,7 @@ impl Supervisor {
         session: &mut Session,
         identity: &IdentityStore,
         journal: &mut Journal,
-        dispatcher: &mut impl Dispatcher,
+        dispatcher: &mut impl DeferredDispatcher,
         credential: &CredentialMetadata,
     ) -> ActiveOutcome {
         let mut last_server_activity = Instant::now();
@@ -324,9 +324,27 @@ impl Supervisor {
                 Ok(
                     SessionEvent::Control
                     | SessionEvent::ServerHeartbeat { .. }
-                    | SessionEvent::RequestCompleted { .. }
+                    | SessionEvent::RequestAccepted { .. }
+                    | SessionEvent::RequestCompleted {
+                        accepted_server_request: true,
+                        ..
+                    }
+                    | SessionEvent::RequestPairCompleted {
+                        accepted_server_request: true,
+                        ..
+                    }
                     | SessionEvent::CompletedResponseResent { .. },
                 ) => last_server_activity = Instant::now(),
+                Ok(
+                    SessionEvent::RequestCompleted {
+                        accepted_server_request: false,
+                        ..
+                    }
+                    | SessionEvent::RequestPairCompleted {
+                        accepted_server_request: false,
+                        ..
+                    },
+                ) => {}
                 Err(error) => return active_from_link_error(error),
             }
         }

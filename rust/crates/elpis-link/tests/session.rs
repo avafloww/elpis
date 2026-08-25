@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 use elpis_identity::{CredentialPolicy, IdentityStore, IssuedCredentials, RevocationEvidence};
 use elpis_journal::{Journal, JournalLimits};
 use elpis_link::{
-    BackoffPolicy, DrainSignal, LinkConfig, LinkError, Session, SessionEvent, Supervisor,
-    SupervisorConfig, SupervisorError, SupervisorExit,
+    BackoffPolicy, DeferredDispatcher, DispatchGroup, DrainSignal, LinkConfig, LinkError, Session,
+    SessionEvent, Supervisor, SupervisorConfig, SupervisorError, SupervisorExit,
 };
 use elpis_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
 use elpis_transport::{ClientFrame, ClientHello, ServerFrame, ServerWelcome};
@@ -238,6 +238,48 @@ fn request(executor_id: &str, seq: u64) -> ServerFrame {
     }
 }
 
+fn framed_request(executor_id: &str, seq: u64, request: Request) -> ServerFrame {
+    ServerFrame::Request {
+        protocol: PROTOCOL_VERSION,
+        executor_id: executor_id.to_owned(),
+        boot_epoch: EPOCH.to_owned(),
+        connection_id: CONNECTION.to_owned(),
+        seq,
+        request,
+    }
+}
+
+fn run_request(executor_id: &str, seq: u64) -> ServerFrame {
+    framed_request(
+        executor_id,
+        seq,
+        Request::Run {
+            protocol: PROTOCOL_VERSION,
+            request_id: "run-request".into(),
+            context_id: "context-1".into(),
+            generation: 1,
+            run_id: "run-1".into(),
+            source: "40 + 2".into(),
+            preview_max_bytes: 1024,
+        },
+    )
+}
+
+fn cancel_request(executor_id: &str, seq: u64) -> ServerFrame {
+    framed_request(
+        executor_id,
+        seq,
+        Request::Cancel {
+            protocol: PROTOCOL_VERSION,
+            request_id: "cancel-request".into(),
+            context_id: "context-1".into(),
+            generation: 1,
+            target_request_id: "run-request".into(),
+            run_id: "run-1".into(),
+        },
+    )
+}
+
 fn heartbeat(executor_id: &str, seq: u64) -> ServerFrame {
     ServerFrame::Heartbeat {
         protocol: PROTOCOL_VERSION,
@@ -246,6 +288,363 @@ fn heartbeat(executor_id: &str, seq: u64) -> ServerFrame {
         connection_id: CONNECTION.to_owned(),
         seq,
     }
+}
+
+struct DeferredPairDispatcher {
+    observer: Journal,
+    cancel_seq: u64,
+    run_pending: bool,
+    defer_pair: bool,
+    completion: Option<DispatchGroup>,
+    poll_count: usize,
+}
+
+impl DeferredDispatcher for DeferredPairDispatcher {
+    fn submit(&mut self, request: Request) -> Option<DispatchGroup> {
+        let request_id = request.request_id().to_owned();
+        let stored = self
+            .observer
+            .request(if request_id == "run-request" {
+                1
+            } else {
+                self.cancel_seq
+            })
+            .unwrap()
+            .expect("the request is durable before submit");
+        assert_eq!(stored.status, elpis_journal::RequestStatus::Prepared);
+        match request {
+            Request::Run { .. } => {
+                self.run_pending = true;
+                None
+            }
+            Request::Cancel { .. } => {
+                assert!(self.run_pending);
+                assert_eq!(
+                    self.observer.request(1).unwrap().unwrap().status,
+                    elpis_journal::RequestStatus::Prepared
+                );
+                self.run_pending = false;
+                let group = DispatchGroup::Pair([
+                    Response::success("run-request".into(), "cancelled", serde_json::json!({})),
+                    Response::success("cancel-request".into(), "cancel", serde_json::json!({})),
+                ]);
+                if self.defer_pair {
+                    self.completion = Some(group);
+                    None
+                } else {
+                    Some(group)
+                }
+            }
+            _ => panic!("unexpected request"),
+        }
+    }
+
+    fn poll(&mut self) -> Option<DispatchGroup> {
+        self.poll_count += 1;
+        self.completion.take()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.run_pending || self.completion.is_some()
+    }
+}
+
+#[test]
+fn deferred_run_keeps_heartbeat_and_cancel_readable_then_commits_pair_before_send() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Deferred Link Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let journal_path = temp.path().join("journal").join("link.sqlite");
+    let server_journal_path = journal_path.clone();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                heartbeat(hello.executor_id(), 2).to_json().unwrap(),
+            ))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                cancel_request(hello.executor_id(), 3).to_json().unwrap(),
+            ))
+            .unwrap();
+
+        let first_bytes = websocket.read().unwrap().into_data().to_vec();
+        let durable = Journal::open(server_journal_path, JournalLimits::default()).unwrap();
+        assert_eq!(
+            durable.request(1).unwrap().unwrap().status,
+            elpis_journal::RequestStatus::Completed
+        );
+        assert_eq!(
+            durable.request(3).unwrap().unwrap().status,
+            elpis_journal::RequestStatus::Completed
+        );
+        let second_bytes = websocket.read().unwrap().into_data().to_vec();
+        let first = ClientFrame::from_json(&first_bytes).unwrap();
+        let second = ClientFrame::from_json(&second_bytes).unwrap();
+        assert!(matches!(
+            first,
+            ClientFrame::Response {
+                seq: 1,
+                request_seq: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            ClientFrame::Response {
+                seq: 2,
+                request_seq: 3,
+                ..
+            }
+        ));
+    });
+
+    let mut journal = journal(&temp);
+    let observer = Journal::open(&journal_path, JournalLimits::default()).unwrap();
+    let mut dispatcher = DeferredPairDispatcher {
+        observer,
+        cancel_seq: 3,
+        run_pending: false,
+        defer_pair: false,
+        completion: None,
+        poll_count: 0,
+    };
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestAccepted { server_seq: 1 }
+    );
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::ServerHeartbeat { server_seq: 2 }
+    );
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestPairCompleted {
+            server_seqs: [1, 3],
+            accepted_server_request: true,
+        }
+    );
+    assert_eq!(dispatcher.poll_count, 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn accepted_cancel_can_complete_as_a_later_atomic_pair() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Deferred Pair Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                cancel_request(hello.executor_id(), 2).to_json().unwrap(),
+            ))
+            .unwrap();
+        let first = websocket.read().unwrap().into_data().to_vec();
+        let second = websocket.read().unwrap().into_data().to_vec();
+        (first, second)
+    });
+
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let mut dispatcher = DeferredPairDispatcher {
+        observer,
+        cancel_seq: 2,
+        run_pending: false,
+        defer_pair: true,
+        completion: None,
+        poll_count: 0,
+    };
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestAccepted { server_seq: 1 }
+    );
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestAccepted { server_seq: 2 }
+    );
+    assert!(session.has_pending());
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestPairCompleted {
+            server_seqs: [1, 2],
+            accepted_server_request: false,
+        }
+    );
+    assert!(!session.has_pending());
+    let (first, second) = server.join().unwrap();
+    assert!(matches!(
+        ClientFrame::from_json(&first).unwrap(),
+        ClientFrame::Response {
+            seq: 1,
+            request_seq: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ClientFrame::from_json(&second).unwrap(),
+        ClientFrame::Response {
+            seq: 2,
+            request_seq: 2,
+            ..
+        }
+    ));
+}
+
+struct DeferredSingleDispatcher {
+    observer: Journal,
+    completion: Option<DispatchGroup>,
+}
+
+impl DeferredDispatcher for DeferredSingleDispatcher {
+    fn submit(&mut self, request: Request) -> Option<DispatchGroup> {
+        assert_eq!(
+            self.observer.request(1).unwrap().unwrap().status,
+            elpis_journal::RequestStatus::Prepared
+        );
+        self.completion = Some(DispatchGroup::Single(Response::success(
+            request.request_id().to_owned(),
+            "completed",
+            serde_json::json!({}),
+        )));
+        None
+    }
+
+    fn poll(&mut self) -> Option<DispatchGroup> {
+        self.completion.take()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.completion.is_some()
+    }
+}
+
+#[test]
+fn natural_deferred_completion_flushes_without_another_server_frame() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Deferred Natural Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        websocket.read().unwrap().into_data().to_vec()
+    });
+
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let mut dispatcher = DeferredSingleDispatcher {
+        observer,
+        completion: None,
+    };
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestAccepted { server_seq: 1 }
+    );
+    assert!(session.has_pending());
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestCompleted {
+            server_seq: 1,
+            accepted_server_request: false,
+        }
+    );
+    assert!(!session.has_pending());
+    let response = ClientFrame::from_json(&server.join().unwrap()).unwrap();
+    assert!(matches!(
+        response,
+        ClientFrame::Response {
+            seq: 1,
+            request_seq: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn mismatched_immediate_group_keeps_prepared_row_in_session_custody() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Mismatched Group Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        let _ = websocket.close(None);
+    });
+
+    let mut journal = journal(&temp);
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    let mut dispatcher = |_request: Request| {
+        Response::success("wrong-request".into(), "completed", serde_json::json!({}))
+    };
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher),
+        Err(LinkError::StateMismatch)
+    );
+    assert!(session.has_pending());
+    assert_eq!(
+        journal.request(1).unwrap().unwrap().status,
+        elpis_journal::RequestStatus::Prepared
+    );
+    drop(session);
+    server.join().unwrap();
 }
 
 #[test]
@@ -317,7 +716,10 @@ fn request_heartbeats_and_exact_completed_resend_cross_real_mtls_websocket() {
     };
     assert_eq!(
         session.step(&mut journal, &mut dispatcher).unwrap(),
-        SessionEvent::RequestCompleted { server_seq: 1 }
+        SessionEvent::RequestCompleted {
+            server_seq: 1,
+            accepted_server_request: true,
+        }
     );
     assert_eq!(
         session.step(&mut journal, &mut dispatcher).unwrap(),
@@ -585,6 +987,113 @@ fn crash_after_prepare_reopens_ambiguous_and_never_reexecutes() {
     assert_eq!(dispatches, 0);
     drop(session);
     server.join().unwrap();
+}
+
+#[test]
+fn paired_send_uncertainty_reconnects_and_resends_both_exact_without_effect() {
+    let temp = TempDir::new().unwrap();
+    let authority = TestAuthority::new("Paired Uncertainty Root");
+    let store = installed_store(&temp.path().join("identity"), &authority);
+    let (first_listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let first_server = thread::spawn(move || {
+        let (socket, _) = first_listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                cancel_request(hello.executor_id(), 2).to_json().unwrap(),
+            ))
+            .unwrap();
+        let socket = websocket.into_inner().sock;
+        let _ = socket.shutdown(Shutdown::Both);
+    });
+
+    let mut journal = journal(&temp);
+    let observer = Journal::open(journal.path(), JournalLimits::default()).unwrap();
+    let mut dispatcher = DeferredPairDispatcher {
+        observer,
+        cancel_seq: 2,
+        run_pending: false,
+        defer_pair: false,
+        completion: None,
+        poll_count: 0,
+    };
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    assert_eq!(
+        session.step(&mut journal, &mut dispatcher).unwrap(),
+        SessionEvent::RequestAccepted { server_seq: 1 }
+    );
+    let _ = session.step(&mut journal, &mut dispatcher);
+    first_server.join().unwrap();
+    assert!(!session.has_pending());
+    let first_stored = journal.request(1).unwrap().unwrap();
+    let second_stored = journal.request(2).unwrap().unwrap();
+    assert_eq!(first_stored.status, elpis_journal::RequestStatus::Completed);
+    assert_eq!(
+        second_stored.status,
+        elpis_journal::RequestStatus::Completed
+    );
+    let first_bytes = first_stored.response.unwrap().bytes;
+    let second_bytes = second_stored.response.unwrap().bytes;
+    drop(session);
+
+    let (listener, port) = listener();
+    let config = server_config(&authority, "localhost", &authority);
+    let second_server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let stream = tls_stream(config, socket);
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        let hello = ClientHello::from_json(&websocket.read().unwrap().into_data()).unwrap();
+        websocket
+            .send(Message::binary(welcome(&hello).to_json().unwrap()))
+            .unwrap();
+        websocket
+            .send(Message::binary(
+                run_request(hello.executor_id(), 1).to_json().unwrap(),
+            ))
+            .unwrap();
+        let first = websocket.read().unwrap().into_data().to_vec();
+        websocket
+            .send(Message::binary(
+                cancel_request(hello.executor_id(), 2).to_json().unwrap(),
+            ))
+            .unwrap();
+        let second = websocket.read().unwrap().into_data().to_vec();
+        (first, second)
+    });
+    let dispatches = std::cell::Cell::new(0);
+    let mut no_effect = |request: Request| {
+        dispatches.set(dispatches.get() + 1);
+        Response::success(
+            request.request_id().to_owned(),
+            "wrong",
+            serde_json::json!({}),
+        )
+    };
+    let mut session =
+        Session::connect(&link_config(port, &store), &store, &journal, EPOCH).unwrap();
+    assert_eq!(
+        session.step(&mut journal, &mut no_effect).unwrap(),
+        SessionEvent::CompletedResponseResent { server_seq: 1 }
+    );
+    assert_eq!(
+        session.step(&mut journal, &mut no_effect).unwrap(),
+        SessionEvent::CompletedResponseResent { server_seq: 2 }
+    );
+    assert_eq!(dispatches.get(), 0);
+    let replayed = second_server.join().unwrap();
+    assert_eq!(replayed, (first_bytes, second_bytes));
 }
 
 #[test]

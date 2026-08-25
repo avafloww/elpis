@@ -1,3 +1,4 @@
+use std::collections::{HashMap, hash_map::Entry};
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -6,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use elpis_identity::IdentityStore;
 use elpis_journal::{
-    ClientHeartbeatOutcome, HeartbeatOutcome, Journal, PrepareOutcome, RequestStatus,
+    ClientHeartbeatOutcome, HeartbeatOutcome, Journal, PrepareOutcome, PreparedRequest,
+    RequestStatus,
 };
 use elpis_protocol::{MAX_FRAME_BYTES, Request, Response};
 use elpis_transport::{ClientHello, ExecutorFence, FenceCheckpoint, ServerFrame, ServerWelcome};
@@ -105,6 +107,22 @@ impl LinkConfig {
     }
 }
 
+/// One completed response, or two responses whose order is atomic and significant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DispatchGroup {
+    Single(Response),
+    Pair([Response; 2]),
+}
+
+impl DispatchGroup {
+    fn responses(&self) -> &[Response] {
+        match self {
+            Self::Single(response) => std::slice::from_ref(response),
+            Self::Pair(responses) => responses,
+        }
+    }
+}
+
 pub trait Dispatcher {
     fn dispatch(&mut self, request: Request) -> Response;
 }
@@ -118,19 +136,57 @@ where
     }
 }
 
+pub trait DeferredDispatcher {
+    fn submit(&mut self, request: Request) -> Option<DispatchGroup>;
+    fn poll(&mut self) -> Option<DispatchGroup>;
+    fn has_pending(&self) -> bool;
+}
+
+impl<T> DeferredDispatcher for T
+where
+    T: Dispatcher,
+{
+    fn submit(&mut self, request: Request) -> Option<DispatchGroup> {
+        Some(DispatchGroup::Single(self.dispatch(request)))
+    }
+
+    fn poll(&mut self) -> Option<DispatchGroup> {
+        None
+    }
+
+    fn has_pending(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEvent {
     Idle,
     Control,
-    ServerHeartbeat { server_seq: u64 },
-    RequestCompleted { server_seq: u64 },
-    CompletedResponseResent { server_seq: u64 },
+    ServerHeartbeat {
+        server_seq: u64,
+    },
+    RequestAccepted {
+        server_seq: u64,
+    },
+    RequestCompleted {
+        server_seq: u64,
+        accepted_server_request: bool,
+    },
+    RequestPairCompleted {
+        server_seqs: [u64; 2],
+        accepted_server_request: bool,
+    },
+    CompletedResponseResent {
+        server_seq: u64,
+    },
     Closed,
 }
 
 pub struct Session {
     socket: LinkSocket,
     fence: ExecutorFence,
+    pending: HashMap<String, PreparedRequest>,
 }
 
 impl Session {
@@ -188,14 +244,26 @@ impl Session {
             .fence_checkpoint(hello.executor_id(), hello.boot_epoch(), &connection_id)
             .map_err(|_| LinkError::Journal)?;
         let fence = ExecutorFence::restore(checkpoint).map_err(|_| LinkError::Journal)?;
-        Ok(Self { socket, fence })
+        Ok(Self {
+            socket,
+            fence,
+            pending: HashMap::new(),
+        })
     }
 
     pub fn step(
         &mut self,
         journal: &mut Journal,
-        dispatcher: &mut impl Dispatcher,
+        dispatcher: &mut impl DeferredDispatcher,
     ) -> Result<SessionEvent, LinkError> {
+        // Completion work is bounded to one group and always wins over a socket
+        // read. An unfinished run still reaches the read below on every step.
+        if dispatcher.has_pending()
+            && let Some(group) = dispatcher.poll()
+        {
+            return self.complete_group(journal, group, None);
+        }
+
         let message = match self.socket.read() {
             Ok(message) => message,
             Err(tungstenite::Error::Io(error)) if is_timeout(&error) => {
@@ -246,16 +314,109 @@ impl Session {
                     PrepareOutcome::Existing(_) => return Err(LinkError::StateMismatch),
                 };
                 let dispatched = dispatched.ok_or(LinkError::StateMismatch)?;
-                let response = dispatcher.dispatch(dispatched.request);
-                let response_frame = self
+                let request_id = dispatched.request.request_id().to_owned();
+                match self.pending.entry(request_id.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(prepared);
+                    }
+                    Entry::Occupied(_) => return Err(LinkError::StateMismatch),
+                }
+                match dispatcher.submit(dispatched.request) {
+                    Some(group) => self.complete_group(journal, group, Some(&request_id)),
+                    None => Ok(SessionEvent::RequestAccepted { server_seq }),
+                }
+            }
+        }
+    }
+
+    fn complete_group(
+        &mut self,
+        journal: &mut Journal,
+        group: DispatchGroup,
+        required_request_id: Option<&str>,
+    ) -> Result<SessionEvent, LinkError> {
+        if required_request_id.is_some_and(|required| {
+            group
+                .responses()
+                .iter()
+                .filter(|response| response.request_id.as_deref() == Some(required))
+                .count()
+                != 1
+        }) {
+            return Err(LinkError::StateMismatch);
+        }
+        match group {
+            DispatchGroup::Single(response) => {
+                let request_id = response
+                    .request_id
+                    .clone()
+                    .ok_or(LinkError::StateMismatch)?;
+                let prepared = self
+                    .pending
+                    .get(&request_id)
+                    .cloned()
+                    .ok_or(LinkError::StateMismatch)?;
+                let frame = self
                     .fence
-                    .build_response(dispatched.seq, response)
+                    .build_response(prepared.server_seq(), response)
                     .map_err(|_| LinkError::Fence)?;
                 let stored = journal
-                    .complete(&prepared, &response_frame)
+                    .complete(&prepared, &frame)
                     .map_err(|_| LinkError::Journal)?;
+                self.pending.remove(&request_id);
                 self.send_exact(stored.bytes)?;
-                Ok(SessionEvent::RequestCompleted { server_seq })
+                Ok(SessionEvent::RequestCompleted {
+                    server_seq: prepared.server_seq(),
+                    accepted_server_request: required_request_id.is_some(),
+                })
+            }
+            DispatchGroup::Pair(responses) => {
+                let first_id = responses[0]
+                    .request_id
+                    .clone()
+                    .ok_or(LinkError::StateMismatch)?;
+                let second_id = responses[1]
+                    .request_id
+                    .clone()
+                    .ok_or(LinkError::StateMismatch)?;
+                if first_id == second_id {
+                    return Err(LinkError::StateMismatch);
+                }
+                let first_prepared = self
+                    .pending
+                    .get(&first_id)
+                    .cloned()
+                    .ok_or(LinkError::StateMismatch)?;
+                let second_prepared = self
+                    .pending
+                    .get(&second_id)
+                    .cloned()
+                    .ok_or(LinkError::StateMismatch)?;
+                let server_seqs = [first_prepared.server_seq(), second_prepared.server_seq()];
+                let [first_response, second_response] = responses;
+                let first_frame = self
+                    .fence
+                    .build_response(server_seqs[0], first_response)
+                    .map_err(|_| LinkError::Fence)?;
+                let second_frame = self
+                    .fence
+                    .build_response(server_seqs[1], second_response)
+                    .map_err(|_| LinkError::Fence)?;
+                let stored = journal
+                    .complete_pair(
+                        (&first_prepared, &first_frame),
+                        (&second_prepared, &second_frame),
+                    )
+                    .map_err(|_| LinkError::Journal)?;
+                self.pending.remove(&first_id);
+                self.pending.remove(&second_id);
+                let [first_stored, second_stored] = stored;
+                self.send_exact(first_stored.bytes)?;
+                self.send_exact(second_stored.bytes)?;
+                Ok(SessionEvent::RequestPairCompleted {
+                    server_seqs,
+                    accepted_server_request: required_request_id.is_some(),
+                })
             }
         }
     }
@@ -278,6 +439,10 @@ impl Session {
 
     pub fn checkpoint(&self) -> FenceCheckpoint {
         self.fence.checkpoint()
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     fn handle_existing(
