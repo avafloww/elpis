@@ -2,7 +2,10 @@
 
 use elpis_protocol::{
     Request, Response,
-    v2::{CompletedEffectReceipt, EffectAmbiguity, MAX_COMPLETED_EFFECTS, MAX_TOTAL_RECEIPT_BYTES},
+    v2::{
+        CompletedEffectReceipt, EffectAmbiguity, EffectAmbiguityReason, EffectBinding,
+        MAX_COMPLETED_EFFECTS, MAX_RECEIPT_BYTES, MAX_TOTAL_RECEIPT_BYTES,
+    },
 };
 use elpis_python::{
     CancelOutcome, HostCallService, PythonContext, PythonContextActor, PythonError,
@@ -135,11 +138,20 @@ pub enum HostEffectReportError {
 }
 
 #[derive(Debug)]
+struct ActiveEffectClaim {
+    token: u64,
+    binding: EffectBinding,
+    max_receipt_bytes: usize,
+}
+
+#[derive(Debug)]
 struct RunEffectState {
     binding: RunBinding,
     completed: Vec<CompletedEffectReceipt>,
     ambiguity: Option<EffectAmbiguity>,
     total_receipt_bytes: usize,
+    active_claim: Option<ActiveEffectClaim>,
+    next_claim_token: u64,
     sealed: bool,
 }
 
@@ -147,6 +159,115 @@ struct RunEffectState {
 struct RunEffectOutcomes {
     completed: Vec<CompletedEffectReceipt>,
     ambiguity: Option<EffectAmbiguity>,
+}
+
+/// A non-cloneable reservation for exactly one effect outcome.
+///
+/// A claim must be acquired before the effect can occur. It owns one completed
+/// receipt slot and a declared part of the aggregate receipt-byte budget until
+/// it is completed, made ambiguous, or explicitly released. Dropping a live
+/// claim conservatively records `ExecutorLost` for its exact binding and seals
+/// further reporting.
+#[derive(Debug)]
+#[must_use = "a live effect claim must be settled or released"]
+pub struct RunEffectClaim {
+    inner: Arc<Mutex<RunEffectState>>,
+    token: u64,
+    binding: EffectBinding,
+    max_receipt_bytes: usize,
+    live: bool,
+}
+
+impl RunEffectClaim {
+    pub fn binding(&self) -> &EffectBinding {
+        &self.binding
+    }
+
+    pub fn max_receipt_bytes(&self) -> usize {
+        self.max_receipt_bytes
+    }
+
+    /// Settles this claim with a validated canonical completed receipt.
+    pub fn completed(
+        mut self,
+        receipt: CompletedEffectReceipt,
+    ) -> Result<(), HostEffectReportError> {
+        let receipt_bytes = receipt
+            .receipt_bytes()
+            .map_err(|_| HostEffectReportError::Invalid)?
+            .len();
+        if receipt.binding != self.binding || receipt_bytes > self.max_receipt_bytes {
+            return Err(HostEffectReportError::Invalid);
+        }
+
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if !claim_matches(&state, self.token, &self.binding, self.max_receipt_bytes) {
+            return Err(HostEffectReportError::Invalid);
+        }
+        // reserve() proved both bounds. These checks keep corruption fail-closed.
+        let total_receipt_bytes = state
+            .total_receipt_bytes
+            .checked_add(receipt_bytes)
+            .filter(|total| *total <= MAX_TOTAL_RECEIPT_BYTES)
+            .ok_or(HostEffectReportError::Invalid)?;
+        state.active_claim = None;
+        state.total_receipt_bytes = total_receipt_bytes;
+        state.completed.push(receipt);
+        self.live = false;
+        Ok(())
+    }
+
+    /// Settles this claim with a protocol-typed uncertainty outcome.
+    pub fn ambiguous(mut self, ambiguity: EffectAmbiguity) -> Result<(), HostEffectReportError> {
+        ambiguity
+            .validate()
+            .map_err(|_| HostEffectReportError::Invalid)?;
+        if ambiguity.binding != self.binding {
+            return Err(HostEffectReportError::Invalid);
+        }
+
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if !claim_matches(&state, self.token, &self.binding, self.max_receipt_bytes) {
+            return Err(HostEffectReportError::Invalid);
+        }
+        state.active_claim = None;
+        state.ambiguity = Some(ambiguity);
+        self.live = false;
+        Ok(())
+    }
+
+    /// Gives back this reservation only when the effect has not occurred.
+    pub fn release(mut self) -> Result<(), HostEffectReportError> {
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if !claim_matches(&state, self.token, &self.binding, self.max_receipt_bytes) {
+            return Err(HostEffectReportError::Invalid);
+        }
+        state.active_claim = None;
+        self.live = false;
+        Ok(())
+    }
+}
+
+impl Drop for RunEffectClaim {
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        let mut state = lock_effects(&self.inner);
+        if !state.sealed {
+            settle_unclaimed_as_ambiguity(&mut state);
+            state.sealed = true;
+        }
+    }
 }
 
 /// Cloneable, run-bound sink for durable effect receipts and ambiguities.
@@ -165,11 +286,72 @@ impl RunEffectReporter {
                 completed: Vec::new(),
                 ambiguity: None,
                 total_receipt_bytes: 0,
+                active_claim: None,
+                next_claim_token: 1,
                 sealed: false,
             })),
         }
     }
 
+    /// Atomically reserves ordering, identity, a slot, and worst-case receipt
+    /// bytes before an effect can cross an irreversible host boundary.
+    pub fn reserve(
+        &self,
+        binding: EffectBinding,
+        max_receipt_bytes: usize,
+    ) -> Result<RunEffectClaim, HostEffectReportError> {
+        binding
+            .validate()
+            .map_err(|_| HostEffectReportError::Invalid)?;
+        if max_receipt_bytes > MAX_RECEIPT_BYTES {
+            return Err(HostEffectReportError::Invalid);
+        }
+
+        let mut state = lock_effects(&self.inner);
+        if state.sealed {
+            return Err(HostEffectReportError::Sealed);
+        }
+        if state.ambiguity.is_some()
+            || state.active_claim.is_some()
+            || !effect_binding_matches(&state.binding, &binding)
+            || state.completed.len() >= MAX_COMPLETED_EFFECTS
+            || state
+                .completed
+                .last()
+                .is_some_and(|prior| prior.binding.call_index >= binding.call_index)
+            || state
+                .completed
+                .iter()
+                .any(|prior| prior.binding.effect_id == binding.effect_id)
+            || state
+                .total_receipt_bytes
+                .checked_add(max_receipt_bytes)
+                .is_none_or(|total| total > MAX_TOTAL_RECEIPT_BYTES)
+        {
+            return Err(HostEffectReportError::Invalid);
+        }
+
+        let token = state.next_claim_token;
+        state.next_claim_token = state
+            .next_claim_token
+            .checked_add(1)
+            .ok_or(HostEffectReportError::Invalid)?;
+        state.active_claim = Some(ActiveEffectClaim {
+            token,
+            binding: binding.clone(),
+            max_receipt_bytes,
+        });
+        Ok(RunEffectClaim {
+            inner: Arc::clone(&self.inner),
+            token,
+            binding,
+            max_receipt_bytes,
+            live: true,
+        })
+    }
+
+    /// Directly records an already-safe receipt. Irreversible host effects must
+    /// use reserve() before crossing the effect boundary.
     pub fn completed(&self, receipt: CompletedEffectReceipt) -> Result<(), HostEffectReportError> {
         let receipt_bytes = receipt
             .receipt_bytes()
@@ -179,7 +361,8 @@ impl RunEffectReporter {
         if state.sealed {
             return Err(HostEffectReportError::Sealed);
         }
-        if state.ambiguity.is_some()
+        if state.active_claim.is_some()
+            || state.ambiguity.is_some()
             || !effect_binding_matches(&state.binding, &receipt.binding)
             || state.completed.len() >= MAX_COMPLETED_EFFECTS
             || state
@@ -203,6 +386,8 @@ impl RunEffectReporter {
         Ok(())
     }
 
+    /// Directly records an ambiguity when no claim is live. New irreversible
+    /// host effects must settle the claim returned by reserve() instead.
     pub fn ambiguous(&self, ambiguity: EffectAmbiguity) -> Result<(), HostEffectReportError> {
         ambiguity
             .validate()
@@ -211,7 +396,8 @@ impl RunEffectReporter {
         if state.sealed {
             return Err(HostEffectReportError::Sealed);
         }
-        if state.ambiguity.is_some()
+        if state.active_claim.is_some()
+            || state.ambiguity.is_some()
             || !effect_binding_matches(&state.binding, &ambiguity.binding)
             || state
                 .completed
@@ -230,6 +416,7 @@ impl RunEffectReporter {
 
     fn finish(&self) -> RunEffectOutcomes {
         let mut state = lock_effects(&self.inner);
+        settle_unclaimed_as_ambiguity(&mut state);
         state.sealed = true;
         RunEffectOutcomes {
             completed: std::mem::take(&mut state.completed),
@@ -238,8 +425,35 @@ impl RunEffectReporter {
     }
 
     fn seal(&self) {
-        lock_effects(&self.inner).sealed = true;
+        let mut state = lock_effects(&self.inner);
+        settle_unclaimed_as_ambiguity(&mut state);
+        state.sealed = true;
     }
+}
+
+fn claim_matches(
+    state: &RunEffectState,
+    token: u64,
+    binding: &EffectBinding,
+    max_receipt_bytes: usize,
+) -> bool {
+    state.active_claim.as_ref().is_some_and(|claim| {
+        claim.token == token
+            && claim.binding == *binding
+            && claim.max_receipt_bytes == max_receipt_bytes
+    })
+}
+
+fn settle_unclaimed_as_ambiguity(state: &mut RunEffectState) {
+    let Some(claim) = state.active_claim.take() else {
+        return;
+    };
+    state.ambiguity = Some(EffectAmbiguity {
+        binding: claim.binding,
+        reason: EffectAmbiguityReason::ExecutorLost,
+        may_have_occurred: true,
+        context_invalidated: true,
+    });
 }
 
 fn lock_effects(inner: &Mutex<RunEffectState>) -> MutexGuard<'_, RunEffectState> {
@@ -1084,6 +1298,8 @@ mod tests {
         Completed,
         Ambiguous,
         CompletedThenAmbiguous,
+        CompletedThenDropped,
+        DroppedClaim,
     }
 
     struct ReportingHostService {
@@ -1095,31 +1311,42 @@ mod tests {
 
     impl HostCallService for ReportingHostService {
         fn call(&mut self, call: &HostCall) -> HostResult {
+            let effect = effect_binding(&self.binding, call.call_index);
+            let claim = self
+                .effects
+                .reserve(effect, 0)
+                .expect("capacity is secured before the simulated effect");
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.mode {
                 ReportMode::Completed => {
-                    self.effects
+                    claim
                         .completed(completed_receipt(&self.binding, call.call_index))
-                        .expect("test receipt is valid");
+                        .expect("reserved test receipt is valid");
                     HostResult::accepted(format!("done-{}", call.call_index))
                 }
                 ReportMode::Ambiguous => {
-                    self.effects
+                    claim
                         .ambiguous(effect_ambiguity(&self.binding, call.call_index))
-                        .expect("test ambiguity is valid");
+                        .expect("reserved test ambiguity is valid");
                     HostResult::rejected("effect outcome is ambiguous")
                 }
-                ReportMode::CompletedThenAmbiguous if call.call_index == 0 => {
-                    self.effects
+                ReportMode::CompletedThenAmbiguous | ReportMode::CompletedThenDropped
+                    if call.call_index == 0 =>
+                {
+                    claim
                         .completed(completed_receipt(&self.binding, call.call_index))
-                        .expect("test receipt is valid");
+                        .expect("reserved test receipt is valid");
                     HostResult::accepted("done-0")
                 }
                 ReportMode::CompletedThenAmbiguous => {
-                    self.effects
+                    claim
                         .ambiguous(effect_ambiguity(&self.binding, call.call_index))
-                        .expect("test ambiguity is valid");
+                        .expect("reserved test ambiguity is valid");
                     HostResult::rejected("later effect outcome is ambiguous")
+                }
+                ReportMode::CompletedThenDropped | ReportMode::DroppedClaim => {
+                    drop(claim);
+                    HostResult::accepted("effect result without settlement")
                 }
             }
         }
@@ -1143,6 +1370,15 @@ mod tests {
             binding: effect_binding(binding, call_index),
             receipt: String::new(),
             receipt_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .into(),
+        }
+    }
+
+    fn one_byte_receipt(binding: &RunBinding, call_index: u64) -> CompletedEffectReceipt {
+        CompletedEffectReceipt {
+            binding: effect_binding(binding, call_index),
+            receipt: "YQ".into(),
+            receipt_sha256: "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
                 .into(),
         }
     }
@@ -1937,6 +2173,308 @@ mod tests {
     }
 
     #[test]
+    fn effect_claim_reserves_count_and_bytes_before_effect() {
+        let binding = RunBinding {
+            request_id: "request-claim-bounds".into(),
+            context_id: "context-claim-bounds".into(),
+            generation: 1,
+            run_id: "run-claim-bounds".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        for call_index in 0..(MAX_COMPLETED_EFFECTS - 1) as u64 {
+            reporter
+                .completed(completed_receipt(&binding, call_index))
+                .unwrap();
+        }
+        let final_claim = reporter
+            .reserve(
+                effect_binding(&binding, (MAX_COMPLETED_EFFECTS - 1) as u64),
+                0,
+            )
+            .unwrap();
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, MAX_COMPLETED_EFFECTS as u64), 0,),
+            Err(HostEffectReportError::Invalid)
+        ));
+        final_claim
+            .completed(completed_receipt(
+                &binding,
+                (MAX_COMPLETED_EFFECTS - 1) as u64,
+            ))
+            .unwrap();
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, MAX_COMPLETED_EFFECTS as u64), 0,),
+            Err(HostEffectReportError::Invalid)
+        ));
+
+        let bytes = RunEffectReporter::new(binding.clone());
+        lock_effects(&bytes.inner).total_receipt_bytes = MAX_TOTAL_RECEIPT_BYTES - 1;
+        let exact = bytes.reserve(effect_binding(&binding, 0), 1).unwrap();
+        exact.completed(one_byte_receipt(&binding, 0)).unwrap();
+        assert!(matches!(
+            bytes.reserve(effect_binding(&binding, 1), 1),
+            Err(HostEffectReportError::Invalid)
+        ));
+        let zero = bytes.reserve(effect_binding(&binding, 1), 0).unwrap();
+        zero.release().unwrap();
+        assert!(matches!(
+            bytes.reserve(effect_binding(&binding, 1), MAX_RECEIPT_BYTES + 1),
+            Err(HostEffectReportError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn effect_claim_accounts_actual_bytes_and_reuses_release() {
+        let binding = RunBinding {
+            request_id: "request-claim-accounting".into(),
+            context_id: "context-claim-accounting".into(),
+            generation: 1,
+            run_id: "run-claim-accounting".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        lock_effects(&reporter.inner).total_receipt_bytes = MAX_TOTAL_RECEIPT_BYTES - 10;
+
+        let claim = reporter.reserve(effect_binding(&binding, 0), 10).unwrap();
+        assert_eq!(claim.max_receipt_bytes(), 10);
+        assert_eq!(claim.binding(), &effect_binding(&binding, 0));
+        claim.completed(one_byte_receipt(&binding, 0)).unwrap();
+
+        let released = reporter.reserve(effect_binding(&binding, 1), 9).unwrap();
+        released.release().unwrap();
+        let reused = reporter.reserve(effect_binding(&binding, 1), 9).unwrap();
+        reused.completed(completed_receipt(&binding, 1)).unwrap();
+        assert_eq!(
+            lock_effects(&reporter.inner).total_receipt_bytes,
+            MAX_TOTAL_RECEIPT_BYTES - 9
+        );
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, 2), 10),
+            Err(HostEffectReportError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn effect_claim_validates_exact_binding_and_opaque_token() {
+        let binding = RunBinding {
+            request_id: "request-claim-binding".into(),
+            context_id: "context-claim-binding".into(),
+            generation: 1,
+            run_id: "run-claim-binding".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        let mut wrong_run = effect_binding(&binding, 0);
+        wrong_run.run_id = "other-run".into();
+        assert!(matches!(
+            reporter.reserve(wrong_run, 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+        let mut invalid = effect_binding(&binding, 0);
+        invalid.effect_id = "not-a-digest".into();
+        assert!(matches!(
+            reporter.reserve(invalid, 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+
+        let claim = reporter.reserve(effect_binding(&binding, 0), 0).unwrap();
+        let mut wrong_receipt = completed_receipt(&binding, 0);
+        wrong_receipt.binding.capability = "other.effect".into();
+        assert_eq!(
+            claim.completed(wrong_receipt),
+            Err(HostEffectReportError::Invalid)
+        );
+        let outcomes = reporter.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+        assert!(outcomes.completed.is_empty());
+
+        let undersized = RunEffectReporter::new(binding.clone());
+        let claim = undersized.reserve(effect_binding(&binding, 0), 0).unwrap();
+        assert_eq!(
+            claim.completed(one_byte_receipt(&binding, 0)),
+            Err(HostEffectReportError::Invalid)
+        );
+        let outcomes = undersized.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+
+        let token_reporter = RunEffectReporter::new(binding.clone());
+        let mut forged = token_reporter
+            .reserve(effect_binding(&binding, 0), 0)
+            .unwrap();
+        forged.token += 1;
+        assert_eq!(forged.release(), Err(HostEffectReportError::Invalid));
+        let outcomes = token_reporter.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+        assert!(outcomes.completed.is_empty());
+    }
+
+    #[test]
+    fn effect_claim_reservation_enforces_order_and_unique_effect_id() {
+        let binding = RunBinding {
+            request_id: "request-claim-order".into(),
+            context_id: "context-claim-order".into(),
+            generation: 1,
+            run_id: "run-claim-order".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        reporter.completed(completed_receipt(&binding, 1)).unwrap();
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, 0), 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, 1), 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+        let mut duplicate_id = effect_binding(&binding, 2);
+        duplicate_id.effect_id = effect_binding(&binding, 1).effect_id;
+        assert!(matches!(
+            reporter.reserve(duplicate_id, 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+        reporter
+            .reserve(effect_binding(&binding, 2), 0)
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+
+    #[test]
+    fn reporter_clones_compete_atomically_for_one_live_claim() {
+        use std::sync::mpsc;
+
+        let binding = RunBinding {
+            request_id: "request-claim-race".into(),
+            context_id: "context-claim-race".into(),
+            generation: 1,
+            run_id: "run-claim-race".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        let (send, receive) = mpsc::channel();
+        let mut threads = Vec::new();
+        for clone in [reporter.clone(), reporter.clone()] {
+            let send = send.clone();
+            let effect = effect_binding(&binding, 0);
+            threads.push(std::thread::spawn(move || {
+                send.send(clone.reserve(effect, 0)).unwrap();
+            }));
+        }
+        drop(send);
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let results: Vec<_> = receive.into_iter().collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .find_map(|result| result.as_ref().err())
+                .copied(),
+            Some(HostEffectReportError::Invalid)
+        );
+        results
+            .into_iter()
+            .find_map(Result::ok)
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+
+    #[test]
+    fn effect_claim_settles_ambiguity_and_blocks_later_effects() {
+        let binding = RunBinding {
+            request_id: "request-claim-ambiguity".into(),
+            context_id: "context-claim-ambiguity".into(),
+            generation: 1,
+            run_id: "run-claim-ambiguity".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        let claim = reporter
+            .reserve(effect_binding(&binding, 0), MAX_RECEIPT_BYTES)
+            .unwrap();
+        assert_eq!(
+            reporter.ambiguous(effect_ambiguity(&binding, 0)),
+            Err(HostEffectReportError::Invalid)
+        );
+        claim.ambiguous(effect_ambiguity(&binding, 0)).unwrap();
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, 1), 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+        let outcomes = reporter.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+    }
+
+    #[test]
+    fn dropping_or_sealing_live_claim_fails_closed_without_receipt() {
+        let binding = RunBinding {
+            request_id: "request-claim-seal".into(),
+            context_id: "context-claim-seal".into(),
+            generation: 1,
+            run_id: "run-claim-seal".into(),
+        };
+        let dropped = RunEffectReporter::new(binding.clone());
+        drop(dropped.reserve(effect_binding(&binding, 0), 0).unwrap());
+        assert_eq!(
+            dropped.completed(completed_receipt(&binding, 0)),
+            Err(HostEffectReportError::Sealed)
+        );
+        let outcomes = dropped.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+        assert!(outcomes.completed.is_empty());
+
+        let finished = RunEffectReporter::new(binding.clone());
+        let claim = finished.reserve(effect_binding(&binding, 0), 0).unwrap();
+        let outcomes = finished.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+        assert!(outcomes.completed.is_empty());
+        assert_eq!(
+            claim.completed(completed_receipt(&binding, 0)),
+            Err(HostEffectReportError::Sealed)
+        );
+
+        let sealed = RunEffectReporter::new(binding.clone());
+        let claim = sealed.reserve(effect_binding(&binding, 0), 0).unwrap();
+        sealed.seal();
+        assert_eq!(claim.release(), Err(HostEffectReportError::Sealed));
+        assert!(matches!(
+            sealed.reserve(effect_binding(&binding, 1), 0),
+            Err(HostEffectReportError::Sealed)
+        ));
+        let outcomes = sealed.finish();
+        assert_eq!(outcomes.ambiguity, Some(effect_ambiguity(&binding, 0)));
+        assert!(outcomes.completed.is_empty());
+    }
+
+    #[test]
+    fn reserved_claim_has_no_post_effect_capacity_or_ordering_rejection() {
+        let binding = RunBinding {
+            request_id: "request-claim-window".into(),
+            context_id: "context-claim-window".into(),
+            generation: 1,
+            run_id: "run-claim-window".into(),
+        };
+        let reporter = RunEffectReporter::new(binding.clone());
+        lock_effects(&reporter.inner).total_receipt_bytes = MAX_TOTAL_RECEIPT_BYTES - 1;
+        let claim = reporter.reserve(effect_binding(&binding, 4), 1).unwrap();
+
+        // Every competing mutation is rejected before the simulated effect.
+        assert_eq!(
+            reporter.completed(completed_receipt(&binding, 3)),
+            Err(HostEffectReportError::Invalid)
+        );
+        assert!(matches!(
+            reporter.reserve(effect_binding(&binding, 5), 0),
+            Err(HostEffectReportError::Invalid)
+        ));
+
+        // After the effect, its already-reserved valid outcome cannot lose a
+        // race for count, byte capacity, uniqueness, or ordering.
+        claim.completed(one_byte_receipt(&binding, 4)).unwrap();
+        let outcomes = reporter.finish();
+        assert!(outcomes.ambiguity.is_none());
+        assert_eq!(outcomes.completed, [one_byte_receipt(&binding, 4)]);
+    }
+
+    #[test]
     fn completed_effects_are_ordered_and_survive_later_python_failure() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut coordinator = reporting_coordinator(ReportMode::Completed, Arc::clone(&calls));
@@ -2020,6 +2558,84 @@ mod tests {
             "1",
         )));
         assert_eq!(missing.failure_kind.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn unsettled_claim_fails_terminal_run_without_inventing_outcome() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = reporting_coordinator(ReportMode::DroppedClaim, Arc::clone(&calls));
+        assert!(only(coordinator.submit(open("context-unsettled", "open-unsettled", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-unsettled",
+                    "request-unsettled",
+                    1,
+                    "run-unsettled",
+                    "host_call('test.effect', [], '')",
+                ))
+                .is_none()
+        );
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert!(!response.ok);
+        assert_eq!(response.failure_kind.as_deref(), Some("effect_ambiguous"));
+        assert!(response.completed_effects.is_empty());
+        assert_eq!(
+            response.ambiguity,
+            Some(effect_ambiguity(
+                &RunBinding {
+                    request_id: "request-unsettled".into(),
+                    context_id: "context-unsettled".into(),
+                    generation: 1,
+                    run_id: "run-unsettled".into(),
+                },
+                0,
+            ))
+        );
+        response.validate().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(coordinator.context_count(), 0);
+    }
+
+    #[test]
+    fn earlier_receipts_survive_later_dropped_claim_and_context_fence() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut coordinator =
+            reporting_coordinator(ReportMode::CompletedThenDropped, Arc::clone(&calls));
+        assert!(only(coordinator.submit(open("context-dropped", "open-dropped", 1))).ok);
+        assert!(
+            coordinator
+                .submit(run_request(
+                    "context-dropped",
+                    "request-dropped",
+                    1,
+                    "run-dropped",
+                    concat!(
+                        "host_call('test.effect', [], '')\n",
+                        "host_call('test.effect', [], '')"
+                    ),
+                ))
+                .is_none()
+        );
+        let response = wait_for(&mut coordinator, 1).remove(0);
+        assert_eq!(response.failure_kind.as_deref(), Some("effect_ambiguous"));
+        assert_eq!(response.completed_effects.len(), 1);
+        assert_eq!(response.completed_effects[0].binding.call_index, 0);
+        assert_eq!(
+            response.ambiguity,
+            Some(effect_ambiguity(
+                &RunBinding {
+                    request_id: "request-dropped".into(),
+                    context_id: "context-dropped".into(),
+                    generation: 1,
+                    run_id: "run-dropped".into(),
+                },
+                1,
+            ))
+        );
+        response.validate().unwrap();
+        assert_eq!(coordinator.context_count(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
