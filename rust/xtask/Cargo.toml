@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+elpis-protocol = { path = "../crates/elpis-protocol" }
 elpis-runtime = { path = "../crates/elpis-runtime" }
 flate2.workspace = true
 fs2.workspace = true

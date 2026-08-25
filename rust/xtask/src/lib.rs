@@ -1,3 +1,4 @@
+use elpis_protocol::{PROTOCOL_VERSION, Request};
 use elpis_runtime::{ManifestEntry, RuntimeManifest, generate_manifest};
 use flate2::read::GzDecoder;
 use fs2::FileExt;
@@ -859,10 +860,31 @@ fn executor_canary(binary: &Path, work: &Path) -> Result<(), DistError> {
     reset_tree(&state)?;
     ensure_private_dir(&state)?;
     let frames = [
-        r#"{"op":"open","protocol":1,"request_id":"d1","context_id":"c1","generation":1}"#,
-        r#"{"op":"run","protocol":1,"request_id":"d2","context_id":"c1","generation":1,"run_id":"r1","source":"(__import__('sys').version_info[:3],__import__('PIL').__version__,__import__('numpy').__version__,__import__('yaml').__version__,__import__('requests').__version__,6*7)"}"#,
-        r#"{"op":"close","protocol":1,"request_id":"d3","context_id":"c1","generation":1}"#,
-    ];
+        Request::Open {
+            protocol: PROTOCOL_VERSION,
+            request_id: "d1".into(),
+            context_id: "c1".into(),
+            generation: 1,
+        },
+        Request::Run {
+            protocol: PROTOCOL_VERSION,
+            request_id: "d2".into(),
+            context_id: "c1".into(),
+            generation: 1,
+            run_id: "r1".into(),
+            source: "(__import__('sys').version_info[:3],__import__('PIL').__version__,__import__('numpy').__version__,__import__('yaml').__version__,__import__('requests').__version__,6*7)".into(),
+            preview_max_bytes: 1024,
+        },
+        Request::Close {
+            protocol: PROTOCOL_VERSION,
+            request_id: "d3".into(),
+            context_id: "c1".into(),
+            generation: 1,
+        },
+    ]
+    .into_iter()
+    .map(|request| serde_json::to_string(&request))
+    .collect::<Result<Vec<_>, _>>()?;
     let mut child = Command::new(binary)
         .env_clear()
         .env("PATH", "/nonexistent")

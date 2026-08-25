@@ -10,4 +10,7 @@ elpis-protocol = { path = "../elpis-protocol" }
 thiserror.workspace = true
 
 [dev-dependencies]
+elpis-journal = { path = "../elpis-journal" }
+elpis-transport = { path = "../elpis-transport" }
 serde_json.workspace = true
+tempfile = "3"
