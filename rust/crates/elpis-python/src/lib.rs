@@ -154,9 +154,117 @@ impl HostResult {
     }
 }
 
-/// A synchronous host implementation supplied for one Run.
+/// The started portion of one host call.
+///
+/// Implementations that own a subprocess or another asynchronous service handle
+/// must not report a result until that operation can be reaped.  The runtime
+/// nevertheless calls [`ActiveHostCall::wait_reaped`] on every completion and cancellation path,
+/// so run ownership is not released while a host child remains unreaped.
+pub trait ActiveHostCall: Send {
+    /// Poll without blocking.  A returned result is not sent to Python until
+    /// [`ActiveHostCall::wait_reaped`] has succeeded.
+    fn try_wait(&mut self) -> Result<Option<HostResult>, PythonError>;
+
+    /// Request cancellation or kill the underlying operation.  This method may
+    /// be called after a racing natural completion and must be idempotent.
+    fn cancel(&mut self) -> Result<(), PythonError>;
+
+    /// Wait until every resource owned by this call has been reaped. An
+    /// implementation may return an error only after satisfying that postcondition.
+    fn wait_reaped(&mut self) -> Result<(), PythonError>;
+}
+
+/// The outcome of linearizing a host-call start.
+pub enum HostCallStart {
+    /// The service completed synchronously.  This is intended for bounded,
+    /// non-subprocess services and for explicit rejection.
+    Complete(HostResult),
+    /// A call started and is now in actor custody.
+    Active(Box<dyn ActiveHostCall>),
+}
+
+impl std::fmt::Debug for HostCallStart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete(result) => formatter.debug_tuple("Complete").field(result).finish(),
+            Self::Active(_) => formatter.write_str("Active(<host-call handle>)"),
+        }
+    }
+}
+
+/// A host implementation supplied for one Run.
+///
+/// Existing bounded synchronous services only need to implement
+/// [`HostCallService::call`]. Services which can outlive the call to
+/// [`HostCallService::start`] (in particular services backed by a subprocess)
+/// must override it and return an [`ActiveHostCall`], giving the actor explicit
+/// cancel/kill/reap custody. `start` itself must be bounded and must not wait for
+/// the operation it starts. Returning an error means no live operation escaped;
+/// once an operation may exist, `start` must return it in `HostCallStart::Active`.
 pub trait HostCallService: Send {
     fn call(&mut self, call: &HostCall) -> HostResult;
+
+    fn start(&mut self, call: &HostCall) -> Result<HostCallStart, PythonError> {
+        Ok(HostCallStart::Complete(self.call(call)))
+    }
+}
+
+impl<T: HostCallService + ?Sized> HostCallService for Box<T> {
+    fn call(&mut self, call: &HostCall) -> HostResult {
+        (**self).call(call)
+    }
+
+    fn start(&mut self, call: &HostCall) -> Result<HostCallStart, PythonError> {
+        (**self).start(call)
+    }
+}
+
+pub(crate) enum HostCallPoll {
+    Pending,
+    Complete(HostResult),
+    Cancelled,
+}
+
+/// Internal synchronization seam used by the context actor.  Implementations
+/// linearize start, completion, and cancellation while the RunEntry is locked.
+pub(crate) trait HostCallCustody {
+    fn start(
+        &mut self,
+        service: &mut dyn HostCallService,
+        call: &HostCall,
+    ) -> Result<HostCallStart, PythonError>;
+
+    fn poll(&mut self, active: &mut dyn ActiveHostCall) -> Result<HostCallPoll, PythonError>;
+
+    fn cancel_and_reap(&mut self, active: &mut dyn ActiveHostCall) -> Result<(), PythonError>;
+}
+
+struct DirectHostCallCustody;
+
+impl HostCallCustody for DirectHostCallCustody {
+    fn start(
+        &mut self,
+        service: &mut dyn HostCallService,
+        call: &HostCall,
+    ) -> Result<HostCallStart, PythonError> {
+        service.start(call)
+    }
+
+    fn poll(&mut self, active: &mut dyn ActiveHostCall) -> Result<HostCallPoll, PythonError> {
+        match active.try_wait()? {
+            Some(result) => {
+                active.wait_reaped()?;
+                Ok(HostCallPoll::Complete(result))
+            }
+            None => Ok(HostCallPoll::Pending),
+        }
+    }
+
+    fn cancel_and_reap(&mut self, active: &mut dyn ActiveHostCall) -> Result<(), PythonError> {
+        let cancelled = active.cancel();
+        let reaped = active.wait_reaped();
+        cancelled.and(reaped)
+    }
 }
 
 /// Explicit rejecting service used by the ordinary, effect-free Run API.
@@ -307,6 +415,14 @@ impl PythonRuntime {
     }
 }
 
+pub(crate) struct RunInvocation<'a> {
+    pub(crate) context_id: &'a str,
+    pub(crate) generation: u64,
+    pub(crate) run_id: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) preview_max_bytes: usize,
+}
+
 pub struct PythonContext {
     context_id: String,
     generation: u64,
@@ -428,6 +544,33 @@ impl PythonContext {
         preview_max_bytes: usize,
         service: &mut dyn HostCallService,
     ) -> Result<RunResult, PythonError> {
+        let mut custody = DirectHostCallCustody;
+        self.run_with_host_service_in_custody(
+            RunInvocation {
+                context_id,
+                generation,
+                run_id,
+                source,
+                preview_max_bytes,
+            },
+            service,
+            &mut custody,
+        )
+    }
+
+    pub(crate) fn run_with_host_service_in_custody(
+        &mut self,
+        invocation: RunInvocation<'_>,
+        service: &mut dyn HostCallService,
+        custody: &mut dyn HostCallCustody,
+    ) -> Result<RunResult, PythonError> {
+        let RunInvocation {
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+        } = invocation;
         if self.closed || context_id != self.context_id || generation != self.generation {
             return Err(PythonError::Binding);
         }
@@ -448,12 +591,18 @@ impl PythonContext {
             source,
             preview_max_bytes,
         })?;
+        self.run_host_frame_loop(service, custody)
+    }
 
-        let result = self.host_frame_loop(service);
+    fn run_host_frame_loop(
+        &mut self,
+        service: &mut dyn HostCallService,
+        custody: &mut dyn HostCallCustody,
+    ) -> Result<RunResult, PythonError> {
+        let result = self.host_frame_loop(service, custody);
         if result.is_err() {
-            // A malformed frame can leave the child blocked waiting for a reply.
-            // Killing the dedicated group makes every protocol failure terminal
-            // without attempting to continue on a desynchronized stream.
+            // A malformed frame, failed service, or cancellation can leave the
+            // child blocked waiting for a reply.  Fail the protocol closed.
             self.fail_closed();
         }
         result
@@ -471,6 +620,7 @@ impl PythonContext {
     fn host_frame_loop(
         &mut self,
         service: &mut dyn HostCallService,
+        custody: &mut dyn HostCallCustody,
     ) -> Result<RunResult, PythonError> {
         let mut expected_index = 0u64;
         loop {
@@ -500,7 +650,39 @@ impl PythonContext {
                         stdin: frame.stdin,
                     };
                     call.validate()?;
-                    let host_result = service.call(&call);
+                    let host_result = match custody.start(service, &call)? {
+                        HostCallStart::Complete(result) => result,
+                        HostCallStart::Active(mut active) => loop {
+                            match custody.poll(active.as_mut()) {
+                                Ok(HostCallPoll::Complete(result)) => break result,
+                                Ok(HostCallPoll::Cancelled) => {
+                                    return Err(PythonError::Cancelled);
+                                }
+                                Ok(HostCallPoll::Pending) => {
+                                    if self.has_exited_unreaped()? {
+                                        // Recheck cancellation/completion after observing
+                                        // the Python exit, then reap the host operation on
+                                        // every still-active path.
+                                        match custody.poll(active.as_mut()) {
+                                            Ok(HostCallPoll::Complete(_)) => {}
+                                            Ok(HostCallPoll::Cancelled) => {
+                                                return Err(PythonError::Cancelled);
+                                            }
+                                            Ok(HostCallPoll::Pending) | Err(_) => {
+                                                custody.cancel_and_reap(active.as_mut())?;
+                                            }
+                                        }
+                                        return Err(PythonError::Eof);
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                }
+                                Err(error) => {
+                                    let cleanup = custody.cancel_and_reap(active.as_mut());
+                                    return cleanup.map_or_else(Err, |_| Err(error));
+                                }
+                            }
+                        },
+                    };
                     host_result.validate()?;
                     self.write_frame(&ChildHostResult {
                         op: "host_result",

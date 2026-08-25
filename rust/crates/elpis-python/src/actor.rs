@@ -1,4 +1,8 @@
-use super::{PythonContext, PythonError, PythonRuntime, RunResult};
+use super::{
+    ActiveHostCall, HostCall, HostCallCustody, HostCallPoll, HostCallService, HostCallStart,
+    HostResult, PythonContext, PythonError, PythonRuntime, RejectHostCalls, RunInvocation,
+    RunResult,
+};
 use elpis_protocol::{MAX_SOURCE_BYTES, validate_id};
 use std::collections::HashSet;
 use std::io;
@@ -91,6 +95,7 @@ enum Command {
         run_id: String,
         source: String,
         preview_max_bytes: usize,
+        service: Box<dyn HostCallService>,
         completion: mpsc::SyncSender<Result<RunResult, PythonError>>,
     },
     Shutdown,
@@ -102,6 +107,11 @@ struct ActorInner {
     shared: Arc<Shared>,
     sender: mpsc::Sender<Command>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct ScheduledHostRun {
+    released: bool,
+    service: Box<dyn HostCallService>,
 }
 
 /// A clonable control handle for a context actor.
@@ -223,7 +233,74 @@ impl PythonContextActor {
             run_id,
             source,
             preview_max_bytes,
-            true,
+            ScheduledHostRun {
+                released: true,
+                service: Box::new(RejectHostCalls),
+            },
+        )
+    }
+
+    /// Schedule a Run with one explicitly supplied host-call service.
+    pub fn run_with_host_service<S: HostCallService + 'static>(
+        &self,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+        source: &str,
+        preview_max_bytes: usize,
+        service: S,
+    ) -> Result<PythonRunHandle, PythonError> {
+        self.schedule_with_host_service(
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+            service,
+        )
+    }
+
+    pub fn schedule_with_host_service<S: HostCallService + 'static>(
+        &self,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+        source: &str,
+        preview_max_bytes: usize,
+        service: S,
+    ) -> Result<PythonRunHandle, PythonError> {
+        self.schedule_inner(
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+            ScheduledHostRun {
+                released: true,
+                service: Box::new(service),
+            },
+        )
+    }
+
+    pub fn schedule_deferred_with_host_service<S: HostCallService + 'static>(
+        &self,
+        context_id: &str,
+        generation: u64,
+        run_id: &str,
+        source: &str,
+        preview_max_bytes: usize,
+        service: S,
+    ) -> Result<PythonRunHandle, PythonError> {
+        self.schedule_inner(
+            context_id,
+            generation,
+            run_id,
+            source,
+            preview_max_bytes,
+            ScheduledHostRun {
+                released: false,
+                service: Box::new(service),
+            },
         )
     }
 
@@ -243,7 +320,10 @@ impl PythonContextActor {
             run_id,
             source,
             preview_max_bytes,
-            false,
+            ScheduledHostRun {
+                released: false,
+                service: Box::new(RejectHostCalls),
+            },
         )
     }
 
@@ -254,8 +334,9 @@ impl PythonContextActor {
         run_id: &str,
         source: &str,
         preview_max_bytes: usize,
-        released: bool,
+        scheduled: ScheduledHostRun,
     ) -> Result<PythonRunHandle, PythonError> {
+        let ScheduledHostRun { released, service } = scheduled;
         if context_id != self.inner.context_id || generation != self.inner.generation {
             return Err(PythonError::Binding);
         }
@@ -293,6 +374,7 @@ impl PythonContextActor {
             run_id: run_id.to_owned(),
             source: source.to_owned(),
             preview_max_bytes,
+            service,
             completion: completion_tx,
         };
         if self.inner.sender.send(command).is_err() {
@@ -489,6 +571,7 @@ fn actor_loop(
                 run_id,
                 source,
                 preview_max_bytes,
+                service,
                 completion,
             }) => process_run(
                 context,
@@ -499,6 +582,7 @@ fn actor_loop(
                 run_id,
                 source,
                 preview_max_bytes,
+                service,
                 completion,
             ),
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -506,6 +590,88 @@ fn actor_loop(
         }
     }
     close_context(context, shared);
+}
+
+struct ActorHostCallCustody<'a> {
+    shared: &'a Arc<Shared>,
+    entry: &'a Arc<RunEntry>,
+}
+
+impl HostCallCustody for ActorHostCallCustody<'_> {
+    fn start(
+        &mut self,
+        service: &mut dyn HostCallService,
+        call: &HostCall,
+    ) -> Result<HostCallStart, PythonError> {
+        // Holding the same locks as cancel makes the boundary exact: either
+        // cancellation observes Scheduled/Executing before this call starts,
+        // or it observes the active call returned by start.
+        let state = lock(&self.shared.state);
+        if !is_active(&state, self.entry) || !state.valid {
+            return Err(PythonError::InvalidContext);
+        }
+        let run_state = lock(&self.entry.state);
+        match *run_state {
+            RunState::Executing => service.start(call),
+            RunState::CancelRequested => Err(PythonError::Cancelled),
+            RunState::Scheduled | RunState::Terminal(_) => Err(PythonError::ActorClosed),
+        }
+    }
+
+    fn poll(&mut self, active: &mut dyn ActiveHostCall) -> Result<HostCallPoll, PythonError> {
+        enum Action {
+            Pending,
+            Complete(HostResult),
+            Cancel,
+            Fail(PythonError),
+        }
+
+        // Polling itself is nonblocking and occurs under the run lock, which is
+        // the completion linearization point.  Potentially blocking kill/reap
+        // work happens afterwards; active ownership remains published meanwhile.
+        let action = {
+            let state = lock(&self.shared.state);
+            if !is_active(&state, self.entry) || !state.valid {
+                Action::Fail(PythonError::InvalidContext)
+            } else {
+                let run_state = lock(&self.entry.state);
+                match *run_state {
+                    RunState::CancelRequested => Action::Cancel,
+                    RunState::Executing => match active.try_wait() {
+                        Ok(Some(result)) => Action::Complete(result),
+                        Ok(None) => Action::Pending,
+                        Err(error) => Action::Fail(error),
+                    },
+                    RunState::Scheduled | RunState::Terminal(_) => {
+                        Action::Fail(PythonError::ActorClosed)
+                    }
+                }
+            }
+        };
+
+        match action {
+            Action::Pending => Ok(HostCallPoll::Pending),
+            Action::Complete(result) => {
+                active.wait_reaped()?;
+                Ok(HostCallPoll::Complete(result))
+            }
+            Action::Cancel => {
+                cancel_and_reap_host(active)?;
+                Ok(HostCallPoll::Cancelled)
+            }
+            Action::Fail(error) => Err(error),
+        }
+    }
+
+    fn cancel_and_reap(&mut self, active: &mut dyn ActiveHostCall) -> Result<(), PythonError> {
+        cancel_and_reap_host(active)
+    }
+}
+
+fn cancel_and_reap_host(active: &mut dyn ActiveHostCall) -> Result<(), PythonError> {
+    let cancelled = active.cancel();
+    let reaped = active.wait_reaped();
+    cancelled.and(reaped)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -518,6 +684,7 @@ fn process_run(
     run_id: String,
     source: String,
     preview_max_bytes: usize,
+    mut service: Box<dyn HostCallService>,
     completion: mpsc::SyncSender<Result<RunResult, PythonError>>,
 ) {
     // Deferred scheduling gives cancellation a deterministic pre-execution point.
@@ -558,7 +725,21 @@ fn process_run(
         }
     }
 
-    let result = context.run(&context_id, generation, &run_id, &source, preview_max_bytes);
+    let mut custody = ActorHostCallCustody {
+        shared,
+        entry: &entry,
+    };
+    let result = context.run_with_host_service_in_custody(
+        RunInvocation {
+            context_id: &context_id,
+            generation,
+            run_id: &run_id,
+            source: &source,
+            preview_max_bytes,
+        },
+        service.as_mut(),
+        &mut custody,
+    );
 
     let mut state = lock(&shared.state);
     let cancellation_won = matches!(*lock(&entry.state), RunState::CancelRequested);
@@ -705,7 +886,9 @@ fn wait<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T>
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn runtime() -> PythonRuntime {
@@ -749,6 +932,461 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    struct ImmediateService {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HostCallService for ImmediateService {
+        fn call(&mut self, _call: &HostCall) -> super::HostResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            super::HostResult::accepted("yes")
+        }
+    }
+
+    struct BlockingService {
+        started: Arc<AtomicBool>,
+        cancelled: Arc<AtomicBool>,
+        allow_reap: Arc<AtomicBool>,
+        reaped: Arc<AtomicBool>,
+    }
+
+    impl HostCallService for BlockingService {
+        fn call(&mut self, _call: &HostCall) -> super::HostResult {
+            unreachable!("blocking service must return an active handle")
+        }
+
+        fn start(&mut self, _call: &HostCall) -> Result<HostCallStart, PythonError> {
+            self.started.store(true, Ordering::SeqCst);
+            Ok(HostCallStart::Active(Box::new(BlockingCall {
+                cancelled: Arc::clone(&self.cancelled),
+                allow_reap: Arc::clone(&self.allow_reap),
+                reaped: Arc::clone(&self.reaped),
+            })))
+        }
+    }
+
+    struct BlockingCall {
+        cancelled: Arc<AtomicBool>,
+        allow_reap: Arc<AtomicBool>,
+        reaped: Arc<AtomicBool>,
+    }
+
+    impl ActiveHostCall for BlockingCall {
+        fn try_wait(&mut self) -> Result<Option<super::HostResult>, PythonError> {
+            Ok(None)
+        }
+
+        fn cancel(&mut self) -> Result<(), PythonError> {
+            self.cancelled.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wait_reaped(&mut self) -> Result<(), PythonError> {
+            while !self.allow_reap.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            self.reaped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct ProcessGroupService {
+        pid_path: PathBuf,
+        reaped: Arc<AtomicBool>,
+    }
+
+    impl HostCallService for ProcessGroupService {
+        fn call(&mut self, _call: &HostCall) -> super::HostResult {
+            unreachable!("process service must return an active handle")
+        }
+
+        fn start(&mut self, _call: &HostCall) -> Result<HostCallStart, PythonError> {
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg("printf '%s\\n' \"$$\" > \"$1\"; sleep 60 & wait")
+                .arg("elpis-host-call")
+                .arg(&self.pid_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()?;
+            let pgid = libc::pid_t::try_from(child.id())
+                .map_err(|_| PythonError::Io(io::Error::other("host child pid is out of range")))?;
+            Ok(HostCallStart::Active(Box::new(ProcessGroupCall {
+                child: Some(child),
+                pgid,
+                reaped: Arc::clone(&self.reaped),
+            })))
+        }
+    }
+
+    struct ProcessGroupCall {
+        child: Option<Child>,
+        pgid: libc::pid_t,
+        reaped: Arc<AtomicBool>,
+    }
+
+    impl ProcessGroupCall {
+        fn kill_group(&self) -> Result<(), PythonError> {
+            let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
+            if result == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(PythonError::Io(error));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl ActiveHostCall for ProcessGroupCall {
+        fn try_wait(&mut self) -> Result<Option<super::HostResult>, PythonError> {
+            let Some(child) = self.child.as_mut() else {
+                return Ok(Some(super::HostResult::accepted("done")));
+            };
+            if child.try_wait()?.is_none() {
+                return Ok(None);
+            }
+            self.child = None;
+            self.reaped.store(true, Ordering::SeqCst);
+            Ok(Some(super::HostResult::accepted("done")))
+        }
+
+        fn cancel(&mut self) -> Result<(), PythonError> {
+            self.kill_group()
+        }
+
+        fn wait_reaped(&mut self) -> Result<(), PythonError> {
+            if let Some(mut child) = self.child.take() {
+                child.wait()?;
+            }
+            self.reaped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl Drop for ProcessGroupCall {
+        fn drop(&mut self) {
+            if self.child.is_some() {
+                let _ = self.kill_group();
+                if let Some(mut child) = self.child.take() {
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+
+    fn process_group_exists(pgid: u32) -> bool {
+        let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+            return false;
+        };
+        let result = unsafe { libc::kill(-pgid, 0) };
+        result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    struct FailingService {
+        cancel_count: Arc<std::sync::atomic::AtomicUsize>,
+        reap_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HostCallService for FailingService {
+        fn call(&mut self, _call: &HostCall) -> super::HostResult {
+            unreachable!("failing service must return an active handle")
+        }
+
+        fn start(&mut self, _call: &HostCall) -> Result<HostCallStart, PythonError> {
+            Ok(HostCallStart::Active(Box::new(FailingCall {
+                cancel_count: Arc::clone(&self.cancel_count),
+                reap_count: Arc::clone(&self.reap_count),
+            })))
+        }
+    }
+
+    struct FailingCall {
+        cancel_count: Arc<std::sync::atomic::AtomicUsize>,
+        reap_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ActiveHostCall for FailingCall {
+        fn try_wait(&mut self) -> Result<Option<super::HostResult>, PythonError> {
+            Err(PythonError::InvalidHostCall("test host failure"))
+        }
+
+        fn cancel(&mut self) -> Result<(), PythonError> {
+            self.cancel_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wait_reaped(&mut self) -> Result<(), PythonError> {
+            self.reap_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct CompletingService {
+        cancel_count: Arc<std::sync::atomic::AtomicUsize>,
+        reap_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HostCallService for CompletingService {
+        fn call(&mut self, _call: &HostCall) -> super::HostResult {
+            unreachable!("completing service must return an active handle")
+        }
+
+        fn start(&mut self, _call: &HostCall) -> Result<HostCallStart, PythonError> {
+            Ok(HostCallStart::Active(Box::new(CompletingCall {
+                cancel_count: Arc::clone(&self.cancel_count),
+                reap_count: Arc::clone(&self.reap_count),
+                completed: false,
+            })))
+        }
+    }
+
+    struct CompletingCall {
+        cancel_count: Arc<std::sync::atomic::AtomicUsize>,
+        reap_count: Arc<std::sync::atomic::AtomicUsize>,
+        completed: bool,
+    }
+
+    impl ActiveHostCall for CompletingCall {
+        fn try_wait(&mut self) -> Result<Option<super::HostResult>, PythonError> {
+            self.completed = true;
+            Ok(Some(super::HostResult::accepted("completed")))
+        }
+
+        fn cancel(&mut self) -> Result<(), PythonError> {
+            self.cancel_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wait_reaped(&mut self) -> Result<(), PythonError> {
+            assert!(self.completed);
+            self.reap_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn actor_routes_bounded_host_results() {
+        let actor = actor("host-result");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = actor
+            .run_with_host_service(
+                "host-result",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                ImmediateService {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .unwrap();
+        let result = run.wait().unwrap();
+        assert_eq!(result.preview, "'yes'");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(actor.is_valid());
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn active_host_call_natural_completion_reaps_without_cancellation() {
+        let actor = actor("host-natural-completion");
+        let cancel_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reap_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = actor
+            .run_with_host_service(
+                "host-natural-completion",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                CompletingService {
+                    cancel_count: Arc::clone(&cancel_count),
+                    reap_count: Arc::clone(&reap_count),
+                },
+            )
+            .unwrap();
+        assert_eq!(run.wait().unwrap().preview, "'completed'");
+        assert_eq!(cancel_count.load(Ordering::SeqCst), 0);
+        assert_eq!(reap_count.load(Ordering::SeqCst), 1);
+        assert!(actor.is_valid());
+        assert_eq!(
+            actor
+                .run("host-natural-completion", 1, "run-2", "6 * 7", 1024)
+                .unwrap()
+                .wait()
+                .unwrap()
+                .preview,
+            "42"
+        );
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn deferred_cancel_never_starts_host_service() {
+        let actor = actor("host-prestart-cancel");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = actor
+            .schedule_deferred_with_host_service(
+                "host-prestart-cancel",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                ImmediateService {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .unwrap();
+        assert_eq!(run.cancel().unwrap(), CancelOutcome::RequestedBeforeStart);
+        assert!(matches!(run.wait(), Err(PythonError::Cancelled)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(actor.is_valid());
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn active_host_call_is_cancelled_and_reaped_before_busy_release() {
+        let actor = actor("host-active-cancel");
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let allow_reap = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::new(AtomicBool::new(false));
+        let run = actor
+            .run_with_host_service(
+                "host-active-cancel",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                BlockingService {
+                    started: Arc::clone(&started),
+                    cancelled: Arc::clone(&cancelled),
+                    allow_reap: Arc::clone(&allow_reap),
+                    reaped: Arc::clone(&reaped),
+                },
+            )
+            .unwrap();
+        wait_until(|| started.load(Ordering::SeqCst));
+        assert_eq!(
+            run.cancel().unwrap(),
+            CancelOutcome::RequestedWhileExecuting
+        );
+        wait_until(|| cancelled.load(Ordering::SeqCst));
+        assert!(!reaped.load(Ordering::SeqCst));
+        assert!(matches!(
+            actor.run("host-active-cancel", 1, "run-2", "1", 1024),
+            Err(PythonError::Busy)
+        ));
+
+        allow_reap.store(true, Ordering::SeqCst);
+        assert!(matches!(run.wait(), Err(PythonError::Cancelled)));
+        assert!(reaped.load(Ordering::SeqCst));
+        assert!(!actor.has_active_run());
+        assert!(!actor.is_valid());
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn actor_cancellation_kills_and_reaps_real_host_process_group() {
+        let actor = actor("host-process-cancel");
+        let pid_path = temporary_path("host-process-pid");
+        let reaped = Arc::new(AtomicBool::new(false));
+        let run = actor
+            .run_with_host_service(
+                "host-process-cancel",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                ProcessGroupService {
+                    pid_path: pid_path.clone(),
+                    reaped: Arc::clone(&reaped),
+                },
+            )
+            .unwrap();
+        let pgid = wait_for_pid(&pid_path);
+        assert!(process_group_exists(pgid));
+        assert_eq!(
+            run.cancel().unwrap(),
+            CancelOutcome::RequestedWhileExecuting
+        );
+        assert!(matches!(run.wait(), Err(PythonError::Cancelled)));
+        assert!(reaped.load(Ordering::SeqCst));
+        wait_until(|| !process_group_exists(pgid));
+        assert!(!actor.has_active_run());
+        assert!(!actor.is_valid());
+        actor.close().unwrap();
+        let _ = fs::remove_file(pid_path);
+    }
+
+    #[test]
+    fn host_poll_error_cancels_and_reaps_exactly_once() {
+        let actor = actor("host-poll-error");
+        let cancel_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reap_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = actor
+            .run_with_host_service(
+                "host-poll-error",
+                1,
+                "run-1",
+                "host_call('testing', [], '')",
+                1024,
+                FailingService {
+                    cancel_count: Arc::clone(&cancel_count),
+                    reap_count: Arc::clone(&reap_count),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            run.wait(),
+            Err(PythonError::InvalidHostCall("test host failure"))
+        ));
+        assert_eq!(cancel_count.load(Ordering::SeqCst), 1);
+        assert_eq!(reap_count.load(Ordering::SeqCst), 1);
+        assert!(!actor.has_active_run());
+        assert!(!actor.is_valid());
+        actor.close().unwrap();
+    }
+
+    #[test]
+    fn python_exit_cancels_and_reaps_active_host_call() {
+        let actor = actor("host-context-exit");
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let allow_reap = Arc::new(AtomicBool::new(true));
+        let reaped = Arc::new(AtomicBool::new(false));
+        let run = actor
+            .run_with_host_service(
+                "host-context-exit",
+                1,
+                "run-1",
+                "import os, threading, time
+def exit_context():
+    time.sleep(0.05)
+    os._exit(7)
+threading.Thread(target=exit_context, daemon=True).start()
+host_call('testing', [], '')",
+                1024,
+                BlockingService {
+                    started: Arc::clone(&started),
+                    cancelled: Arc::clone(&cancelled),
+                    allow_reap,
+                    reaped: Arc::clone(&reaped),
+                },
+            )
+            .unwrap();
+        wait_until(|| started.load(Ordering::SeqCst));
+        assert!(run.wait().is_err());
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(reaped.load(Ordering::SeqCst));
+        assert!(!actor.has_active_run());
+        assert!(!actor.is_valid());
+        actor.close().unwrap();
     }
 
     #[test]
