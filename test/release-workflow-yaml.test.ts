@@ -23,6 +23,12 @@ test('unified workflow has exact triggers concurrency and least job permissions'
   ]);
   assert.deepEqual(workflow.on.push.branches, ['main']);
   assert.equal(workflow.on.push.tags, undefined);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.bootstrap, {
+    description: 'Publish the explicit first v0.1.0 release',
+    required: true,
+    default: false,
+    type: 'boolean',
+  });
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(
     workflow.concurrency['cancel-in-progress'],
@@ -54,6 +60,13 @@ test('unified workflow has exact triggers concurrency and least job permissions'
       ].includes(value),
     ),
   );
+  const buildxSteps = Object.values(workflow.jobs)
+    .flatMap((job: any) => job.steps)
+    .filter((step: any) =>
+      String(step.uses ?? '').startsWith('docker/setup-buildx-action@'),
+    );
+  assert.equal(buildxSteps.length, 2);
+  assert.ok(buildxSteps.every((step: any) => step.with.version === 'v0.36.1'));
 });
 
 test('workflow builds each release artifact once and publishes through guarded exact seams', async () => {
@@ -61,15 +74,46 @@ test('workflow builds each release artifact once and publishes through guarded e
   assert.equal((text.match(/npm run tools:check/g) ?? []).length, 2);
   assert.equal((text.match(/cargo xtask dist/g) ?? []).length, 1);
   assert.equal((text.match(/docker buildx build/g) ?? []).length, 2);
-  assert.equal((text.match(/git push --atomic/g) ?? []).length, 1);
+  assert.equal((text.match(/git push --atomic/g) ?? []).length, 2);
+  assert.equal((text.match(/:refs\/heads\/main/g) ?? []).length, 2);
   assert.equal(
     (text.match(/npm run release:workflow -- prepare/g) ?? []).length,
     2,
+  );
+  assert.equal((text.match(/--bootstrap "\$BOOTSTRAP"/g) ?? []).length, 2);
+  assert.match(
+    text,
+    /elif \[ "\$\{\{ steps\.prep\.outputs\.mode \}\}" = bootstrap \]/,
   );
   assert.match(text, /origin\/main\).*base_sha|base_sha/);
   assert.match(text, /gh release upload/);
   assert.match(text, /gh release create/);
   assert.match(text, /docker image inspect --format '\{\{\.Id\}\}'/);
+  assert.equal(
+    (text.match(/--output "type=docker,name=\$local_image"/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (
+      text.match(
+        /--output "type=oci,dest=\$oci_archive,name=\$local_image"/g,
+      ) ?? []
+    ).length,
+    1,
+  );
+  assert.match(text, /ORAS_VERSION: 1\.3\.3/);
+  assert.match(
+    text,
+    /9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59/,
+  );
+  assert.equal((text.match(/oras cp --from-oci-layout/g) ?? []).length, 1);
+  assert.equal((text.match(/oras manifest index create/g) ?? []).length, 1);
+  assert.equal(
+    (text.match(/oras tag "\$image@\$index_digest"/g) ?? []).length,
+    1,
+  );
+  assert.doesNotMatch(text, /docker push|imagetools create/);
+  assert.match(text, /application\/vnd\.oci\.image\.index\.v1\+json/);
   assert.match(text, /sha-\$\{\{ steps\.prep\.outputs\.short_sha \}\}/);
   assert.doesNotMatch(text, /build-push-action/);
   assert.doesNotMatch(

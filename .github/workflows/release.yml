@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Publish the explicit first v0.1.0 release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -14,8 +20,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  NODE_VERSION: "24"
-  RUST_VERSION: "1.94.1"
+  NODE_VERSION: '24'
+  RUST_VERSION: '1.94.1'
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -63,6 +69,8 @@ jobs:
           RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: github.event_name == 'pull_request'
+        with:
+          version: v0.36.1
       - name: Build pull-request container without push
         if: github.event_name == 'pull_request'
         run: |
@@ -120,12 +128,14 @@ jobs:
         id: prep
         env:
           GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap || false }}
         run: |
           actor=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.committer.login // ""')
           npm run release:workflow -- prepare \
             --root "$GITHUB_WORKSPACE" \
             --tested-sha "$GITHUB_SHA" \
             --actor-login "$actor" \
+            --bootstrap "$BOOTSTRAP" \
             --output "$GITHUB_OUTPUT"
       - name: No version tag yet
         if: steps.prep.outputs.mode == 'none'
@@ -162,20 +172,56 @@ jobs:
           test "$(find "$RUNNER_TEMP/elpis-release-dist" -maxdepth 1 -type f | wc -l)" -eq 4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: steps.prep.outputs.mode != 'none'
+        with:
+          version: v0.36.1
+      - name: Install checksum-pinned ORAS
+        if: steps.prep.outputs.mode != 'none'
+        env:
+          ORAS_VERSION: 1.3.3
+          ORAS_SHA256: 9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59
+        run: |
+          install_dir="$RUNNER_TEMP/oras"
+          archive="$install_dir/oras.tgz"
+          rm -rf "$install_dir"
+          mkdir -m 0700 "$install_dir"
+          curl -fsSLo "$archive" \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          test "$(stat -c %s "$archive")" -eq 4668550
+          printf '%s  %s\n' "$ORAS_SHA256" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$install_dir" oras
+          chmod 0555 "$install_dir/oras"
+          "$install_dir/oras" version | grep -Fx 'Version:        1.3.3'
+          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
       - name: Build and load release container once
         if: steps.prep.outputs.mode != 'none'
         run: |
           local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
+          oci_archive="$RUNNER_TEMP/elpis-release-image.oci.tar"
+          rm -f "$oci_archive"
           docker buildx build \
-            --load \
-            --tag "$local_image" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --output "type=docker,name=$local_image" \
+            --output "type=oci,dest=$oci_archive,name=$local_image" \
             --label "org.opencontainers.image.revision=${{ steps.prep.outputs.release_sha }}" \
             --label "org.opencontainers.image.version=${{ steps.prep.outputs.version }}" \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --cache-from type=gha,scope=release-container \
             --cache-to type=gha,mode=max,scope=release-container \
             .
-          docker image inspect "$local_image" >/dev/null
+          source_id=$(docker image inspect --format '{{.Id}}' "$local_image")
+          descriptor=$(oras manifest fetch --descriptor --oci-layout \
+            "$oci_archive:${{ steps.prep.outputs.release_sha }}")
+          test "$(printf '%s\n' "$descriptor" | jq -r .mediaType)" = \
+            application/vnd.oci.image.manifest.v1+json
+          manifest_digest=$(printf '%s\n' "$descriptor" | jq -r .digest)
+          layout="$RUNNER_TEMP/elpis-release-image-layout"
+          rm -rf "$layout"
+          mkdir -m 0700 "$layout"
+          tar -xf "$oci_archive" -C "$layout"
+          manifest="$layout/blobs/sha256/${manifest_digest#sha256:}"
+          test -f "$manifest"
+          test "$(jq -r .config.digest "$manifest")" = "$source_id"
       - name: Refetch and atomically publish release refs
         if: steps.prep.outputs.mode != 'none'
         run: |
@@ -191,6 +237,14 @@ jobs:
             git push --atomic origin \
               "${{ steps.prep.outputs.release_sha }}:refs/heads/main" \
               "refs/tags/${{ steps.prep.outputs.tag }}:refs/tags/${{ steps.prep.outputs.tag }}"
+          elif [ "${{ steps.prep.outputs.mode }}" = bootstrap ]; then
+            test "$(git rev-parse refs/remotes/origin/main)" = "${{ steps.prep.outputs.base_sha }}"
+            if ! git ls-remote --exit-code --tags origin \
+              "refs/tags/${{ steps.prep.outputs.tag }}" >/dev/null 2>&1; then
+              git push --atomic origin \
+                "${{ steps.prep.outputs.release_sha }}:refs/heads/main" \
+                "refs/tags/${{ steps.prep.outputs.tag }}:refs/tags/${{ steps.prep.outputs.tag }}"
+            fi
           fi
           git fetch --no-tags --force origin \
             +refs/heads/main:refs/remotes/origin/main
@@ -202,6 +256,7 @@ jobs:
         if: steps.prep.outputs.mode != 'none'
         env:
           GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ steps.prep.outputs.mode == 'bootstrap' }}
         run: |
           actor=$(gh api \
             "repos/${GITHUB_REPOSITORY}/commits/${{ steps.prep.outputs.release_sha }}" \
@@ -212,8 +267,11 @@ jobs:
             --root "$GITHUB_WORKSPACE" \
             --tested-sha "${{ steps.prep.outputs.release_sha }}" \
             --actor-login "$actor" \
+            --bootstrap "$BOOTSTRAP" \
             --output "$output"
-          grep -Fx 'mode=resume' "$output"
+          expected=resume
+          if [ "$BOOTSTRAP" = true ]; then expected=bootstrap; fi
+          grep -Fx "mode=$expected" "$output"
           grep -Fx 'release_sha=${{ steps.prep.outputs.release_sha }}' "$output"
           grep -Fx 'tag=${{ steps.prep.outputs.tag }}' "$output"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -257,20 +315,47 @@ jobs:
           test "${#published[@]}" -eq 4
           test "$(printf '%s\n' "${published[@]}")" = \
             "$(printf '%s\n' "${assets[@]##*/}" | sort)"
-      - name: Publish same loaded image to GHCR
+      - name: Publish same loaded image as one OCI index to GHCR
         if: steps.prep.outputs.mode != 'none'
         run: |
           local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
           source_id=$(docker image inspect --format '{{.Id}}' "$local_image")
+          oci_archive="$RUNNER_TEMP/elpis-release-image.oci.tar"
+          descriptor=$(oras manifest fetch --descriptor --oci-layout \
+            "$oci_archive:${{ steps.prep.outputs.release_sha }}")
+          manifest_digest=$(printf '%s\n' "$descriptor" | jq -r .digest)
+          layout="$RUNNER_TEMP/elpis-release-image-layout"
+          manifest="$layout/blobs/sha256/${manifest_digest#sha256:}"
+          test "$(jq -r .config.digest "$manifest")" = "$source_id"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          seed="$image:sha-${{ steps.prep.outputs.short_sha }}"
+          oras cp --from-oci-layout \
+            "$oci_archive:${{ steps.prep.outputs.release_sha }}" "$seed"
+          remote_manifest=$(oras manifest fetch --descriptor "$seed" | jq -r .digest)
+          test "$remote_manifest" = "$manifest_digest"
+          oras manifest index create \
+            --annotation "org.opencontainers.image.version=${{ steps.prep.outputs.version }}" \
+            --annotation "org.opencontainers.image.revision=${{ steps.prep.outputs.release_sha }}" \
+            "$seed" "$manifest_digest"
+          index_descriptor=$(oras manifest fetch --descriptor "$seed")
+          index_digest=$(printf '%s\n' "$index_descriptor" | jq -r .digest)
+          printf '%s\n' "$index_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          test "$(printf '%s\n' "$index_descriptor" | jq -r .mediaType)" = \
+            application/vnd.oci.image.index.v1+json
+          test "$index_digest" != "$manifest_digest"
+          oras tag "$image@$index_digest" \
+            "${{ steps.prep.outputs.tag }}" \
+            "${{ steps.prep.outputs.minor_tag }}" \
+            latest
           tags=(
             "$image:${{ steps.prep.outputs.tag }}"
             "$image:${{ steps.prep.outputs.minor_tag }}"
-            "$image:sha-${{ steps.prep.outputs.short_sha }}"
+            "$seed"
             "$image:latest"
           )
           for target in "${tags[@]}"; do
-            docker tag "$local_image" "$target"
-            test "$(docker image inspect --format '{{.Id}}' "$target")" = "$source_id"
-            docker push "$target"
+            descriptor=$(oras manifest fetch --descriptor "$target")
+            test "$(printf '%s\n' "$descriptor" | jq -r .digest)" = "$index_digest"
+            test "$(printf '%s\n' "$descriptor" | jq -r .mediaType)" = \
+              application/vnd.oci.image.index.v1+json
           done

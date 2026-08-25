@@ -39,7 +39,7 @@ export class ReleaseWorkflowError extends Error {
 
 export interface ReleaseWorkflowResult {
   format: 'elpis-release-workflow-v1';
-  mode: 'none' | 'release' | 'resume';
+  mode: 'none' | 'bootstrap' | 'release' | 'resume';
   baseSha: string;
   releaseSha: string;
   tag: string;
@@ -60,6 +60,7 @@ export async function prepareReleaseWorkflow(
   testedSha: string,
   actorLogin = '',
   dependencies: ReleaseWorkflowDependencies = {},
+  bootstrap = false,
 ): Promise<ReleaseWorkflowResult> {
   const root = await canonicalRoot(inputRoot);
   requireSha(testedSha, 'tested SHA');
@@ -86,6 +87,9 @@ export async function prepareReleaseWorkflow(
     );
   }
   if (currentTags.length === 1) {
+    if (bootstrap) {
+      return validateBootstrapTag(root, testedSha, currentTags[0]);
+    }
     if (actorLogin !== RELEASE_BOT_LOGIN && !LOGIN.test(actorLogin)) {
       throw new ReleaseWorkflowError(
         'release commit actor login is unavailable',
@@ -101,9 +105,15 @@ export async function prepareReleaseWorkflow(
     .filter((tag) => TAG.test(tag));
   if (reachableTags.length === 0) {
     await verifyReleaseSync(root, '0.1.0');
+    if (bootstrap) return prepareBootstrapTag(root, testedSha);
     return emptyResult(
       testedSha,
       'no reachable version tag; bootstrap is separate',
+    );
+  }
+  if (bootstrap) {
+    throw new ReleaseWorkflowError(
+      'bootstrap requires a repository with no reachable version tag',
     );
   }
   const previousTag = await git(root, [
@@ -201,9 +211,68 @@ export async function runReleaseWorkflowCli(
     parsed.root,
     parsed.testedSha,
     parsed.actorLogin,
+    {},
+    parsed.bootstrap,
   );
   if (parsed.output !== '') await appendGitHubOutput(parsed.output, value);
   write(`${JSON.stringify(value)}\n`);
+}
+
+async function prepareBootstrapTag(
+  root: string,
+  testedSha: string,
+): Promise<ReleaseWorkflowResult> {
+  const tag = 'v0.1.0';
+  if ((await git(root, ['tag', '--list', tag])) !== '') {
+    throw new ReleaseWorkflowError('bootstrap tag already exists elsewhere');
+  }
+  const date = await git(root, ['show', '-s', '--format=%cI', testedSha]);
+  await git(
+    root,
+    [
+      'tag',
+      '--annotate',
+      '--no-sign',
+      '--message',
+      `Elpis ${tag}`,
+      tag,
+      testedSha,
+    ],
+    releaseIdentityEnvironment(date),
+  );
+  return validateBootstrapTag(root, testedSha, tag);
+}
+
+async function validateBootstrapTag(
+  root: string,
+  testedSha: string,
+  tag: string,
+): Promise<ReleaseWorkflowResult> {
+  if (tag !== 'v0.1.0') {
+    throw new ReleaseWorkflowError('bootstrap tag must be exactly v0.1.0');
+  }
+  await requireAnnotatedTag(root, tag, true);
+  if ((await git(root, ['rev-parse', `${tag}^{}`])) !== testedSha) {
+    throw new ReleaseWorkflowError('bootstrap tag does not target tested SHA');
+  }
+  const reachableTags = (
+    await git(root, ['tag', '--merged', testedSha, '--list', 'v*'])
+  )
+    .split('\n')
+    .filter((candidate) => TAG.test(candidate));
+  if (reachableTags.length !== 1 || reachableTags[0] !== tag) {
+    throw new ReleaseWorkflowError('bootstrap tag set is invalid');
+  }
+  await verifyReleaseSync(root, '0.1.0');
+  return result(
+    'bootstrap',
+    testedSha,
+    testedSha,
+    tag,
+    '',
+    '',
+    'validated explicit v0.1.0 bootstrap tag',
+  );
 }
 
 async function validateExistingRelease(
@@ -414,7 +483,7 @@ function sameOwnedPaths(paths: readonly string[]): boolean {
 }
 
 function result(
-  mode: 'release' | 'resume',
+  mode: 'bootstrap' | 'release' | 'resume',
   baseSha: string,
   releaseSha: string,
   tag: string,
@@ -569,12 +638,13 @@ type ParsedArgs = {
   testedSha: string;
   actorLogin: string;
   output: string;
+  bootstrap: boolean;
 };
 
 function parseArgs(args: readonly string[]): ParsedArgs {
   if (args[0] !== 'prepare') {
     throw new ReleaseWorkflowError(
-      'usage: release-workflow prepare --root ABSOLUTE --tested-sha SHA [--actor-login LOGIN] [--output ABSOLUTE]',
+      'usage: release-workflow prepare --root ABSOLUTE --tested-sha SHA [--actor-login LOGIN] [--output ABSOLUTE] [--bootstrap true|false]',
     );
   }
   const values = new Map<string, string>();
@@ -588,12 +658,18 @@ function parseArgs(args: readonly string[]): ParsedArgs {
   }
   if (
     values.size < 2 ||
-    values.size > 4 ||
+    values.size > 5 ||
     !values.get('--root') ||
     !values.get('--tested-sha') ||
     [...values.keys()].some(
       (key) =>
-        !['--root', '--tested-sha', '--actor-login', '--output'].includes(key),
+        ![
+          '--root',
+          '--tested-sha',
+          '--actor-login',
+          '--output',
+          '--bootstrap',
+        ].includes(key),
     )
   ) {
     throw new ReleaseWorkflowError('release workflow arguments are invalid');
@@ -603,7 +679,14 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     testedSha: values.get('--tested-sha')!,
     actorLogin: values.get('--actor-login') ?? '',
     output: values.get('--output') ?? '',
+    bootstrap: parseBoolean(values.get('--bootstrap') ?? 'false'),
   };
+}
+
+function parseBoolean(value: string): boolean {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new ReleaseWorkflowError('bootstrap must be true or false');
 }
 
 if (

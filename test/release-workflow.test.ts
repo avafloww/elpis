@@ -135,6 +135,84 @@ test('CLI writes exact bounded no-release GitHub outputs', async (t) => {
   );
 });
 
+test('explicit bootstrap creates only deterministic v0.1.0 tag and supports recovery', async (t) => {
+  const roots = await Promise.all([fixture(false), fixture(false)]);
+  t.after(() =>
+    Promise.all(
+      roots.map((root) => fs.rm(root, { recursive: true, force: true })),
+    ),
+  );
+  const shas = await Promise.all(
+    roots.map((root) => git(root, ['rev-parse', 'HEAD'])),
+  );
+  assert.equal(shas[0], shas[1]);
+  const values = await Promise.all(
+    roots.map((root, index) =>
+      prepareReleaseWorkflow(root, shas[index], '', {}, true),
+    ),
+  );
+  assert.ok(values.every((value) => value.mode === 'bootstrap'));
+  assert.ok(values.every((value) => value.tag === 'v0.1.0'));
+  assert.ok(values.every((value, index) => value.releaseSha === shas[index]));
+  assert.equal(
+    await git(roots[0], ['rev-parse', 'refs/tags/v0.1.0']),
+    await git(roots[1], ['rev-parse', 'refs/tags/v0.1.0']),
+  );
+  assert.equal(await git(roots[0], ['rev-parse', 'v0.1.0^{}']), shas[0]);
+  assert.equal(await git(roots[0], ['rev-parse', 'HEAD']), shas[0]);
+  const recovered = await prepareReleaseWorkflow(
+    roots[0],
+    shas[0],
+    'human',
+    {},
+    true,
+  );
+  assert.equal(recovered.mode, 'bootstrap');
+  await assert.rejects(
+    prepareReleaseWorkflow(roots[0], shas[0], 'human'),
+    ReleaseWorkflowError,
+  );
+});
+
+test('CLI bootstrap flag is exact and emits bootstrap outputs', async (t) => {
+  const root = await fixture(false);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const output = path.join(root, '.git/bootstrap-output');
+  await fs.writeFile(output, '');
+  const sha = await git(root, ['rev-parse', 'HEAD']);
+  let receipt = '';
+  await runReleaseWorkflowCli(
+    [
+      'prepare',
+      '--root',
+      root,
+      '--tested-sha',
+      sha,
+      '--bootstrap',
+      'true',
+      '--output',
+      output,
+    ],
+    (text) => {
+      receipt += text;
+    },
+  );
+  assert.equal(JSON.parse(receipt).mode, 'bootstrap');
+  assert.match(await fs.readFile(output, 'utf8'), /^mode=bootstrap\n/);
+  await assert.rejects(
+    runReleaseWorkflowCli([
+      'prepare',
+      '--root',
+      root,
+      '--tested-sha',
+      sha,
+      '--bootstrap',
+      'yes',
+    ]),
+    /bootstrap must be true or false/,
+  );
+});
+
 test('stale tested SHA fails before release preparation', async (t) => {
   const root = await fixture(true);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
