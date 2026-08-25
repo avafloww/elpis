@@ -282,6 +282,7 @@ dependencies = [
 name = "elpis-executor"
 version = "0.7.1"
 dependencies = [
+ "base64",
  "elpis-coordinator",
  "elpis-identity",
  "elpis-journal",
@@ -298,6 +299,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tempfile",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]

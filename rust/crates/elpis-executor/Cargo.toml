@@ -16,6 +16,8 @@ elpis-link = { path = "../elpis-link" }
 elpis-protocol = { path = "../elpis-protocol" }
 elpis-python = { path = "../elpis-python" }
 elpis-runtime = { path = "../elpis-runtime", optional = true }
+base64.workspace = true
+serde.workspace = true
 hex.workspace = true
 libc.workspace = true
 ring.workspace = true
@@ -24,6 +26,7 @@ serde_json.workspace = true
 signal-hook.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
