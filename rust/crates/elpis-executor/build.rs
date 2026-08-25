@@ -17,6 +17,9 @@ struct RuntimeLock {
 #[serde(deny_unknown_fields)]
 struct PythonLock {
     version: String,
+    source_archive_filename: String,
+    source_archive_url: String,
+    source_archive_bytes: u64,
     source_archive_sha256: String,
 }
 
@@ -36,6 +39,8 @@ struct PackageLock {
     version: String,
     dist_info: String,
     wheel: String,
+    wheel_url: String,
+    wheel_bytes: u64,
     wheel_sha256: String,
     license_dir: String,
 }
@@ -60,6 +65,9 @@ fn seal_bundle() -> Result<(), Box<dyn std::error::Error>> {
     let lock: RuntimeLock = serde_json::from_slice(&lock_bytes)?;
     if lock.format != 1
         || lock.python.version != "3.13.15"
+        || lock.python.source_archive_filename.is_empty()
+        || !valid_https_url(&lock.python.source_archive_url)
+        || lock.python.source_archive_bytes == 0
         || !is_sha256(&lock.python.source_archive_sha256)
     {
         return Err("runtime lock header is invalid".into());
@@ -168,6 +176,8 @@ fn validate_packages(packages: &[PackageLock]) -> Result<(), Box<dyn std::error:
             || package.version.is_empty()
             || package.dist_info.is_empty()
             || package.wheel.is_empty()
+            || !valid_https_url(&package.wheel_url)
+            || package.wheel_bytes == 0
             || !is_sha256(&package.wheel_sha256)
             || package.license_dir != format!("{}/licenses", package.dist_info)
         {
@@ -179,4 +189,8 @@ fn validate_packages(packages: &[PackageLock]) -> Result<(), Box<dyn std::error:
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_https_url(value: &str) -> bool {
+    value.starts_with("https://") && !value.contains('#') && !value.contains('@')
 }

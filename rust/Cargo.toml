@@ -8,6 +8,7 @@ members = [
   "crates/elpis-runtime",
   "crates/elpis-identity",
   "crates/elpis-link",
+  "xtask",
 ]
 resolver = "3"
 

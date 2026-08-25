@@ -1418,6 +1418,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "elpis-runtime",
+ "flate2",
+ "fs2",
+ "hex",
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "ureq",
+]
+
+[[package]]
 name = "yasna"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

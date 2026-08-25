@@ -47,6 +47,99 @@ impl ManifestEntry {
     }
 }
 
+pub fn generate_manifest(
+    archive_bytes: &[u8],
+    executable: String,
+) -> Result<Vec<u8>, RuntimeError> {
+    let archive_sha256 = sha256_hex(archive_bytes);
+    let decoder = GzDecoder::new(Cursor::new(archive_bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = Vec::new();
+    let mut unpacked_bytes = 0_u64;
+    for item in archive.entries()? {
+        let mut item = item?;
+        let path = normalized_archive_path(&item.path()?)?;
+        let entry_type = item.header().entry_type();
+        if entry_type == EntryType::Directory {
+            continue;
+        }
+        if entry_type.is_file() {
+            let size = item.header().size()?;
+            unpacked_bytes = unpacked_bytes
+                .checked_add(size)
+                .ok_or(RuntimeError::Limits)?;
+            let mut hasher = Sha256::new();
+            io::copy(&mut item, &mut HashSink(&mut hasher))?;
+            let mode = if item.header().mode()? & 0o111 != 0 {
+                0o555
+            } else {
+                0o444
+            };
+            entries.push(ManifestEntry::File {
+                path,
+                sha256: hex::encode(hasher.finalize()),
+                mode,
+                size,
+            });
+        } else if entry_type.is_symlink() {
+            let target = item
+                .link_name()?
+                .ok_or_else(|| RuntimeError::Manifest("symlink target is missing".into()))?
+                .into_owned()
+                .into_os_string()
+                .into_string()
+                .map_err(|_| RuntimeError::Manifest("symlink target must be UTF-8".into()))?;
+            entries.push(ManifestEntry::Symlink { path, target });
+        } else {
+            return Err(RuntimeError::UnsupportedEntry(path));
+        }
+    }
+    entries.sort_by(|left, right| left.path().cmp(right.path()));
+    let manifest = RuntimeManifest {
+        format: 1,
+        archive_sha256,
+        executable,
+        max_entries: entries.len() as u64,
+        max_unpacked_bytes: unpacked_bytes,
+        entries,
+    };
+    let bytes = serde_json::to_vec(&manifest)?;
+    RuntimePayload::new(archive_bytes, &bytes)?;
+    Ok(bytes)
+}
+
+struct HashSink<'a>(&'a mut Sha256);
+
+impl Write for HashSink<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn normalized_archive_path(path: &Path) -> Result<String, RuntimeError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => parts.push(
+                value
+                    .to_str()
+                    .ok_or_else(|| RuntimeError::Manifest("path must be UTF-8".into()))?,
+            ),
+            Component::CurDir => {}
+            _ => return Err(RuntimeError::UnsafePath(path.display().to_string())),
+        }
+    }
+    if parts.is_empty() {
+        return Err(RuntimeError::Manifest("empty archive path".into()));
+    }
+    Ok(parts.join("/"))
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("runtime manifest is invalid: {0}")]
