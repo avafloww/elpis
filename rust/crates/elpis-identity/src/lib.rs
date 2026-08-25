@@ -338,6 +338,10 @@ impl IdentityStore {
         self.identity.clone()
     }
 
+    pub fn tls_server_name(&self) -> &str {
+        &self.policy.server_name
+    }
+
     pub fn certificate_request(&self) -> Result<CertificateRequest, IdentityError> {
         let private = PrivatePkcs8KeyDer::from(self.key.pkcs8.as_slice());
         let key = RcgenKeyPair::from_pkcs8_der_and_sign_algo(&private, &PKCS_ED25519)

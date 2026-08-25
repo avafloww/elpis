@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use elpis_protocol::Request;
-use elpis_transport::{ClientFrame, ServerFrame};
+use elpis_transport::{ClientFrame, FenceCheckpoint, ServerFrame};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -406,6 +406,43 @@ impl Journal {
 
     pub fn request(&self, server_seq: u64) -> Result<Option<StoredRequest>, JournalError> {
         load_request_connection(&self.connection, server_seq)
+    }
+
+    pub fn fence_checkpoint(
+        &self,
+        executor_id: &str,
+        boot_epoch: &str,
+        connection_id: &str,
+    ) -> Result<FenceCheckpoint, JournalError> {
+        let state = self.state()?;
+        for (stored, expected) in [
+            (state.executor_id.as_deref(), executor_id),
+            (state.boot_epoch.as_deref(), boot_epoch),
+            (state.connection_id.as_deref(), connection_id),
+        ] {
+            if stored.is_some_and(|value| value != expected) {
+                return Err(JournalError::BindingMismatch);
+            }
+        }
+        let mut statement = self.connection.prepare(request_select_all())?;
+        let requests = statement
+            .query_map([], decode_request)?
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint = FenceCheckpoint {
+            executor_id: executor_id.to_owned(),
+            boot_epoch: boot_epoch.to_owned(),
+            connection_id: connection_id.to_owned(),
+            last_committed_server_seq: state.last_committed_server_seq,
+            next_client_seq: state.next_client_seq,
+            request_seqs: requests.iter().map(|request| request.server_seq).collect(),
+            responded_request_seqs: requests
+                .iter()
+                .filter(|request| request.status == RequestStatus::Completed)
+                .map(|request| request.server_seq)
+                .collect(),
+        };
+        checkpoint.to_json()?;
+        Ok(checkpoint)
     }
 
     fn recover_prepared(&mut self) -> Result<u64, JournalError> {
@@ -1129,6 +1166,42 @@ mod tests {
 
     fn open(temp: &TempDir) -> Journal {
         Journal::open(database(temp), JournalLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn fence_checkpoint_reconstructs_completed_and_ambiguous_requests() {
+        let temp = TempDir::new().unwrap();
+        let mut journal = open(&temp);
+        let empty = journal
+            .fence_checkpoint("executor-1", EPOCH, "connection-1")
+            .unwrap();
+        assert_eq!(empty.last_committed_server_seq, 0);
+        assert_eq!(empty.next_client_seq, 1);
+        assert!(empty.request_seqs.is_empty());
+        assert!(empty.responded_request_seqs.is_empty());
+
+        let prepared = match journal.prepare(&request(1, "request-1", "x = 1")).unwrap() {
+            PrepareOutcome::New(prepared) => prepared,
+            PrepareOutcome::Existing(_) => panic!("request unexpectedly existed"),
+        };
+        journal
+            .complete(&prepared, &response(1, 1, "request-1"))
+            .unwrap();
+        journal.prepare(&request(2, "request-2", "x = 2")).unwrap();
+        drop(journal);
+
+        let reopened = open(&temp);
+        let checkpoint = reopened
+            .fence_checkpoint("executor-1", EPOCH, "connection-1")
+            .unwrap();
+        assert_eq!(checkpoint.last_committed_server_seq, 2);
+        assert_eq!(checkpoint.next_client_seq, 2);
+        assert_eq!(checkpoint.request_seqs, vec![1, 2]);
+        assert_eq!(checkpoint.responded_request_seqs, vec![1]);
+        assert!(matches!(
+            reopened.fence_checkpoint("executor-1", EPOCH, "other-connection"),
+            Err(JournalError::BindingMismatch)
+        ));
     }
 
     #[test]
