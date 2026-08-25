@@ -31,6 +31,7 @@ rcgen = { version = "=0.14.9", default-features = false, features = ["ring"] }
 x509-parser = "=0.18.1"
 rustix = { version = "=1.1.2", features = ["process"] }
 zeroize = "=1.8.1"
+ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
 tar = "0.4"
 thiserror = "2"
 tracing = "0.1"

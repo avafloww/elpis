@@ -25,6 +25,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod enrollment;
+pub use enrollment::{EnrollmentClient, EnrollmentError, EnrollmentToken};
+
 const KEY_FILE: &str = "identity-v1.pk8";
 const LOCK_FILE: &str = ".identity.lock";
 const MANIFEST_FILE: &str = "credential-v1.json";

@@ -1,6 +1,6 @@
 # elpis-identity
 
-Local executor identity and mTLS credential storage. The crate performs no network I/O.
+Local executor identity, mTLS credential storage, and bounded pre-client-certificate enrollment.
 
 ## Security contract
 
@@ -23,3 +23,10 @@ Local executor identity and mTLS credential storage. The crate performs no netwo
 Revocation evidence is supplied by the enrollment boundary and has an explicit
 freshness deadline. `Revoked`, `Unknown`, stale, future-dated, or absent evidence
 is rejected; this local crate does not fetch OCSP or CRLs.
+
+Pre-client-certificate enrollment uses a consuming client and one-shot zeroizing token.
+The endpoint must be HTTPS on the configured DNS name. The client uses rustls with one
+specific configured root, SNI and verification enabled, no proxy, no redirects, and
+bounded stage, header, request, and response sizes. Transport errors are redacted. Only
+credentials accepted by the local store are atomically activated; the token is never
+persisted.
