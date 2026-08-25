@@ -264,6 +264,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-effects"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rusqlite",
+ "rustix",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "elpis-executor"
 version = "0.1.0"
 dependencies = [
