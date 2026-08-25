@@ -192,7 +192,7 @@ struct PendingCancel {
 
 #[derive(Debug, Clone)]
 enum TerminalResponse {
-    Exact(Response),
+    Exact(Box<Response>),
     Stale,
 }
 
@@ -390,7 +390,7 @@ impl RemoteRunOwner {
             .ok_or(ClientError::UnknownResponse)?;
         if let Some(terminal) = self.terminal_responses.get(&response_id) {
             return match terminal {
-                TerminalResponse::Exact(first) if first == &response => {
+                TerminalResponse::Exact(first) if first.as_ref() == &response => {
                     Ok(ResponseEvent::Duplicate)
                 }
                 TerminalResponse::Exact(_) => Err(ClientError::ConflictingTerminalResponse),
@@ -859,7 +859,9 @@ impl RemoteRunOwner {
             response_ids.push(response_id.clone());
             self.terminal_responses.insert(
                 response_id,
-                response.map_or(TerminalResponse::Stale, TerminalResponse::Exact),
+                response.map_or(TerminalResponse::Stale, |response| {
+                    TerminalResponse::Exact(Box::new(response))
+                }),
             );
         }
         if let Some(future_id) = &future_id {

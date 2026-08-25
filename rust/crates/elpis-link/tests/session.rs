@@ -344,7 +344,7 @@ impl DeferredDispatcher for DeferredPairDispatcher {
                         "context_invalidated": true,
                     }),
                 );
-                let group = DispatchGroup::Pair([run, cancel]);
+                let group = DispatchGroup::Pair(Box::new([run, cancel]));
                 if self.defer_pair {
                     self.completion = Some(group);
                     None
@@ -574,11 +574,11 @@ impl DeferredDispatcher for DeferredSingleDispatcher {
             self.observer.request(1).unwrap().unwrap().status,
             elpis_journal::RequestStatus::Prepared
         );
-        self.completion = Some(DispatchGroup::Single(Response::success(
+        self.completion = Some(DispatchGroup::Single(Box::new(Response::success(
             request.request_id().to_owned(),
             "completed",
             serde_json::json!({}),
-        )));
+        ))));
         None
     }
 

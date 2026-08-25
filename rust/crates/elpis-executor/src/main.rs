@@ -365,7 +365,7 @@ fn write_group(output: &mut impl Write, group: &DispatchGroup) {
     match group {
         DispatchGroup::Single(response) => write_response(output, response),
         DispatchGroup::Pair(responses) => {
-            for response in responses {
+            for response in responses.as_ref() {
                 write_response(output, response);
             }
         }
@@ -566,7 +566,7 @@ mod tests {
 
     fn only(group: Option<DispatchGroup>) -> Response {
         match group.expect("request returned no immediate response") {
-            DispatchGroup::Single(response) => response,
+            DispatchGroup::Single(response) => *response,
             DispatchGroup::Pair(_) => panic!("request returned an unexpected response pair"),
         }
     }
@@ -577,7 +577,7 @@ mod tests {
     ) -> Option<DispatchGroup> {
         match decode_request(value.to_string().as_bytes()) {
             Ok(request) => executor.submit(request),
-            Err(response) => Some(DispatchGroup::Single(*response)),
+            Err(response) => Some(DispatchGroup::Single(response)),
         }
     }
 
@@ -801,9 +801,10 @@ mod tests {
             serde_json::json!({"op":"cancel","protocol":PROTOCOL_VERSION,"request_id":"cancel-1","context_id":"context-1","generation":1,"target_request_id":"request-1","run_id":"run-1"}),
         );
         let group = immediate.unwrap_or_else(|| wait_group(&mut executor));
-        let DispatchGroup::Pair([run, cancel]) = group else {
+        let DispatchGroup::Pair(responses) = group else {
             panic!("cancellation did not return an ordered pair");
         };
+        let [run, cancel] = *responses;
         assert_eq!(run.request_id.as_deref(), Some("request-1"));
         assert_eq!(run.failure_kind.as_deref(), Some("cancelled"));
         assert_eq!(cancel.request_id.as_deref(), Some("cancel-1"));
@@ -815,7 +816,7 @@ mod tests {
         let mut executor = executor();
         let response = only(submit_json(
             &mut executor,
-            serde_json::json!({"op":"open","protocol":1,"request_id":"r1","context_id":"c1","generation":1,"unexpected":true}),
+            serde_json::json!({"op":"open","protocol":PROTOCOL_VERSION,"request_id":"r1","context_id":"c1","generation":1,"unexpected":true}),
         ));
         assert!(!response.ok);
         assert_eq!(executor.coordinator.context_count(), 0);

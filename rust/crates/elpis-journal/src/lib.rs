@@ -10,7 +10,8 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const WIRE_PROTOCOL: i64 = 2;
 const APPLICATION_ID: i64 = 0x454c_504a;
 const ZERO_SEQ: [u8; 8] = 0_u64.to_be_bytes();
 const ONE_SEQ: [u8; 8] = 1_u64.to_be_bytes();
@@ -110,25 +111,38 @@ impl Journal {
     pub fn open(path: impl AsRef<Path>, limits: JournalLimits) -> Result<Self, JournalError> {
         validate_limits(limits)?;
         let path = path.as_ref().to_path_buf();
+        let existed = path.exists();
         prepare_path(&path)?;
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        set_private_file_mode(&path)?;
+        // A newly created database must not be left at the process umask while
+        // its schema is initialized.  Existing files are chmod'd only after
+        // compatibility has been accepted so a refused legacy journal is not
+        // changed in any way.
+        if !existed {
+            set_private_file_mode(&path)?;
+        }
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+
+        // Compatibility checks and the one permitted v1 migration precede
+        // persistent PRAGMAs, integrity decoding, and prepared-row recovery.
+        initialize_schema(&mut connection)?;
         let check: String = connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
         if check != "ok" {
             return Err(JournalError::Corrupt(check));
         }
-        initialize_schema(&connection)?;
         validate_integrity(&connection, limits)?;
+        if existed {
+            set_private_file_mode(&path)?;
+        }
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
         let mut journal = Self {
             path,
             connection,
@@ -619,6 +633,8 @@ pub enum JournalError {
     Transport(#[from] elpis_transport::EncodeError),
     #[error("journal is corrupt: {0}")]
     Corrupt(String),
+    #[error("schema 1 journal contains legacy protocol state and cannot be opened")]
+    LegacyProtocolState,
     #[error("unsafe journal path: {0}")]
     UnsafePath(String),
     #[error("journal limits must be nonzero and fit SQLite counters")]
@@ -749,28 +765,37 @@ impl From<std::io::Error> for JournalError {
     }
 }
 
-fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
+fn initialize_schema(connection: &mut Connection) -> Result<(), JournalError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != 0 && version != SCHEMA_VERSION {
-        return Err(JournalError::Corrupt(format!(
-            "unsupported schema version {version}"
-        )));
-    }
-    if version == 0 {
-        let objects: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
-            [],
-            |row| row.get(0),
-        )?;
-        if objects != 0 {
-            return Err(JournalError::Corrupt(
-                "unversioned database already contains objects".into(),
-            ));
+    match version {
+        0 => initialize_new_schema(connection)?,
+        1 => migrate_empty_legacy_schema(connection)?,
+        SCHEMA_VERSION => validate_schema_identity(connection)?,
+        _ => {
+            return Err(JournalError::Corrupt(format!(
+                "unsupported schema version {version}"
+            )));
         }
     }
-    if version == 0 {
-        connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS journal_state (
+    validate_wire_protocol_pin(connection)?;
+    Ok(())
+}
+
+fn initialize_new_schema(connection: &mut Connection) -> Result<(), JournalError> {
+    let objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if objects != 0 {
+        return Err(JournalError::Corrupt(
+            "unversioned database already contains objects".into(),
+        ));
+    }
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "CREATE TABLE journal_state (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             executor_id TEXT,
             boot_epoch TEXT,
@@ -779,10 +804,11 @@ fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
             next_client_seq BLOB NOT NULL CHECK (length(next_client_seq) = 8),
             request_count INTEGER NOT NULL CHECK (request_count >= 0),
             total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+            wire_protocol INTEGER NOT NULL CHECK (wire_protocol = 2),
             CHECK ((executor_id IS NULL) = (boot_epoch IS NULL)),
             CHECK ((executor_id IS NULL) = (connection_id IS NULL))
         );
-        CREATE TABLE IF NOT EXISTS journal_requests (
+        CREATE TABLE journal_requests (
             server_seq BLOB PRIMARY KEY CHECK (length(server_seq) = 8),
             executor_id TEXT NOT NULL,
             boot_epoch TEXT NOT NULL,
@@ -800,7 +826,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
                 (status IN ('prepared', 'ambiguous') AND response_sha256 IS NULL AND response_bytes IS NULL AND client_seq IS NULL)
             )
         );
-        CREATE TRIGGER IF NOT EXISTS journal_request_identity_immutable
+        CREATE TRIGGER journal_request_identity_immutable
         BEFORE UPDATE ON journal_requests
         WHEN OLD.server_seq != NEW.server_seq
           OR OLD.executor_id != NEW.executor_id
@@ -810,18 +836,18 @@ fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
           OR OLD.request_sha256 != NEW.request_sha256
           OR OLD.request_bytes != NEW.request_bytes
         BEGIN SELECT RAISE(ABORT, 'request identity is immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS journal_request_lifecycle
+        CREATE TRIGGER journal_request_lifecycle
         BEFORE UPDATE OF status ON journal_requests
         WHEN NOT (
             (OLD.status = 'prepared' AND NEW.status IN ('completed', 'ambiguous'))
             OR OLD.status = NEW.status
         )
         BEGIN SELECT RAISE(ABORT, 'invalid request lifecycle transition'); END;
-        CREATE TRIGGER IF NOT EXISTS journal_request_insert_prepared
+        CREATE TRIGGER journal_request_insert_prepared
         BEFORE INSERT ON journal_requests
         WHEN NEW.status != 'prepared'
         BEGIN SELECT RAISE(ABORT, 'new request must be prepared'); END;
-        CREATE TRIGGER IF NOT EXISTS journal_request_completed_immutable
+        CREATE TRIGGER journal_request_completed_immutable
         BEFORE UPDATE ON journal_requests
         WHEN OLD.status = 'completed' AND (
             OLD.status != NEW.status
@@ -830,20 +856,98 @@ fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
             OR OLD.client_seq != NEW.client_seq
         )
         BEGIN SELECT RAISE(ABORT, 'completed receipt is immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS journal_request_no_delete
+        CREATE TRIGGER journal_request_no_delete
         BEFORE DELETE ON journal_requests
         BEGIN SELECT RAISE(ABORT, 'journal requests are append-only'); END;",
-        )?;
-        connection.execute(
-            "INSERT INTO journal_state (
-                singleton, executor_id, boot_epoch, connection_id,
-                last_server_seq, next_client_seq, request_count, total_bytes
-             ) VALUES (1, NULL, NULL, NULL, ?1, ?2, 0, 0)",
-            params![ZERO_SEQ.as_slice(), ONE_SEQ.as_slice()],
-        )?;
-        connection.pragma_update(None, "application_id", APPLICATION_ID)?;
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    )?;
+    transaction.execute(
+        "INSERT INTO journal_state (
+            singleton, executor_id, boot_epoch, connection_id,
+            last_server_seq, next_client_seq, request_count, total_bytes, wire_protocol
+         ) VALUES (1, NULL, NULL, NULL, ?1, ?2, 0, 0, ?3)",
+        params![ZERO_SEQ.as_slice(), ONE_SEQ.as_slice(), WIRE_PROTOCOL],
+    )?;
+    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    validate_schema_identity(&transaction)?;
+    validate_wire_protocol_pin(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_empty_legacy_schema(connection: &mut Connection) -> Result<(), JournalError> {
+    // A schema-2 database whose user_version was lowered must never be treated
+    // as a migratable legacy journal.
+    if state_column_exists(connection, "wire_protocol")? {
+        return Err(JournalError::Corrupt(
+            "schema 2 journal is marked as schema 1".into(),
+        ));
     }
+    validate_schema_identity(connection)?;
+    if !legacy_schema_is_empty(connection)? {
+        return Err(JournalError::LegacyProtocolState);
+    }
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Recheck while holding the write reservation.  This ensures a concurrent
+    // legacy writer cannot bind or append between inspection and migration.
+    if state_column_exists(&transaction, "wire_protocol")? {
+        return Err(JournalError::Corrupt(
+            "schema 2 journal is marked as schema 1".into(),
+        ));
+    }
+    validate_schema_identity(&transaction)?;
+    if !legacy_schema_is_empty(&transaction)? {
+        return Err(JournalError::LegacyProtocolState);
+    }
+    transaction.execute(
+        "ALTER TABLE journal_state
+         ADD COLUMN wire_protocol INTEGER NOT NULL DEFAULT 2 CHECK (wire_protocol = 2)",
+        [],
+    )?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    validate_schema_identity(&transaction)?;
+    validate_wire_protocol_pin(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn legacy_schema_is_empty(connection: &Connection) -> Result<bool, JournalError> {
+    let state_rows: i64 =
+        connection.query_row("SELECT COUNT(*) FROM journal_state", [], |row| row.get(0))?;
+    let request_rows: i64 =
+        connection.query_row("SELECT COUNT(*) FROM journal_requests", [], |row| {
+            row.get(0)
+        })?;
+    if state_rows != 1 || request_rows != 0 {
+        return Ok(false);
+    }
+    let eligible: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM journal_state
+         WHERE singleton = 1
+           AND executor_id IS NULL
+           AND boot_epoch IS NULL
+           AND connection_id IS NULL
+           AND typeof(last_server_seq) = 'blob' AND last_server_seq = ?1
+           AND typeof(next_client_seq) = 'blob' AND next_client_seq = ?2
+           AND typeof(request_count) = 'integer' AND request_count = 0
+           AND typeof(total_bytes) = 'integer' AND total_bytes = 0",
+        params![ZERO_SEQ.as_slice(), ONE_SEQ.as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(eligible == 1)
+}
+
+fn state_column_exists(connection: &Connection, column: &str) -> Result<bool, JournalError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('journal_state') WHERE name = ?1",
+        params![column],
+        |row| row.get(0),
+    )?;
+    Ok(count != 0)
+}
+
+fn validate_schema_identity(connection: &Connection) -> Result<(), JournalError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     if application_id != APPLICATION_ID {
@@ -868,6 +972,34 @@ fn initialize_schema(connection: &Connection) -> Result<(), JournalError> {
                 "missing journal {kind} {name}"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_wire_protocol_pin(connection: &Connection) -> Result<(), JournalError> {
+    if !state_column_exists(connection, "wire_protocol")? {
+        return Err(JournalError::Corrupt(
+            "schema 2 journal has no wire protocol pin".into(),
+        ));
+    }
+    let (rows, pinned): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(
+             CASE WHEN typeof(wire_protocol) = 'integer' AND wire_protocol = ?1
+                  THEN 1 ELSE 0 END
+         ), 0)
+         FROM journal_state",
+        params![WIRE_PROTOCOL],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rows != 1 {
+        return Err(JournalError::Corrupt(format!(
+            "expected one journal state row, found {rows}"
+        )));
+    }
+    if pinned != 1 {
+        return Err(JournalError::Corrupt(
+            "journal wire protocol pin is not 2".into(),
+        ));
     }
     Ok(())
 }
@@ -1289,7 +1421,7 @@ mod tests {
             connection_id: "connection-1".into(),
             seq: client_seq,
             request_seq,
-            response: response_value(request_id),
+            response: Box::new(response_value(request_id)),
         }
     }
 
@@ -1303,6 +1435,42 @@ mod tests {
 
     fn open(temp: &TempDir) -> Journal {
         Journal::open(database(temp), JournalLimits::default()).unwrap()
+    }
+
+    const LEGACY_NONEMPTY_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/nonempty-v1.sqlite");
+    const LEGACY_NONEMPTY_SHA256: [u8; 32] = [
+        48, 96, 178, 150, 90, 172, 1, 182, 8, 28, 136, 92, 222, 73, 93, 53, 48, 66, 111, 128, 119,
+        209, 38, 87, 168, 2, 139, 184, 167, 19, 149, 234,
+    ];
+
+    fn legacy_database(temp: &TempDir) -> PathBuf {
+        let path = database(temp);
+        fs::write(&path, LEGACY_NONEMPTY_FIXTURE).unwrap();
+        path
+    }
+
+    fn make_legacy_empty(path: &Path, executor_id: Option<&str>, last_server_seq: u64) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER journal_request_no_delete;
+                 DELETE FROM journal_requests;
+                 CREATE TRIGGER journal_request_no_delete
+                 BEFORE DELETE ON journal_requests
+                 BEGIN SELECT RAISE(ABORT, 'journal requests are append-only'); END;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE journal_state
+                 SET executor_id = ?1,
+                     boot_epoch = CASE WHEN ?1 IS NULL THEN NULL ELSE '00112233445566778899aabbccddeeff' END,
+                     connection_id = CASE WHEN ?1 IS NULL THEN NULL ELSE 'connection-legacy' END,
+                     last_server_seq = ?2, next_client_seq = ?3,
+                     request_count = 0, total_bytes = 0",
+                params![executor_id, seq_blob(last_server_seq), ONE_SEQ.as_slice()],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1680,7 +1848,7 @@ mod tests {
             connection_id: "connection-1".into(),
             seq: 2,
             request_seq: 2,
-            response: response_value("request-2"),
+            response: Box::new(response_value("request-2")),
         };
         assert!(matches!(
             journal.complete_pair((&first, &response_1), (&second, &wrong_binding)),
@@ -1903,6 +2071,245 @@ mod tests {
         drop(raw);
         assert!(matches!(
             Journal::open(&second_database, JournalLimits::default()),
+            Err(JournalError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn nonempty_schema_1_golden_is_refused_without_touching_bytes_or_rows() {
+        let temp = TempDir::new().unwrap();
+        let path = legacy_database(&temp);
+        let before = fs::read(&path).unwrap();
+        assert_eq!(sha256(&before), LEGACY_NONEMPTY_SHA256);
+
+        let rows_before = {
+            type LegacyStateRow = (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Vec<u8>,
+                Vec<u8>,
+                i64,
+                i64,
+            );
+            let raw = Connection::open(&path).unwrap();
+            let state: LegacyStateRow = raw
+                .query_row(
+                    "SELECT executor_id, boot_epoch, connection_id, last_server_seq,
+                            next_client_seq, request_count, total_bytes FROM journal_state",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let request: (Vec<u8>, String, Vec<u8>, String) = raw
+                .query_row(
+                    "SELECT server_seq, request_id, request_bytes, status FROM journal_requests",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            (state, request)
+        };
+        assert!(serde_json::from_slice::<serde_json::Value>(&rows_before.1.2).is_err());
+
+        assert!(matches!(
+            Journal::open(&path, JournalLimits::default()),
+            Err(JournalError::LegacyProtocolState)
+        ));
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(sha256(&after), LEGACY_NONEMPTY_SHA256);
+        assert!(!path.with_extension("sqlite-wal").exists());
+        assert!(!path.with_extension("sqlite-shm").exists());
+        let raw = Connection::open(&path).unwrap();
+        let state_after = raw
+            .query_row(
+                "SELECT executor_id, boot_epoch, connection_id, last_server_seq,
+                        next_client_seq, request_count, total_bytes FROM journal_state",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let request_after = raw
+            .query_row(
+                "SELECT server_seq, request_id, request_bytes, status FROM journal_requests",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!((state_after, request_after), rows_before);
+    }
+
+    #[test]
+    fn wrong_application_schema_1_is_corrupt_before_legacy_classification() {
+        let temp = TempDir::new().unwrap();
+        let path = legacy_database(&temp);
+        let raw = Connection::open(&path).unwrap();
+        raw.pragma_update(None, "application_id", APPLICATION_ID + 1)
+            .unwrap();
+        drop(raw);
+        let before = fs::read(&path).unwrap();
+
+        assert!(matches!(
+            Journal::open(&path, JournalLimits::default()),
+            Err(JournalError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("sqlite-wal").exists());
+        assert!(!path.with_extension("sqlite-shm").exists());
+    }
+
+    #[test]
+    fn bound_empty_and_sequence_only_schema_1_are_refused() {
+        let bound = TempDir::new().unwrap();
+        let bound_path = legacy_database(&bound);
+        make_legacy_empty(&bound_path, Some("executor-legacy"), 0);
+        assert!(matches!(
+            Journal::open(&bound_path, JournalLimits::default()),
+            Err(JournalError::LegacyProtocolState)
+        ));
+        let raw = Connection::open(&bound_path).unwrap();
+        assert_eq!(
+            raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(raw);
+
+        let sequenced = TempDir::new().unwrap();
+        let sequenced_path = legacy_database(&sequenced);
+        make_legacy_empty(&sequenced_path, None, 1);
+        assert!(matches!(
+            Journal::open(&sequenced_path, JournalLimits::default()),
+            Err(JournalError::LegacyProtocolState)
+        ));
+        let raw = Connection::open(&sequenced_path).unwrap();
+        assert_eq!(
+            raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn exactly_empty_schema_1_migrates_to_pinned_schema_2_and_reopens() {
+        let temp = TempDir::new().unwrap();
+        let path = legacy_database(&temp);
+        make_legacy_empty(&path, None, 0);
+
+        let journal = Journal::open(&path, JournalLimits::default()).unwrap();
+        assert_eq!(journal.state().unwrap().last_committed_server_seq, 0);
+        drop(journal);
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            raw.query_row("SELECT wire_protocol FROM journal_state", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            WIRE_PROTOCOL
+        );
+        drop(raw);
+        drop(Journal::open(&path, JournalLimits::default()).unwrap());
+    }
+
+    #[test]
+    fn new_database_starts_at_pinned_schema_2_and_reopens() {
+        let temp = TempDir::new().unwrap();
+        let path = database(&temp);
+        drop(Journal::open(&path, JournalLimits::default()).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        let version = raw
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let pin = raw
+            .query_row("SELECT wire_protocol FROM journal_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!((version, pin), (SCHEMA_VERSION, WIRE_PROTOCOL));
+        drop(raw);
+        drop(Journal::open(&path, JournalLimits::default()).unwrap());
+    }
+
+    #[test]
+    fn schema_2_wrong_pin_and_schema_version_downgrades_fail_closed() {
+        let wrong_pin = TempDir::new().unwrap();
+        let wrong_pin_path = database(&wrong_pin);
+        drop(Journal::open(&wrong_pin_path, JournalLimits::default()).unwrap());
+        let raw = Connection::open(&wrong_pin_path).unwrap();
+        raw.pragma_update(None, "ignore_check_constraints", "ON")
+            .unwrap();
+        raw.execute("UPDATE journal_state SET wire_protocol = 1", [])
+            .unwrap();
+        drop(raw);
+        assert!(matches!(
+            Journal::open(&wrong_pin_path, JournalLimits::default()),
+            Err(JournalError::Corrupt(_))
+        ));
+
+        let lowered_v2 = TempDir::new().unwrap();
+        let lowered_v2_path = database(&lowered_v2);
+        drop(Journal::open(&lowered_v2_path, JournalLimits::default()).unwrap());
+        let raw = Connection::open(&lowered_v2_path).unwrap();
+        raw.pragma_update(None, "user_version", 1).unwrap();
+        drop(raw);
+        assert!(matches!(
+            Journal::open(&lowered_v2_path, JournalLimits::default()),
+            Err(JournalError::Corrupt(_))
+        ));
+
+        let raised_v1 = TempDir::new().unwrap();
+        let raised_v1_path = legacy_database(&raised_v1);
+        let raw = Connection::open(&raised_v1_path).unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        drop(raw);
+        assert!(matches!(
+            Journal::open(&raised_v1_path, JournalLimits::default()),
+            Err(JournalError::Corrupt(_))
+        ));
+
+        let future = TempDir::new().unwrap();
+        let future_path = database(&future);
+        drop(Journal::open(&future_path, JournalLimits::default()).unwrap());
+        let raw = Connection::open(&future_path).unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(raw);
+        assert!(matches!(
+            Journal::open(&future_path, JournalLimits::default()),
             Err(JournalError::Corrupt(_))
         ));
     }

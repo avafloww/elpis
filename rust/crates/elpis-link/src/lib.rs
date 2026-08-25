@@ -110,15 +110,15 @@ impl LinkConfig {
 /// One completed response, or two responses whose order is atomic and significant.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DispatchGroup {
-    Single(Response),
-    Pair([Response; 2]),
+    Single(Box<Response>),
+    Pair(Box<[Response; 2]>),
 }
 
 impl DispatchGroup {
     fn responses(&self) -> &[Response] {
         match self {
-            Self::Single(response) => std::slice::from_ref(response),
-            Self::Pair(responses) => responses,
+            Self::Single(response) => std::slice::from_ref(response.as_ref()),
+            Self::Pair(responses) => responses.as_ref(),
         }
     }
 }
@@ -147,7 +147,7 @@ where
     T: Dispatcher,
 {
     fn submit(&mut self, request: Request) -> Option<DispatchGroup> {
-        Some(DispatchGroup::Single(self.dispatch(request)))
+        Some(DispatchGroup::Single(Box::new(self.dispatch(request))))
     }
 
     fn poll(&mut self) -> Option<DispatchGroup> {
@@ -358,7 +358,7 @@ impl Session {
                     .ok_or(LinkError::StateMismatch)?;
                 let frame = self
                     .fence
-                    .build_response(prepared.server_seq(), response)
+                    .build_response(prepared.server_seq(), *response)
                     .map_err(|_| LinkError::Fence)?;
                 let stored = journal
                     .complete(&prepared, &frame)
@@ -393,7 +393,7 @@ impl Session {
                     .cloned()
                     .ok_or(LinkError::StateMismatch)?;
                 let server_seqs = [first_prepared.server_seq(), second_prepared.server_seq()];
-                let [first_response, second_response] = responses;
+                let [first_response, second_response] = *responses;
                 let first_frame = self
                     .fence
                     .build_response(server_seqs[0], first_response)

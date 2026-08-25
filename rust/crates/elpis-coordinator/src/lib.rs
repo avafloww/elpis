@@ -66,22 +66,22 @@ impl Default for CoordinatorConfig {
 /// One response, or two responses whose order is part of the result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompletionGroup {
-    Single(Response),
-    Pair([Response; 2]),
+    Single(Box<Response>),
+    Pair(Box<[Response; 2]>),
 }
 
 impl CompletionGroup {
     pub fn responses(&self) -> &[Response] {
         match self {
-            Self::Single(response) => std::slice::from_ref(response),
-            Self::Pair(responses) => responses,
+            Self::Single(response) => std::slice::from_ref(response.as_ref()),
+            Self::Pair(responses) => responses.as_ref(),
         }
     }
 
     pub fn into_responses(self) -> Vec<Response> {
         match self {
-            Self::Single(response) => vec![response],
-            Self::Pair(responses) => Vec::from(responses),
+            Self::Single(response) => vec![*response],
+            Self::Pair(responses) => Vec::from(*responses),
         }
     }
 }
@@ -649,7 +649,7 @@ impl Drop for Coordinator {
 }
 
 fn single(response: Response) -> Option<CompletionGroup> {
-    Some(CompletionGroup::Single(response))
+    Some(CompletionGroup::Single(Box::new(response)))
 }
 
 fn terminal_completion(
@@ -658,20 +658,20 @@ fn terminal_completion(
     terminal: Result<RunResult, PythonError>,
 ) -> CompletionGroup {
     let Some(pending) = pending_cancel else {
-        return CompletionGroup::Single(run_terminal_response(
+        return CompletionGroup::Single(Box::new(run_terminal_response(
             binding.request_id.clone(),
             terminal,
-        ));
+        )));
     };
     match pending.mode {
-        PendingCancelMode::CompletionWon => CompletionGroup::Pair([
+        PendingCancelMode::CompletionWon => CompletionGroup::Pair(Box::new([
             run_terminal_response(binding.request_id.clone(), terminal),
             cancel_already_terminal(pending.request_id, binding.request_id.clone()),
-        ]),
+        ])),
         PendingCancelMode::Owned {
             started,
             context_invalidated,
-        } if matches!(&terminal, Err(PythonError::Cancelled)) => CompletionGroup::Pair([
+        } if matches!(&terminal, Err(PythonError::Cancelled)) => CompletionGroup::Pair(Box::new([
             cancelled_run_response(binding.request_id.clone(), started, context_invalidated),
             cancel_success(
                 pending.request_id,
@@ -679,8 +679,8 @@ fn terminal_completion(
                 started,
                 context_invalidated,
             ),
-        ]),
-        PendingCancelMode::Owned { .. } => CompletionGroup::Pair([
+        ])),
+        PendingCancelMode::Owned { .. } => CompletionGroup::Pair(Box::new([
             run_terminal_response(binding.request_id.clone(), terminal),
             Response::failure(
                 Some(pending.request_id),
@@ -688,7 +688,7 @@ fn terminal_completion(
                 "state_mismatch",
                 "run reached an unexpected terminal state after cancellation",
             ),
-        ]),
+        ])),
     }
 }
 
@@ -791,7 +791,7 @@ mod tests {
 
     fn only(group: Option<CompletionGroup>) -> Response {
         match group.expect("immediate request returned no response") {
-            CompletionGroup::Single(response) => response,
+            CompletionGroup::Single(response) => *response,
             CompletionGroup::Pair(_) => panic!("immediate request returned a response pair"),
         }
     }
@@ -1596,7 +1596,7 @@ mod tests {
     fn completion_group_preserves_pair_order() {
         let first = Response::success("request-1".into(), "first", json!({}));
         let second = Response::success("request-2".into(), "second", json!({}));
-        let group = CompletionGroup::Pair([first, second]);
+        let group = CompletionGroup::Pair(Box::new([first, second]));
         assert_eq!(group.responses()[0].kind, "first");
         assert_eq!(group.responses()[1].kind, "second");
         let responses = group.into_responses();

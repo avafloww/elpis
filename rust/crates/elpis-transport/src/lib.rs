@@ -271,7 +271,7 @@ pub enum ClientFrame {
         seq: u64,
         #[serde(deserialize_with = "deserialize_nonzero_seq")]
         request_seq: u64,
-        response: Response,
+        response: Box<Response>,
     },
     Heartbeat {
         #[serde(deserialize_with = "deserialize_protocol")]
@@ -550,7 +550,7 @@ impl ExecutorFence {
             connection_id: self.connection_id.clone(),
             seq,
             request_seq,
-            response,
+            response: Box::new(response),
         };
         self.next_client_seq = next;
         self.responded_request_seqs.insert(request_seq);
@@ -874,17 +874,49 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected_in_every_envelope_family() {
-        let hello = br#"{"kind":"hello","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","last_committed_server_seq":0,"extra":true}"#;
+        let hello = br#"{"kind":"hello","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","last_committed_server_seq":0,"extra":true}"#;
         assert!(serde_json::from_slice::<ClientHello>(hello).is_err());
 
-        let welcome = br#"{"kind":"welcome","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","next_server_seq":1,"extra":true}"#;
+        let welcome = br#"{"kind":"welcome","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","next_server_seq":1,"extra":true}"#;
         assert!(serde_json::from_slice::<ServerWelcome>(welcome).is_err());
 
-        let server = br#"{"kind":"heartbeat","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":1,"extra":true}"#;
+        let server = br#"{"kind":"heartbeat","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":1,"extra":true}"#;
         assert!(serde_json::from_slice::<ServerFrame>(server).is_err());
 
-        let client = br#"{"kind":"heartbeat","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":1,"observed_server_seq":0,"extra":true}"#;
+        let client = br#"{"kind":"heartbeat","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":1,"observed_server_seq":0,"extra":true}"#;
         assert!(serde_json::from_slice::<ClientFrame>(client).is_err());
+    }
+
+    #[test]
+    fn protocol_2_hello_and_frames_have_golden_json() {
+        assert_eq!(
+            hello(0).to_json().unwrap(),
+            br#"{"kind":"hello","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","last_committed_server_seq":0}"#
+        );
+        assert_eq!(
+            request_frame(1).to_json().unwrap(),
+            br#"{"kind":"request","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request":{"op":"validate","protocol":2,"request_id":"request-1","source":"40 + 2"}}"#
+        );
+    }
+
+    #[test]
+    fn mixed_protocol_frames_are_rejected() {
+        let v2_envelope_v1_request = br#"{"kind":"request","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request":{"op":"validate","protocol":1,"request_id":"request-1","source":"1 + 1"}}"#;
+        assert!(matches!(
+            ServerFrame::from_json(v2_envelope_v1_request),
+            Err(DecodeError::Validation(ValidationError::InvalidRequest(
+                ProtocolError::Version
+            )))
+        ));
+
+        let v1_envelope_v2_request = br#"{"kind":"request","protocol":1,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request":{"op":"validate","protocol":2,"request_id":"request-1","source":"1 + 1"}}"#;
+        assert!(ServerFrame::from_json(v1_envelope_v2_request).is_err());
+
+        let v2_envelope_v1_response = br#"{"kind":"response","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request_seq":1,"response":{"protocol":1,"request_id":"request-1","ok":true,"kind":"completed","result":{},"completed_effects":[]}}"#;
+        assert!(matches!(
+            ClientFrame::from_json(v2_envelope_v1_response),
+            Err(DecodeError::Validation(ValidationError::InvalidResponse))
+        ));
     }
 
     #[test]
@@ -892,7 +924,7 @@ mod tests {
         let frame = request_frame(1);
         let json = frame.to_json().unwrap();
         assert_eq!(ServerFrame::from_json(&json).unwrap(), frame);
-        let invalid = br#"{"kind":"request","protocol":1,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request":{"op":"open","protocol":1,"request_id":"r1","context_id":"c1","generation":0}}"#;
+        let invalid = br#"{"kind":"request","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request":{"op":"open","protocol":2,"request_id":"r1","context_id":"c1","generation":0}}"#;
         assert!(matches!(
             ServerFrame::from_json(invalid),
             Err(DecodeError::Validation(ValidationError::InvalidRequest(
@@ -920,7 +952,7 @@ mod tests {
             connection_id: "connection-1".into(),
             seq: 1,
             request_seq: 1,
-            response,
+            response: Box::new(response),
         };
         let bytes = frame.to_json().unwrap();
         assert_eq!(ClientFrame::from_json(&bytes).unwrap(), frame);
@@ -929,8 +961,8 @@ mod tests {
     #[test]
     fn malformed_response_shapes_are_rejected_during_decode() {
         for invalid in [
-            br#"{"kind":"response","protocol":1,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request_seq":1,"response":{"protocol":1,"request_id":"r1","ok":true,"kind":"completed"}}"#.as_slice(),
-            br#"{"kind":"response","protocol":1,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request_seq":1,"response":{"protocol":1,"request_id":"r1","ok":false,"kind":"failed","result":{},"failure_kind":"runtime","error":"no"}}"#.as_slice(),
+            br#"{"kind":"response","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request_seq":1,"response":{"protocol":2,"request_id":"r1","ok":true,"kind":"completed","completed_effects":[]}}"#.as_slice(),
+            br#"{"kind":"response","protocol":2,"executor_id":"executor-1","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"connection-1","seq":1,"request_seq":1,"response":{"protocol":2,"request_id":"r1","ok":false,"kind":"failed","result":{},"failure_kind":"runtime","error":"no","completed_effects":[]}}"#.as_slice(),
         ] {
             assert!(matches!(
                 ClientFrame::from_json(invalid),
@@ -945,16 +977,16 @@ mod tests {
         assert!(ClientHello::new("e", "00112233445566778899AABBCCDDEEFF", 0).is_err());
         assert!(ClientHello::new("x".repeat(121), EPOCH, 0).is_err());
 
-        let bad_protocol = br#"{"kind":"hello","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","last_committed_server_seq":0}"#;
+        let bad_protocol = br#"{"kind":"hello","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","last_committed_server_seq":0}"#;
         assert!(serde_json::from_slice::<ClientHello>(bad_protocol).is_err());
-        let zero = br#"{"kind":"heartbeat","protocol":1,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":0}"#;
+        let zero = br#"{"kind":"heartbeat","protocol":2,"executor_id":"e","boot_epoch":"00112233445566778899aabbccddeeff","connection_id":"c","seq":0}"#;
         assert!(serde_json::from_slice::<ServerFrame>(zero).is_err());
     }
 
     #[test]
     fn welcome_must_match_hello_exactly() {
         let base = ServerWelcome::Welcome {
-            protocol: 1,
+            protocol: PROTOCOL_VERSION,
             executor_id: "other".into(),
             boot_epoch: EPOCH.into(),
             connection_id: "c".into(),
@@ -966,7 +998,7 @@ mod tests {
         ));
 
         let wrong_seq = ServerWelcome::Welcome {
-            protocol: 1,
+            protocol: PROTOCOL_VERSION,
             executor_id: "executor-1".into(),
             boot_epoch: EPOCH.into(),
             connection_id: "c".into(),
@@ -1028,10 +1060,10 @@ mod tests {
         let ServerFrame::Request { protocol, .. } = &mut wrong else {
             unreachable!()
         };
-        *protocol = 2;
+        *protocol = elpis_protocol::PROTOCOL_V1_VERSION;
         assert!(matches!(
             fence.accept_server_frame(wrong),
-            Err(FenceError::WrongProtocol(2))
+            Err(FenceError::WrongProtocol(1))
         ));
         let mut wrong = request_frame(1);
         let ServerFrame::Request { executor_id, .. } = &mut wrong else {
@@ -1288,7 +1320,7 @@ mod tests {
     #[test]
     fn sequence_exhaustion_fails_closed() {
         let welcome = ServerWelcome::Welcome {
-            protocol: 1,
+            protocol: PROTOCOL_VERSION,
             executor_id: "executor-1".into(),
             boot_epoch: EPOCH.into(),
             connection_id: "connection-1".into(),
@@ -1319,7 +1351,7 @@ mod tests {
         assert_eq!(client_fence.next_client_seq(), u64::MAX);
         assert!(matches!(
             ServerWelcome::Welcome {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 executor_id: "executor-1".into(),
                 boot_epoch: EPOCH.into(),
                 connection_id: "c".into(),

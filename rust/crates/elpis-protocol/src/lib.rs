@@ -8,8 +8,8 @@ use thiserror::Error;
 
 pub const PROTOCOL_V1_VERSION: u32 = 1;
 pub const PROTOCOL_V2_VERSION: u32 = 2;
-/// The only active wire protocol. V2 DTOs are intentionally dormant.
-pub const PROTOCOL_VERSION: u32 = PROTOCOL_V1_VERSION;
+/// The only active wire protocol.
+pub const PROTOCOL_VERSION: u32 = PROTOCOL_V2_VERSION;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_SOURCE_BYTES: usize = 524_288;
 pub const DEFAULT_PREVIEW_BYTES: usize = 16_384;
@@ -176,6 +176,119 @@ impl RequestV1 {
     }
 }
 
+/// Active protocol-2 request DTO. Its operation shapes intentionally parallel
+/// protocol 1, while validation requires the protocol-2 discriminator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestV2 {
+    Validate {
+        protocol: u32,
+        request_id: String,
+        source: String,
+    },
+    Open {
+        protocol: u32,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+    },
+    Run {
+        protocol: u32,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        run_id: String,
+        source: String,
+        #[serde(default = "default_preview_bytes")]
+        preview_max_bytes: usize,
+    },
+    Cancel {
+        protocol: u32,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+        target_request_id: String,
+        run_id: String,
+    },
+    Close {
+        protocol: u32,
+        request_id: String,
+        context_id: String,
+        generation: u64,
+    },
+}
+
+impl RequestV2 {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Validate { request_id, .. }
+            | Self::Open { request_id, .. }
+            | Self::Run { request_id, .. }
+            | Self::Cancel { request_id, .. }
+            | Self::Close { request_id, .. } => request_id,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let protocol = match self {
+            Self::Validate { protocol, .. }
+            | Self::Open { protocol, .. }
+            | Self::Run { protocol, .. }
+            | Self::Cancel { protocol, .. }
+            | Self::Close { protocol, .. } => *protocol,
+        };
+        if protocol != PROTOCOL_V2_VERSION {
+            return Err(ProtocolError::Version);
+        }
+        validate_id("request_id", self.request_id(), 120)?;
+        match self {
+            Self::Validate { source, .. } => validate_source(source),
+            Self::Open {
+                context_id,
+                generation,
+                ..
+            }
+            | Self::Close {
+                context_id,
+                generation,
+                ..
+            } => {
+                validate_id("context_id", context_id, 120)?;
+                validate_generation(*generation)
+            }
+            Self::Run {
+                context_id,
+                generation,
+                run_id,
+                source,
+                preview_max_bytes,
+                ..
+            } => {
+                validate_id("context_id", context_id, 120)?;
+                validate_generation(*generation)?;
+                validate_id("run_id", run_id, 120)?;
+                validate_source(source)?;
+                if !(1..=MAX_PREVIEW_BYTES).contains(preview_max_bytes) {
+                    return Err(ProtocolError::InvalidPreviewLimit);
+                }
+                Ok(())
+            }
+            Self::Cancel {
+                context_id,
+                generation,
+                target_request_id,
+                run_id,
+                ..
+            } => {
+                validate_id("context_id", context_id, 120)?;
+                validate_generation(*generation)?;
+                validate_id("target_request_id", target_request_id, 120)?;
+                validate_id("run_id", run_id, 120)
+            }
+        }
+    }
+}
+
 fn validate_generation(generation: u64) -> Result<(), ProtocolError> {
     if generation == 0 {
         return Err(ProtocolError::InvalidGeneration);
@@ -279,10 +392,10 @@ impl ResponseV1 {
     }
 }
 
-/// Stable name for the currently active protocol-1 request DTO.
-pub type Request = RequestV1;
-/// Stable name for the currently active protocol-1 response DTO.
-pub type Response = ResponseV1;
+/// Stable name for the currently active protocol-2 request DTO.
+pub type Request = RequestV2;
+/// Stable name for the currently active protocol-2 response DTO.
+pub type Response = ResponseV2;
 
 /// Version-scoped access to the frozen protocol-1 DTOs.
 pub mod v1 {
@@ -424,8 +537,7 @@ impl EffectAmbiguityV2 {
     }
 }
 
-/// Dormant protocol-2 response. It is intentionally not used by transport,
-/// executor, journal, or client code until a separate negotiation change.
+/// Active protocol-2 response DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseV2 {
@@ -445,6 +557,41 @@ pub struct ResponseV2 {
 }
 
 impl ResponseV2 {
+    /// Constructs an effect-free successful response.
+    pub fn success(request_id: String, kind: impl Into<String>, result: Value) -> Self {
+        Self {
+            protocol: PROTOCOL_V2_VERSION,
+            request_id: Some(request_id),
+            ok: true,
+            kind: kind.into(),
+            result: Some(result),
+            failure_kind: None,
+            error: None,
+            completed_effects: Vec::new(),
+            ambiguity: None,
+        }
+    }
+
+    /// Constructs an effect-free failure response.
+    pub fn failure(
+        request_id: Option<String>,
+        kind: impl Into<String>,
+        failure_kind: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol: PROTOCOL_V2_VERSION,
+            request_id,
+            ok: false,
+            kind: kind.into(),
+            result: None,
+            failure_kind: Some(failure_kind.into()),
+            error: Some(error.into()),
+            completed_effects: Vec::new(),
+            ambiguity: None,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ProtocolError> {
         self.validate_shape()?;
         let encoded = serde_json::to_vec(self).map_err(|_| ProtocolError::InvalidResponseV2)?;
@@ -579,12 +726,12 @@ fn is_lower_hex_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Version-scoped access to the dormant protocol-2 DTOs and limits.
+/// Version-scoped access to the active protocol-2 DTOs and limits.
 pub mod v2 {
     pub use super::{
         CompletedEffectReceiptV2 as CompletedEffectReceipt,
         EffectAmbiguityReasonV2 as EffectAmbiguityReason, EffectAmbiguityV2 as EffectAmbiguity,
-        EffectBindingV2 as EffectBinding, ResponseV2 as Response,
+        EffectBindingV2 as EffectBinding, RequestV2 as Request, ResponseV2 as Response,
     };
     pub const PROTOCOL_VERSION: u32 = super::PROTOCOL_V2_VERSION;
     pub const MAX_FRAME_BYTES: usize = super::MAX_FRAME_BYTES;
@@ -622,23 +769,23 @@ mod tests {
         ] {
             let mut malformed = cancelled.clone();
             malformed.result = Some(result);
-            assert_eq!(malformed.validate(), Err(ProtocolError::InvalidResponse));
+            assert_eq!(malformed.validate(), Err(ProtocolError::InvalidResponseV2));
         }
         let mut missing = cancelled.clone();
         missing.result = None;
-        assert_eq!(missing.validate(), Err(ProtocolError::InvalidResponse));
+        assert_eq!(missing.validate(), Err(ProtocolError::InvalidResponseV2));
         let mut arbitrary_failure =
             Response::failure(Some("run-1".into()), "failed", "runtime", "failed");
         arbitrary_failure.result = Some(serde_json::json!({}));
         assert_eq!(
             arbitrary_failure.validate(),
-            Err(ProtocolError::InvalidResponse)
+            Err(ProtocolError::InvalidResponseV2)
         );
     }
 
     #[test]
     fn unknown_request_fields_are_rejected() {
-        let raw = r#"{"op":"open","protocol":1,"request_id":"r1","context_id":"c1","generation":1,"extra":true}"#;
+        let raw = r#"{"op":"open","protocol":2,"request_id":"r1","context_id":"c1","generation":1,"extra":true}"#;
         assert!(serde_json::from_str::<Request>(raw).is_err());
     }
 
@@ -658,26 +805,26 @@ mod tests {
 
     #[test]
     fn cancel_is_exact_and_validates_every_binding() {
-        let raw = r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#;
+        let raw = r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#;
         let request: Request = serde_json::from_str(raw).unwrap();
         assert_eq!(request.validate(), Ok(()));
         assert_eq!(serde_json::to_string(&request).unwrap(), raw);
 
         for malformed in [
-            r#"{"op":"cancel","protocol":1,"request_id":"","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"bad/id","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":0,"target_request_id":"request-1","run_id":"run-1"}"#,
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"bad target","run_id":"run-1"}"#,
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":""}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"bad/id","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":0,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"bad target","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":""}"#,
         ] {
             let request: Request = serde_json::from_str(malformed).unwrap();
             assert!(request.validate().is_err(), "accepted {malformed}");
         }
 
         for invalid_shape in [
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"run_id":"run-1"}"#,
-            r#"{"op":"cancel","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1","extra":true}"#,
-            r#"{"op":"detach","protocol":1,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"run_id":"run-1"}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1","extra":true}"#,
+            r#"{"op":"detach","protocol":2,"request_id":"cancel-1","context_id":"ctx-1","generation":2,"target_request_id":"request-1","run_id":"run-1"}"#,
         ] {
             assert!(serde_json::from_str::<Request>(invalid_shape).is_err());
         }
@@ -728,10 +875,9 @@ mod tests {
             r#"{"op":"close","protocol":1,"request_id":"r5","context_id":"c1","generation":1}"#,
         ];
         for golden in cases {
-            let explicit: RequestV1 = serde_json::from_str(golden).unwrap();
-            let current: Request = explicit.clone();
-            assert_eq!(explicit.validate(), Ok(()));
-            assert_eq!(serde_json::to_string(&current).unwrap(), golden);
+            let request: v1::Request = serde_json::from_str(golden).unwrap();
+            assert_eq!(request.validate(), Ok(()));
+            assert_eq!(serde_json::to_string(&request).unwrap(), golden);
         }
 
         let success =
@@ -756,9 +902,52 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
         assert_eq!(v1::PROTOCOL_VERSION, 1);
         assert_eq!(v2::PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn protocol_2_request_is_active_and_has_deliberate_v1_compatible_shape() {
+        let cases = [
+            r#"{"op":"validate","protocol":2,"request_id":"r1","source":"1 + 1"}"#,
+            r#"{"op":"open","protocol":2,"request_id":"r2","context_id":"c1","generation":1}"#,
+            r#"{"op":"run","protocol":2,"request_id":"r3","context_id":"c1","generation":1,"run_id":"run1","source":"2 + 2","preview_max_bytes":16384}"#,
+            r#"{"op":"cancel","protocol":2,"request_id":"r4","context_id":"c1","generation":1,"target_request_id":"r3","run_id":"run1"}"#,
+            r#"{"op":"close","protocol":2,"request_id":"r5","context_id":"c1","generation":1}"#,
+        ];
+        for golden in cases {
+            let request: Request = serde_json::from_str(golden).unwrap();
+            let explicit: v2::Request = request.clone();
+            assert_eq!(explicit.validate(), Ok(()));
+            assert_eq!(serde_json::to_string(&request).unwrap(), golden);
+        }
+
+        let v1_bytes = cases[1].replace("\"protocol\":2", "\"protocol\":1");
+        let wrong_version: Request = serde_json::from_str(&v1_bytes).unwrap();
+        assert_eq!(wrong_version.validate(), Err(ProtocolError::Version));
+        assert_eq!(PROTOCOL_VERSION, v2::PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn protocol_2_constructors_are_effect_free_and_have_golden_json() {
+        let success = Response::success("r1".into(), "completed", serde_json::json!({}));
+        assert_eq!(success.completed_effects, Vec::new());
+        assert_eq!(success.ambiguity, None);
+        assert_eq!(
+            serde_json::to_string(&success).unwrap(),
+            r#"{"protocol":2,"request_id":"r1","ok":true,"kind":"completed","result":{},"completed_effects":[]}"#
+        );
+
+        let failure = Response::failure(Some("r1".into()), "failed", "runtime", "no");
+        assert_eq!(failure.completed_effects, Vec::new());
+        assert_eq!(failure.ambiguity, None);
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"protocol":2,"request_id":"r1","ok":false,"kind":"failed","failure_kind":"runtime","error":"no","completed_effects":[]}"#
+        );
+        assert_eq!(success.validate(), Ok(()));
+        assert_eq!(failure.validate(), Ok(()));
     }
 
     #[test]
