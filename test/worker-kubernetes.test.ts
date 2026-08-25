@@ -238,6 +238,37 @@ test('Pod create failure deletes only the deterministic Secret', async () => {
   ]);
 });
 
+test('failed worker fatal diagnostics are bounded on a UTF-8 boundary', async () => {
+  const f = fixture();
+  f.replies.push(
+    {
+      code: 0,
+      stdout: JSON.stringify({
+        metadata: { name: 'elpis-worker-a1b2c3d4', uid: 'uid-1' },
+        status: {
+          phase: 'Failed',
+          containerStatuses: [
+            { state: { terminated: { reason: 'Error', exitCode: 1 } } },
+          ],
+        },
+      }),
+      stderr: '',
+    },
+    {
+      code: 0,
+      stdout: `[worker] fatal: ${'😀'.repeat(300)}`,
+      stderr: '',
+    },
+  );
+  const state = await f.runtime.inspect(session());
+  assert.equal(state.state, 'failed');
+  if (state.state !== 'failed') return;
+  const diagnostic = state.error.split('; diagnostic: ')[1];
+  assert.ok(diagnostic);
+  assert.ok(Buffer.byteLength(diagnostic, 'utf8') <= 500);
+  assert.match(diagnostic, /…$/);
+});
+
 test('inspect is phase and UID aware, while cleanup uses exact names without selectors', async () => {
   const f = fixture();
   f.replies.push({
@@ -266,26 +297,70 @@ test('inspect is phase and UID aware, while cleanup uses exact names without sel
       workspaceRef: 'pod/workers/elpis-worker-a1b2c3d4',
     },
   });
-  f.replies.push({
-    code: 0,
-    stdout: JSON.stringify({
-      metadata: { name: 'elpis-worker-a1b2c3d4', uid: 'uid-1' },
-      status: {
-        phase: 'Failed',
-        containerStatuses: [
-          {
-            state: {
-              terminated: { reason: 'Error', exitCode: 17, message: 'boom' },
+  f.replies.push(
+    {
+      code: 0,
+      stdout: JSON.stringify({
+        metadata: { name: 'elpis-worker-a1b2c3d4', uid: 'uid-1' },
+        status: {
+          phase: 'Failed',
+          containerStatuses: [
+            {
+              state: {
+                terminated: { reason: 'Error', exitCode: 17, message: 'boom' },
+              },
             },
-          },
-        ],
-      },
-    }),
-    stderr: '',
-  });
+          ],
+        },
+      }),
+      stderr: '',
+    },
+    {
+      code: 0,
+      stdout: [
+        'untrusted unrelated output must not escape',
+        `[worker] fatal: broker Bearer ${'x'.repeat(43)} failed in /workspace/repo/file.ts`,
+      ].join('\n'),
+      stderr: '',
+    },
+  );
   assert.deepEqual(await f.runtime.inspect(session()), {
     state: 'failed',
-    error: 'worker Pod failed: Error, exit 17: boom',
+    error:
+      'worker Pod failed: Error, exit 17: boom; diagnostic: broker Bearer [REDACTED] failed in [WORKER PATH]',
+    receipt: {
+      podName: 'elpis-worker-a1b2c3d4',
+      podUid: 'uid-1',
+      workspaceRef: 'pod/workers/elpis-worker-a1b2c3d4',
+    },
+  });
+  assert.deepEqual(f.calls.at(-1)!.args.slice(-6), [
+    'logs',
+    'elpis-worker-a1b2c3d4',
+    '--container',
+    'worker',
+    '--tail=20',
+    '--limit-bytes=4096',
+  ]);
+  f.replies.push(
+    {
+      code: 0,
+      stdout: JSON.stringify({
+        metadata: { name: 'elpis-worker-a1b2c3d4', uid: 'uid-1' },
+        status: {
+          phase: 'Failed',
+          containerStatuses: [
+            { state: { terminated: { reason: 'Error', exitCode: 23 } } },
+          ],
+        },
+      }),
+      stderr: '',
+    },
+    { code: 1, stdout: '', stderr: 'logs unavailable' },
+  );
+  assert.deepEqual(await f.runtime.inspect(session()), {
+    state: 'failed',
+    error: 'worker Pod failed: Error, exit 23',
     receipt: {
       podName: 'elpis-worker-a1b2c3d4',
       podUid: 'uid-1',

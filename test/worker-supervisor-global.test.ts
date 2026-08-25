@@ -68,13 +68,25 @@ test('full sandbox exposes a frozen forwarding worker supervisor', async () => {
     'start',
     'status',
   ]);
-  await elpis.worker.start('elm-a1b2c3d4', { modelRef: 'p/model' });
-  await elpis.worker.send('quiet-otter', 'steer');
-  await elpis.worker.followup('quiet-otter', 'continue durably');
-  await elpis.worker.status('quiet-otter');
-  await elpis.worker.artifact('quiet-otter', 'workspace.patch.gz');
-  await elpis.worker.list();
-  await elpis.worker.dismiss('quiet-otter');
+  const start = elpis.worker.start('elm-a1b2c3d4', { modelRef: 'p/model' });
+  const send = elpis.worker.send('quiet-otter', 'steer');
+  const followup = elpis.worker.followup('quiet-otter', 'continue durably');
+  const status = elpis.worker.status('quiet-otter');
+  const artifact = elpis.worker.artifact('quiet-otter', 'workspace.patch.gz');
+  const list = elpis.worker.list();
+  const dismiss = elpis.worker.dismiss('quiet-otter');
+  for (const operation of [
+    start,
+    send,
+    followup,
+    status,
+    artifact,
+    list,
+    dismiss,
+  ]) {
+    assert.equal(operation instanceof Promise, true);
+  }
+  await Promise.all([start, send, followup, status, artifact, list, dismiss]);
   assert.deepEqual(f.calls, [
     ['start', 'elm-a1b2c3d4', { modelRef: 'p/model' }],
     ['send', 'quiet-otter', 'steer'],

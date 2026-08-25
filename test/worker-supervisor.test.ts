@@ -159,6 +159,44 @@ test('supervisor owns spawn, live refresh, mailbox steering, and dismissal', asy
   f.close();
 });
 
+test('failed worker diagnostics persist before exact runtime cleanup', async () => {
+  const f = fixture();
+  const runtime = await startWorkerSupervisor({
+    db: f.db,
+    config: f.config,
+    mind: f.mind,
+    mailbox: f.mailbox,
+    workspace: f.workspace,
+    logger: noopLogger,
+    runtime: f.runtime,
+  });
+  assert.ok(runtime);
+  const item = f.mind.create({
+    title: 'failing worker task',
+    body: 'Fail in a controlled way.',
+  });
+  const session = await runtime.api.start(item.id);
+  const diagnostic =
+    'worker Pod failed: Error, exit 1; diagnostic: completion broker returned malformed JSON';
+  f.states.set(session.id, {
+    state: 'failed',
+    error: diagnostic,
+    receipt: {
+      podName: session.podName!,
+      podUid: session.podUid,
+      workspaceRef: session.workspaceRef!,
+    },
+  });
+
+  const status = await runtime.api.status(session.id);
+  assert.equal(status.session.status, 'failed');
+  assert.equal(status.session.lastError, diagnostic);
+  assert.deepEqual(f.cleaned, [session.id]);
+  assert.deepEqual(status.messages, []);
+  assert.deepEqual(status.artifacts, []);
+  f.close();
+});
+
 test('completed worker follow-up starts a fresh same-Mind episode from durable context', async () => {
   const f = fixture();
   const runtime = await startWorkerSupervisor({

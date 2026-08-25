@@ -36,6 +36,44 @@ const REQUIRED_MOUNTS = new Map([
   ['/data', 'data'],
   ['/tmp', 'scratch'],
 ]);
+const WORKER_FATAL_PREFIX = '[worker] fatal:';
+const MAX_FATAL_LOG_BYTES = 4096;
+const MAX_FATAL_DIAGNOSTIC_BYTES = 500;
+
+function boundedUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  const marker = Buffer.from('…');
+  let end = Math.max(0, maxBytes - marker.length);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return `${bytes.subarray(0, end).toString('utf8')}…`;
+}
+
+function sanitizeWorkerDiagnostic(value: string): string | null {
+  const diagnostic = value
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\b[A-Za-z0-9_-]{43}\b/g, '[REDACTED]')
+    .replace(
+      /\/(?:workspace|data|tmp|home|opt\/elpis)(?:\/[^\s,;:]*)?/g,
+      '[WORKER PATH]',
+    )
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return diagnostic
+    ? boundedUtf8(diagnostic, MAX_FATAL_DIAGNOSTIC_BYTES)
+    : null;
+}
+
+function workerFatalDiagnostic(logs: string): string | null {
+  const line = logs
+    .split(/\r?\n/)
+    .reverse()
+    .find((entry) => entry.startsWith(WORKER_FATAL_PREFIX));
+  return line
+    ? sanitizeWorkerDiagnostic(line.slice(WORKER_FATAL_PREFIX.length))
+    : null;
+}
 
 function object(value: unknown, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -366,13 +404,26 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
         const exit = Number.isInteger(terminated?.exitCode)
           ? `, exit ${terminated.exitCode}`
           : '';
-        const message =
-          typeof terminated?.message === 'string' && terminated.message.trim()
-            ? `: ${terminated.message.trim().slice(0, 500)}`
-            : '';
+        const terminatedMessage =
+          typeof terminated?.message === 'string'
+            ? sanitizeWorkerDiagnostic(terminated.message)
+            : null;
+        const message = terminatedMessage ? `: ${terminatedMessage}` : '';
+        const logs = await this.exec(
+          this.args(
+            'logs',
+            names.pod,
+            '--container',
+            this.options.container,
+            '--tail=20',
+            `--limit-bytes=${MAX_FATAL_LOG_BYTES}`,
+          ),
+        );
+        const diagnostic =
+          logs.code === 0 ? workerFatalDiagnostic(logs.stdout) : null;
         return {
           state: 'failed',
-          error: `worker Pod failed: ${reason}${exit}${message}`,
+          error: `worker Pod failed: ${reason}${exit}${message}${diagnostic ? `; diagnostic: ${diagnostic}` : ''}`,
           receipt,
         };
       }
