@@ -42,6 +42,12 @@ const MAX_SERVICE_UNITS: usize = 32;
 const MAX_SERVICE_UNIT_NAME_BYTES: usize = 128;
 const MAX_PACKAGE_NAMES: usize = 128;
 const MAX_PACKAGE_NAME_BYTES: usize = 128;
+const MAX_REMOTE_ACTIONS: usize = 32;
+const MAX_REMOTE_ARGV_ITEMS: usize = 64;
+const MAX_REMOTE_ARG_BYTES: usize = 4096;
+const MAX_REMOTE_ARGV_BYTES: usize = 65_536;
+const MAX_REMOTE_TIMEOUT_MS: u64 = 300_000;
+const MAX_REMOTE_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -182,6 +188,9 @@ pub enum SensitiveLocalProfileKindV1 {
         dependencies: PackageDependencyPolicy,
         maintainer_scripts: PackageMaintainerScriptPolicy,
         configuration: PackageConfigurationPolicy,
+    },
+    RemoteActions {
+        actions: Vec<RemoteActionRule>,
     },
 }
 
@@ -338,6 +347,7 @@ impl SensitiveLocalProfileKindV1 {
                 validate_package_operations(operations)?;
                 validate_package_names(packages)
             }
+            Self::RemoteActions { actions } => validate_remote_actions(actions),
         }
     }
 }
@@ -985,6 +995,103 @@ pub enum PackageConfigurationPolicy {
     FailOnPromptOrConffileChange,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteActionRule {
+    pub id: String,
+    pub execution: RemoteExecutionMode,
+    pub executable_path: String,
+    pub executable_sha256: String,
+    pub argv: Vec<String>,
+    pub environment: RemoteEnvironmentPolicy,
+    pub cwd_profile: SensitiveProfileRef,
+    pub uid: u32,
+    pub gid: u32,
+    pub capabilities: Vec<RemoteLinuxCapability>,
+    pub stdin: RemoteStdinPolicy,
+    pub no_new_privileges: RemoteNoNewPrivilegesPolicy,
+    pub timeout_ms: u64,
+    pub max_stdout_bytes: u64,
+    pub max_stderr_bytes: u64,
+}
+
+impl RemoteActionRule {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_id(&self.id).map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+        validate_absolute_root(&self.executable_path)?;
+        validate_lower_hex_64(&self.executable_sha256)
+            .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+        self.cwd_profile
+            .validate()
+            .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+        validate_remote_argv(&self.argv, &self.executable_path)?;
+        if self.uid == 0
+            || self.gid == 0
+            || self.capabilities.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.timeout_ms == 0
+            || self.timeout_ms > MAX_REMOTE_TIMEOUT_MS
+            || self.max_stdout_bytes == 0
+            || self.max_stdout_bytes > MAX_REMOTE_OUTPUT_BYTES
+            || self.max_stderr_bytes == 0
+            || self.max_stderr_bytes > MAX_REMOTE_OUTPUT_BYTES
+        {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteExecutionMode {
+    DirectNativeElfNoShellOrInterpreter,
+}
+
+/// The process receives an empty environment plus only these fixed nonsecret values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteEnvironmentPolicy {
+    pub mode: RemoteEnvironmentMode,
+    pub locale: RemoteLocale,
+    pub timezone: RemoteTimezone,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteEnvironmentMode {
+    ClearThenSetFixed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoteLocale {
+    #[serde(rename = "C.UTF-8")]
+    CUtf8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoteTimezone {
+    #[serde(rename = "UTC")]
+    Utc,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RemoteLinuxCapability {
+    CapNetBindService,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteStdinPolicy {
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteNoNewPrivilegesPolicy {
+    Required,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -999,6 +1106,44 @@ pub enum SensitiveLocalProfileError {
     InvalidField,
     #[error("sensitive local profile lists must be nonempty, sorted, and unique")]
     NonCanonicalList,
+}
+
+fn validate_remote_actions(actions: &[RemoteActionRule]) -> Result<(), SensitiveLocalProfileError> {
+    if actions.is_empty()
+        || actions.len() > MAX_REMOTE_ACTIONS
+        || actions.windows(2).any(|pair| pair[0].id >= pair[1].id)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for action in actions {
+        action.validate()?;
+    }
+    Ok(())
+}
+
+fn validate_remote_argv(
+    argv: &[String],
+    executable_path: &str,
+) -> Result<(), SensitiveLocalProfileError> {
+    if argv.is_empty() || argv.len() > MAX_REMOTE_ARGV_ITEMS || argv[0] != executable_path {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    let mut total = 0usize;
+    for argument in argv {
+        if argument.len() > MAX_REMOTE_ARG_BYTES
+            || argument.contains('\0')
+            || argument.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+        total = total
+            .checked_add(argument.len())
+            .ok_or(SensitiveLocalProfileError::InvalidField)?;
+    }
+    if total > MAX_REMOTE_ARGV_BYTES {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
 }
 
 fn validate_package_operations(
@@ -3284,6 +3429,223 @@ mod tests {
             assert_eq!(
                 CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
                 Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
+    }
+    fn remote_profile() -> SensitiveLocalProfileV1 {
+        let executable = "/usr/libexec/elpis/check-state".to_string();
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "resident-actions".into(),
+            profile: SensitiveLocalProfileKindV1::RemoteActions {
+                actions: vec![RemoteActionRule {
+                    id: "check-state".into(),
+                    execution: RemoteExecutionMode::DirectNativeElfNoShellOrInterpreter,
+                    executable_path: executable.clone(),
+                    executable_sha256: "b".repeat(64),
+                    argv: vec![executable, "--format".into(), "json".into()],
+                    environment: RemoteEnvironmentPolicy {
+                        mode: RemoteEnvironmentMode::ClearThenSetFixed,
+                        locale: RemoteLocale::CUtf8,
+                        timezone: RemoteTimezone::Utc,
+                    },
+                    cwd_profile: SensitiveProfileRef {
+                        id: "work-root".into(),
+                        sha256: "a".repeat(64),
+                    },
+                    uid: 10001,
+                    gid: 10001,
+                    capabilities: vec![],
+                    stdin: RemoteStdinPolicy::Closed,
+                    no_new_privileges: RemoteNoNewPrivilegesPolicy::Required,
+                    timeout_ms: 30_000,
+                    max_stdout_bytes: 65_536,
+                    max_stderr_bytes: 65_536,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn remote_profile_canonical_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"resident-actions","profile":{"kind":"remote_actions","actions":[{"id":"check-state","execution":"direct_native_elf_no_shell_or_interpreter","executable_path":"/usr/libexec/elpis/check-state","executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","argv":["/usr/libexec/elpis/check-state","--format","json"],"environment":{"mode":"clear_then_set_fixed","locale":"C.UTF-8","timezone":"UTC"},"cwd_profile":{"id":"work-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"uid":10001,"gid":10001,"capabilities":[],"stdin":"closed","no_new_privileges":"required","timeout_ms":30000,"max_stdout_bytes":65536,"max_stderr_bytes":65536}]}}"#;
+        const GOLDEN_SHA256: &str =
+            "76c010f20c81f47bf54296effcae7f18b3d4c316d88cec3d53f97d399f9bd45e";
+
+        let bytes = remote_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &remote_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn remote_actions_are_nonempty_sorted_unique_and_bounded() {
+        for actions in [
+            vec![],
+            vec![
+                RemoteActionRule {
+                    id: "z-last".into(),
+                    ..remote_action()
+                },
+                RemoteActionRule {
+                    id: "a-first".into(),
+                    ..remote_action()
+                },
+            ],
+            vec![remote_action(), remote_action()],
+        ] {
+            let mut value = remote_profile();
+            if let SensitiveLocalProfileKindV1::RemoteActions { actions: target } =
+                &mut value.profile
+            {
+                *target = actions;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        let mut value = remote_profile();
+        if let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut value.profile {
+            *actions = (0..=MAX_REMOTE_ACTIONS)
+                .map(|index| RemoteActionRule {
+                    id: format!("action-{index:02}"),
+                    ..remote_action()
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+    }
+
+    fn remote_action() -> RemoteActionRule {
+        match remote_profile().profile {
+            SensitiveLocalProfileKindV1::RemoteActions { mut actions } => actions.remove(0),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn remote_executable_and_argv_are_exact_bounded_and_control_free() {
+        for mutation in [
+            "relative", "hash", "argv0", "nul", "control", "item", "total",
+        ] {
+            let mut value = remote_profile();
+            if let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut value.profile {
+                let action = &mut actions[0];
+                match mutation {
+                    "relative" => action.executable_path = "bin/check-state".into(),
+                    "hash" => action.executable_sha256 = "B".repeat(64),
+                    "argv0" => action.argv[0] = "/usr/bin/other".into(),
+                    "nul" => action.argv[1] = "bad\0arg".into(),
+                    "control" => action.argv[1] = "bad\narg".into(),
+                    "item" => action.argv[1] = "x".repeat(MAX_REMOTE_ARG_BYTES + 1),
+                    _ => {
+                        action.argv = vec![action.executable_path.clone()];
+                        action
+                            .argv
+                            .extend((0..16).map(|_| "x".repeat(MAX_REMOTE_ARG_BYTES)));
+                    }
+                }
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn remote_identity_capabilities_and_resource_bounds_fail_closed() {
+        for mutation in [
+            "cwd", "uid", "gid", "caps", "timeout0", "timeout", "stdout", "stderr",
+        ] {
+            let mut value = remote_profile();
+            if let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut value.profile {
+                let action = &mut actions[0];
+                match mutation {
+                    "cwd" => action.cwd_profile.sha256 = "short".into(),
+                    "uid" => action.uid = 0,
+                    "gid" => action.gid = 0,
+                    "caps" => {
+                        action.capabilities = vec![
+                            RemoteLinuxCapability::CapNetBindService,
+                            RemoteLinuxCapability::CapNetBindService,
+                        ]
+                    }
+                    "timeout0" => action.timeout_ms = 0,
+                    "timeout" => action.timeout_ms = MAX_REMOTE_TIMEOUT_MS + 1,
+                    "stdout" => action.max_stdout_bytes = MAX_REMOTE_OUTPUT_BYTES + 1,
+                    _ => action.max_stderr_bytes = 0,
+                }
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = remote_profile();
+        if let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut value.profile {
+            actions[0].capabilities = vec![RemoteLinuxCapability::CapNetBindService];
+        }
+        assert!(value.validate().is_ok());
+    }
+
+    #[test]
+    fn remote_encoding_rejects_shell_path_lookup_and_caller_control() {
+        let bytes = remote_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "shell",
+            "path_lookup",
+            "caller_argv",
+            "caller_env",
+            "caller_cwd",
+            "stdin",
+            "privileges",
+            "credential",
+            "supplementary_groups",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "shell" => value["profile"]["actions"][0]["execution"] = serde_json::json!("shell"),
+                "path_lookup" => {
+                    value["profile"]["actions"][0]["executable_path"] =
+                        serde_json::json!("check-state")
+                }
+                "caller_argv" => {
+                    value["profile"]["actions"][0]["argv_policy"] = serde_json::json!("caller")
+                }
+                "caller_env" => {
+                    value["profile"]["actions"][0]["environment"] =
+                        serde_json::json!({"mode":"caller"})
+                }
+                "caller_cwd" => {
+                    value["profile"]["actions"][0]["cwd_policy"] = serde_json::json!("caller")
+                }
+                "stdin" => value["profile"]["actions"][0]["stdin"] = serde_json::json!("caller"),
+                "privileges" => {
+                    value["profile"]["actions"][0]["no_new_privileges"] =
+                        serde_json::json!("disabled")
+                }
+                "credential" => {
+                    value["profile"]["actions"][0]["credential"] = serde_json::json!("secret")
+                }
+                _ => value["profile"]["actions"][0]["supplementary_gids"] = serde_json::json!([0]),
+            }
+            let expected = if mutation == "path_lookup" {
+                SensitiveLocalProfileError::InvalidField
+            } else {
+                SensitiveLocalProfileError::InvalidEncoding
+            };
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(expected)
             );
         }
     }
