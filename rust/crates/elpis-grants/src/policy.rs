@@ -148,7 +148,7 @@ pub struct SensitiveProfileRef {
 }
 
 impl SensitiveProfileRef {
-    fn validate(&self) -> Result<(), SensitivePolicyError> {
+    pub(crate) fn validate(&self) -> Result<(), SensitivePolicyError> {
         validate_profile_id(&self.id)?;
         validate_lower_hex_64(&self.sha256).map_err(|_| SensitivePolicyError::InvalidField)
     }

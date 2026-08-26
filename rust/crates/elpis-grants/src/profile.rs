@@ -1,12 +1,15 @@
 //! Canonical local sensitive-profile artifacts.
 //!
 //! These bytes describe checks a later evaluator must perform. Parsing them does not inspect the
-//! filesystem, resolve a path, prevent TOCTOU, or prove confinement.
+//! filesystem, resolve a path, inspect credentials, perform TLS, contact Kubernetes, evaluate a
+//! request, prevent TOCTOU, or prove confinement.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{SensitiveProfileRef, sha256_hex, validate_id};
+use super::{
+    KubernetesResource, SensitiveProfileRef, sha256_hex, validate_id, validate_lower_hex_64,
+};
 
 pub const SENSITIVE_LOCAL_PROFILE_VERSION: u32 = 1;
 pub const MAX_SENSITIVE_LOCAL_PROFILE_BYTES: usize = 16 * 1024;
@@ -17,6 +20,11 @@ const MAX_DEPTH: u32 = 64;
 const MAX_ENTRIES: u32 = 1_000_000;
 const MAX_ARTIFACT_FILES: u32 = 4096;
 const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_KUBERNETES_RULES: usize = 20;
+const MAX_KUBERNETES_NAMES: usize = 64;
+const MAX_KUBERNETES_SELECTORS: usize = 32;
+const MAX_KUBERNETES_REQUEST_BYTES: u64 = 1024 * 1024;
+const MAX_KUBERNETES_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +126,14 @@ pub enum SensitiveLocalProfileKindV1 {
         max_single_file_bytes: u64,
         max_total_bytes: u64,
     },
+    KubernetesCluster {
+        api_server: KubernetesApiServer,
+        credential_profile: SensitiveProfileRef,
+        namespace: String,
+        rules: Vec<KubernetesQueryRule>,
+        max_request_bytes: u64,
+        max_response_bytes: u64,
+    },
 }
 
 impl SensitiveLocalProfileKindV1 {
@@ -182,6 +198,29 @@ impl SensitiveLocalProfileKindV1 {
                     || *max_total_bytes == 0
                     || *max_total_bytes > MAX_ARTIFACT_BYTES
                     || *max_single_file_bytes > *max_total_bytes
+                {
+                    return Err(SensitiveLocalProfileError::InvalidField);
+                }
+                Ok(())
+            }
+            Self::KubernetesCluster {
+                api_server,
+                credential_profile,
+                namespace,
+                rules,
+                max_request_bytes,
+                max_response_bytes,
+            } => {
+                api_server.validate()?;
+                credential_profile
+                    .validate()
+                    .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+                validate_kubernetes_dns_label(namespace)?;
+                validate_kubernetes_rules(rules)?;
+                if *max_request_bytes == 0
+                    || *max_request_bytes > MAX_KUBERNETES_REQUEST_BYTES
+                    || *max_response_bytes == 0
+                    || *max_response_bytes > MAX_KUBERNETES_RESPONSE_BYTES
                 {
                     return Err(SensitiveLocalProfileError::InvalidField);
                 }
@@ -299,6 +338,95 @@ pub enum ArtifactNamePolicy {
     OpaqueUuid,
 }
 
+/// Exact HTTPS API origin and TLS identity without a URL path or credential material.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesApiServer {
+    pub host: String,
+    pub port: u16,
+    pub tls_server_name: String,
+    pub ca_sha256: String,
+    pub redirects: KubernetesRedirectPolicy,
+}
+
+impl KubernetesApiServer {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_kubernetes_host(&self.host)?;
+        validate_kubernetes_host(&self.tls_server_name)?;
+        validate_lower_hex_64(&self.ca_sha256)
+            .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+        if self.port == 0 {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesRedirectPolicy {
+    Deny,
+}
+
+/// Namespaced query/delete authority; writes and delete-collection are unrepresentable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KubernetesQueryRule {
+    Delete {
+        resource: KubernetesResource,
+        names: Vec<String>,
+        precondition: KubernetesDeletePrecondition,
+    },
+    Get {
+        resource: KubernetesResource,
+        names: Vec<String>,
+    },
+    List {
+        resource: KubernetesResource,
+        selectors: Vec<KubernetesLabelSelector>,
+    },
+    Watch {
+        resource: KubernetesResource,
+        selectors: Vec<KubernetesLabelSelector>,
+    },
+}
+
+impl KubernetesQueryRule {
+    fn key(&self) -> String {
+        let (verb, resource) = match self {
+            Self::Delete { resource, .. } => ("delete", resource),
+            Self::Get { resource, .. } => ("get", resource),
+            Self::List { resource, .. } => ("list", resource),
+            Self::Watch { resource, .. } => ("watch", resource),
+        };
+        format!("{verb}:{}", kubernetes_resource_name(resource))
+    }
+
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        match self {
+            Self::Delete { names, .. } | Self::Get { names, .. } => {
+                validate_kubernetes_names(names)
+            }
+            Self::List { selectors, .. } | Self::Watch { selectors, .. } => {
+                validate_kubernetes_selectors(selectors)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesLabelSelector {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesDeletePrecondition {
+    ExactUidAndResourceVersion,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -353,6 +481,133 @@ fn validate_absolute_root(value: &str) -> Result<(), SensitiveLocalProfileError>
         return Err(SensitiveLocalProfileError::InvalidField);
     }
     Ok(())
+}
+
+fn validate_kubernetes_rules(
+    rules: &[KubernetesQueryRule],
+) -> Result<(), SensitiveLocalProfileError> {
+    if rules.is_empty() || rules.len() > MAX_KUBERNETES_RULES {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    let mut previous = None;
+    for rule in rules {
+        rule.validate()?;
+        let key = rule.key();
+        if previous
+            .as_ref()
+            .is_some_and(|value: &String| value >= &key)
+        {
+            return Err(SensitiveLocalProfileError::NonCanonicalList);
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_names(names: &[String]) -> Result<(), SensitiveLocalProfileError> {
+    if names.is_empty()
+        || names.len() > MAX_KUBERNETES_NAMES
+        || names.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for name in names {
+        validate_kubernetes_dns_name(name)?;
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_selectors(
+    selectors: &[KubernetesLabelSelector],
+) -> Result<(), SensitiveLocalProfileError> {
+    if selectors.is_empty()
+        || selectors.len() > MAX_KUBERNETES_SELECTORS
+        || selectors.windows(2).any(|pair| pair[0].key >= pair[1].key)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for selector in selectors {
+        validate_kubernetes_label_key(&selector.key)?;
+        validate_kubernetes_label_token(&selector.value)?;
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_host(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if let Ok(address) = value.parse::<std::net::IpAddr>() {
+        if address.to_string() == value {
+            return Ok(());
+        }
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    validate_kubernetes_dns_name(value)
+}
+
+fn validate_kubernetes_dns_label(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.len() > 63 || value.contains('.') {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    validate_kubernetes_dns_name(value)
+}
+
+fn validate_kubernetes_dns_name(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        })
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_label_key(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    let mut parts = value.split('/');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if parts.next().is_some() {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    match second {
+        Some(name) => {
+            validate_kubernetes_dns_name(first)?;
+            validate_kubernetes_label_token(name)
+        }
+        None => validate_kubernetes_label_token(first),
+    }
+}
+
+fn validate_kubernetes_label_token(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > 63
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn kubernetes_resource_name(resource: &KubernetesResource) -> &'static str {
+    match resource {
+        KubernetesResource::ConfigMap => "config_map",
+        KubernetesResource::Deployment => "deployment",
+        KubernetesResource::Job => "job",
+        KubernetesResource::Pod => "pod",
+        KubernetesResource::Service => "service",
+    }
 }
 
 fn validate_sorted_unique<T: Ord>(values: &[T]) -> Result<(), SensitiveLocalProfileError> {
@@ -634,5 +889,277 @@ mod tests {
             value.validate(),
             Err(SensitiveLocalProfileError::InvalidField)
         );
+    }
+
+    fn kubernetes_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "cluster-query".into(),
+            profile: SensitiveLocalProfileKindV1::KubernetesCluster {
+                api_server: KubernetesApiServer {
+                    host: "api.cluster.example".into(),
+                    port: 6443,
+                    tls_server_name: "api.cluster.example".into(),
+                    ca_sha256: "a".repeat(64),
+                    redirects: KubernetesRedirectPolicy::Deny,
+                },
+                credential_profile: SensitiveProfileRef {
+                    id: "cluster-credential".into(),
+                    sha256: "b".repeat(64),
+                },
+                namespace: "elpis-workers".into(),
+                rules: vec![
+                    KubernetesQueryRule::Delete {
+                        resource: KubernetesResource::ConfigMap,
+                        names: vec!["worker-lock".into()],
+                        precondition: KubernetesDeletePrecondition::ExactUidAndResourceVersion,
+                    },
+                    KubernetesQueryRule::Get {
+                        resource: KubernetesResource::Pod,
+                        names: vec!["worker-a".into(), "worker-b".into()],
+                    },
+                    KubernetesQueryRule::List {
+                        resource: KubernetesResource::Pod,
+                        selectors: vec![
+                            KubernetesLabelSelector {
+                                key: "app.kubernetes.io/name".into(),
+                                value: "elpis-worker".into(),
+                            },
+                            KubernetesLabelSelector {
+                                key: "elpis.dev/mind".into(),
+                                value: "elm-34v9m41b".into(),
+                            },
+                        ],
+                    },
+                    KubernetesQueryRule::Watch {
+                        resource: KubernetesResource::Service,
+                        selectors: vec![KubernetesLabelSelector {
+                            key: "app".into(),
+                            value: "elpis".into(),
+                        }],
+                    },
+                ],
+                max_request_bytes: 64 * 1024,
+                max_response_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn kubernetes_query_canonical_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"cluster-query","profile":{"kind":"kubernetes_cluster","api_server":{"host":"api.cluster.example","port":6443,"tls_server_name":"api.cluster.example","ca_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","redirects":"deny"},"credential_profile":{"id":"cluster-credential","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"namespace":"elpis-workers","rules":[{"verb":"delete","resource":"config_map","names":["worker-lock"],"precondition":"exact_uid_and_resource_version"},{"verb":"get","resource":"pod","names":["worker-a","worker-b"]},{"verb":"list","resource":"pod","selectors":[{"key":"app.kubernetes.io/name","value":"elpis-worker"},{"key":"elpis.dev/mind","value":"elm-34v9m41b"}]},{"verb":"watch","resource":"service","selectors":[{"key":"app","value":"elpis"}]}],"max_request_bytes":65536,"max_response_bytes":1048576}}"#;
+        const GOLDEN_SHA256: &str =
+            "6338334f1357aa71545bd157b06d770aab5126d038d7f77f63aaaf69212909d3";
+
+        let bytes = kubernetes_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &kubernetes_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn kubernetes_query_scope_is_nonempty_sorted_unique_and_bounded() {
+        kubernetes_profile().validate().unwrap();
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile {
+            rules.reverse();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile
+            && let KubernetesQueryRule::Get { names, .. } = &mut rules[1]
+        {
+            names.push("worker-b".into());
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile
+            && let KubernetesQueryRule::List { selectors, .. } = &mut rules[2]
+        {
+            selectors.reverse();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile
+            && let KubernetesQueryRule::List { selectors, .. } = &mut rules[2]
+        {
+            selectors.push(KubernetesLabelSelector {
+                key: "elpis.dev/mind".into(),
+                value: "another".into(),
+            });
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        for (request, response) in [
+            (0, 1024),
+            (MAX_KUBERNETES_REQUEST_BYTES + 1, 1024),
+            (1024, 0),
+            (1024, MAX_KUBERNETES_RESPONSE_BYTES + 1),
+        ] {
+            let mut value = kubernetes_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesCluster {
+                max_request_bytes,
+                max_response_bytes,
+                ..
+            } = &mut value.profile
+            {
+                *max_request_bytes = request;
+                *max_response_bytes = response;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn kubernetes_cluster_and_credential_identity_fail_closed() {
+        for host in [
+            "https://api.cluster.example",
+            "API.cluster.example",
+            "api.cluster.example.",
+            "api..cluster.example",
+            "2001:0db8::1",
+        ] {
+            let mut value = kubernetes_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesCluster { api_server, .. } =
+                &mut value.profile
+            {
+                api_server.host = host.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        for namespace in [
+            "Default",
+            "default/other",
+            ".default",
+            "default.",
+            "team.prod",
+        ] {
+            let mut value = kubernetes_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesCluster {
+                namespace: field, ..
+            } = &mut value.profile
+            {
+                *field = namespace.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster {
+            api_server,
+            credential_profile,
+            ..
+        } = &mut value.profile
+        {
+            api_server.port = 0;
+            credential_profile.id = "../credential".into();
+            credential_profile.sha256 = "A".repeat(64);
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = kubernetes_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesCluster { api_server, .. } =
+            &mut value.profile
+        {
+            api_server.host = "2001:db8::1".into();
+            api_server.tls_server_name = "10.42.0.1".into();
+        }
+        value.validate().unwrap();
+    }
+
+    #[test]
+    fn kubernetes_query_grammar_rejects_wildcards_and_widening() {
+        for bad in ["*", "pod/*", "-leading", "trailing-", "UPPER"] {
+            let mut value = kubernetes_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile
+                && let KubernetesQueryRule::Get { names, .. } = &mut rules[1]
+            {
+                names.clear();
+                names.push(bad.into());
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        for (key, selector_value) in [
+            ("*", "worker"),
+            ("app//name", "worker"),
+            ("App/name", "worker"),
+            ("app/name", ""),
+            ("app/name", "wild*card"),
+        ] {
+            let mut value = kubernetes_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesCluster { rules, .. } = &mut value.profile
+                && let KubernetesQueryRule::Watch { selectors, .. } = &mut rules[3]
+            {
+                selectors[0] = KubernetesLabelSelector {
+                    key: key.into(),
+                    value: selector_value.into(),
+                };
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let bytes = kubernetes_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "secret_resource",
+            "patch_verb",
+            "weak_delete",
+            "url_path",
+            "redirects",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "secret_resource" => {
+                    value["profile"]["rules"][0]["resource"] = serde_json::json!("secret")
+                }
+                "patch_verb" => value["profile"]["rules"][1]["verb"] = serde_json::json!("patch"),
+                "weak_delete" => {
+                    value["profile"]["rules"][0]["precondition"] = serde_json::json!("none")
+                }
+                "url_path" => value["profile"]["api_server"]["path"] = serde_json::json!("/api/v1"),
+                _ => value["profile"]["api_server"]["redirects"] = serde_json::json!("follow"),
+            }
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
     }
 }
