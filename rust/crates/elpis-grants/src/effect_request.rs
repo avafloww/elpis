@@ -3,7 +3,8 @@
 //! This module is deliberately grammar-only. It does not look up or evaluate profiles, read or
 //! write files, accept content bodies, issue authority, or perform any other effect. Content is
 //! bound by its declared byte length and SHA-256; a later effect adapter must verify the external
-//! body before using it.
+//! body before using it. Canonical authorization of a hash and length is not evidence that an
+//! adapter received matching bytes.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1609,6 +1610,108 @@ mod tests {
             })
             .canonical_bytes(),
             Err(SensitiveEffectRequestError::PayloadTooLarge)
+        );
+    }
+
+    #[test]
+    fn total_envelope_version_kind_and_scalar_shapes_fail_closed() {
+        let mut wrong_version = request(SensitiveEffectV1::ReadPath {
+            root_profile_id: "read".into(),
+            relative_path: ".".into(),
+            max_result_bytes: 1,
+        });
+        wrong_version.version = 2;
+        assert_eq!(
+            wrong_version.validate(),
+            Err(SensitiveEffectRequestError::Version)
+        );
+        assert_eq!(
+            CanonicalSensitiveEffectRequest::parse(&[]),
+            Err(SensitiveEffectRequestError::PayloadTooLarge)
+        );
+        for bytes in [
+            br#"{"version":1,"effect":{"kind":"future_effect"}}"#.as_slice(),
+            br#"{"version":-1,"effect":{"kind":"read_path","root_profile_id":"read","relative_path":".","max_result_bytes":1}}"#.as_slice(),
+            br#"{"version":1.0,"effect":{"kind":"read_path","root_profile_id":"read","relative_path":".","max_result_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"read_path","root_profile_id":"read","relative_path":".","max_result_bytes":1.0}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                CanonicalSensitiveEffectRequest::parse(bytes),
+                Err(SensitiveEffectRequestError::InvalidEncoding)
+            );
+        }
+    }
+
+    #[test]
+    fn hard_string_component_and_depth_boundaries_are_enforced() {
+        let read = |relative_path| {
+            request(SensitiveEffectV1::ReadPath {
+                root_profile_id: "read".into(),
+                relative_path,
+                max_result_bytes: 1,
+            })
+        };
+        assert!(
+            read("a/".repeat(MAX_EFFECT_PATH_DEPTH - 1) + "a")
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            read("a/".repeat(MAX_EFFECT_PATH_DEPTH) + "a").validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        assert!(
+            read("a".repeat(MAX_EFFECT_PATH_COMPONENT_BYTES))
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            read("a".repeat(MAX_EFFECT_PATH_COMPONENT_BYTES + 1)).validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+
+        let valid_service = format!("{}.service", "a".repeat(MAX_SERVICE_UNIT_NAME_BYTES - 8));
+        let long_service = format!("{}.service", "a".repeat(MAX_SERVICE_UNIT_NAME_BYTES - 7));
+        assert!(validate_service_unit_name(&valid_service).is_ok());
+        assert_eq!(
+            validate_service_unit_name(&long_service),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        assert!(validate_package_name(&"a".repeat(MAX_PACKAGE_NAME_BYTES)).is_ok());
+        assert_eq!(
+            validate_package_name(&"a".repeat(MAX_PACKAGE_NAME_BYTES + 1)),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        assert!(
+            validate_network_path(&format!("/{}", "a".repeat(MAX_NETWORK_PATH_BYTES - 1))).is_ok()
+        );
+        assert_eq!(
+            validate_network_path(&format!("/{}", "a".repeat(MAX_NETWORK_PATH_BYTES))),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn external_content_is_bound_only_by_exact_hash_and_length() {
+        let artifact = |hash: &str, bytes| {
+            request(SensitiveEffectV1::ArtifactExport {
+                destination_profile_id: "artifacts".into(),
+                artifact_name: "550e8400-e29b-41d4-a716-446655440000".into(),
+                content_sha256: hash.into(),
+                content_bytes: bytes,
+                max_result_bytes: 1,
+            })
+        };
+        let first = artifact(HASH_A, 4).canonical_bytes().unwrap();
+        let changed_hash = artifact(HASH_B, 4).canonical_bytes().unwrap();
+        let changed_length = artifact(HASH_A, 5).canonical_bytes().unwrap();
+        assert_ne!(sha256_hex(&first), sha256_hex(&changed_hash));
+        assert_ne!(sha256_hex(&first), sha256_hex(&changed_length));
+
+        let raw_body = br#"{"version":1,"effect":{"kind":"artifact_export","destination_profile_id":"artifacts","artifact_name":"550e8400-e29b-41d4-a716-446655440000","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","content_bytes":4,"content_base64":"dGVzdA==","max_result_bytes":1}}"#;
+        assert_eq!(
+            CanonicalSensitiveEffectRequest::parse(raw_body),
+            Err(SensitiveEffectRequestError::InvalidEncoding)
         );
     }
 
