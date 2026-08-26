@@ -1,7 +1,12 @@
 #[cfg(all(not(feature = "embedded-python"), not(debug_assertions)))]
 compile_error!("release builds require the embedded-python feature");
 
-use elpis_coordinator::{CompletionGroup, Coordinator, CoordinatorConfig};
+use elpis_coordinator::{
+    CompletionGroup, Coordinator, CoordinatorConfig, RunBinding, RunEffectReporter,
+};
+use elpis_effects::{EffectLedger, EffectLimits};
+use elpis_executor::host_call_service::{HostExecLedgerOwner, OwnedHostExecService};
+use elpis_executor::host_exec::{CAPABILITY_PROFILE_ENV, CapabilityProfile};
 use elpis_identity::{CredentialPolicy, IdentityStore};
 use elpis_journal::{Journal, JournalLimits};
 use elpis_link::{
@@ -9,7 +14,7 @@ use elpis_link::{
     SupervisorConfig, SupervisorExit,
 };
 use elpis_protocol::{MAX_FRAME_BYTES, Request, Response};
-use elpis_python::PythonRuntime;
+use elpis_python::{HostCallService, PythonRuntime};
 use ring::rand::{SecureRandom, SystemRandom};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
@@ -49,6 +54,7 @@ struct OutboundConfig {
 struct StartupConfig {
     state_dir: Option<PathBuf>,
     mode: ModeConfig,
+    capability_profile: CapabilityProfile,
 }
 
 impl StartupConfig {
@@ -61,6 +67,20 @@ impl StartupConfig {
         let state_dir = lookup("ELPIS_EXECUTOR_STATE_DIR").map(PathBuf::from);
         if state_dir.as_ref().is_some_and(|path| !path.is_absolute()) {
             return Err("ELPIS_EXECUTOR_STATE_DIR must be absolute".into());
+        }
+        let profile_value = lookup(CAPABILITY_PROFILE_ENV)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| format!("{CAPABILITY_PROFILE_ENV} must be valid UTF-8"))
+            })
+            .transpose()?;
+        let capability_profile = CapabilityProfile::from_local_config(profile_value.as_deref())
+            .map_err(|_| format!("{CAPABILITY_PROFILE_ENV} is invalid"))?;
+        if capability_profile == CapabilityProfile::OwnedPermissive && state_dir.is_none() {
+            return Err(format!(
+                "ELPIS_EXECUTOR_STATE_DIR is required when {CAPABILITY_PROFILE_ENV}=owned_permissive"
+            ));
         }
         #[cfg(feature = "embedded-python")]
         if state_dir.is_none() {
@@ -98,7 +118,11 @@ impl StartupConfig {
             }
             _ => return Err("ELPIS_EXECUTOR_MODE must be stdin or outbound".into()),
         };
-        Ok(Self { state_dir, mode })
+        Ok(Self {
+            state_dir,
+            mode,
+            capability_profile,
+        })
     }
 }
 
@@ -187,6 +211,7 @@ fn main() {
             ModeConfig::Stdin => "stdin",
             ModeConfig::Outbound(_) => "outbound",
         },
+        capability_profile = config.capability_profile.as_str(),
         "executor starting"
     );
     let runtime = match load_runtime(config.state_dir.as_deref()) {
@@ -204,7 +229,17 @@ fn main() {
     );
     #[cfg(not(feature = "embedded-python"))]
     info!("executor runtime ready");
-    let mut executor = ExecutorDispatcher::new(runtime);
+    let mut executor = match ExecutorDispatcher::new(
+        runtime,
+        config.state_dir.as_deref(),
+        config.capability_profile,
+    ) {
+        Ok(executor) => executor,
+        Err(error) => {
+            error!(error = %error, "executor capability startup failed");
+            std::process::exit(1);
+        }
+    };
     let outcome = match &config.mode {
         ModeConfig::Stdin => run_stdin(&mut executor),
         ModeConfig::Outbound(outbound) => match config.state_dir.as_deref() {
@@ -227,13 +262,18 @@ struct ExecutorDispatcher {
 }
 
 impl ExecutorDispatcher {
-    fn new(runtime: ExecutorRuntime) -> Self {
-        let coordinator = Coordinator::new(runtime.python.clone(), CoordinatorConfig::default());
-        Self {
+    fn new(
+        runtime: ExecutorRuntime,
+        state_dir: Option<&Path>,
+        capability_profile: CapabilityProfile,
+    ) -> Result<Self, String> {
+        let coordinator =
+            coordinator_for_profile(runtime.python.clone(), state_dir, capability_profile)?;
+        Ok(Self {
             _runtime: Some(runtime),
             coordinator,
             ready: VecDeque::new(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -248,6 +288,43 @@ impl ExecutorDispatcher {
     fn close_all(&mut self) -> usize {
         self.ready.clear();
         self.coordinator.close_all()
+    }
+}
+
+fn coordinator_for_profile(
+    runtime: PythonRuntime,
+    state_dir: Option<&Path>,
+    capability_profile: CapabilityProfile,
+) -> Result<Coordinator, String> {
+    match capability_profile {
+        CapabilityProfile::Disabled => Ok(Coordinator::new(runtime, CoordinatorConfig::default())),
+        CapabilityProfile::OwnedPermissive => {
+            let state_dir = state_dir.ok_or_else(|| {
+                "owned_permissive host execution requires a state directory".to_string()
+            })?;
+            if !state_dir.is_absolute() {
+                return Err(
+                    "owned_permissive host execution requires an absolute state directory".into(),
+                );
+            }
+            ensure_private_state_root(state_dir)?;
+            let ledger =
+                EffectLedger::open(state_dir.join("effects.sqlite"), EffectLimits::default())
+                    .map_err(|_| "host effect ledger is unavailable".to_string())?;
+            let owner = HostExecLedgerOwner::new(ledger);
+            Ok(Coordinator::with_host_service_factory(
+                runtime,
+                CoordinatorConfig::default(),
+                move |binding: &RunBinding, effects: RunEffectReporter| {
+                    Ok(Box::new(OwnedHostExecService::new(
+                        binding,
+                        effects,
+                        CapabilityProfile::OwnedPermissive,
+                        owner.clone(),
+                    )) as Box<dyn HostCallService>)
+                },
+            ))
+        }
     }
 }
 
@@ -571,6 +648,50 @@ mod tests {
         }
     }
 
+    fn coordinator_only(group: Option<CompletionGroup>) -> Response {
+        match group.expect("request returned no immediate response") {
+            CompletionGroup::Single(response) => *response,
+            CompletionGroup::Pair(_) => panic!("request returned an unexpected response pair"),
+        }
+    }
+
+    fn open_coordinator(coordinator: &mut Coordinator) {
+        let response = coordinator_only(coordinator.submit(Request::Open {
+            protocol: PROTOCOL_VERSION,
+            request_id: "open-1".into(),
+            context_id: "context-1".into(),
+            generation: 1,
+        }));
+        assert!(response.ok, "{response:?}");
+    }
+
+    fn run_coordinator(coordinator: &mut Coordinator, source: &str) -> Response {
+        assert!(
+            coordinator
+                .submit(Request::Run {
+                    protocol: PROTOCOL_VERSION,
+                    request_id: "request-1".into(),
+                    context_id: "context-1".into(),
+                    generation: 1,
+                    run_id: "run-1".into(),
+                    source: source.into(),
+                    preview_max_bytes: elpis_protocol::DEFAULT_PREVIEW_BYTES,
+                })
+                .is_none()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(group) = coordinator.poll().pop() {
+                return coordinator_only(Some(group));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "coordinator run timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     fn submit_json(
         executor: &mut ExecutorDispatcher,
         value: serde_json::Value,
@@ -839,6 +960,160 @@ mod tests {
     }
 
     #[test]
+    fn capability_profile_is_exact_local_only_and_owned_requires_state() {
+        let absent = startup(&[("ELPIS_EXECUTOR_MODE", "stdin")]).unwrap();
+        assert_eq!(absent.capability_profile, CapabilityProfile::Disabled);
+        let disabled = startup(&[
+            ("ELPIS_EXECUTOR_MODE", "stdin"),
+            (CAPABILITY_PROFILE_ENV, "disabled"),
+        ])
+        .unwrap();
+        assert_eq!(disabled.capability_profile, CapabilityProfile::Disabled);
+        assert!(
+            startup(&[
+                ("ELPIS_EXECUTOR_MODE", "stdin"),
+                (CAPABILITY_PROFILE_ENV, "owned_permissive"),
+            ])
+            .is_err()
+        );
+        let owned = startup(&[
+            ("ELPIS_EXECUTOR_MODE", "stdin"),
+            ("ELPIS_EXECUTOR_STATE_DIR", "/tmp/elpis-owned-state"),
+            (CAPABILITY_PROFILE_ENV, "owned_permissive"),
+        ])
+        .unwrap();
+        assert_eq!(owned.capability_profile, CapabilityProfile::OwnedPermissive);
+        for invalid in [
+            "",
+            "owned-permissive",
+            "OWNED_PERMISSIVE",
+            " owned_permissive",
+        ] {
+            assert!(
+                startup(&[
+                    ("ELPIS_EXECUTOR_MODE", "stdin"),
+                    ("ELPIS_EXECUTOR_STATE_DIR", "/tmp/elpis-owned-state"),
+                    (CAPABILITY_PROFILE_ENV, invalid),
+                ])
+                .is_err(),
+                "accepted invalid profile {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_profile_preserves_default_coordinator_behavior() {
+        let runtime = PythonRuntime::system("python3");
+        let mut expected = Coordinator::new(runtime.clone(), CoordinatorConfig::default());
+        let mut disabled =
+            coordinator_for_profile(runtime, None, CapabilityProfile::Disabled).unwrap();
+        let request = Request::Validate {
+            protocol: PROTOCOL_VERSION,
+            request_id: "same-request".into(),
+            source: "40 + 2".into(),
+        };
+        assert_eq!(disabled.submit(request.clone()), expected.submit(request));
+
+        open_coordinator(&mut expected);
+        open_coordinator(&mut disabled);
+        let source = "host_call('elpis.host.exec',['/bin/true'])";
+        assert_eq!(
+            run_coordinator(&mut disabled, source),
+            run_coordinator(&mut expected, source)
+        );
+    }
+
+    #[test]
+    fn owned_profile_rejects_nonprivate_or_nonabsolute_state_before_factory_use() {
+        let runtime = PythonRuntime::system("python3");
+        assert!(
+            coordinator_for_profile(
+                runtime.clone(),
+                Some(Path::new("relative")),
+                CapabilityProfile::OwnedPermissive,
+            )
+            .is_err()
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        fs::create_dir(&public).unwrap();
+        fs::set_permissions(&public, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            coordinator_for_profile(
+                runtime.clone(),
+                Some(&public),
+                CapabilityProfile::OwnedPermissive,
+            )
+            .is_err()
+        );
+
+        let private = temp.path().join("private");
+        ensure_private_state_root(&private).unwrap();
+        let ledger = private.join("effects.sqlite");
+        fs::write(&ledger, []).unwrap();
+        fs::set_permissions(&ledger, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            coordinator_for_profile(runtime, Some(&private), CapabilityProfile::OwnedPermissive,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owned_profile_factory_replays_across_restart_and_closes_ledger_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let marker = temp.path().join("executions");
+        let script = format!("printf x >> {}; printf wired", marker.display());
+        let argv = vec!["/bin/sh", "-c", script.as_str()];
+        let source = format!(
+            "host_call('elpis.host.exec',{})",
+            serde_json::to_string(&argv).unwrap()
+        );
+
+        let mut first = coordinator_for_profile(
+            PythonRuntime::system("python3"),
+            Some(&state),
+            CapabilityProfile::OwnedPermissive,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&state).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(state.join("effects.sqlite"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        open_coordinator(&mut first);
+        let completed = run_coordinator(&mut first, &source);
+        assert!(completed.ok, "{completed:?}");
+        assert_eq!(completed.completed_effects.len(), 1);
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+        assert_eq!(first.close_all(), 1);
+        drop(first);
+
+        let mut restarted = coordinator_for_profile(
+            PythonRuntime::system("python3"),
+            Some(&state),
+            CapabilityProfile::OwnedPermissive,
+        )
+        .unwrap();
+        open_coordinator(&mut restarted);
+        let replayed = run_coordinator(&mut restarted, &source);
+        assert!(replayed.ok, "{replayed:?}");
+        assert_eq!(replayed.completed_effects, completed.completed_effects);
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+        assert_eq!(restarted.close_all(), 1);
+        drop(restarted);
+
+        EffectLedger::open(state.join("effects.sqlite"), EffectLimits::default()).unwrap();
+    }
+
+    #[test]
     fn mode_is_explicit_and_outbound_configuration_cannot_bleed_into_stdin() {
         assert!(startup(&[]).is_err());
         assert!(startup(&[("ELPIS_EXECUTOR_MODE", "unknown")]).is_err());
@@ -875,6 +1150,20 @@ mod tests {
         ];
         let parsed = startup(&valid).unwrap();
         assert!(matches!(parsed.mode, ModeConfig::Outbound(_)));
+        assert_eq!(parsed.capability_profile, CapabilityProfile::Disabled);
+        let owned = startup(&[
+            ("ELPIS_EXECUTOR_MODE", "outbound"),
+            ("ELPIS_EXECUTOR_STATE_DIR", "/tmp/elpis-executor-state"),
+            (
+                "ELPIS_EXECUTOR_LINK_ENDPOINT",
+                "wss://executor.example/link",
+            ),
+            ("ELPIS_EXECUTOR_TLS_SERVER_NAME", "executor.example"),
+            ("ELPIS_EXECUTOR_TLS_ROOT_FILE", "/tmp/root.der"),
+            (CAPABILITY_PROFILE_ENV, "owned_permissive"),
+        ])
+        .unwrap();
+        assert_eq!(owned.capability_profile, CapabilityProfile::OwnedPermissive);
         for index in 0..valid.len() {
             let missing = valid
                 .iter()
