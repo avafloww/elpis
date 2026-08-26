@@ -1,4 +1,4 @@
-//! Canonical, content-addressed requests for sensitive filesystem effects.
+//! Canonical, content-addressed requests for sensitive effects.
 //!
 //! This module is deliberately grammar-only. It does not look up or evaluate profiles, read or
 //! write files, accept content bodies, issue authority, or perform any other effect. Content is
@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{sha256_hex, validate_id, validate_lower_hex_64};
+use super::{
+    NetworkContentType, NetworkMethod, PackageArchitecture, PackageOperation, ServiceAction,
+    sha256_hex, validate_id, validate_lower_hex_64,
+};
 
 pub const SENSITIVE_EFFECT_REQUEST_VERSION: u32 = 1;
 pub const MAX_SENSITIVE_EFFECT_REQUEST_BYTES: usize = 1024 * 1024;
@@ -19,6 +22,13 @@ pub const MAX_EDIT_TREE_OPERATIONS: usize = 4096;
 pub const MAX_EFFECT_CONTENT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const MAX_EDIT_TREE_CONTENT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const MAX_EFFECT_RESULT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_SERVICE_UNIT_NAME_BYTES: usize = 128;
+pub const MAX_PACKAGE_REQUEST_SELECTIONS: usize = 128;
+pub const MAX_PACKAGE_NAME_BYTES: usize = 128;
+pub const MAX_REMOTE_OUTPUT_BYTES: u64 = 1024 * 1024;
+pub const MAX_NETWORK_PATH_BYTES: usize = 256;
+pub const MAX_NETWORK_REQUEST_BYTES: u64 = 1024 * 1024;
+pub const MAX_NETWORK_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The v1 envelope. Field order is part of its canonical JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,7 +90,7 @@ impl CanonicalSensitiveEffectRequest {
     }
 }
 
-/// The closed set of v1 sensitive filesystem effects.
+/// The closed set of v1 sensitive effects.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SensitiveEffectV1 {
@@ -100,6 +110,31 @@ pub enum SensitiveEffectV1 {
         content_sha256: String,
         content_bytes: u64,
         max_result_bytes: u64,
+    },
+    ServiceAction {
+        service_profile_id: String,
+        unit: String,
+        action: ServiceAction,
+        max_result_bytes: u64,
+    },
+    PackageOperation {
+        package_profile_id: String,
+        operation: PackageOperation,
+        selections: Vec<PackageRequestSelectionV1>,
+        max_result_bytes: u64,
+    },
+    RemoteExecProfile {
+        remote_profile_id: String,
+        action_id: String,
+        max_stdout_bytes: u64,
+        max_stderr_bytes: u64,
+    },
+    NetworkEndpoint {
+        endpoint_profile_id: String,
+        method: NetworkMethod,
+        path: String,
+        body: NetworkRequestBodyV1,
+        max_response_bytes: u64,
     },
 }
 
@@ -148,6 +183,114 @@ impl SensitiveEffectV1 {
                 validate_artifact_name(artifact_name)?;
                 validate_content(content_sha256, *content_bytes)?;
                 validate_result_cap(*max_result_bytes)
+            }
+            Self::ServiceAction {
+                service_profile_id,
+                unit,
+                max_result_bytes,
+                ..
+            } => {
+                validate_profile_id(service_profile_id)?;
+                validate_service_unit_name(unit)?;
+                validate_result_cap(*max_result_bytes)
+            }
+            Self::PackageOperation {
+                package_profile_id,
+                selections,
+                max_result_bytes,
+                ..
+            } => {
+                validate_profile_id(package_profile_id)?;
+                validate_result_cap(*max_result_bytes)?;
+                if selections.is_empty()
+                    || selections.len() > MAX_PACKAGE_REQUEST_SELECTIONS
+                    || selections
+                        .windows(2)
+                        .any(|pair| pair[0].name >= pair[1].name)
+                {
+                    return Err(SensitiveEffectRequestError::InvalidList);
+                }
+                for selection in selections {
+                    selection.validate()?;
+                }
+                Ok(())
+            }
+            Self::RemoteExecProfile {
+                remote_profile_id,
+                action_id,
+                max_stdout_bytes,
+                max_stderr_bytes,
+            } => {
+                validate_profile_id(remote_profile_id)?;
+                validate_profile_id(action_id)?;
+                validate_remote_output_cap(*max_stdout_bytes)?;
+                validate_remote_output_cap(*max_stderr_bytes)
+            }
+            Self::NetworkEndpoint {
+                endpoint_profile_id,
+                method,
+                path,
+                body,
+                max_response_bytes,
+            } => {
+                validate_profile_id(endpoint_profile_id)?;
+                validate_network_path(path)?;
+                body.validate()?;
+                if matches!(method, NetworkMethod::Get | NetworkMethod::Head)
+                    && !matches!(body, NetworkRequestBodyV1::Forbidden)
+                {
+                    return Err(SensitiveEffectRequestError::InvalidField);
+                }
+                validate_network_response_cap(*max_response_bytes)
+            }
+        }
+    }
+}
+
+/// An exact archive selection. Lists are canonical in strictly increasing package-name order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PackageRequestSelectionV1 {
+    pub name: String,
+    pub version: String,
+    pub architecture: PackageArchitecture,
+    pub archive_sha256: String,
+}
+
+impl PackageRequestSelectionV1 {
+    fn validate(&self) -> Result<(), SensitiveEffectRequestError> {
+        validate_package_name(&self.name)?;
+        validate_package_version(&self.version)?;
+        validate_sha256(&self.archive_sha256)
+    }
+}
+
+/// A request body is either absent or bound to exact external bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NetworkRequestBodyV1 {
+    Forbidden,
+    Content {
+        content_type: NetworkContentType,
+        content_sha256: String,
+        content_bytes: u64,
+    },
+}
+
+impl NetworkRequestBodyV1 {
+    fn validate(&self) -> Result<(), SensitiveEffectRequestError> {
+        match self {
+            Self::Forbidden => Ok(()),
+            Self::Content {
+                content_sha256,
+                content_bytes,
+                ..
+            } => {
+                validate_sha256(content_sha256)?;
+                if *content_bytes > MAX_NETWORK_REQUEST_BYTES {
+                    return Err(SensitiveEffectRequestError::ContentTooLarge);
+                }
+                Ok(())
             }
         }
     }
@@ -259,7 +402,7 @@ pub enum SensitiveEffectRequestError {
     NonCanonical,
     #[error("sensitive effect request field is invalid")]
     InvalidField,
-    #[error("sensitive effect request list is empty or exceeds its bound")]
+    #[error("sensitive effect request list is empty, noncanonical, or exceeds its bound")]
     InvalidList,
     #[error("sensitive effect request content length exceeds its bound")]
     ContentTooLarge,
@@ -283,6 +426,87 @@ fn validate_content(sha256: &str, bytes: u64) -> Result<(), SensitiveEffectReque
 
 fn validate_result_cap(bytes: u64) -> Result<(), SensitiveEffectRequestError> {
     if bytes == 0 || bytes > MAX_EFFECT_RESULT_BYTES {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_remote_output_cap(bytes: u64) -> Result<(), SensitiveEffectRequestError> {
+    if bytes == 0 || bytes > MAX_REMOTE_OUTPUT_BYTES {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_network_response_cap(bytes: u64) -> Result<(), SensitiveEffectRequestError> {
+    if bytes == 0 || bytes > MAX_NETWORK_RESPONSE_BYTES {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_service_unit_name(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    let Some(stem) = value.strip_suffix(".service") else {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    };
+    if value.len() > MAX_SERVICE_UNIT_NAME_BYTES
+        || stem.is_empty()
+        || stem.starts_with(['-', '.', '_', '@'])
+        || stem.ends_with(['-', '.', '_', '@'])
+        || stem.contains("..")
+        || stem.matches('@').count() > 1
+        || !stem.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'.' | b'_' | b'@')
+        })
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_package_name(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > MAX_PACKAGE_NAME_BYTES
+        || !value.as_bytes()[0].is_ascii_lowercase()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')
+        })
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_package_version(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > MAX_PACKAGE_NAME_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b':' | b'~' | b'-')
+        })
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_network_path(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.len() < 2
+        || value.len() > MAX_NETWORK_PATH_BYTES
+        || !value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("//")
+        || value.contains(['\\', '?', '#', '%', '@', ':'])
+        || value.split('/').skip(1).any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+        })
+    {
         return Err(SensitiveEffectRequestError::InvalidField);
     }
     Ok(())
@@ -432,6 +656,82 @@ mod tests {
                     "b4afb502434a0032f5e3730481e7130b840bf4accaa2816d867f3a663fbd3b30"
                 );
             }
+        }
+    }
+
+    fn package_selection(
+        name: &str,
+        version: &str,
+        architecture: PackageArchitecture,
+        archive_sha256: &str,
+    ) -> PackageRequestSelectionV1 {
+        PackageRequestSelectionV1 {
+            name: name.into(),
+            version: version.into(),
+            architecture,
+            archive_sha256: archive_sha256.into(),
+        }
+    }
+
+    #[test]
+    fn new_request_variants_have_stable_bytes_and_hashes() {
+        let cases = [
+            (
+                request(SensitiveEffectV1::ServiceAction {
+                    service_profile_id: "profile.service-1".into(),
+                    unit: "api@blue.service".into(),
+                    action: ServiceAction::Restart,
+                    max_result_bytes: 4096,
+                }),
+                br#"{"version":1,"effect":{"kind":"service_action","service_profile_id":"profile.service-1","unit":"api@blue.service","action":"restart","max_result_bytes":4096}}"#.as_slice(),
+                "feb273c9ac3759cef9120281d9d50e55a3f2825be0df155b6defcf983a1771f9",
+            ),
+            (
+                request(SensitiveEffectV1::PackageOperation {
+                    package_profile_id: "profile.packages-1".into(),
+                    operation: PackageOperation::Install,
+                    selections: vec![
+                        package_selection("libalpha", "1:2.3-4", PackageArchitecture::Amd64, HASH_A),
+                        package_selection("tool-beta", "5.0~rc1", PackageArchitecture::Arm64, HASH_B),
+                    ],
+                    max_result_bytes: 8192,
+                }),
+                br#"{"version":1,"effect":{"kind":"package_operation","package_profile_id":"profile.packages-1","operation":"install","selections":[{"name":"libalpha","version":"1:2.3-4","architecture":"amd64","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"name":"tool-beta","version":"5.0~rc1","architecture":"arm64","archive_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],"max_result_bytes":8192}}"#.as_slice(),
+                "08a7c1bf2d6a1366db34591c7e658d33564ba4f61c0677fb296226e2ab194289",
+            ),
+            (
+                request(SensitiveEffectV1::RemoteExecProfile {
+                    remote_profile_id: "profile.remote-1".into(),
+                    action_id: "rotate-logs".into(),
+                    max_stdout_bytes: 65_536,
+                    max_stderr_bytes: 32_768,
+                }),
+                br#"{"version":1,"effect":{"kind":"remote_exec_profile","remote_profile_id":"profile.remote-1","action_id":"rotate-logs","max_stdout_bytes":65536,"max_stderr_bytes":32768}}"#.as_slice(),
+                "f089ee3c2155a1560bc6d8295361d5420c296c4ed4aaebdc9b85f80420c118ce",
+            ),
+            (
+                request(SensitiveEffectV1::NetworkEndpoint {
+                    endpoint_profile_id: "profile.network-1".into(),
+                    method: NetworkMethod::Post,
+                    path: "/v1/reports/current".into(),
+                    body: NetworkRequestBodyV1::Content {
+                        content_type: NetworkContentType::ApplicationJson,
+                        content_sha256: HASH_A.into(),
+                        content_bytes: 27,
+                    },
+                    max_response_bytes: 1024 * 1024,
+                }),
+                br#"{"version":1,"effect":{"kind":"network_endpoint","endpoint_profile_id":"profile.network-1","method":"post","path":"/v1/reports/current","body":{"kind":"content","content_type":"application/json","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","content_bytes":27},"max_response_bytes":1048576}}"#.as_slice(),
+                "8eb01def787f824b49d8efd26fda2222688774cd081edae44037baafa8c71978",
+            ),
+        ];
+
+        for (request, expected_bytes, expected_hash) in cases {
+            let bytes = request.canonical_bytes().unwrap();
+            assert_eq!(bytes.as_slice(), expected_bytes);
+            let parsed = CanonicalSensitiveEffectRequest::parse(&bytes).unwrap();
+            assert_eq!(parsed.request(), &request);
+            assert_eq!(parsed.request_sha256(), expected_hash);
         }
     }
 
@@ -592,6 +892,212 @@ mod tests {
         for case in cases {
             assert!(case.validate().is_err());
         }
+    }
+
+    #[test]
+    fn service_units_are_canonical_and_caps_and_ids_are_bounded() {
+        for unit in [
+            "api",
+            "/api.service",
+            "Api.service",
+            ".api.service",
+            "api..blue.service",
+            "api@@blue.service",
+            "api.service/other.service",
+        ] {
+            assert_eq!(
+                request(SensitiveEffectV1::ServiceAction {
+                    service_profile_id: "services".into(),
+                    unit: unit.into(),
+                    action: ServiceAction::Status,
+                    max_result_bytes: 1,
+                })
+                .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+        for (profile_id, cap) in [
+            ("bad/id", 1),
+            ("services", 0),
+            ("services", MAX_EFFECT_RESULT_BYTES + 1),
+        ] {
+            assert_eq!(
+                request(SensitiveEffectV1::ServiceAction {
+                    service_profile_id: profile_id.into(),
+                    unit: "api.service".into(),
+                    action: ServiceAction::Restart,
+                    max_result_bytes: cap,
+                })
+                .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn package_selections_are_exact_sorted_nonempty_and_bounded() {
+        let first = package_selection("alpha", "1.0", PackageArchitecture::Amd64, HASH_A);
+        let second = package_selection("beta", "2.0", PackageArchitecture::Arm64, HASH_B);
+        let package_request = |selections| {
+            request(SensitiveEffectV1::PackageOperation {
+                package_profile_id: "packages".into(),
+                operation: PackageOperation::Upgrade,
+                selections,
+                max_result_bytes: 1,
+            })
+        };
+
+        assert!(
+            package_request(vec![first.clone(), second.clone()])
+                .validate()
+                .is_ok()
+        );
+        for selections in [
+            Vec::new(),
+            vec![second.clone(), first.clone()],
+            vec![first.clone(), first.clone()],
+            vec![package_selection(
+                "Alpha",
+                "1.0",
+                PackageArchitecture::Amd64,
+                HASH_A,
+            )],
+            vec![package_selection(
+                "alpha",
+                "1/0",
+                PackageArchitecture::Amd64,
+                HASH_A,
+            )],
+            vec![package_selection(
+                "alpha",
+                "1.0",
+                PackageArchitecture::Amd64,
+                &"A".repeat(64),
+            )],
+        ] {
+            assert!(package_request(selections).validate().is_err());
+        }
+        assert_eq!(
+            package_request(vec![first; MAX_PACKAGE_REQUEST_SELECTIONS + 1]).validate(),
+            Err(SensitiveEffectRequestError::InvalidList)
+        );
+    }
+
+    #[test]
+    fn remote_requests_bind_only_profile_action_and_output_caps() {
+        for (profile_id, action_id, stdout, stderr) in [
+            ("bad/profile", "rotate", 1, 1),
+            ("remote", "bad/action", 1, 1),
+            ("remote", "rotate", 0, 1),
+            ("remote", "rotate", 1, 0),
+            ("remote", "rotate", MAX_REMOTE_OUTPUT_BYTES + 1, 1),
+            ("remote", "rotate", 1, MAX_REMOTE_OUTPUT_BYTES + 1),
+        ] {
+            assert_eq!(
+                request(SensitiveEffectV1::RemoteExecProfile {
+                    remote_profile_id: profile_id.into(),
+                    action_id: action_id.into(),
+                    max_stdout_bytes: stdout,
+                    max_stderr_bytes: stderr,
+                })
+                .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn network_paths_bodies_methods_and_caps_fail_closed() {
+        let network_request = |method, path: &str, body, cap| {
+            request(SensitiveEffectV1::NetworkEndpoint {
+                endpoint_profile_id: "endpoint".into(),
+                method,
+                path: path.into(),
+                body,
+                max_response_bytes: cap,
+            })
+        };
+        for path in [
+            "",
+            "/",
+            "relative",
+            "https://example.com/v1",
+            "//user@example.com/v1",
+            "/v1/",
+            "/v1//item",
+            "/v1/./item",
+            "/v1/../item",
+            "/v1/item?secret=x",
+            "/v1/item#fragment",
+            "/v1/%69tem",
+            "/v1/user@example.com",
+            "/v1\\item",
+        ] {
+            assert_eq!(
+                network_request(NetworkMethod::Get, path, NetworkRequestBodyV1::Forbidden, 1)
+                    .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+
+        let content = |hash: &str, bytes| NetworkRequestBodyV1::Content {
+            content_type: NetworkContentType::ApplicationJson,
+            content_sha256: hash.into(),
+            content_bytes: bytes,
+        };
+        assert_eq!(
+            network_request(NetworkMethod::Get, "/v1/item", content(HASH_A, 1), 1).validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        assert_eq!(
+            network_request(
+                NetworkMethod::Post,
+                "/v1/item",
+                content(HASH_A, MAX_NETWORK_REQUEST_BYTES + 1),
+                1
+            )
+            .validate(),
+            Err(SensitiveEffectRequestError::ContentTooLarge)
+        );
+        assert_eq!(
+            network_request(
+                NetworkMethod::Post,
+                "/v1/item",
+                content(&"A".repeat(64), 1),
+                1
+            )
+            .validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        for cap in [0, MAX_NETWORK_RESPONSE_BYTES + 1] {
+            assert_eq!(
+                network_request(NetworkMethod::Post, "/v1/item", content(HASH_A, 1), cap)
+                    .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn request_grammar_has_no_argument_transport_or_credential_overrides() {
+        let forbidden = [
+            br#"{"version":1,"effect":{"kind":"remote_exec_profile","remote_profile_id":"remote","action_id":"rotate","max_stdout_bytes":1,"max_stderr_bytes":1,"argv":["/bin/sh"]}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"remote_exec_profile","remote_profile_id":"remote","action_id":"rotate","max_stdout_bytes":1,"max_stderr_bytes":1,"env":{"TOKEN":"x"}}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"network_endpoint","endpoint_profile_id":"endpoint","method":"get","path":"/v1/item","body":{"kind":"forbidden"},"max_response_bytes":1,"url":"https://example.com","headers":{"authorization":"x"},"query":"secret=x","credential_profile_id":"secret"}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"package_operation","package_profile_id":"packages","operation":"install","selections":[{"name":"alpha","version":"1.0","architecture":"amd64","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://example.com/a.deb"}],"max_result_bytes":1}}"#.as_slice(),
+        ];
+        for bytes in forbidden {
+            assert_eq!(
+                CanonicalSensitiveEffectRequest::parse(bytes),
+                Err(SensitiveEffectRequestError::InvalidEncoding)
+            );
+        }
+
+        let noncanonical_order = br#"{"effect":{"kind":"network_endpoint","endpoint_profile_id":"endpoint","method":"get","path":"/v1/item","body":{"kind":"forbidden"},"max_response_bytes":1},"version":1}"#;
+        assert_eq!(
+            CanonicalSensitiveEffectRequest::parse(noncanonical_order),
+            Err(SensitiveEffectRequestError::NonCanonical)
+        );
     }
 
     #[test]
