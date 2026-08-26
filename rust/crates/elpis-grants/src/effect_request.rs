@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    NetworkContentType, NetworkMethod, PackageArchitecture, PackageOperation, ServiceAction,
-    sha256_hex, validate_id, validate_lower_hex_64,
+    KubernetesLabelSelector, KubernetesResource, NetworkContentType, NetworkMethod,
+    PackageArchitecture, PackageOperation, ServiceAction, sha256_hex, validate_id,
+    validate_lower_hex_64,
 };
 
 pub const SENSITIVE_EFFECT_REQUEST_VERSION: u32 = 1;
@@ -29,6 +30,9 @@ pub const MAX_REMOTE_OUTPUT_BYTES: u64 = 1024 * 1024;
 pub const MAX_NETWORK_PATH_BYTES: usize = 256;
 pub const MAX_NETWORK_REQUEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_NETWORK_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_KUBERNETES_SELECTORS: usize = 32;
+pub const MAX_KUBERNETES_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_KUBERNETES_RESOURCE_VERSION_BYTES: usize = 256;
 
 /// The v1 envelope. Field order is part of its canonical JSON representation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +138,12 @@ pub enum SensitiveEffectV1 {
         method: NetworkMethod,
         path: String,
         body: NetworkRequestBodyV1,
+        max_response_bytes: u64,
+    },
+    KubernetesNamespace {
+        cluster_profile_id: String,
+        namespace: String,
+        operation: KubernetesRequestOperationV1,
         max_response_bytes: u64,
     },
 }
@@ -243,6 +253,17 @@ impl SensitiveEffectV1 {
                 }
                 validate_network_response_cap(*max_response_bytes)
             }
+            Self::KubernetesNamespace {
+                cluster_profile_id,
+                namespace,
+                operation,
+                max_response_bytes,
+            } => {
+                validate_profile_id(cluster_profile_id)?;
+                validate_kubernetes_namespace(namespace)?;
+                operation.validate()?;
+                validate_kubernetes_response_cap(*max_response_bytes)
+            }
         }
     }
 }
@@ -293,6 +314,62 @@ impl NetworkRequestBodyV1 {
                 Ok(())
             }
         }
+    }
+}
+
+/// One exact namespaced Kubernetes query or delete. Create, patch, update, generic bodies,
+/// object templates, API locations, credentials, and query overrides are deliberately absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KubernetesRequestOperationV1 {
+    Get {
+        resource: KubernetesResource,
+        name: String,
+    },
+    List {
+        resource: KubernetesResource,
+        selectors: Vec<KubernetesLabelSelector>,
+    },
+    Watch {
+        resource: KubernetesResource,
+        selectors: Vec<KubernetesLabelSelector>,
+    },
+    Delete {
+        resource: KubernetesResource,
+        name: String,
+        precondition: KubernetesDeletePreconditionV1,
+    },
+}
+
+impl KubernetesRequestOperationV1 {
+    fn validate(&self) -> Result<(), SensitiveEffectRequestError> {
+        match self {
+            Self::Get { name, .. } => validate_kubernetes_name(name),
+            Self::List { selectors, .. } | Self::Watch { selectors, .. } => {
+                validate_kubernetes_selectors(selectors)
+            }
+            Self::Delete {
+                name, precondition, ..
+            } => {
+                validate_kubernetes_name(name)?;
+                precondition.validate()
+            }
+        }
+    }
+}
+
+/// Exact object identity and concurrency token required by every Kubernetes delete request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesDeletePreconditionV1 {
+    pub uid: String,
+    pub resource_version: String,
+}
+
+impl KubernetesDeletePreconditionV1 {
+    fn validate(&self) -> Result<(), SensitiveEffectRequestError> {
+        validate_kubernetes_uid(&self.uid)?;
+        validate_kubernetes_resource_version(&self.resource_version)
     }
 }
 
@@ -440,6 +517,125 @@ fn validate_remote_output_cap(bytes: u64) -> Result<(), SensitiveEffectRequestEr
 
 fn validate_network_response_cap(bytes: u64) -> Result<(), SensitiveEffectRequestError> {
     if bytes == 0 || bytes > MAX_NETWORK_RESPONSE_BYTES {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_response_cap(bytes: u64) -> Result<(), SensitiveEffectRequestError> {
+    if bytes == 0 || bytes > MAX_KUBERNETES_RESPONSE_BYTES {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_namespace(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > 63
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_name(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        })
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_selectors(
+    selectors: &[KubernetesLabelSelector],
+) -> Result<(), SensitiveEffectRequestError> {
+    if selectors.is_empty()
+        || selectors.len() > MAX_KUBERNETES_SELECTORS
+        || selectors.windows(2).any(|pair| pair[0].key >= pair[1].key)
+    {
+        return Err(SensitiveEffectRequestError::InvalidList);
+    }
+    for selector in selectors {
+        validate_kubernetes_label_key(&selector.key)?;
+        validate_kubernetes_label_token(&selector.value)?;
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_label_key(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    let mut parts = value.split('/');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if parts.next().is_some() {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    match second {
+        Some(name) => {
+            validate_kubernetes_name(first)?;
+            validate_kubernetes_label_token(name)
+        }
+        None => validate_kubernetes_label_token(first),
+    }
+}
+
+fn validate_kubernetes_label_token(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > 63
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_uid(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36
+        || !matches!(bytes[8], b'-')
+        || !matches!(bytes[13], b'-')
+        || !matches!(bytes[18], b'-')
+        || !matches!(bytes[23], b'-')
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                || byte.is_ascii_digit()
+                || matches!(byte, b'a'..=b'f')
+        })
+        || !matches!(bytes[14], b'1'..=b'5')
+        || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+    {
+        return Err(SensitiveEffectRequestError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_resource_version(value: &str) -> Result<(), SensitiveEffectRequestError> {
+    if value.is_empty()
+        || value.len() > MAX_KUBERNETES_RESOURCE_VERSION_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
         return Err(SensitiveEffectRequestError::InvalidField);
     }
     Ok(())
@@ -733,6 +929,296 @@ mod tests {
             assert_eq!(parsed.request(), &request);
             assert_eq!(parsed.request_sha256(), expected_hash);
         }
+    }
+
+    fn kubernetes_selector(key: &str, value: &str) -> KubernetesLabelSelector {
+        KubernetesLabelSelector {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    fn kubernetes_request(
+        operation: KubernetesRequestOperationV1,
+        max_response_bytes: u64,
+    ) -> SensitiveEffectRequestV1 {
+        request(SensitiveEffectV1::KubernetesNamespace {
+            cluster_profile_id: "profile.cluster-1".into(),
+            namespace: "elpis-workers".into(),
+            operation,
+            max_response_bytes,
+        })
+    }
+
+    fn kubernetes_delete_precondition() -> KubernetesDeletePreconditionV1 {
+        KubernetesDeletePreconditionV1 {
+            uid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            resource_version: "rv:184467".into(),
+        }
+    }
+
+    #[test]
+    fn kubernetes_requests_have_stable_bytes_and_hashes() {
+        let cases = [
+            (
+                kubernetes_request(
+                    KubernetesRequestOperationV1::Get {
+                        resource: KubernetesResource::Pod,
+                        name: "worker-a".into(),
+                    },
+                    1024 * 1024,
+                ),
+                br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"profile.cluster-1","namespace":"elpis-workers","operation":{"verb":"get","resource":"pod","name":"worker-a"},"max_response_bytes":1048576}}"#.as_slice(),
+                "f0525b5773c36ac0492f56ac3752eb2aef069973fa73f1789ab99f17918e64fc",
+            ),
+            (
+                kubernetes_request(
+                    KubernetesRequestOperationV1::List {
+                        resource: KubernetesResource::Deployment,
+                        selectors: vec![
+                            kubernetes_selector("app.kubernetes.io/name", "elpis-worker"),
+                            kubernetes_selector("elpis.dev/mind", "elm-34v9m41b"),
+                        ],
+                    },
+                    2 * 1024 * 1024,
+                ),
+                br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"profile.cluster-1","namespace":"elpis-workers","operation":{"verb":"list","resource":"deployment","selectors":[{"key":"app.kubernetes.io/name","value":"elpis-worker"},{"key":"elpis.dev/mind","value":"elm-34v9m41b"}]},"max_response_bytes":2097152}}"#.as_slice(),
+                "1381ed47deaf696b9cc82990c36fb0f5627f528c3e79100e1826b6a1a4c1348e",
+            ),
+            (
+                kubernetes_request(
+                    KubernetesRequestOperationV1::Watch {
+                        resource: KubernetesResource::Service,
+                        selectors: vec![kubernetes_selector("app", "elpis")],
+                    },
+                    4 * 1024 * 1024,
+                ),
+                br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"profile.cluster-1","namespace":"elpis-workers","operation":{"verb":"watch","resource":"service","selectors":[{"key":"app","value":"elpis"}]},"max_response_bytes":4194304}}"#.as_slice(),
+                "ff73e90ac3e828996e1bce818b97b95b7210d0ed168529b2714c0ae7ac5985cc",
+            ),
+            (
+                kubernetes_request(
+                    KubernetesRequestOperationV1::Delete {
+                        resource: KubernetesResource::ConfigMap,
+                        name: "worker-lock".into(),
+                        precondition: kubernetes_delete_precondition(),
+                    },
+                    65_536,
+                ),
+                br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"profile.cluster-1","namespace":"elpis-workers","operation":{"verb":"delete","resource":"config_map","name":"worker-lock","precondition":{"uid":"550e8400-e29b-41d4-a716-446655440000","resource_version":"rv:184467"}},"max_response_bytes":65536}}"#.as_slice(),
+                "f117d3d435d5296cd412bfe2e85dae6b4d6826fb9797afb61863cca74320f687",
+            ),
+        ];
+
+        for (request, expected_bytes, expected_hash) in cases {
+            let bytes = request.canonical_bytes().unwrap();
+            assert_eq!(bytes.as_slice(), expected_bytes);
+            let parsed = CanonicalSensitiveEffectRequest::parse(&bytes).unwrap();
+            assert_eq!(parsed.request(), &request);
+            assert_eq!(parsed.request_sha256(), expected_hash);
+        }
+    }
+
+    #[test]
+    fn kubernetes_profile_namespace_names_and_response_caps_are_exact() {
+        let get = || KubernetesRequestOperationV1::Get {
+            resource: KubernetesResource::Pod,
+            name: "worker-a".into(),
+        };
+        for (profile_id, namespace, cap) in [
+            ("bad/profile", "elpis-workers", 1),
+            ("cluster", "", 1),
+            ("cluster", "Elpis", 1),
+            ("cluster", "elpis.workers", 1),
+            ("cluster", "-elpis", 1),
+            ("cluster", "elpis-", 1),
+            ("cluster", "elpis-workers", 0),
+            (
+                "cluster",
+                "elpis-workers",
+                MAX_KUBERNETES_RESPONSE_BYTES + 1,
+            ),
+        ] {
+            assert_eq!(
+                request(SensitiveEffectV1::KubernetesNamespace {
+                    cluster_profile_id: profile_id.into(),
+                    namespace: namespace.into(),
+                    operation: get(),
+                    max_response_bytes: cap,
+                })
+                .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+        assert_eq!(
+            request(SensitiveEffectV1::KubernetesNamespace {
+                cluster_profile_id: "cluster".into(),
+                namespace: "a".repeat(64),
+                operation: get(),
+                max_response_bytes: 1,
+            })
+            .validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        for name in [
+            "",
+            "Worker-a",
+            "-worker",
+            "worker-",
+            ".worker",
+            "worker.",
+            "worker..a",
+            "worker/a",
+            "worker_a",
+        ] {
+            assert_eq!(
+                kubernetes_request(
+                    KubernetesRequestOperationV1::Get {
+                        resource: KubernetesResource::Pod,
+                        name: name.into(),
+                    },
+                    1,
+                )
+                .validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+        assert_eq!(
+            kubernetes_request(
+                KubernetesRequestOperationV1::Get {
+                    resource: KubernetesResource::Pod,
+                    name: "a".repeat(254),
+                },
+                1,
+            )
+            .validate(),
+            Err(SensitiveEffectRequestError::InvalidField)
+        );
+        assert!(
+            kubernetes_request(
+                KubernetesRequestOperationV1::Get {
+                    resource: KubernetesResource::Job,
+                    name: "job.worker-a".into(),
+                },
+                MAX_KUBERNETES_RESPONSE_BYTES,
+            )
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn kubernetes_selectors_are_nonempty_sorted_unique_and_bounded() {
+        let list_request = |selectors| {
+            kubernetes_request(
+                KubernetesRequestOperationV1::List {
+                    resource: KubernetesResource::Pod,
+                    selectors,
+                },
+                1,
+            )
+        };
+        let first = kubernetes_selector("app.kubernetes.io/name", "worker");
+        let second = kubernetes_selector("elpis.dev/mind", "elm-34v9m41b");
+        assert!(
+            list_request(vec![first.clone(), second.clone()])
+                .validate()
+                .is_ok()
+        );
+        for selectors in [
+            Vec::new(),
+            vec![second.clone(), first.clone()],
+            vec![first.clone(), first.clone()],
+            vec![
+                first.clone(),
+                kubernetes_selector("app.kubernetes.io/name", "other"),
+            ],
+            vec![kubernetes_selector("bad//key", "worker")],
+            vec![kubernetes_selector("app", "bad/value")],
+            vec![kubernetes_selector("-app", "worker")],
+            vec![kubernetes_selector("app", "-worker")],
+        ] {
+            assert!(list_request(selectors).validate().is_err());
+        }
+        assert_eq!(
+            list_request(vec![first; MAX_KUBERNETES_SELECTORS + 1]).validate(),
+            Err(SensitiveEffectRequestError::InvalidList)
+        );
+    }
+
+    #[test]
+    fn kubernetes_delete_requires_exact_uid_and_resource_version() {
+        let delete_request = |precondition| {
+            kubernetes_request(
+                KubernetesRequestOperationV1::Delete {
+                    resource: KubernetesResource::ConfigMap,
+                    name: "worker-lock".into(),
+                    precondition,
+                },
+                1,
+            )
+        };
+        let mut invalid = Vec::new();
+        for uid in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "00000000-0000-0000-0000-000000000000",
+            "550e8400-e29b-01d4-a716-446655440000",
+            "550e8400-e29b-41d4-7716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+        ] {
+            invalid.push(KubernetesDeletePreconditionV1 {
+                uid: uid.into(),
+                ..kubernetes_delete_precondition()
+            });
+        }
+        for resource_version in [
+            String::new(),
+            "has space".into(),
+            "has/slash".into(),
+            "é".into(),
+            "x".repeat(MAX_KUBERNETES_RESOURCE_VERSION_BYTES + 1),
+        ] {
+            invalid.push(KubernetesDeletePreconditionV1 {
+                resource_version,
+                ..kubernetes_delete_precondition()
+            });
+        }
+        for precondition in invalid {
+            assert_eq!(
+                delete_request(precondition).validate(),
+                Err(SensitiveEffectRequestError::InvalidField)
+            );
+        }
+        assert!(
+            delete_request(kubernetes_delete_precondition())
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn kubernetes_write_shapes_overrides_and_inexact_deletes_are_unrepresentable() {
+        let forbidden = [
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"create","resource":"pod","name":"worker"},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"patch","resource":"pod","name":"worker","body":{}},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"update","resource":"pod","name":"worker","template_profile_id":"template"},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"delete","resource":"pod","name":"worker"},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"delete","resource":"pod","name":"worker","precondition":{"uid":"550e8400-e29b-41d4-a716-446655440000"}},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"delete","resource":"pod","name":"worker","precondition":{"uid":"550e8400-e29b-41d4-a716-446655440000","resource_version":"1","grace_period_seconds":0}},"max_response_bytes":1}}"#.as_slice(),
+            br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"verb":"get","resource":"pod","name":"worker","api_url":"https://example.invalid","credential_profile_id":"secret","query":"limit=0"},"max_response_bytes":1}}"#.as_slice(),
+        ];
+        for bytes in forbidden {
+            assert_eq!(
+                CanonicalSensitiveEffectRequest::parse(bytes),
+                Err(SensitiveEffectRequestError::InvalidEncoding)
+            );
+        }
+
+        let noncanonical_order = br#"{"version":1,"effect":{"kind":"kubernetes_namespace","cluster_profile_id":"cluster","namespace":"workers","operation":{"resource":"pod","verb":"get","name":"worker"},"max_response_bytes":1}}"#;
+        assert_eq!(
+            CanonicalSensitiveEffectRequest::parse(noncanonical_order),
+            Err(SensitiveEffectRequestError::NonCanonical)
+        );
     }
 
     #[test]
