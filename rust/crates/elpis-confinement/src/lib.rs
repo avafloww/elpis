@@ -6,6 +6,8 @@
 //! namespace, mount, credential, capability, seccomp, Landlock, and cgroup
 //! operation before executing guest code.
 
+mod filesystem;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
