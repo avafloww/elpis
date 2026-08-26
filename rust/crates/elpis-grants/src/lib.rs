@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod policy;
+mod profile;
 pub use policy::*;
+pub use profile::*;
 
 use std::fmt;
 
