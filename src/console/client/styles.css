@@ -199,6 +199,7 @@ pre {
   text-decoration: none;
   border-bottom: 1px dotted rgba(255, 255, 255, 0.2);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .sidebar-brand a:hover {

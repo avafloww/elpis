@@ -50,7 +50,7 @@ function BuildLinks({ state }: { state: ConsoleState }) {
             rel='noreferrer'
             title={revision}
           >
-            {revision.slice(0, 12)}
+            {revision.slice(0, 7)}
           </a>
         ) : null}
       </>
@@ -63,7 +63,7 @@ function BuildLinks({ state }: { state: ConsoleState }) {
       rel='noreferrer'
       title={revision}
     >
-      {revision.slice(0, 12)}
+      {revision.slice(0, 7)}
     </a>
   ) : (
     <span>local</span>
