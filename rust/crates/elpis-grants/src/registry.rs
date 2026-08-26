@@ -297,6 +297,108 @@ impl ValidatedSensitiveProfileBindings {
     }
 }
 
+/// Proves signed relative-prefix and artifact-size bounds against one exact local profile.
+///
+/// This validates profile containment only; it does not resolve paths, inspect files, or prevent
+/// time-of-check/time-of-use races.
+pub fn prove_path_artifact_profile_subset(
+    capability: &SensitiveCapabilityRule,
+    profile: &SensitiveLocalProfileV1,
+) -> Result<(), SensitiveProfileSubsetError> {
+    let prefixes_fit =
+        |prefixes: &[String], max_depth: u32, max_relative: u32, max_component: u32| {
+            prefixes.iter().all(|prefix| {
+                let components: Vec<_> = prefix.split('/').collect();
+                !prefix.is_empty()
+                    && !prefix.starts_with('/')
+                    && !prefix.ends_with('/')
+                    && prefix.len() <= max_relative as usize
+                    && components.len() <= max_depth as usize
+                    && components.iter().all(|component| {
+                        !component.is_empty()
+                            && *component != "."
+                            && *component != ".."
+                            && component.len() <= max_component as usize
+                    })
+            })
+        };
+    match (capability, &profile.profile) {
+        (
+            SensitiveCapabilityRule::ReadPath {
+                relative_prefixes, ..
+            },
+            SensitiveLocalProfileKindV1::FilesystemRoot {
+                max_depth,
+                max_relative_path_bytes,
+                max_component_bytes,
+                ..
+            },
+        ) => {
+            if prefixes_fit(
+                relative_prefixes,
+                *max_depth,
+                *max_relative_path_bytes,
+                *max_component_bytes,
+            ) {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::EditTree {
+                relative_prefixes,
+                max_files,
+                ..
+            },
+            SensitiveLocalProfileKindV1::EditableTree {
+                max_depth,
+                max_relative_path_bytes,
+                max_component_bytes,
+                max_entries,
+                ..
+            },
+        ) => {
+            if *max_files <= *max_entries
+                && prefixes_fit(
+                    relative_prefixes,
+                    *max_depth,
+                    *max_relative_path_bytes,
+                    *max_component_bytes,
+                )
+            {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::ArtifactExport {
+                max_artifact_bytes, ..
+            },
+            SensitiveLocalProfileKindV1::ArtifactCustody {
+                max_single_file_bytes,
+                max_total_bytes,
+                ..
+            },
+        ) => {
+            if max_artifact_bytes <= max_single_file_bytes && max_artifact_bytes <= max_total_bytes
+            {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::ReadPath { .. }
+            | SensitiveCapabilityRule::EditTree { .. }
+            | SensitiveCapabilityRule::ArtifactExport { .. },
+            _,
+        ) => Err(SensitiveProfileSubsetError::ProfileKindMismatch),
+        _ => Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily),
+    }
+}
+
 /// Proves namespace equality and full signed verb-by-resource query coverage.
 ///
 /// Create, patch, and update are unrepresentable in a cluster query profile and fail closed.
@@ -524,6 +626,9 @@ mod tests {
     const NETWORK_JSON: &str = r#"{"version":1,"id":"package-index-endpoint","profile":{"kind":"network_endpoint","origin":{"protocol":"https","host":"api.example.test","port":443},"address_policy":{"mode":"direct_connect_only_pinned_no_proxy","addresses":["198.51.100.10","2001:db8::10"]},"tls":{"server_name":"api.example.test","minimum_version":"tls13","verification":"pinned_ca_and_leaf_spki_with_hostname_and_validity","ca_certificate_sha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"leaf_spki_sha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]},"routes":[{"path_prefix":"/v1/artifacts","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/octet-stream"]},{"path_prefix":"/v1/artifacts","method":"post","query":"forbidden","request_body":{"mode":"allowed","content_types":["application/json"]},"response_content_types":["application/json"]},{"path_prefix":"/v1/status","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/json"]}],"request_headers":"generated_host_and_allowed_content_type_only","response_encoding":"identity_only","redirects":"deny","max_request_bytes":65536,"max_response_bytes":1048576}}"#;
     const PACKAGE_JSON: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change"}}"#;
     const KUBERNETES_JSON: &str = r#"{"version":1,"id":"cluster-query","profile":{"kind":"kubernetes_cluster","api_server":{"host":"api.cluster.example","port":6443,"tls_server_name":"api.cluster.example","ca_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","redirects":"deny"},"credential_profile":{"id":"cluster-credential","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"namespace":"elpis-workers","rules":[{"verb":"delete","resource":"config_map","names":["worker-lock"],"precondition":"exact_uid_and_resource_version"},{"verb":"get","resource":"pod","names":["worker-a","worker-b"]},{"verb":"list","resource":"pod","selectors":[{"key":"app.kubernetes.io/name","value":"elpis-worker"},{"key":"elpis.dev/mind","value":"elm-34v9m41b"}]},{"verb":"watch","resource":"service","selectors":[{"key":"app","value":"elpis"}]}],"max_request_bytes":65536,"max_response_bytes":1048576}}"#;
+    const READ_JSON: &str = r#"{"version":1,"id":"project-read","profile":{"kind":"filesystem_root","root":{"canonical_root":"/srv/elpis/project","expected_mount_id":11,"expected_device":22,"expected_inode":33,"expected_owner_uid":1000,"expected_owner_gid":1000,"expected_permissions":488,"entry_ownership":"root_owner_only","entry_writes":"owner_only","symlinks":"deny","hard_links":"deny_multiple_links","mount_crossing":"deny","special_files":"regular_files_and_directories_only"},"max_depth":16,"max_relative_path_bytes":512,"max_component_bytes":120,"max_entries":10000}}"#;
+    const EDIT_JSON: &str = r#"{"version":1,"id":"project-edit","profile":{"kind":"editable_tree","root":{"canonical_root":"/srv/elpis/project","expected_mount_id":11,"expected_device":22,"expected_inode":33,"expected_owner_uid":1000,"expected_owner_gid":1000,"expected_permissions":488,"entry_ownership":"root_owner_only","entry_writes":"owner_only","symlinks":"deny","hard_links":"deny_multiple_links","mount_crossing":"deny","special_files":"regular_files_and_directories_only"},"max_depth":16,"max_relative_path_bytes":512,"max_component_bytes":120,"max_entries":10000,"operations":["create_file","replace_file"],"create_policy":"exclusive","replace_policy":"exact_identity_and_sha256","delete_policy":"exact_identity_and_sha256","commit_policy":"fsync_file_rename_fsync_directory","created_file_mode":384,"created_directory_mode":448}}"#;
+    const ARTIFACT_JSON: &str = r#"{"version":1,"id":"review-artifacts","profile":{"kind":"artifact_custody","root":{"canonical_root":"/srv/elpis/project","expected_mount_id":11,"expected_device":22,"expected_inode":33,"expected_owner_uid":1000,"expected_owner_gid":1000,"expected_permissions":448,"entry_ownership":"root_owner_only","entry_writes":"owner_only","symlinks":"deny","hard_links":"deny_multiple_links","mount_crossing":"deny","special_files":"regular_files_and_directories_only"},"write_mode":"create_only","name_policy":"opaque_uuid","created_file_mode":384,"max_files":4,"max_single_file_bytes":1024,"max_total_bytes":4096}}"#;
 
     fn service_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(SERVICE_JSON).unwrap()
@@ -543,6 +648,18 @@ mod tests {
 
     fn kubernetes_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(KUBERNETES_JSON).unwrap()
+    }
+
+    fn read_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(READ_JSON).unwrap()
+    }
+
+    fn edit_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(EDIT_JSON).unwrap()
+    }
+
+    fn artifact_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(ARTIFACT_JSON).unwrap()
     }
 
     fn registry() -> SensitiveProfileRegistryV1 {
@@ -1132,6 +1249,116 @@ mod tests {
         };
         assert_eq!(
             prove_kubernetes_profile_subset(&read, &kubernetes_profile()),
+            Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
+        );
+    }
+    #[test]
+    fn path_and_artifact_subsets_accept_exact_bounds() {
+        let reference = |id: &str| SensitiveProfileRef {
+            id: id.into(),
+            sha256: "a".repeat(64),
+        };
+        let read = SensitiveCapabilityRule::ReadPath {
+            root: reference("read"),
+            relative_prefixes: vec!["docs".into(), "src/lib".into()],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&read, &read_profile()),
+            Ok(())
+        );
+        let edit = SensitiveCapabilityRule::EditTree {
+            tree: reference("edit"),
+            relative_prefixes: vec!["src/lib".into()],
+            max_files: 10_000,
+            max_changed_bytes: 1,
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&edit, &edit_profile()),
+            Ok(())
+        );
+        let artifact = SensitiveCapabilityRule::ArtifactExport {
+            destination_profile: reference("artifact"),
+            max_artifact_bytes: 1024,
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&artifact, &artifact_profile()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn path_and_artifact_subsets_reject_each_widened_dimension() {
+        let reference = |id: &str| SensitiveProfileRef {
+            id: id.into(),
+            sha256: "a".repeat(64),
+        };
+        let too_deep = (0..17).map(|_| "a").collect::<Vec<_>>().join("/");
+        let too_long = "a".repeat(513);
+        let long_component = "a".repeat(121);
+        for prefix in [
+            too_deep,
+            too_long,
+            long_component,
+            "a//b".into(),
+            "../escape".into(),
+        ] {
+            let read = SensitiveCapabilityRule::ReadPath {
+                root: reference("read"),
+                relative_prefixes: vec![prefix],
+                budget: binding_budget(),
+            };
+            assert_eq!(
+                prove_path_artifact_profile_subset(&read, &read_profile()),
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            );
+        }
+        let edit = SensitiveCapabilityRule::EditTree {
+            tree: reference("edit"),
+            relative_prefixes: vec!["src".into()],
+            max_files: 10_001,
+            max_changed_bytes: 1,
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&edit, &edit_profile()),
+            Err(SensitiveProfileSubsetError::ConstraintNotContained)
+        );
+        let artifact = SensitiveCapabilityRule::ArtifactExport {
+            destination_profile: reference("artifact"),
+            max_artifact_bytes: 1025,
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&artifact, &artifact_profile()),
+            Err(SensitiveProfileSubsetError::ConstraintNotContained)
+        );
+    }
+
+    #[test]
+    fn path_and_artifact_subsets_reject_wrong_kind_and_other_families() {
+        let reference = SensitiveProfileRef {
+            id: "x".into(),
+            sha256: "a".repeat(64),
+        };
+        let read = SensitiveCapabilityRule::ReadPath {
+            root: reference.clone(),
+            relative_prefixes: vec!["src".into()],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&read, &edit_profile()),
+            Err(SensitiveProfileSubsetError::ProfileKindMismatch)
+        );
+        let service = SensitiveCapabilityRule::ServiceAction {
+            profile: reference,
+            actions: vec![crate::ServiceAction::Status],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_path_artifact_profile_subset(&service, &read_profile()),
             Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
         );
     }
