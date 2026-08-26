@@ -1,13 +1,18 @@
-//! Boot-frozen requirements and non-authoritative Linux preflight evidence.
+//! Boot-frozen requirements, an inert namespace-child handshake, and
+//! non-authoritative Linux preflight evidence.
 //!
-//! This crate deliberately cannot launch a process or install policy.  A positive
-//! report only says that read-only observations are consistent with the one
-//! compiled launcher profile.  The launcher must still perform and verify every
-//! namespace, mount, credential, capability, seccomp, Landlock, and cgroup
-//! operation before executing guest code.
+//! This crate deliberately cannot launch a process or install policy. The fixed
+//! child helper ends at a test-only stop, and a positive preflight report only
+//! says that read-only observations are consistent with the compiled launcher
+//! profile. The launcher must still perform and verify every mount, credential,
+//! capability, seccomp, Landlock, and cgroup operation before guest code.
 
+mod bootstrap_helper;
 mod filesystem;
 mod namespace_child;
+
+#[doc(hidden)]
+pub use bootstrap_helper::sensitive_namespace_bootstrap_main;
 
 use std::collections::BTreeSet;
 use std::fs;
