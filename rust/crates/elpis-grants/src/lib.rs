@@ -1,16 +1,19 @@
-//! Pure canonical claims and Ed25519 verification for sensitive executor grants.
+//! Pure canonical artifacts and Ed25519 verification for sensitive executor grants and requests.
 //!
-//! This crate authenticates signed claims but does not admit or activate them. It has no
-//! issuer private key, trusted clock, replay state, persistence, transport, effect, or clearance effect.
+//! This crate authenticates signed claims and parses request grammar, but does not admit or
+//! activate grants. It has no issuer private key, trusted clock, replay state, persistence,
+//! transport, effect execution, or clearance effect.
 
 #![forbid(unsafe_code)]
 
 mod control;
+mod effect_request;
 mod narrowing;
 mod policy;
 mod profile;
 mod registry;
 pub use control::*;
+pub use effect_request::*;
 pub use narrowing::*;
 pub use policy::*;
 pub use profile::*;
