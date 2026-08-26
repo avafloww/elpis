@@ -284,6 +284,7 @@ version = "0.7.1"
 dependencies = [
  "base64",
  "elpis-coordinator",
+ "elpis-effects",
  "elpis-identity",
  "elpis-journal",
  "elpis-link",
