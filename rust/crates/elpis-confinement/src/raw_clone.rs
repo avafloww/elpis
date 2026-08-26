@@ -34,6 +34,146 @@ pub(super) struct BootFrozenHelperFd {
 // Deliberately no constructor. Future boot integration must add the narrowly
 // scoped mint after its identity proof exists; this leaf can only consume it.
 
+#[cfg(test)]
+pub(super) fn test_only_mint_verified_helper() -> Result<BootFrozenHelperFd, io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::ffi::CString;
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let path =
+        option_env!("CARGO_BIN_EXE_elpis-sensitive-namespace-bootstrap").ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "fixed test helper identity unavailable",
+            )
+        })?;
+    let open = || {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+    };
+    let mut first = open()?;
+    let mut second = open()?;
+    let before_first = first.metadata()?;
+    let before_second = second.metadata()?;
+
+    let name = CString::new("elpis-verified-test-helper").expect("fixed memfd name");
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut sealed = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut first_hash = Sha256::new();
+    let mut bytes = [0_u8; 16 * 1024];
+    loop {
+        let count = first.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        first_hash.update(&bytes[..count]);
+        sealed.write_all(&bytes[..count])?;
+    }
+    let first_digest: [u8; 32] = first_hash.finalize().into();
+
+    let mut second_hash = Sha256::new();
+    loop {
+        let count = second.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        second_hash.update(&bytes[..count]);
+    }
+    let second_digest: [u8; 32] = second_hash.finalize().into();
+    let after_first = first.metadata()?;
+    let after_second = second.metadata()?;
+    let identity = |metadata: &std::fs::Metadata| {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+        )
+    };
+    let current_uid = unsafe { libc::geteuid() };
+    let current_gid = unsafe { libc::getegid() };
+    let acceptable = before_first.is_file()
+        && before_first.dev() != 0
+        && before_first.ino() != 0
+        && before_first.len() != 0
+        && (before_first.uid() == 0 || before_first.uid() == current_uid)
+        && before_first.mode() & 0o111 != 0
+        && before_first.mode() & 0o002 == 0
+        && (before_first.mode() & 0o020 == 0 || before_first.gid() == current_gid)
+        && first_digest.iter().any(|byte| *byte != 0)
+        && first_digest == second_digest
+        && identity(&before_first) == identity(&before_second)
+        && identity(&before_first) == identity(&after_first)
+        && identity(&before_first) == identity(&after_second);
+    if !acceptable {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "fixed test helper identity changed or violated source invariants",
+        ));
+    }
+    if unsafe { libc::fchmod(sealed.as_raw_fd(), 0o500) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(BootFrozenHelperFd { fd: sealed.into() })
+}
+#[cfg(test)]
+pub(super) fn test_only_mint_exec_failure_fixture() -> Result<BootFrozenHelperFd, io::Error> {
+    use std::ffi::CString;
+
+    // First require the same verified fixed helper identity as the success
+    // path. The malformed executable is an anonymous, sealed derivative used
+    // only to exercise the real post-clone execveat failure path.
+    drop(test_only_mint_verified_helper()?);
+    let name = CString::new("elpis-exec-failure-fixture").expect("fixed memfd name");
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let bytes = b"ELPIS deliberately invalid executable\n";
+    let written = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    if written != bytes.len() as isize {
+        return Err(if written < 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::from_raw_os_error(libc::EIO)
+        });
+    }
+    if unsafe { libc::fchmod(fd.as_raw_fd(), 0o500) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(BootFrozenHelperFd { fd })
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CloneArgs {
@@ -453,6 +593,12 @@ impl NextChildCustody {
     }
     pub(super) fn close_protocol(&mut self) {
         self.child.close_protocol();
+    }
+    #[cfg(test)]
+    pub(super) fn protocol_closed(&self) -> bool {
+        self.child.control.is_none()
+            && self.child.receipt.is_none()
+            && self.child.exec_status.is_none()
     }
 
     /// Called only after waitid(P_PIDFD) returned an exact terminal disposition.

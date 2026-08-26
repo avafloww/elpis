@@ -219,8 +219,23 @@ fn decimal(bytes: &[u8]) -> Option<libc::c_int> {
     }
     Some(value)
 }
-// getdents64 avoids opening an iterator whose own descriptor is hidden from us.
-fn only_protocol_fds() -> bool {
+fn null_descriptor(fd: libc::c_int, access: libc::c_int) -> bool {
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    let status_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    descriptor_flags == 0
+        && status_flags >= 0
+        && status_flags & libc::O_ACCMODE == access
+        && unsafe { libc::fstat(fd, &mut stat) } == 0
+        && stat.st_mode & libc::S_IFMT == libc::S_IFCHR
+        && stat.st_rdev == libc::makedev(1, 3)
+}
+
+// Rust's startup runtime safely replenishes closed standard descriptors with
+// /dev/null before main. Verify those exact descriptors rather than treating
+// runtime-created fds as ambient authority. getdents64 avoids hiding the scan
+// descriptor inside a higher-level iterator.
+fn only_fixed_fds() -> bool {
     let scan = unsafe {
         libc::open(
             c"/proc/self/fd".as_ptr(),
@@ -259,7 +274,10 @@ fn only_protocol_fds() -> bool {
                 && name != b".."
                 && !matches!(
                     decimal(name),
-                    Some(fd) if fd == CONTROL_FD || fd == RECEIPT_FD || fd == scan
+                    Some(fd) if (0..=2).contains(&fd)
+                        || fd == CONTROL_FD
+                        || fd == RECEIPT_FD
+                        || fd == scan
                 )
             {
                 good = false;
@@ -274,11 +292,13 @@ fn only_protocol_fds() -> bool {
     good
 }
 fn exact_descriptors() -> bool {
-    matches!((socket_identity(CONTROL_FD), socket_identity(RECEIPT_FD)),
-        (Some(a), Some(b)) if a != b)
-        && only_protocol_fds()
+    null_descriptor(0, libc::O_RDWR)
+        && null_descriptor(1, libc::O_RDWR)
+        && null_descriptor(2, libc::O_RDWR)
+        && matches!((socket_identity(CONTROL_FD), socket_identity(RECEIPT_FD)),
+            (Some(a), Some(b)) if a != b)
+        && only_fixed_fds()
 }
-
 fn read_file(path: &std::ffi::CStr, out: &mut [u8]) -> Option<usize> {
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -429,12 +449,12 @@ pub fn sensitive_namespace_bootstrap_main() -> ! {
         libc::close(CONTROL_FD);
         libc::close(RECEIPT_FD);
     }
-    // Test-only terminal for this leaf: there is intentionally no mount continuation.
-    if unsafe { libc::raise(libc::SIGSTOP) } != 0 {
-        abort();
+    // PID-namespace init ignores a self-generated default SIGSTOP. Wait for
+    // the owning parent to stop us through the exact pidfd after it observes
+    // protocol EOF; PDEATHSIG still kills us if that parent disappears.
+    loop {
+        unsafe { libc::pause() };
     }
-    // A test supervisor can resume only so that it can reap us.
-    unsafe { libc::_exit(0) }
 }
 
 #[cfg(test)]

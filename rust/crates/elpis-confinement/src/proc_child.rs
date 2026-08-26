@@ -1638,6 +1638,7 @@ mod stopped_child_composition {
         Namespaces,
         ReleaseToMountAssembly,
         ReleaseEof,
+        StopChild,
         StoppedHandoff,
     }
 
@@ -1689,6 +1690,7 @@ mod stopped_child_composition {
         /// Blocks until the helper closes its receipt endpoint after validating
         /// post-map state; any additional packet is malformed.
         fn release_receipt_eof(child: &mut Self::Child) -> Result<(), Self::Error>;
+        fn send_stop(child: &mut Self::Child) -> Result<(), Self::Error>;
         fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error>;
         fn read_setgroups(child: &mut Self::Child) -> Result<Vec<u8>, Self::Error>;
         fn write_setgroups_deny(child: &mut Self::Child) -> Result<(), Self::Error>;
@@ -1931,6 +1933,7 @@ mod stopped_child_composition {
         );
         evidence!(Step::ReleaseToMountAssembly, sent == FRAME_LEN);
         operation!(Step::ReleaseEof, K::release_receipt_eof(&mut child));
+        operation!(Step::StopChild, K::send_stop(&mut child));
         let release_state = operation!(Step::StoppedHandoff, K::release_state(&mut child));
         if matches!(release_state, ReleaseState::Terminal(_)) {
             return Err(reap_without_signal(
@@ -2132,6 +2135,12 @@ mod stopped_child_composition {
                 }
             }
         }
+        fn send_stop(child: &mut Self::Child) -> Result<(), Self::Error> {
+            child
+                .send_signal(libc::SIGSTOP)
+                .map(|_| ())
+                .map_err(LinuxStoppedError::Proc)
+        }
         fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error> {
             child.wait_release_state().map_err(LinuxStoppedError::Proc)
         }
@@ -2232,6 +2241,44 @@ mod stopped_child_composition {
     }
 
     #[cfg(test)]
+    pub(super) fn test_only_real_launch(uid: u32, gid: u32) -> Result<(), String> {
+        if uid == 0 || gid == 0 {
+            return Err("real launch fixture ids must be nonzero".into());
+        }
+        let helper = crate::raw_clone::test_only_mint_verified_helper()
+            .map_err(|error| format!("verified helper mint: {error}"))?;
+        let kernel = StoppedChildKernel {
+            helper: Some(helper),
+            nonce: BootNonce([0x66; NONCE_LEN]),
+            ids: FrozenIds { uid, gid },
+        };
+        let armed = launch_linux(kernel).map_err(|_| "composed real launch failed".to_string())?;
+        if !armed.namespaces.valid()
+            || armed.start.outer_pid == 0
+            || !armed.child.custody.protocol_closed()
+        {
+            return Err("composed launch returned incomplete stopped custody".into());
+        }
+        let ArmedStoppedChild {
+            mut child, start, ..
+        } = armed;
+        child
+            .send_signal(libc::SIGKILL)
+            .map_err(|error| format!("composed child SIGKILL: {error:?}"))?;
+        let receipt = child
+            .wait()
+            .map_err(|_| "composed child exact reap became uncertain".to_string())?;
+        if StartIdentity::from(receipt.start) != start
+            || receipt.disposition != TerminalDisposition::Signaled(libc::SIGKILL)
+        {
+            return Err(format!(
+                "composed child wrong terminal receipt: {receipt:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::*;
         use std::cell::RefCell;
@@ -2256,6 +2303,7 @@ mod stopped_child_composition {
             Namespaces,
             Release,
             ReleaseEof,
+            Stop,
             AwaitStopped,
             CloseProtocol,
             Kill,
@@ -2432,6 +2480,9 @@ mod stopped_child_composition {
             fn release_receipt_eof(child: &mut Self::Child) -> Result<(), Self::Error> {
                 child_call(child, Call::ReleaseEof)
             }
+            fn send_stop(child: &mut Self::Child) -> Result<(), Self::Error> {
+                child_call(child, Call::Stop)
+            }
             fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error> {
                 child_call(child, Call::AwaitStopped)?;
                 Ok(if child.state.borrow().terminal_after_release {
@@ -2537,6 +2588,7 @@ mod stopped_child_composition {
             Call::Namespaces,
             Call::Release,
             Call::ReleaseEof,
+            Call::Stop,
             Call::AwaitStopped,
             Call::CloseProtocol,
         ];
@@ -2599,6 +2651,7 @@ mod stopped_child_composition {
                 Call::Namespaces,
                 Call::Release,
                 Call::ReleaseEof,
+                Call::Stop,
                 Call::AwaitStopped,
             ] {
                 let calls = assert_reaped_after(Fake::new(), failure);
@@ -2749,6 +2802,699 @@ mod stopped_child_composition {
             let exec = Fake::new();
             exec.state.borrow_mut().fail = Some(Call::Exec);
             assert!(!matches!(launch(exec), Err(LaunchFailure::NoChild { .. })));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod real_e2e {
+    use super::*;
+    use crate::raw_clone::{
+        CloneExecError, NextChildCustody, RawChild, clone_exec_fixed,
+        test_only_mint_exec_failure_fixture, test_only_mint_verified_helper,
+    };
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::time::{Duration, Instant};
+
+    const FRAME_LEN: usize = 48;
+    const MAGIC: &[u8; 8] = b"ELPISNS\0";
+    const NS_GET_USERNS: libc::c_ulong = 0xb701;
+
+    #[derive(Debug)]
+    pub(crate) enum Outcome {
+        Passed,
+        Unavailable(String),
+        Failed(String),
+    }
+
+    fn frame(kind: u8, nonce: u8) -> [u8; FRAME_LEN] {
+        let mut bytes = [0_u8; FRAME_LEN];
+        bytes[..8].copy_from_slice(MAGIC);
+        bytes[8] = 1;
+        bytes[9] = kind;
+        bytes[16..].fill(nonce);
+        bytes
+    }
+
+    fn poll(fd: RawFd, events: i16, timeout: Duration) -> Result<i16, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let millis = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+            let mut item = libc::pollfd {
+                fd,
+                events,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut item, 1, millis) };
+            if n > 0 {
+                return Ok(item.revents);
+            }
+            if n == 0 || Instant::now() >= deadline {
+                return Err(format!("timeout polling fd {fd} for {events:#x}"));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("poll fd {fd}: {error}"));
+            }
+        }
+    }
+
+    fn send_packet(fd: RawFd, bytes: &[u8]) -> Result<(), String> {
+        let n = unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL) };
+        if n == bytes.len() as isize {
+            Ok(())
+        } else if n < 0 {
+            Err(format!(
+                "send protocol packet: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err(format!("short protocol packet: {n}/{}", bytes.len()))
+        }
+    }
+
+    fn recv_packet(fd: RawFd) -> Result<[u8; FRAME_LEN], String> {
+        poll(fd, libc::POLLIN | libc::POLLHUP, Duration::from_secs(3))?;
+        let mut bytes = [0_u8; FRAME_LEN];
+        let n = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), libc::MSG_TRUNC) };
+        if n == FRAME_LEN as isize {
+            Ok(bytes)
+        } else if n == 0 {
+            Err("protocol receipt reached EOF before frame".into())
+        } else if n < 0 {
+            Err(format!(
+                "receive protocol packet: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err(format!("noncanonical protocol packet length {n}"))
+        }
+    }
+
+    fn require_no_packet(fd: RawFd) -> Result<(), String> {
+        let mut item = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        let n = unsafe { libc::poll(&mut item, 1, 100) };
+        if n == 0 {
+            Ok(())
+        } else if n < 0 {
+            Err(format!(
+                "poll no-packet: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err(format!(
+                "child emitted/closed receipt early: revents={:#x}",
+                item.revents
+            ))
+        }
+    }
+
+    fn require_exec_success(fd: RawFd) -> Result<(), String> {
+        poll(fd, libc::POLLIN | libc::POLLHUP, Duration::from_secs(3))?;
+        let mut byte = 0_u8;
+        let n = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
+        if n == 0 {
+            Ok(())
+        } else if n < 0 {
+            Err(format!(
+                "read exec status: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err("child reported a setup/exec failure frame".into())
+        }
+    }
+
+    fn parent_namespaces() -> Result<NamespaceIdentities, String> {
+        fn one(name: &str) -> Result<NamespaceIdentity, String> {
+            let metadata = std::fs::metadata(format!("/proc/self/ns/{name}"))
+                .map_err(|e| format!("stat parent namespace {name}: {e}"))?;
+            use std::os::unix::fs::MetadataExt;
+            if metadata.dev() == 0 || metadata.ino() == 0 {
+                return Err(format!("zero identity for parent namespace {name}"));
+            }
+            Ok(NamespaceIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        Ok(NamespaceIdentities {
+            user: one("user")?,
+            mount: one("mnt")?,
+            pid: one("pid")?,
+            network: one("net")?,
+        })
+    }
+
+    fn open_ns(dir: RawFd, name: &str) -> Result<OwnedFd, String> {
+        let name = CString::new(format!("ns/{name}")).expect("fixed namespace name");
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            Err(format!(
+                "open child namespace: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    fn identity(fd: RawFd) -> Result<NamespaceIdentity, String> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "fstat namespace: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let stat = unsafe { stat.assume_init() };
+        Ok(NamespaceIdentity {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        })
+    }
+
+    fn require_namespace_owners(
+        child: &ExactChild<LinuxKernel, NextChildCustody>,
+        expected_user: NamespaceIdentity,
+    ) -> Result<(), String> {
+        for name in ["mnt", "pid", "net"] {
+            let namespace = open_ns(child.proc_dir.as_raw_fd(), name)?;
+            let owner = unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_USERNS) };
+            if owner < 0 {
+                return Err(format!(
+                    "NS_GET_USERNS for {name}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+            if identity(owner.as_raw_fd())? != expected_user {
+                return Err(format!(
+                    "{name} namespace is not owned by child user namespace"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn clone_bound() -> Result<ExactChild<LinuxKernel, NextChildCustody>, Outcome> {
+        let helper = test_only_mint_verified_helper()
+            .map_err(|e| Outcome::Failed(format!("verified helper mint: {e}")))?;
+        let raw = match clone_exec_fixed(helper) {
+            Ok(raw) => raw,
+            Err(CloneExecError::NoChild(error))
+                if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) =>
+            {
+                return Err(Outcome::Unavailable(format!(
+                    "clone3 NEWUSER|NEWNS|NEWPID|NEWNET denied with errno {} ({error})",
+                    error.raw_os_error().unwrap_or_default()
+                )));
+            }
+            Err(error) => return Err(Outcome::Failed(format!("clone3 fixed child: {error:?}"))),
+        };
+        let custody = raw.into_next_custody();
+        require_exec_success(custody.exec_status_fd()).map_err(Outcome::Failed)?;
+        bind(custody).map_err(|_| {
+            Outcome::Failed("exact pidfd/proc/start binding aborted and reaped child".into())
+        })
+    }
+
+    fn raw_map(
+        child: &mut ExactChild<LinuxKernel, NextChildCustody>,
+        name: &'static str,
+    ) -> Result<Vec<u8>, String> {
+        read_named(&mut child.kernel, &child.proc_dir, name, MAX_MAP)
+            .map_err(|e| format!("read {name}: {e:?}"))
+    }
+
+    fn require_parent_unchanged(before: NamespaceIdentities) -> Result<(), String> {
+        let after = parent_namespaces()?;
+        if before == after {
+            Ok(())
+        } else {
+            Err(format!(
+                "parent namespaces changed: {before:?} -> {after:?}"
+            ))
+        }
+    }
+
+    fn wait_terminal(
+        child: ExactChild<LinuxKernel, NextChildCustody>,
+    ) -> Result<TerminalReceipt, String> {
+        let fd = child
+            .custody
+            .pidfd()
+            .ok_or_else(|| "bound child lost pidfd".to_string())?;
+        poll(fd, libc::POLLIN | libc::POLLHUP, Duration::from_secs(3))?;
+        child
+            .wait()
+            .map_err(|_| "exact pidfd wait/reap became uncertain".into())
+    }
+
+    fn abort_exact(
+        mut child: ExactChild<LinuxKernel, NextChildCustody>,
+    ) -> Result<TerminalReceipt, String> {
+        child.custody.close_protocol();
+        child
+            .send_signal(libc::SIGKILL)
+            .map_err(|e| format!("pidfd SIGKILL: {e:?}"))?;
+        wait_terminal(child)
+    }
+
+    fn require_receipt_eof(fd: RawFd) -> Result<(), String> {
+        poll(fd, libc::POLLIN | libc::POLLHUP, Duration::from_secs(3))?;
+        let mut byte = 0_u8;
+        let n = unsafe { libc::recv(fd, (&mut byte as *mut u8).cast(), 1, 0) };
+        if n == 0 {
+            Ok(())
+        } else {
+            Err(format!("expected receipt EOF before SIGSTOP, got {n}"))
+        }
+    }
+
+    fn run_success() -> Result<(), Outcome> {
+        let parent = parent_namespaces().map_err(Outcome::Failed)?;
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        if uid == 0 || gid == 0 {
+            return Err(Outcome::Failed(format!(
+                "fixture must be nonroot, observed uid={uid} gid={gid}"
+            )));
+        }
+        let mut child = clone_bound()?;
+        let start = child
+            .identity()
+            .map_err(|e| Outcome::Failed(format!("start identity: {e:?}")))?;
+        let pidfd_target = child
+            .kernel
+            .pidfd_target(child.custody.pidfd().unwrap())
+            .map_err(|e| Outcome::Failed(format!("pidfd fdinfo: {e}")))?;
+        if pidfd_target != PidfdTarget::Process(start.outer_pid) {
+            return Err(Outcome::Failed(format!(
+                "pidfd fdinfo target mismatch: {pidfd_target:?} vs {start:?}"
+            )));
+        }
+        if let Err(error) = require_no_packet(child.custody.receipt_fd()) {
+            let receipt = wait_terminal(child)
+                .map_err(|wait| Outcome::Failed(format!("{error}; terminal wait: {wait}")))?;
+            return Err(Outcome::Failed(format!(
+                "{error}; helper terminal disposition: {:?}",
+                receipt.disposition
+            )));
+        }
+        if !raw_map(&mut child, "uid_map")
+            .map_err(Outcome::Failed)?
+            .is_empty()
+            || !raw_map(&mut child, "gid_map")
+                .map_err(Outcome::Failed)?
+                .is_empty()
+        {
+            return Err(Outcome::Failed(
+                "child was mapped before Ready synchronization".into(),
+            ));
+        }
+        let child_ns = child
+            .read_namespaces()
+            .map_err(|e| Outcome::Failed(format!("child namespaces: {e:?}")))?;
+        if child_ns.user == parent.user
+            || child_ns.mount == parent.mount
+            || child_ns.pid == parent.pid
+            || child_ns.network == parent.network
+        {
+            return Err(Outcome::Failed(format!(
+                "clone did not create all four namespaces: parent={parent:?} child={child_ns:?}"
+            )));
+        }
+        require_namespace_owners(&child, child_ns.user).map_err(Outcome::Failed)?;
+
+        let nonce = 0x5a;
+        send_packet(child.custody.control_fd(), &frame(1, nonce)).map_err(Outcome::Failed)?;
+        let ready = recv_packet(child.custody.receipt_fd()).map_err(Outcome::Failed)?;
+        if ready != frame(2, nonce) {
+            return Err(Outcome::Failed(
+                "Ready receipt was not exact or nonce-bound".into(),
+            ));
+        }
+        require_no_packet(child.custody.receipt_fd()).map_err(Outcome::Failed)?;
+        child
+            .write_setgroups_deny()
+            .map_err(|e| Outcome::Failed(format!("setgroups deny: {e:?}")))?;
+        child
+            .write_uid_map(uid)
+            .map_err(|e| Outcome::Failed(format!("uid_map: {e:?}")))?;
+        child
+            .write_gid_map(gid)
+            .map_err(|e| Outcome::Failed(format!("gid_map: {e:?}")))?;
+        if child
+            .read_setgroups()
+            .map_err(|e| Outcome::Failed(format!("read setgroups: {e:?}")))?
+            != b"deny\n"
+            || child
+                .read_uid_map()
+                .map_err(|e| Outcome::Failed(format!("read uid_map: {e:?}")))?
+                != (IdMapExtent {
+                    inside: 0,
+                    outside: uid,
+                    length: 1,
+                })
+            || child
+                .read_gid_map()
+                .map_err(|e| Outcome::Failed(format!("read gid_map: {e:?}")))?
+                != (IdMapExtent {
+                    inside: 0,
+                    outside: gid,
+                    length: 1,
+                })
+        {
+            return Err(Outcome::Failed(
+                "exact nonzero map readback mismatch".into(),
+            ));
+        }
+        if child
+            .read_nspid()
+            .map_err(|e| Outcome::Failed(format!("NSpid: {e:?}")))?
+            != [start.outer_pid, 1]
+        {
+            return Err(Outcome::Failed("NSpid was not [outer, 1]".into()));
+        }
+        if child
+            .read_namespaces()
+            .map_err(|e| Outcome::Failed(format!("namespace recheck: {e:?}")))?
+            != child_ns
+        {
+            return Err(Outcome::Failed(
+                "child namespace identity drifted across mapping".into(),
+            ));
+        }
+        require_parent_unchanged(parent).map_err(Outcome::Failed)?;
+
+        send_packet(child.custody.control_fd(), &frame(3, nonce)).map_err(Outcome::Failed)?;
+        require_receipt_eof(child.custody.receipt_fd()).map_err(Outcome::Failed)?;
+        child
+            .send_signal(libc::SIGSTOP)
+            .map_err(|e| Outcome::Failed(format!("pidfd SIGSTOP: {e:?}")))?;
+        let release_state = child
+            .wait_release_state()
+            .map_err(|e| Outcome::Failed(format!("SIGSTOP wait: {e:?}")))?;
+        if release_state != ReleaseState::Stopped {
+            return Err(Outcome::Failed(format!(
+                "release did not end at exact SIGSTOP: {release_state:?}"
+            )));
+        }
+        let old_pidfd =
+            unsafe { libc::fcntl(child.custody.pidfd().unwrap(), libc::F_DUPFD_CLOEXEC, 7) };
+        if old_pidfd < 0 {
+            return Err(Outcome::Failed(format!(
+                "duplicate pidfd: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let old_pidfd = unsafe { OwnedFd::from_raw_fd(old_pidfd) };
+        let receipt = abort_exact(child).map_err(Outcome::Failed)?;
+        if receipt.start != start
+            || receipt.disposition != TerminalDisposition::Signaled(libc::SIGKILL)
+        {
+            return Err(Outcome::Failed(format!(
+                "wrong exact reap receipt: {receipt:?}"
+            )));
+        }
+        let replacement = unsafe { libc::fork() };
+        if replacement < 0 {
+            return Err(Outcome::Failed(format!(
+                "fork later identity: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if replacement == 0 {
+            unsafe {
+                libc::pause();
+                libc::_exit(0);
+            }
+        }
+        let signal = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                old_pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                0,
+                0,
+            )
+        };
+        let old_error = std::io::Error::last_os_error().raw_os_error();
+        let replacement_alive = unsafe { libc::kill(replacement, 0) } == 0;
+        unsafe { libc::kill(replacement, libc::SIGKILL) };
+        let mut replacement_status = 0;
+        let replacement_reaped =
+            unsafe { libc::waitpid(replacement, &mut replacement_status, 0) } == replacement;
+        if signal == 0
+            || old_error != Some(libc::ESRCH)
+            || !replacement_alive
+            || !replacement_reaped
+        {
+            return Err(Outcome::Failed(format!(
+                "terminal pidfd did not remain bound away from later process identity: signal={signal} errno={old_error:?} alive={replacement_alive} reaped={replacement_reaped}"
+            )));
+        }
+        require_parent_unchanged(parent).map_err(Outcome::Failed)
+    }
+
+    fn run_protocol(case: &str) -> Result<(), Outcome> {
+        let parent = parent_namespaces().map_err(Outcome::Failed)?;
+        let mut child = clone_bound()?;
+        let start = child
+            .identity()
+            .map_err(|e| Outcome::Failed(format!("identity: {e:?}")))?;
+        let receipt_watch = if case == "parent_eof" {
+            None
+        } else {
+            let fd = unsafe { libc::fcntl(child.custody.receipt_fd(), libc::F_DUPFD_CLOEXEC, 7) };
+            if fd < 0 {
+                return Err(Outcome::Failed(format!(
+                    "duplicate receipt witness: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Some(unsafe { OwnedFd::from_raw_fd(fd) })
+        };
+        match case {
+            "malformed" => {
+                send_packet(child.custody.control_fd(), b"malformed").map_err(Outcome::Failed)?
+            }
+            "duplicate" => {
+                child
+                    .send_signal(libc::SIGSTOP)
+                    .map_err(|e| Outcome::Failed(format!("freeze before duplicate: {e:?}")))?;
+                if child
+                    .wait_release_state()
+                    .map_err(|e| Outcome::Failed(format!("wait duplicate freeze: {e:?}")))?
+                    != ReleaseState::Stopped
+                {
+                    return Err(Outcome::Failed("duplicate fixture did not stop".into()));
+                }
+                send_packet(child.custody.control_fd(), &frame(1, 0x31))
+                    .map_err(Outcome::Failed)?;
+                send_packet(child.custody.control_fd(), &frame(3, 0x31))
+                    .map_err(Outcome::Failed)?;
+                child
+                    .send_signal(libc::SIGCONT)
+                    .map_err(|e| Outcome::Failed(format!("resume duplicate fixture: {e:?}")))?;
+            }
+            "parent_eof" => child.custody.close_protocol(),
+            _ => unreachable!(),
+        }
+        let receipt = wait_terminal(child).map_err(Outcome::Failed)?;
+        if receipt.start != start || receipt.disposition != TerminalDisposition::Exited(125) {
+            return Err(Outcome::Failed(format!(
+                "{case} did not fail closed/reap exact child: {receipt:?}"
+            )));
+        }
+        if let Some(watch) = receipt_watch {
+            let mut unexpected = [0_u8; FRAME_LEN];
+            let count = unsafe {
+                libc::recv(
+                    watch.as_raw_fd(),
+                    unexpected.as_mut_ptr().cast(),
+                    unexpected.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if count != 0 {
+                return Err(Outcome::Failed(format!(
+                    "{case} emitted an unexpected Ready receipt: count={count}"
+                )));
+            }
+        }
+        require_parent_unchanged(parent).map_err(Outcome::Failed)
+    }
+
+    fn run_map_abort(partial: bool) -> Result<(), Outcome> {
+        let parent = parent_namespaces().map_err(Outcome::Failed)?;
+        let uid = unsafe { libc::geteuid() };
+        let mut child = clone_bound()?;
+        send_packet(child.custody.control_fd(), &frame(1, 0x42)).map_err(Outcome::Failed)?;
+        if recv_packet(child.custody.receipt_fd()).map_err(Outcome::Failed)? != frame(2, 0x42) {
+            return Err(Outcome::Failed("map-abort case lacked exact Ready".into()));
+        }
+        child
+            .write_setgroups_deny()
+            .map_err(|e| Outcome::Failed(format!("setgroups: {e:?}")))?;
+        if partial {
+            child
+                .write_uid_map(uid)
+                .map_err(|e| Outcome::Failed(format!("partial uid map: {e:?}")))?;
+            if child
+                .read_uid_map()
+                .map_err(|e| Outcome::Failed(format!("partial uid readback: {e:?}")))?
+                != (IdMapExtent {
+                    inside: 0,
+                    outside: uid,
+                    length: 1,
+                })
+                || !raw_map(&mut child, "gid_map")
+                    .map_err(Outcome::Failed)?
+                    .is_empty()
+            {
+                return Err(Outcome::Failed(
+                    "partial-map fixture did not contain exactly uid-only mapping".into(),
+                ));
+            }
+        } else {
+            let wrong = uid
+                .checked_add(1)
+                .ok_or_else(|| Outcome::Failed("uid overflow".into()))?;
+            match child.write_uid_map(wrong) {
+                Err(ExactError::Kernel(error))
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EPERM | libc::EACCES | libc::EINVAL)
+                    ) =>
+                {
+                    if !raw_map(&mut child, "uid_map")
+                        .map_err(Outcome::Failed)?
+                        .is_empty()
+                    {
+                        return Err(Outcome::Failed(
+                            "rejected wrong uid map changed kernel state".into(),
+                        ));
+                    }
+                }
+                Ok(()) => {
+                    return Err(Outcome::Failed(format!(
+                        "kernel accepted wrong outside uid {wrong} for fixture uid {uid}"
+                    )));
+                }
+                Err(error) => {
+                    return Err(Outcome::Failed(format!(
+                        "wrong uid map failed for a non-policy reason: {error:?}"
+                    )));
+                }
+            }
+        }
+        send_packet(child.custody.control_fd(), &frame(3, 0x42)).map_err(Outcome::Failed)?;
+        let receipt = wait_terminal(child).map_err(Outcome::Failed)?;
+        if receipt.disposition != TerminalDisposition::Exited(125) {
+            return Err(Outcome::Failed(format!(
+                "wrong or partial map did not fail child post-map validation: {receipt:?}"
+            )));
+        }
+        require_parent_unchanged(parent).map_err(Outcome::Failed)
+    }
+
+    fn run_post_map_bad_release() -> Result<(), Outcome> {
+        let parent = parent_namespaces().map_err(Outcome::Failed)?;
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let mut child = clone_bound()?;
+        send_packet(child.custody.control_fd(), &frame(1, 0x51)).map_err(Outcome::Failed)?;
+        if recv_packet(child.custody.receipt_fd()).map_err(Outcome::Failed)? != frame(2, 0x51) {
+            return Err(Outcome::Failed("post-map case lacked Ready".into()));
+        }
+        child
+            .write_setgroups_deny()
+            .map_err(|e| Outcome::Failed(format!("setgroups: {e:?}")))?;
+        child
+            .write_uid_map(uid)
+            .map_err(|e| Outcome::Failed(format!("uid map: {e:?}")))?;
+        child
+            .write_gid_map(gid)
+            .map_err(|e| Outcome::Failed(format!("gid map: {e:?}")))?;
+        send_packet(child.custody.control_fd(), &frame(3, 0x52)).map_err(Outcome::Failed)?;
+        let receipt = wait_terminal(child).map_err(Outcome::Failed)?;
+        if receipt.disposition != TerminalDisposition::Exited(125) {
+            return Err(Outcome::Failed(format!(
+                "wrong-nonce release did not abort: {receipt:?}"
+            )));
+        }
+        require_parent_unchanged(parent).map_err(Outcome::Failed)
+    }
+
+    fn run_exec_failure() -> Result<(), Outcome> {
+        let parent = parent_namespaces().map_err(Outcome::Failed)?;
+        let helper = test_only_mint_exec_failure_fixture()
+            .map_err(|e| Outcome::Failed(format!("exec-failure fixture: {e}")))?;
+        let raw: RawChild = match clone_exec_fixed(helper) {
+            Ok(raw) => raw,
+            Err(CloneExecError::NoChild(error))
+                if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) =>
+            {
+                return Err(Outcome::Unavailable(format!(
+                    "clone3 denied in exec-failure case: {error}"
+                )));
+            }
+            Err(error) => return Err(Outcome::Failed(format!("exec-failure clone: {error:?}"))),
+        };
+        poll(
+            raw.exec_status().as_raw_fd(),
+            libc::POLLIN | libc::POLLHUP,
+            Duration::from_secs(3),
+        )
+        .map_err(Outcome::Failed)?;
+        let mut status = [0_u8; 16];
+        let n = unsafe {
+            libc::read(
+                raw.exec_status().as_raw_fd(),
+                status.as_mut_ptr().cast(),
+                status.len(),
+            )
+        };
+        if n != status.len() as isize
+            || &status[..4] != b"ELPX"
+            || u16::from_ne_bytes([status[6], status[7]]) != 9
+            || i32::from_ne_bytes([status[8], status[9], status[10], status[11]]) != libc::ENOEXEC
+        {
+            return Err(Outcome::Failed(format!(
+                "wrong execveat failure frame: n={n} bytes={status:?}"
+            )));
+        }
+        raw.abort_and_reap()
+            .map_err(|e| Outcome::Failed(format!("exec-failure reap: {e:?}")))?;
+        require_parent_unchanged(parent).map_err(Outcome::Failed)
+    }
+
+    pub(crate) fn run(case: &str) -> Outcome {
+        let result = match case {
+            "success" => run_success(),
+            "composed" => super::stopped_child_composition::test_only_real_launch(
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+            )
+            .map_err(Outcome::Failed),
+            "malformed" | "duplicate" | "parent_eof" => run_protocol(case),
+            "wrong_map" => run_map_abort(false),
+            "partial_map" => run_map_abort(true),
+            "post_map_bad_release" => run_post_map_bad_release(),
+            "exec_failure" => run_exec_failure(),
+            other => Err(Outcome::Failed(format!("unknown real e2e case {other}"))),
+        };
+        match result {
+            Ok(()) => Outcome::Passed,
+            Err(outcome) => outcome,
         }
     }
 }
