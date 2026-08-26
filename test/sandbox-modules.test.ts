@@ -47,6 +47,12 @@ test('selected but unconfigured Kagi is enumerable, omitted functionality reject
     (e.search as (...args: unknown[]) => Promise<unknown>)('x'),
     /Kagi is selected but not configured/,
   );
+  await assert.rejects(
+    (e.extract as (...args: unknown[]) => Promise<unknown>)(
+      'https://example.com',
+    ),
+    /Kagi is selected but not configured/,
+  );
 });
 
 test('selected but unconfigured Bluesky exposes a diagnostic method stub', async () => {

@@ -39,6 +39,7 @@ import { restartHarnessService } from '../lib/lifecycle.js';
 import { slugifyName, authorHasPeopleFile } from './people.js';
 import { formatRead } from './read.js';
 import { kagiSearch, kagiExtract } from './web.js';
+import { extractChatGptShare, isChatGptShareUrl } from './chatgpt-share.js';
 import { createBrowserTools } from './browser.js';
 import { createComputerTools, displayShellCommand } from './computer.js';
 import { createMotorController } from './motor.js';
@@ -1092,13 +1093,25 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   g.atob = atob;
   g.queueMicrotask = queueMicrotask;
   g.crypto = crypto;
-  // web search + page extraction via Kagi (`kagi.api_key`); bodies in web.ts
+  // Kagi handles general search/extraction. Pinned ChatGPT share routes use the
+  // native decoder and need no Kagi credential, while module policy still owns
+  // whether the overall web surface exists.
   if (modules.isActive('kagi')) {
     e.search = (query: string, opts?: { limit?: number; workflow?: string }) =>
       kagiSearch(deps, query, opts);
     e.extract = (url: string, opts?: { timeout?: number; format?: string }) =>
-      kagiExtract(deps, url, opts);
-  } else installUnavailableModule('kagi');
+      isChatGptShareUrl(url)
+        ? extractChatGptShare(url, opts)
+        : kagiExtract(deps, url, opts);
+  } else if (modules.state('kagi') === 'unavailable') {
+    const reason = modules.reason('kagi') ?? 'Kagi is unavailable';
+    e.search = unavailableFunction('search', reason);
+    const unavailableExtract = unavailableFunction('extract', reason);
+    e.extract = (url: string, opts?: { timeout?: number; format?: string }) =>
+      isChatGptShareUrl(url)
+        ? extractChatGptShare(url, opts)
+        : unavailableExtract(url, opts);
+  }
 
   // Browser and whole-desktop control share the one real Xorg seat. Headless
   // Playwright ignores these variables; headed sessions render onto the exact
