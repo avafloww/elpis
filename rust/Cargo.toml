@@ -6,6 +6,7 @@ members = [
   "crates/elpis-journal",
   "crates/elpis-effects",
   "crates/elpis-grants",
+  "crates/elpis-grant-ledger",
   "crates/elpis-python",
   "crates/elpis-coordinator",
   "crates/elpis-executor",

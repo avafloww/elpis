@@ -311,6 +311,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-grant-ledger"
+version = "0.7.1"
+dependencies = [
+ "elpis-grants",
+ "ring",
+ "rusqlite",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "elpis-grants"
 version = "0.7.1"
 dependencies = [
