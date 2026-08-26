@@ -744,6 +744,14 @@ mod tests {
         (grant, active)
     }
 
+    fn duplicate_active(active: &ActiveGrant) -> ActiveGrant {
+        ActiveGrant {
+            grant: active.grant.clone(),
+            payload_sha256: active.payload_sha256,
+            ledger_binding: active.ledger_binding,
+        }
+    }
+
     fn terminal_control(
         id: &str,
         sequence: u64,
@@ -770,6 +778,30 @@ mod tests {
             executor_id: "executor-1".into(),
             policy_epoch: 3,
             target,
+            issued_at_unix_s: NOW,
+            expires_at_unix_s: NOW + 60,
+            nonce: NONCE.into(),
+        };
+        let payload = control.canonical_payload().unwrap();
+        let signature = key()
+            .sign(&terminal_control_signature_input(&payload).unwrap())
+            .as_ref()
+            .to_vec();
+        (payload, signature)
+    }
+
+    fn clear_control(id: &str, sequence: u64, policy_sha256: &str) -> (Vec<u8>, Vec<u8>) {
+        let control = TerminalControlV1 {
+            version: elpis_grants::TERMINAL_CONTROL_VERSION,
+            control_id: id.into(),
+            issuer_id: "operator-1".into(),
+            issuer_seq: sequence,
+            executor_id: "executor-1".into(),
+            policy_epoch: 3,
+            target: TerminalControlActionV1::ClearLatch {
+                profile_id: "sensitive-v1".into(),
+                policy_sha256: policy_sha256.into(),
+            },
             issued_at_unix_s: NOW,
             expires_at_unix_s: NOW + 60,
             nonce: NONCE.into(),
@@ -809,6 +841,226 @@ mod tests {
             artifact_count: u32::from(artifact_bytes > 0),
             artifact_bytes,
         }
+    }
+
+    #[test]
+    fn cold_reopen_interrupts_unsettled_session_and_fences_stale_authority() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (_, active) = admit(
+            &mut fixture.ledger,
+            "grant-restart-interrupted",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let stale = duplicate_active(&active);
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        let path = fixture.ledger.path().to_path_buf();
+        drop(session);
+        drop(fixture.ledger);
+
+        let reopened = GrantLedger::open_with_terminal_control_verifier_and_clock(
+            &path,
+            verifier(),
+            control_verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .terminal_receipt("grant-restart-interrupted")
+                .unwrap()
+                .unwrap()
+                .kind(),
+            crate::GrantTerminalKind::Interrupted
+        );
+        let (_, canonical) = policy();
+        assert!(matches!(
+            reopened.begin_sensitive_session(stale, canonical),
+            Err(SensitiveSessionDenied::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn flag_and_clear_survive_restart_without_resurrecting_session() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-clear-no-resurrection",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let stale = duplicate_active(&active);
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        let (payload, signature) = terminal_control("flag-before-restart", 2, &grant, true);
+        let request = fixture
+            .ledger
+            .admit_terminal_control_for_sensitive_session(&payload, &signature, session)
+            .unwrap();
+        assert_eq!(request.control_receipt().latch_event_seq(), Some(1));
+        let path = fixture.ledger.path().to_path_buf();
+        drop(request);
+        drop(fixture.ledger);
+
+        let mut reopened = GrantLedger::open_with_terminal_control_verifier_and_clock(
+            &path,
+            verifier(),
+            control_verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .terminal_receipt("grant-clear-no-resurrection")
+                .unwrap()
+                .unwrap()
+                .kind(),
+            crate::GrantTerminalKind::Flagged
+        );
+        assert!(
+            reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        let (payload, signature) = clear_control("wrong-clear-after-restart", 3, HASH_A);
+        assert!(matches!(
+            reopened.admit_terminal_control(&payload, &signature),
+            Err(crate::GrantLedgerError::PolicyLatchNotFlagged)
+        ));
+        assert!(
+            reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        let (payload, signature) = clear_control("clear-after-restart", 3, &policy_sha256);
+        let clear = reopened
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        assert_eq!(clear.latch_event_seq(), Some(2));
+        assert!(
+            !reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        let (_, canonical) = policy();
+        assert!(matches!(
+            reopened.begin_sensitive_session(stale, canonical),
+            Err(SensitiveSessionDenied::Unavailable)
+        ));
+        drop(reopened);
+
+        let reopened = GrantLedger::open_with_terminal_control_verifier_and_clock(
+            &path,
+            verifier(),
+            control_verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .terminal_receipt("grant-clear-no-resurrection")
+                .unwrap()
+                .unwrap()
+                .kind(),
+            crate::GrantTerminalKind::Flagged
+        );
+        assert!(
+            !reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        let counts: (i64, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM terminal_control_receipts),
+                    (SELECT COUNT(*) FROM grant_terminal_events),
+                    (SELECT COUNT(*) FROM policy_latch_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (2, 1, 2));
+    }
+
+    #[test]
+    fn competing_stale_sessions_produce_one_terminal_event_and_one_request() {
+        let mut fixture = fixture(true);
+        let (_, canonical_one) = policy();
+        let policy_sha256 = canonical_one.policy_sha256().to_owned();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-stale-session-race",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let duplicate = duplicate_active(&active);
+        let session_one = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical_one)
+            .unwrap();
+        let (_, canonical_two) = policy();
+        let session_two = fixture
+            .ledger
+            .begin_sensitive_session(duplicate, canonical_two)
+            .unwrap();
+        let (revoke_payload, revoke_signature) = terminal_control("race-revoke", 2, &grant, false);
+        let request = fixture
+            .ledger
+            .admit_terminal_control_for_sensitive_session(
+                &revoke_payload,
+                &revoke_signature,
+                session_one,
+            )
+            .unwrap();
+        assert_eq!(
+            request.terminal_receipt().kind(),
+            crate::GrantTerminalKind::Revoked
+        );
+        let (flag_payload, flag_signature) = terminal_control("race-flag", 3, &grant, true);
+        assert!(matches!(
+            fixture.ledger.admit_terminal_control_for_sensitive_session(
+                &flag_payload,
+                &flag_signature,
+                session_two,
+            ),
+            Err(crate::GrantLedgerError::ControlTargetAlreadyTerminal)
+        ));
+        let durable: (i64, i64, i64, Vec<u8>) = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM terminal_control_receipts),
+                    (SELECT COUNT(*) FROM grant_terminal_events),
+                    (SELECT COUNT(*) FROM policy_latch_events),
+                    last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((durable.0, durable.1, durable.2), (1, 1, 0));
+        assert_eq!(
+            super::super::decode_u64(durable.3, "test sequence").unwrap(),
+            2
+        );
     }
 
     #[test]
