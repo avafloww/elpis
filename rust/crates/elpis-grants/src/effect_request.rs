@@ -449,6 +449,7 @@ pub struct DestructiveFilePreconditionV1 {
     pub mount_id: u64,
     pub device: u64,
     pub inode: u64,
+    pub expected_bytes: u64,
     pub sha256: String,
 }
 
@@ -456,6 +457,9 @@ impl DestructiveFilePreconditionV1 {
     fn validate(&self) -> Result<(), SensitiveEffectRequestError> {
         if self.mount_id == 0 || self.device == 0 || self.inode == 0 {
             return Err(SensitiveEffectRequestError::InvalidField);
+        }
+        if self.expected_bytes > MAX_EFFECT_CONTENT_BYTES {
+            return Err(SensitiveEffectRequestError::ContentTooLarge);
         }
         validate_sha256(&self.sha256)
     }
@@ -788,6 +792,7 @@ mod tests {
             mount_id: 7,
             device: 8,
             inode: 9,
+            expected_bytes: 11,
             sha256: HASH_A.into(),
         }
     }
@@ -1335,6 +1340,10 @@ mod tests {
             inode: 0,
             ..identity()
         };
+        let oversized_identity = DestructiveFilePreconditionV1 {
+            expected_bytes: MAX_EFFECT_CONTENT_BYTES + 1,
+            ..identity()
+        };
         let cases = [
             request(SensitiveEffectV1::EditTree {
                 tree_profile_id: "edit".into(),
@@ -1346,6 +1355,14 @@ mod tests {
                 operations: vec![EditTreeRequestOperationV1::DeleteFile {
                     path: "x".into(),
                     precondition: invalid_identity,
+                }],
+                max_result_bytes: 1,
+            }),
+            request(SensitiveEffectV1::EditTree {
+                tree_profile_id: "edit".into(),
+                operations: vec![EditTreeRequestOperationV1::DeleteFile {
+                    path: "x".into(),
+                    precondition: oversized_identity,
                 }],
                 max_result_bytes: 1,
             }),
