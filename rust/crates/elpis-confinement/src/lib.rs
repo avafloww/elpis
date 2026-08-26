@@ -1,8 +1,10 @@
 //! Boot-frozen requirements, an inert namespace-child handshake, and
 //! non-authoritative Linux preflight evidence.
 //!
-//! This crate deliberately cannot launch a process or install policy. The fixed
-//! child helper ends at a test-only stop, and a positive preflight report only
+//! The public crate API deliberately cannot launch a process or install policy. A
+//! private, unwired x86_64 clone/exec leaf is compiled only for fake-syscall
+//! testing and future boot integration. The fixed child helper otherwise ends at
+//! a test-only stop, and a positive preflight report only
 //! says that read-only observations are consistent with the compiled launcher
 //! profile. The launcher must still perform and verify every mount, credential,
 //! capability, seccomp, Landlock, and cgroup operation before guest code.
@@ -10,6 +12,8 @@
 mod bootstrap_helper;
 mod filesystem;
 mod namespace_child;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod raw_clone;
 
 #[doc(hidden)]
 pub use bootstrap_helper::sensitive_namespace_bootstrap_main;
