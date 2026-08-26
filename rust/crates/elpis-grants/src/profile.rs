@@ -25,6 +25,11 @@ const MAX_KUBERNETES_NAMES: usize = 64;
 const MAX_KUBERNETES_SELECTORS: usize = 32;
 const MAX_KUBERNETES_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAX_KUBERNETES_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_KUBERNETES_WRITE_TEMPLATES: usize = 32;
+const MAX_KUBERNETES_LABELS: usize = 32;
+const MAX_CONFIG_MAP_DATA_ENTRIES: usize = 64;
+const MAX_CONFIG_MAP_DATA_BYTES: usize = 8 * 1024;
+const MAX_SERVICE_PORTS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +139,10 @@ pub enum SensitiveLocalProfileKindV1 {
         max_request_bytes: u64,
         max_response_bytes: u64,
     },
+    KubernetesObjectTemplates {
+        cluster_profile: SensitiveProfileRef,
+        templates: Vec<KubernetesWriteTemplate>,
+    },
 }
 
 impl SensitiveLocalProfileKindV1 {
@@ -225,6 +234,15 @@ impl SensitiveLocalProfileKindV1 {
                     return Err(SensitiveLocalProfileError::InvalidField);
                 }
                 Ok(())
+            }
+            Self::KubernetesObjectTemplates {
+                cluster_profile,
+                templates,
+            } => {
+                cluster_profile
+                    .validate()
+                    .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+                validate_kubernetes_write_templates(templates)
             }
         }
     }
@@ -427,6 +445,159 @@ pub enum KubernetesDeletePrecondition {
     ExactUidAndResourceVersion,
 }
 
+/// Exact write authority over four fixed object/action shapes; no generic body exists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KubernetesWriteTemplate {
+    CreateConfigMap {
+        precondition: KubernetesCreatePrecondition,
+        name: String,
+        labels: Vec<KubernetesLabel>,
+        immutable: KubernetesImmutablePolicy,
+        data: Vec<KubernetesConfigMapDataEntry>,
+    },
+    UpdateConfigMap {
+        precondition: KubernetesUpdatePrecondition,
+        projection: KubernetesConfigMapUpdateProjection,
+        name: String,
+        labels: Vec<KubernetesLabel>,
+        immutable: KubernetesImmutablePolicy,
+        data: Vec<KubernetesConfigMapDataEntry>,
+    },
+    CreateClusterIpService {
+        precondition: KubernetesCreatePrecondition,
+        name: String,
+        labels: Vec<KubernetesLabel>,
+        selectors: Vec<KubernetesLabelSelector>,
+        ports: Vec<KubernetesServicePort>,
+    },
+    UpdateClusterIpService {
+        precondition: KubernetesUpdatePrecondition,
+        projection: KubernetesServiceUpdateProjection,
+        name: String,
+        labels: Vec<KubernetesLabel>,
+        selectors: Vec<KubernetesLabelSelector>,
+        ports: Vec<KubernetesServicePort>,
+    },
+}
+
+impl KubernetesWriteTemplate {
+    fn key(&self) -> String {
+        match self {
+            Self::CreateConfigMap { name, .. } => format!("create:config_map:{name}"),
+            Self::UpdateConfigMap { name, .. } => format!("update:config_map:{name}"),
+            Self::CreateClusterIpService { name, .. } => {
+                format!("create:cluster_ip_service:{name}")
+            }
+            Self::UpdateClusterIpService { name, .. } => {
+                format!("update:cluster_ip_service:{name}")
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        match self {
+            Self::CreateConfigMap {
+                name, labels, data, ..
+            }
+            | Self::UpdateConfigMap {
+                name, labels, data, ..
+            } => {
+                validate_kubernetes_dns_name(name)?;
+                validate_kubernetes_labels(labels)?;
+                validate_config_map_data(data)
+            }
+            Self::CreateClusterIpService {
+                name,
+                labels,
+                selectors,
+                ports,
+                ..
+            }
+            | Self::UpdateClusterIpService {
+                name,
+                labels,
+                selectors,
+                ports,
+                ..
+            } => {
+                validate_kubernetes_dns_name(name)?;
+                validate_kubernetes_labels(labels)?;
+                validate_kubernetes_selectors(selectors)?;
+                validate_service_ports(ports)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesCreatePrecondition {
+    Exclusive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesUpdatePrecondition {
+    ExactUidAndResourceVersion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesImmutablePolicy {
+    Required,
+}
+
+/// Replace labels only after proving immutable data exactly matches the template.
+///
+/// A future evaluator must preserve Kubernetes-owned identity metadata and reject annotations,
+/// finalizers, owner references, binary data, or any data mismatch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesConfigMapUpdateProjection {
+    ReplaceLabelsVerifyImmutableDataPreserveServerIdentity,
+}
+
+/// Replace labels, selectors, and ports while preserving only Kubernetes-owned identity/allocation.
+///
+/// Allocation is exactly `clusterIP`, `clusterIPs`, `ipFamilies`, and `ipFamilyPolicy`. A future
+/// evaluator must require ClusterIP defaults and reject every other unrepresented user-controlled
+/// metadata or spec field rather than silently merging it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesServiceUpdateProjection {
+    ReplaceLabelsSelectorsAndPortsPreserveServerIdentityAndAllocation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesLabel {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesConfigMapDataEntry {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesServicePort {
+    pub name: String,
+    pub port: u16,
+    pub target_port: u16,
+    pub protocol: KubernetesServiceProtocol,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum KubernetesServiceProtocol {
+    Tcp,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -477,6 +648,109 @@ fn validate_absolute_root(value: &str) -> Result<(), SensitiveLocalProfileError>
             .split('/')
             .skip(1)
             .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_write_templates(
+    templates: &[KubernetesWriteTemplate],
+) -> Result<(), SensitiveLocalProfileError> {
+    if templates.is_empty() || templates.len() > MAX_KUBERNETES_WRITE_TEMPLATES {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    let mut previous = None;
+    for template in templates {
+        template.validate()?;
+        let key = template.key();
+        if previous
+            .as_ref()
+            .is_some_and(|value: &String| value >= &key)
+        {
+            return Err(SensitiveLocalProfileError::NonCanonicalList);
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_kubernetes_labels(
+    labels: &[KubernetesLabel],
+) -> Result<(), SensitiveLocalProfileError> {
+    if labels.len() > MAX_KUBERNETES_LABELS
+        || labels.windows(2).any(|pair| pair[0].key >= pair[1].key)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for label in labels {
+        validate_kubernetes_label_key(&label.key)?;
+        validate_kubernetes_label_token(&label.value)?;
+    }
+    Ok(())
+}
+
+fn validate_config_map_data(
+    data: &[KubernetesConfigMapDataEntry],
+) -> Result<(), SensitiveLocalProfileError> {
+    if data.len() > MAX_CONFIG_MAP_DATA_ENTRIES
+        || data.windows(2).any(|pair| pair[0].key >= pair[1].key)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    let mut total = 0usize;
+    for entry in data {
+        validate_config_map_key(&entry.key)?;
+        total = total
+            .checked_add(entry.key.len())
+            .and_then(|value| value.checked_add(entry.value.len()))
+            .ok_or(SensitiveLocalProfileError::InvalidField)?;
+    }
+    if total > MAX_CONFIG_MAP_DATA_BYTES {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_config_map_key(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > 253
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_service_ports(
+    ports: &[KubernetesServicePort],
+) -> Result<(), SensitiveLocalProfileError> {
+    if ports.is_empty()
+        || ports.len() > MAX_SERVICE_PORTS
+        || ports.windows(2).any(|pair| pair[0].name >= pair[1].name)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    let mut seen_ports = std::collections::BTreeSet::new();
+    for port in ports {
+        validate_service_port_name(&port.name)?;
+        if port.port == 0 || port.target_port == 0 || !seen_ports.insert(port.port) {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+    }
+    Ok(())
+}
+
+fn validate_service_port_name(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > 15
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
     {
         return Err(SensitiveLocalProfileError::InvalidField);
     }
@@ -1155,6 +1429,393 @@ mod tests {
                 }
                 "url_path" => value["profile"]["api_server"]["path"] = serde_json::json!("/api/v1"),
                 _ => value["profile"]["api_server"]["redirects"] = serde_json::json!("follow"),
+            }
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
+    }
+
+    fn kubernetes_write_profile() -> SensitiveLocalProfileV1 {
+        let service_labels = vec![
+            KubernetesLabel {
+                key: "app".into(),
+                value: "api".into(),
+            },
+            KubernetesLabel {
+                key: "app.kubernetes.io/managed-by".into(),
+                value: "elpis".into(),
+            },
+        ];
+        let selectors = vec![KubernetesLabelSelector {
+            key: "app".into(),
+            value: "api".into(),
+        }];
+        let ports = vec![KubernetesServicePort {
+            name: "https".into(),
+            port: 443,
+            target_port: 8443,
+            protocol: KubernetesServiceProtocol::Tcp,
+        }];
+        let config_labels = vec![KubernetesLabel {
+            key: "app".into(),
+            value: "settings".into(),
+        }];
+        let data = vec![
+            KubernetesConfigMapDataEntry {
+                key: "config.toml".into(),
+                value: "mode = \"safe\"\n".into(),
+            },
+            KubernetesConfigMapDataEntry {
+                key: "generation".into(),
+                value: "1".into(),
+            },
+        ];
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "cluster-writes".into(),
+            profile: SensitiveLocalProfileKindV1::KubernetesObjectTemplates {
+                cluster_profile: SensitiveProfileRef {
+                    id: "cluster-query".into(),
+                    sha256: "c".repeat(64),
+                },
+                templates: vec![
+                    KubernetesWriteTemplate::CreateClusterIpService {
+                        precondition: KubernetesCreatePrecondition::Exclusive,
+                        name: "api".into(),
+                        labels: service_labels.clone(),
+                        selectors: selectors.clone(),
+                        ports: ports.clone(),
+                    },
+                    KubernetesWriteTemplate::CreateConfigMap {
+                        precondition: KubernetesCreatePrecondition::Exclusive,
+                        name: "settings".into(),
+                        labels: config_labels.clone(),
+                        immutable: KubernetesImmutablePolicy::Required,
+                        data: data.clone(),
+                    },
+                    KubernetesWriteTemplate::UpdateClusterIpService {
+                        precondition: KubernetesUpdatePrecondition::ExactUidAndResourceVersion,
+                        projection: KubernetesServiceUpdateProjection::ReplaceLabelsSelectorsAndPortsPreserveServerIdentityAndAllocation,
+                        name: "api".into(),
+                        labels: service_labels,
+                        selectors,
+                        ports,
+                    },
+                    KubernetesWriteTemplate::UpdateConfigMap {
+                        precondition: KubernetesUpdatePrecondition::ExactUidAndResourceVersion,
+                        projection: KubernetesConfigMapUpdateProjection::ReplaceLabelsVerifyImmutableDataPreserveServerIdentity,
+                        name: "settings".into(),
+                        labels: config_labels,
+                        immutable: KubernetesImmutablePolicy::Required,
+                        data,
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn kubernetes_write_template_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"cluster-writes","profile":{"kind":"kubernetes_object_templates","cluster_profile":{"id":"cluster-query","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"templates":[{"action":"create_cluster_ip_service","precondition":"exclusive","name":"api","labels":[{"key":"app","value":"api"},{"key":"app.kubernetes.io/managed-by","value":"elpis"}],"selectors":[{"key":"app","value":"api"}],"ports":[{"name":"https","port":443,"target_port":8443,"protocol":"tcp"}]},{"action":"create_config_map","precondition":"exclusive","name":"settings","labels":[{"key":"app","value":"settings"}],"immutable":"required","data":[{"key":"config.toml","value":"mode = \"safe\"\n"},{"key":"generation","value":"1"}]},{"action":"update_cluster_ip_service","precondition":"exact_uid_and_resource_version","projection":"replace_labels_selectors_and_ports_preserve_server_identity_and_allocation","name":"api","labels":[{"key":"app","value":"api"},{"key":"app.kubernetes.io/managed-by","value":"elpis"}],"selectors":[{"key":"app","value":"api"}],"ports":[{"name":"https","port":443,"target_port":8443,"protocol":"tcp"}]},{"action":"update_config_map","precondition":"exact_uid_and_resource_version","projection":"replace_labels_verify_immutable_data_preserve_server_identity","name":"settings","labels":[{"key":"app","value":"settings"}],"immutable":"required","data":[{"key":"config.toml","value":"mode = \"safe\"\n"},{"key":"generation","value":"1"}]}]}}"#;
+        const GOLDEN_SHA256: &str =
+            "9cac3d3c62a52e2a26b7ffce5e7cec72451c589b74fc871b195b9930ecea0aff";
+
+        let bytes = kubernetes_write_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &kubernetes_write_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn kubernetes_write_templates_and_cluster_ref_are_exact_sorted_and_unique() {
+        kubernetes_write_profile().validate().unwrap();
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+        {
+            templates.reverse();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+        {
+            templates.push(templates.last().unwrap().clone());
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        for count in [0, MAX_KUBERNETES_WRITE_TEMPLATES + 1] {
+            let mut value = kubernetes_write_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+                &mut value.profile
+            {
+                *templates = (0..count)
+                    .map(|index| KubernetesWriteTemplate::CreateConfigMap {
+                        precondition: KubernetesCreatePrecondition::Exclusive,
+                        name: format!("cm-{index:02}"),
+                        labels: vec![],
+                        immutable: KubernetesImmutablePolicy::Required,
+                        data: vec![],
+                    })
+                    .collect();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        for (id, sha256) in [
+            ("../cluster", "c".repeat(64)),
+            ("cluster-query", "C".repeat(64)),
+        ] {
+            let mut value = kubernetes_write_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates {
+                cluster_profile, ..
+            } = &mut value.profile
+            {
+                cluster_profile.id = id.into();
+                cluster_profile.sha256 = sha256;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn config_map_templates_require_exact_immutable_sorted_bounded_data() {
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateConfigMap { data, .. } = &mut templates[1]
+        {
+            data.reverse();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateConfigMap { labels, .. } = &mut templates[1]
+        {
+            labels.push(labels[0].clone());
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateConfigMap { labels, .. } = &mut templates[1]
+        {
+            *labels = (0..=MAX_KUBERNETES_LABELS)
+                .map(|index| KubernetesLabel {
+                    key: format!("label-{index:02}"),
+                    value: "value".into(),
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateConfigMap { data, .. } = &mut templates[1]
+        {
+            *data = (0..=MAX_CONFIG_MAP_DATA_ENTRIES)
+                .map(|index| KubernetesConfigMapDataEntry {
+                    key: format!("key-{index:02}"),
+                    value: String::new(),
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        for (key, data_value) in [
+            ("bad/key", "ok".into()),
+            ("config", "x".repeat(MAX_CONFIG_MAP_DATA_BYTES + 1)),
+        ] {
+            let mut value = kubernetes_write_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+                &mut value.profile
+                && let KubernetesWriteTemplate::CreateConfigMap { data, .. } = &mut templates[1]
+            {
+                data.clear();
+                data.push(KubernetesConfigMapDataEntry {
+                    key: key.into(),
+                    value: data_value,
+                });
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn cluster_ip_service_templates_require_exact_selectors_and_tcp_ports() {
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateClusterIpService { selectors, .. } =
+                &mut templates[0]
+        {
+            selectors.clear();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateClusterIpService { ports, .. } = &mut templates[0]
+        {
+            ports.push(KubernetesServicePort {
+                name: "web".into(),
+                port: 443,
+                target_port: 8080,
+                protocol: KubernetesServiceProtocol::Tcp,
+            });
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = kubernetes_write_profile();
+        if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+            &mut value.profile
+            && let KubernetesWriteTemplate::CreateClusterIpService { ports, .. } = &mut templates[0]
+        {
+            *ports = (0..=MAX_SERVICE_PORTS)
+                .map(|index| KubernetesServicePort {
+                    name: format!("p{index:02}"),
+                    port: 10_000 + index as u16,
+                    target_port: 20_000 + index as u16,
+                    protocol: KubernetesServiceProtocol::Tcp,
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        for (name, port, target_port) in [("UPPER", 80, 8080), ("web", 0, 8080), ("web", 80, 0)] {
+            let mut value = kubernetes_write_profile();
+            if let SensitiveLocalProfileKindV1::KubernetesObjectTemplates { templates, .. } =
+                &mut value.profile
+                && let KubernetesWriteTemplate::CreateClusterIpService { ports, .. } =
+                    &mut templates[0]
+            {
+                ports[0].name = name.into();
+                ports[0].port = port;
+                ports[0].target_port = target_port;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn kubernetes_write_grammar_rejects_workloads_patch_and_service_widening() {
+        let bytes = kubernetes_write_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "pod_action",
+            "patch_action",
+            "weak_create",
+            "weak_update",
+            "weak_projection",
+            "mutable_config_map",
+            "binary_data",
+            "annotations",
+            "node_port",
+            "external_name",
+            "load_balancer",
+            "cluster_ip",
+            "generic_body",
+            "udp",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "pod_action" => {
+                    value["profile"]["templates"][0]["action"] = serde_json::json!("create_pod")
+                }
+                "patch_action" => {
+                    value["profile"]["templates"][0]["action"] = serde_json::json!("patch")
+                }
+                "weak_create" => {
+                    value["profile"]["templates"][0]["precondition"] =
+                        serde_json::json!("overwrite")
+                }
+                "weak_update" => {
+                    value["profile"]["templates"][2]["precondition"] =
+                        serde_json::json!("resource_version_only")
+                }
+                "weak_projection" => {
+                    value["profile"]["templates"][2]["projection"] = serde_json::json!("merge")
+                }
+                "mutable_config_map" => {
+                    value["profile"]["templates"][1]["immutable"] = serde_json::json!("allow")
+                }
+                "binary_data" => {
+                    value["profile"]["templates"][1]["binary_data"] = serde_json::json!({})
+                }
+                "annotations" => {
+                    value["profile"]["templates"][0]["annotations"] = serde_json::json!({})
+                }
+                "node_port" => {
+                    value["profile"]["templates"][0]["node_port"] = serde_json::json!(30443)
+                }
+                "external_name" => {
+                    value["profile"]["templates"][0]["external_name"] =
+                        serde_json::json!("outside.example")
+                }
+                "load_balancer" => {
+                    value["profile"]["templates"][0]["load_balancer_ip"] =
+                        serde_json::json!("203.0.113.1")
+                }
+                "cluster_ip" => {
+                    value["profile"]["templates"][0]["cluster_ip"] = serde_json::json!("10.43.0.10")
+                }
+                "generic_body" => {
+                    value["profile"]["templates"][0]["body"] =
+                        serde_json::json!({"spec":{"hostNetwork":true}})
+                }
+                _ => {
+                    value["profile"]["templates"][0]["ports"][0]["protocol"] =
+                        serde_json::json!("udp")
+                }
             }
             assert_eq!(
                 CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
