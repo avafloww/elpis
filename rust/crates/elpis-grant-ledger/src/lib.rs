@@ -13,14 +13,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use elpis_grants::{
-    ED25519_SIGNATURE_BYTES, GrantBinding, GrantError, GrantV1, GrantVerifier,
-    MAX_GRANT_PAYLOAD_BYTES,
+    CanonicalSensitivePolicy, ED25519_SIGNATURE_BYTES, GrantBinding, GrantError, GrantV1,
+    GrantVerifier, MAX_GRANT_PAYLOAD_BYTES, MAX_TERMINAL_CONTROL_PAYLOAD_BYTES,
+    TerminalControlActionV1, TerminalControlV1,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 // "ELGL", deliberately distinct from the transport, effect, and other ledgers.
 const APPLICATION_ID: i64 = 0x454c_474c;
 const ADMISSION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
@@ -51,6 +52,128 @@ BEGIN SELECT RAISE(ABORT, 'grant terminal events are immutable'); END;
 CREATE TRIGGER grant_terminal_events_no_delete
 BEFORE DELETE ON grant_terminal_events
 BEGIN SELECT RAISE(ABORT, 'grant terminal events are append-only'); END;";
+const CONTROL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "terminal_control_receipts"),
+    ("trigger", "terminal_control_receipts_immutable"),
+    ("trigger", "terminal_control_receipts_no_delete"),
+    ("trigger", "terminal_control_receipts_shared_sequence"),
+    ("trigger", "grant_rows_shared_sequence"),
+];
+const LATCH_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "policy_latch_events"),
+    ("index", "policy_latch_events_key_sequence"),
+    ("trigger", "policy_latch_events_immutable"),
+    ("trigger", "policy_latch_events_no_delete"),
+];
+const V4_SCHEMA_SQL: &str = r#"CREATE TABLE terminal_control_receipts (
+    receipt_seq INTEGER PRIMARY KEY CHECK (receipt_seq > 0),
+    control_id TEXT NOT NULL UNIQUE
+        CHECK (typeof(control_id) = 'text'
+               AND length(CAST(control_id AS BLOB)) BETWEEN 1 AND 120
+               AND control_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+    issuer_id TEXT NOT NULL
+        CHECK (typeof(issuer_id) = 'text'
+               AND length(CAST(issuer_id AS BLOB)) BETWEEN 1 AND 120
+               AND issuer_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+    issuer_seq BLOB NOT NULL
+        CHECK (typeof(issuer_seq) = 'blob' AND length(issuer_seq) = 8
+               AND issuer_seq != zeroblob(8)),
+    executor_id TEXT NOT NULL
+        CHECK (typeof(executor_id) = 'text'
+               AND length(CAST(executor_id AS BLOB)) BETWEEN 1 AND 120
+               AND executor_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+    policy_epoch BLOB NOT NULL
+        CHECK (typeof(policy_epoch) = 'blob' AND length(policy_epoch) = 8
+               AND policy_epoch != zeroblob(8)),
+    target_action TEXT NOT NULL
+        CHECK (target_action IN ('revoke_grant', 'flag_grant', 'clear_latch')),
+    target_grant_id TEXT REFERENCES grants(grant_id),
+    target_grant_payload_sha256 BLOB,
+    target_profile_id TEXT,
+    target_policy_sha256 BLOB,
+    issued_at_unix_s BLOB NOT NULL
+        CHECK (typeof(issued_at_unix_s) = 'blob' AND length(issued_at_unix_s) = 8
+               AND issued_at_unix_s != zeroblob(8)),
+    expires_at_unix_s BLOB NOT NULL
+        CHECK (typeof(expires_at_unix_s) = 'blob' AND length(expires_at_unix_s) = 8),
+    admitted_at_unix_s BLOB NOT NULL
+        CHECK (typeof(admitted_at_unix_s) = 'blob' AND length(admitted_at_unix_s) = 8
+               AND admitted_at_unix_s != zeroblob(8)),
+    payload_sha256 BLOB NOT NULL
+        CHECK (typeof(payload_sha256) = 'blob' AND length(payload_sha256) = 32),
+    payload_bytes BLOB NOT NULL UNIQUE
+        CHECK (typeof(payload_bytes) = 'blob'
+               AND length(payload_bytes) BETWEEN 1 AND 4096),
+    signature BLOB NOT NULL
+        CHECK (typeof(signature) = 'blob' AND length(signature) = 64),
+    UNIQUE (issuer_id, issuer_seq),
+    CHECK (expires_at_unix_s > issued_at_unix_s),
+    CHECK (
+        (target_action IN ('revoke_grant', 'flag_grant')
+         AND typeof(target_grant_id) = 'text'
+         AND length(CAST(target_grant_id AS BLOB)) BETWEEN 1 AND 120
+         AND target_grant_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+         AND typeof(target_grant_payload_sha256) = 'blob'
+         AND length(target_grant_payload_sha256) = 32
+         AND target_profile_id IS NULL AND target_policy_sha256 IS NULL)
+        OR
+        (target_action = 'clear_latch'
+         AND target_grant_id IS NULL AND target_grant_payload_sha256 IS NULL
+         AND typeof(target_profile_id) = 'text'
+         AND length(CAST(target_profile_id AS BLOB)) BETWEEN 1 AND 120
+         AND target_profile_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+         AND typeof(target_policy_sha256) = 'blob'
+         AND length(target_policy_sha256) = 32)
+    )
+);
+CREATE TRIGGER terminal_control_receipts_immutable
+BEFORE UPDATE ON terminal_control_receipts
+BEGIN SELECT RAISE(ABORT, 'terminal control receipts are immutable'); END;
+CREATE TRIGGER terminal_control_receipts_no_delete
+BEFORE DELETE ON terminal_control_receipts
+BEGIN SELECT RAISE(ABORT, 'terminal control receipts are append-only'); END;
+CREATE TRIGGER terminal_control_receipts_shared_sequence
+BEFORE INSERT ON terminal_control_receipts
+WHEN EXISTS (SELECT 1 FROM grants
+             WHERE issuer_id = NEW.issuer_id AND issuer_seq = NEW.issuer_seq)
+BEGIN SELECT RAISE(ABORT, 'issuer sequence was already used by a grant'); END;
+CREATE TRIGGER grant_rows_shared_sequence
+BEFORE INSERT ON grants
+WHEN EXISTS (SELECT 1 FROM terminal_control_receipts
+             WHERE issuer_id = NEW.issuer_id AND issuer_seq = NEW.issuer_seq)
+BEGIN SELECT RAISE(ABORT, 'issuer sequence was already used by a control'); END;
+CREATE TABLE policy_latch_events (
+    event_seq INTEGER PRIMARY KEY CHECK (event_seq > 0),
+    executor_id TEXT NOT NULL
+        CHECK (typeof(executor_id) = 'text'
+               AND length(CAST(executor_id AS BLOB)) BETWEEN 1 AND 120
+               AND executor_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+    profile_id TEXT NOT NULL
+        CHECK (typeof(profile_id) = 'text'
+               AND length(CAST(profile_id AS BLOB)) BETWEEN 1 AND 120
+               AND profile_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+    policy_sha256 BLOB NOT NULL
+        CHECK (typeof(policy_sha256) = 'blob' AND length(policy_sha256) = 32),
+    policy_bytes BLOB,
+    kind TEXT NOT NULL CHECK (kind IN ('flag', 'clear')),
+    grant_id TEXT UNIQUE REFERENCES grants(grant_id),
+    control_id TEXT NOT NULL UNIQUE REFERENCES terminal_control_receipts(control_id),
+    occurred_at_unix_s BLOB NOT NULL
+        CHECK (typeof(occurred_at_unix_s) = 'blob' AND length(occurred_at_unix_s) = 8
+               AND occurred_at_unix_s != zeroblob(8)),
+    CHECK ((kind = 'flag' AND grant_id IS NOT NULL
+            AND typeof(policy_bytes) = 'blob'
+            AND length(policy_bytes) BETWEEN 1 AND 32768)
+           OR (kind = 'clear' AND grant_id IS NULL AND policy_bytes IS NULL))
+);
+CREATE INDEX policy_latch_events_key_sequence
+ON policy_latch_events(executor_id, profile_id, policy_sha256, event_seq DESC);
+CREATE TRIGGER policy_latch_events_immutable
+BEFORE UPDATE ON policy_latch_events
+BEGIN SELECT RAISE(ABORT, 'policy latch events are immutable'); END;
+CREATE TRIGGER policy_latch_events_no_delete
+BEFORE DELETE ON policy_latch_events
+BEGIN SELECT RAISE(ABORT, 'policy latch events are append-only'); END;"#;
 
 /// Conventional filename for the daemon-private grant ledger.
 pub const GRANT_LEDGER_DATABASE_FILENAME: &str = "grants.sqlite";
@@ -60,6 +183,10 @@ pub const GRANT_LEDGER_DATABASE_FILENAME: &str = "grants.sqlite";
 pub struct GrantLedgerLimits {
     pub max_grants: u64,
     pub max_bytes: u64,
+    pub max_terminal_controls: u64,
+    pub max_terminal_control_bytes: u64,
+    pub max_latch_events: u64,
+    pub max_latch_bytes: u64,
 }
 
 impl Default for GrantLedgerLimits {
@@ -67,6 +194,10 @@ impl Default for GrantLedgerLimits {
         Self {
             max_grants: 10_000,
             max_bytes: 64 * 1024 * 1024,
+            max_terminal_controls: 10_000,
+            max_terminal_control_bytes: 32 * 1024 * 1024,
+            max_latch_events: 20_000,
+            max_latch_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -441,6 +572,32 @@ impl GrantLedger {
         load_terminal_receipt(&self.connection, grant_id)
     }
 
+    /// Returns the state derived from the latest append-only event for one exact latch key.
+    pub fn policy_latch_is_set(
+        &self,
+        executor_id: &str,
+        profile_id: &str,
+        policy_sha256: &[u8; 32],
+    ) -> Result<bool, GrantLedgerError> {
+        let latest = self
+            .connection
+            .query_row(
+                "SELECT kind FROM policy_latch_events
+                 WHERE executor_id = ?1 AND profile_id = ?2 AND policy_sha256 = ?3
+                 ORDER BY event_seq DESC LIMIT 1",
+                params![executor_id, profile_id, policy_sha256.as_slice()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match latest.as_deref() {
+            None | Some("clear") => Ok(false),
+            Some("flag") => Ok(true),
+            Some(_) => Err(GrantLedgerError::Corrupt(
+                "stored policy latch event kind is invalid".into(),
+            )),
+        }
+    }
+
     pub fn expire_due(&mut self) -> Result<Vec<GrantTerminalReceipt>, GrantLedgerError> {
         self.terminalize_unsettled(false)
     }
@@ -597,8 +754,16 @@ pub enum GrantLedgerError {
 fn validate_limits(limits: GrantLedgerLimits) -> Result<(), GrantLedgerError> {
     if limits.max_grants == 0
         || limits.max_bytes == 0
+        || limits.max_terminal_controls == 0
+        || limits.max_terminal_control_bytes == 0
+        || limits.max_latch_events == 0
+        || limits.max_latch_bytes == 0
         || limits.max_grants > i64::MAX as u64
         || limits.max_bytes > i64::MAX as u64
+        || limits.max_terminal_controls > i64::MAX as u64
+        || limits.max_terminal_control_bytes > i64::MAX as u64
+        || limits.max_latch_events > i64::MAX as u64
+        || limits.max_latch_bytes > i64::MAX as u64
     {
         return Err(GrantLedgerError::InvalidLimits);
     }
@@ -912,7 +1077,7 @@ fn run_quick_check(connection: &Connection) -> Result<(), GrantLedgerError> {
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 0 | 1 | 2 | SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | 2 | 3 | SCHEMA_VERSION) {
         return Err(GrantLedgerError::Corrupt(format!(
             "unsupported schema version {version}"
         )));
@@ -937,15 +1102,15 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
                 grant_count INTEGER NOT NULL CHECK (grant_count >= 0),
                 total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
                 CHECK (
-                    (issuer_id IS NULL AND last_issuer_seq IS NULL AND grant_count = 0)
+                    (issuer_id IS NULL AND last_issuer_seq IS NULL
+                     AND grant_count = 0 AND total_bytes = 0)
                     OR
                     (typeof(issuer_id) = 'text'
                      AND length(CAST(issuer_id AS BLOB)) BETWEEN 1 AND 120
                      AND issuer_id NOT GLOB '*[^A-Za-z0-9._:-]*'
                      AND typeof(last_issuer_seq) = 'blob'
                      AND length(last_issuer_seq) = 8
-                     AND last_issuer_seq != zeroblob(8)
-                     AND grant_count > 0)
+                     AND last_issuer_seq != zeroblob(8))
                 )
              );
              CREATE TABLE grants (
@@ -998,6 +1163,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
              BEGIN SELECT RAISE(ABORT, 'issuer sequence must advance'); END;",
         )?;
         transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
+        transaction.execute_batch(V4_SCHEMA_SQL)?;
         transaction.execute(
             "INSERT INTO grant_state (
                 singleton, issuer_id, last_issuer_seq, grant_count, total_bytes
@@ -1013,7 +1179,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
         require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.pragma_update(None, "user_version", 3_i64)?;
         transaction.commit()?;
     }
     if version == 2 {
@@ -1036,13 +1202,75 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
             [],
         )?;
         transaction.execute_batch("DROP TABLE grant_terminal_events_v2")?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.pragma_update(None, "user_version", 3_i64)?;
         transaction.commit()?;
+    }
+
+    let current_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current_version == 3 {
+        require_application_id(connection)?;
+        require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
+        require_schema_objects(connection, TERMINAL_SCHEMA_OBJECTS)?;
+        migrate_v3_to_v4(connection)?;
     }
 
     require_application_id(connection)?;
     require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
-    require_schema_objects(connection, TERMINAL_SCHEMA_OBJECTS)
+    require_schema_objects(connection, TERMINAL_SCHEMA_OBJECTS)?;
+    require_schema_objects(connection, CONTROL_SCHEMA_OBJECTS)?;
+    require_schema_objects(connection, LATCH_SCHEMA_OBJECTS)
+}
+
+fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), GrantLedgerError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "DROP TRIGGER grant_state_no_delete;
+         DROP TRIGGER grant_state_sequence_monotonic;
+         ALTER TABLE grant_state RENAME TO grant_state_v3;
+         CREATE TABLE grant_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            issuer_id TEXT,
+            last_issuer_seq BLOB,
+            grant_count INTEGER NOT NULL CHECK (grant_count >= 0),
+            total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+            CHECK (
+                (issuer_id IS NULL AND last_issuer_seq IS NULL
+                 AND grant_count = 0 AND total_bytes = 0)
+                OR
+                (typeof(issuer_id) = 'text'
+                 AND length(CAST(issuer_id AS BLOB)) BETWEEN 1 AND 120
+                 AND issuer_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                 AND typeof(last_issuer_seq) = 'blob'
+                 AND length(last_issuer_seq) = 8
+                 AND last_issuer_seq != zeroblob(8))
+            )
+         );
+         INSERT INTO grant_state (
+            singleton, issuer_id, last_issuer_seq, grant_count, total_bytes
+         )
+         SELECT singleton, issuer_id, last_issuer_seq, grant_count, total_bytes
+         FROM grant_state_v3;
+         DROP TABLE grant_state_v3;
+         CREATE TRIGGER grant_state_no_delete
+         BEFORE DELETE ON grant_state
+         BEGIN SELECT RAISE(ABORT, 'grant state cannot be deleted'); END;
+         CREATE TRIGGER grant_state_sequence_monotonic
+         BEFORE UPDATE OF issuer_id, last_issuer_seq ON grant_state
+         WHEN NOT (
+            (OLD.issuer_id IS NULL AND OLD.last_issuer_seq IS NULL
+             AND NEW.issuer_id IS NOT NULL AND NEW.last_issuer_seq IS NOT NULL)
+            OR
+            (OLD.issuer_id = NEW.issuer_id
+             AND typeof(NEW.last_issuer_seq) = 'blob'
+             AND NEW.last_issuer_seq > OLD.last_issuer_seq)
+         )
+         BEGIN SELECT RAISE(ABORT, 'issuer sequence must advance'); END;",
+    )?;
+    transaction.execute_batch(V4_SCHEMA_SQL)?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn require_application_id(connection: &Connection) -> Result<(), GrantLedgerError> {
@@ -1184,15 +1412,39 @@ fn validate_integrity(
         maximum_seq = Some(maximum_seq.map_or(issuer_seq, |old: u64| old.max(issuer_seq)));
     }
 
-    if count != state.grant_count
-        || total_bytes != state.total_bytes
-        || maximum_seq != state.last_issuer_seq
-    {
+    drop(rows);
+    drop(statement);
+    if count != state.grant_count || total_bytes != state.total_bytes {
         return Err(GrantLedgerError::Corrupt(
-            "grant state counters do not match stored rows".into(),
+            "grant state counters do not match stored grant rows".into(),
         ));
     }
-    validate_terminal_integrity(connection, state.grant_count)
+
+    let control_maximum = validate_control_integrity(connection, state_issuer.as_deref(), limits)?;
+    let durable_maximum = match (maximum_seq, control_maximum) {
+        (Some(grant), Some(control)) => Some(grant.max(control)),
+        (grant, control) => grant.or(control),
+    };
+    if durable_maximum != state.last_issuer_seq {
+        return Err(GrantLedgerError::Corrupt(
+            "issuer sequence high-water does not match grants and controls".into(),
+        ));
+    }
+    let reused_sequences: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM grants AS grant
+         JOIN terminal_control_receipts AS control
+           ON control.issuer_id = grant.issuer_id
+          AND control.issuer_seq = grant.issuer_seq",
+        [],
+        |row| row.get(0),
+    )?;
+    if reused_sequences != 0 {
+        return Err(GrantLedgerError::Corrupt(
+            "issuer sequence is shared by a grant and control".into(),
+        ));
+    }
+    validate_terminal_integrity(connection, state.grant_count)?;
+    validate_latch_integrity(connection, limits)
 }
 
 fn validate_terminal_integrity(
@@ -1250,11 +1502,401 @@ fn validate_terminal_integrity(
     Ok(())
 }
 
+fn validate_control_integrity(
+    connection: &Connection,
+    state_issuer: Option<&str>,
+    limits: GrantLedgerLimits,
+) -> Result<Option<u64>, GrantLedgerError> {
+    let mut statement = connection.prepare(
+        "SELECT receipt_seq, control_id, issuer_id, issuer_seq, executor_id, policy_epoch,
+                target_action, target_grant_id, target_grant_payload_sha256,
+                target_profile_id, target_policy_sha256, issued_at_unix_s,
+                expires_at_unix_s, admitted_at_unix_s, payload_sha256, payload_bytes, signature
+         FROM terminal_control_receipts ORDER BY receipt_seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut expected_receipt = 1_u64;
+    let mut count = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut maximum_seq = None;
+    while let Some(row) = rows.next()? {
+        let receipt_seq = positive_sequence(row.get(0)?, "control receipt")?;
+        if receipt_seq != expected_receipt {
+            return Err(GrantLedgerError::Corrupt(
+                "control receipt sequence is not gap-free".into(),
+            ));
+        }
+        let control_id: String = row.get(1)?;
+        let issuer_id: String = row.get(2)?;
+        let issuer_seq = decode_u64(row.get(3)?, "control issuer sequence")?;
+        let executor_id: String = row.get(4)?;
+        let policy_epoch = decode_u64(row.get(5)?, "control policy epoch")?;
+        let action: String = row.get(6)?;
+        let target_grant_id: Option<String> = row.get(7)?;
+        let target_grant_hash: Option<Vec<u8>> = row.get(8)?;
+        let target_profile_id: Option<String> = row.get(9)?;
+        let target_policy_hash: Option<Vec<u8>> = row.get(10)?;
+        let issued_at = decode_u64(row.get(11)?, "control issuance time")?;
+        let expires_at = decode_u64(row.get(12)?, "control expiry")?;
+        let admitted_at = decode_u64(row.get(13)?, "control admission time")?;
+        let payload_hash = decode_hash(row.get(14)?, "control payload hash")?;
+        let payload: Vec<u8> = row.get(15)?;
+        let signature: Vec<u8> = row.get(16)?;
+
+        if receipt_seq != count + 1
+            || admitted_at < issued_at
+            || admitted_at >= expires_at
+            || payload.is_empty()
+            || payload.len() > MAX_TERMINAL_CONTROL_PAYLOAD_BYTES
+            || signature.len() != ED25519_SIGNATURE_BYTES
+            || payload_hash != sha256(&payload)
+        {
+            return Err(GrantLedgerError::Corrupt(
+                "stored terminal control metadata is invalid".into(),
+            ));
+        }
+        let control: TerminalControlV1 = serde_json::from_slice(&payload).map_err(|error| {
+            GrantLedgerError::Corrupt(format!("stored terminal control is invalid: {error}"))
+        })?;
+        let canonical = control.canonical_payload().map_err(|error| {
+            GrantLedgerError::Corrupt(format!("stored terminal control is invalid: {error}"))
+        })?;
+        if canonical != payload
+            || control.control_id != control_id
+            || control.issuer_id != issuer_id
+            || control.issuer_seq != issuer_seq
+            || control.executor_id != executor_id
+            || control.policy_epoch != policy_epoch
+            || control.issued_at_unix_s != issued_at
+            || control.expires_at_unix_s != expires_at
+            || state_issuer != Some(issuer_id.as_str())
+            || !control_target_matches(
+                connection,
+                &control.target,
+                &control.executor_id,
+                StoredControlTarget {
+                    action: &action,
+                    grant_id: target_grant_id.as_deref(),
+                    grant_hash: target_grant_hash.as_deref(),
+                    profile_id: target_profile_id.as_deref(),
+                    policy_hash: target_policy_hash.as_deref(),
+                },
+            )?
+        {
+            return Err(GrantLedgerError::Corrupt(
+                "stored terminal control columns do not match canonical claims".into(),
+            ));
+        }
+        count = count.checked_add(1).ok_or(GrantLedgerError::StorageLimit)?;
+        total_bytes = total_bytes
+            .checked_add(accounted_control_bytes(&control, &payload, &signature)?)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+        maximum_seq = Some(maximum_seq.map_or(issuer_seq, |old: u64| old.max(issuer_seq)));
+        expected_receipt = expected_receipt
+            .checked_add(1)
+            .ok_or(GrantLedgerError::TerminalSequenceExhausted)?;
+    }
+    if count > limits.max_terminal_controls || total_bytes > limits.max_terminal_control_bytes {
+        return Err(GrantLedgerError::StorageLimit);
+    }
+    Ok(maximum_seq)
+}
+
+struct StoredControlTarget<'a> {
+    action: &'a str,
+    grant_id: Option<&'a str>,
+    grant_hash: Option<&'a [u8]>,
+    profile_id: Option<&'a str>,
+    policy_hash: Option<&'a [u8]>,
+}
+
+fn control_target_matches(
+    connection: &Connection,
+    target: &TerminalControlActionV1,
+    executor_id: &str,
+    stored: StoredControlTarget<'_>,
+) -> Result<bool, GrantLedgerError> {
+    match target {
+        TerminalControlActionV1::RevokeGrant {
+            grant_id,
+            grant_payload_sha256,
+        }
+        | TerminalControlActionV1::FlagGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => {
+            let expected_action = match target {
+                TerminalControlActionV1::RevokeGrant { .. } => "revoke_grant",
+                _ => "flag_grant",
+            };
+            let claim_hash = lower_hex_hash(grant_payload_sha256)?;
+            let admitted: Option<(Vec<u8>, Vec<u8>)> = connection
+                .query_row(
+                    "SELECT payload_sha256, payload_bytes FROM grants WHERE grant_id = ?1",
+                    params![grant_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let admitted_matches = admitted
+                .map(|(hash, payload)| -> Result<bool, GrantLedgerError> {
+                    let grant: GrantV1 = serde_json::from_slice(&payload).map_err(|error| {
+                        GrantLedgerError::Corrupt(format!(
+                            "control target grant is invalid: {error}"
+                        ))
+                    })?;
+                    Ok(hash.as_slice() == claim_hash && grant.executor_id == executor_id)
+                })
+                .transpose()?
+                .unwrap_or(false);
+            Ok(stored.action == expected_action
+                && stored.grant_id == Some(grant_id.as_str())
+                && stored.grant_hash == Some(claim_hash.as_slice())
+                && admitted_matches
+                && stored.profile_id.is_none()
+                && stored.policy_hash.is_none())
+        }
+        TerminalControlActionV1::ClearLatch {
+            profile_id,
+            policy_sha256,
+        } => {
+            let claim_hash = lower_hex_hash(policy_sha256)?;
+            Ok(stored.action == "clear_latch"
+                && stored.grant_id.is_none()
+                && stored.grant_hash.is_none()
+                && stored.profile_id == Some(profile_id.as_str())
+                && stored.policy_hash == Some(claim_hash.as_slice()))
+        }
+    }
+}
+
+fn validate_latch_integrity(
+    connection: &Connection,
+    limits: GrantLedgerLimits,
+) -> Result<(), GrantLedgerError> {
+    let mut statement = connection.prepare(
+        "SELECT event.event_seq, event.executor_id, event.profile_id, event.policy_sha256,
+                event.kind, event.grant_id, event.control_id, event.occurred_at_unix_s,
+                event.policy_bytes, grant.payload_bytes, grant.payload_sha256,
+                control.executor_id, control.target_action, control.target_grant_id,
+                control.target_grant_payload_sha256, control.target_profile_id,
+                control.target_policy_sha256, control.issuer_seq, control.admitted_at_unix_s
+         FROM policy_latch_events AS event
+         LEFT JOIN grants AS grant ON grant.grant_id = event.grant_id
+         JOIN terminal_control_receipts AS control ON control.control_id = event.control_id
+         ORDER BY event.event_seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut expected = 1_u64;
+    let mut count = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut states = std::collections::HashMap::new();
+    while let Some(row) = rows.next()? {
+        let sequence = positive_sequence(row.get(0)?, "policy latch event")?;
+        if sequence != expected {
+            return Err(GrantLedgerError::Corrupt(
+                "policy latch event sequence is not gap-free".into(),
+            ));
+        }
+        let executor_id: String = row.get(1)?;
+        let profile_id: String = row.get(2)?;
+        let policy_hash = decode_hash(row.get(3)?, "latch policy hash")?;
+        let kind: String = row.get(4)?;
+        let grant_id: Option<String> = row.get(5)?;
+        let control_id: String = row.get(6)?;
+        let occurred_at = decode_u64(row.get(7)?, "latch occurrence time")?;
+        let policy_bytes: Option<Vec<u8>> = row.get(8)?;
+        let control_executor: String = row.get(11)?;
+        let control_action: String = row.get(12)?;
+        let control_grant_id: Option<String> = row.get(13)?;
+        let control_grant_hash: Option<Vec<u8>> = row.get(14)?;
+        let control_profile_id: Option<String> = row.get(15)?;
+        let control_policy_hash: Option<Vec<u8>> = row.get(16)?;
+        let control_sequence = decode_u64(row.get(17)?, "latch control issuer sequence")?;
+        let admitted_at = decode_u64(row.get(18)?, "latch control admission time")?;
+
+        let source_matches = if kind == "flag" {
+            let grant_payload: Option<Vec<u8>> = row.get(9)?;
+            let grant_payload_hash: Option<Vec<u8>> = row.get(10)?;
+            let grant: Option<GrantV1> = grant_payload
+                .map(|payload| serde_json::from_slice(&payload))
+                .transpose()
+                .map_err(|error| {
+                    GrantLedgerError::Corrupt(format!("flag latch grant is invalid: {error}"))
+                })?;
+            let policy = policy_bytes
+                .as_deref()
+                .map(CanonicalSensitivePolicy::parse)
+                .transpose()
+                .map_err(|error| {
+                    GrantLedgerError::Corrupt(format!("flag latch policy is invalid: {error}"))
+                })?;
+            grant_id.is_some()
+                && control_executor == executor_id
+                && control_action == "flag_grant"
+                && control_grant_id == grant_id
+                && control_grant_hash == grant_payload_hash
+                && control_profile_id.is_none()
+                && control_policy_hash.is_none()
+                && grant.as_ref().is_some_and(|grant| {
+                    grant.executor_id == executor_id
+                        && lower_hex_hash(&grant.policy_sha256)
+                            .is_ok_and(|hash| hash == policy_hash)
+                })
+                && policy.as_ref().is_some_and(|policy| {
+                    policy.policy().profile_id == profile_id
+                        && lower_hex_hash(policy.policy_sha256())
+                            .is_ok_and(|hash| hash == policy_hash)
+                })
+        } else if kind == "clear" {
+            grant_id.is_none()
+                && policy_bytes.is_none()
+                && control_executor == executor_id
+                && control_action == "clear_latch"
+                && control_grant_id.is_none()
+                && control_grant_hash.is_none()
+                && control_profile_id.as_deref() == Some(profile_id.as_str())
+                && control_policy_hash.as_deref() == Some(policy_hash.as_slice())
+        } else {
+            false
+        };
+        let key = (executor_id.clone(), profile_id.clone(), policy_hash);
+        let transition_matches = match states.get(&key) {
+            None => kind == "flag",
+            Some((previous_kind, previous_sequence)) => {
+                control_sequence > *previous_sequence
+                    && ((previous_kind == "flag" && kind == "clear")
+                        || (previous_kind == "clear" && kind == "flag"))
+            }
+        };
+        if !source_matches || !transition_matches || occurred_at == 0 || occurred_at < admitted_at {
+            return Err(GrantLedgerError::Corrupt(
+                "policy latch event does not match its exact source and sequence".into(),
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(accounted_latch_bytes(
+                &executor_id,
+                &profile_id,
+                &kind,
+                grant_id.as_deref(),
+                &control_id,
+                policy_bytes.as_deref(),
+            )?)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+        states.insert(key, (kind, control_sequence));
+        count = count.checked_add(1).ok_or(GrantLedgerError::StorageLimit)?;
+        expected = expected
+            .checked_add(1)
+            .ok_or(GrantLedgerError::TerminalSequenceExhausted)?;
+    }
+    if count > limits.max_latch_events || total_bytes > limits.max_latch_bytes {
+        return Err(GrantLedgerError::StorageLimit);
+    }
+    Ok(())
+}
+
+fn positive_sequence(value: i64, field: &str) -> Result<u64, GrantLedgerError> {
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| GrantLedgerError::Corrupt(format!("{field} sequence is invalid")))
+}
+
+fn lower_hex_hash(value: &str) -> Result<[u8; 32], GrantLedgerError> {
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
+    {
+        return Err(GrantLedgerError::Corrupt(
+            "canonical SHA-256 claim is invalid".into(),
+        ));
+    }
+    let mut result = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte: u8| -> u8 {
+            match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => unreachable!(),
+            }
+        };
+        result[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    Ok(result)
+}
+
+fn accounted_control_bytes(
+    control: &TerminalControlV1,
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<u64, GrantLedgerError> {
+    let target_bytes = match &control.target {
+        TerminalControlActionV1::RevokeGrant { grant_id, .. }
+        | TerminalControlActionV1::FlagGrant { grant_id, .. } => grant_id.len() + 32,
+        TerminalControlActionV1::ClearLatch { profile_id, .. } => profile_id.len() + 32,
+    };
+    [
+        8,
+        control.control_id.len(),
+        control.issuer_id.len(),
+        8,
+        control.executor_id.len(),
+        8,
+        target_bytes,
+        8,
+        8,
+        8,
+        32,
+        payload.len(),
+        signature.len(),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, length| {
+        total
+            .checked_add(length as u64)
+            .ok_or(GrantLedgerError::InvalidLimits)
+    })
+}
+
+fn accounted_latch_bytes(
+    executor_id: &str,
+    profile_id: &str,
+    kind: &str,
+    grant_id: Option<&str>,
+    control_id: &str,
+    policy_bytes: Option<&[u8]>,
+) -> Result<u64, GrantLedgerError> {
+    [
+        8,
+        executor_id.len(),
+        profile_id.len(),
+        32,
+        kind.len(),
+        grant_id.map_or(0, str::len),
+        control_id.len(),
+        8,
+        policy_bytes.map_or(0, <[u8]>::len),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, length| {
+        total
+            .checked_add(length as u64)
+            .ok_or(GrantLedgerError::InvalidLimits)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use elpis_grants::{GRANT_VERSION, GrantMode, signature_input};
+    use elpis_grants::{
+        GRANT_VERSION, GrantMode, GuestPersistence, SENSITIVE_POLICY_VERSION, SensitiveBudgets,
+        SensitiveClassifierPolicy, SensitivePersistencePolicy, SensitivePolicyV1,
+        TERMINAL_CONTROL_VERSION, TerminalControlActionV1, TerminalControlV1, signature_input,
+        terminal_control_signature_input,
+    };
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use tempfile::TempDir;
 
@@ -1287,12 +1929,44 @@ mod tests {
     }
 
     fn binding() -> GrantBinding {
+        binding_for_policy(HASH_C)
+    }
+
+    fn binding_for_policy(policy_sha256: &str) -> GrantBinding {
         GrantBinding {
             mind_id: "elm-test".into(),
             mandate_sha256: HASH_A.into(),
             runtime_sha256: HASH_B.into(),
-            policy_sha256: HASH_C.into(),
+            policy_sha256: policy_sha256.into(),
         }
+    }
+
+    fn latch_policy_fixture() -> (Vec<u8>, String) {
+        let policy = SensitivePolicyV1 {
+            version: SENSITIVE_POLICY_VERSION,
+            profile_id: "sensitive-v1".into(),
+            capabilities: Vec::new(),
+            budgets: SensitiveBudgets {
+                max_runs: 1,
+                max_effects: 0,
+                max_lease_s: 300,
+                max_wall_ms: 1_000,
+                max_cpu_ms: 1_000,
+                max_rss_bytes: 1_048_576,
+                max_io_read_bytes: 1_048_576,
+                max_io_write_bytes: 1_048_576,
+                max_scratch_bytes: 1_048_576,
+            },
+            classifier: SensitiveClassifierPolicy::Disabled,
+            persistence: SensitivePersistencePolicy {
+                guest_persistence: GuestPersistence::Disabled,
+                max_artifacts: 0,
+                max_total_artifact_bytes: 0,
+            },
+        };
+        let bytes = policy.canonical_bytes().unwrap();
+        let canonical = CanonicalSensitivePolicy::parse(&bytes).unwrap();
+        (bytes, canonical.policy_sha256().to_owned())
     }
 
     fn grant(id: &str, sequence: u64) -> GrantV1 {
@@ -1312,6 +1986,12 @@ mod tests {
             mode: GrantMode::SensitiveGranted,
             nonce: NONCE.into(),
         }
+    }
+
+    fn latch_grant(id: &str, sequence: u64, policy_sha256: &str) -> GrantV1 {
+        let mut grant = grant(id, sequence);
+        grant.policy_sha256 = policy_sha256.into();
+        grant
     }
 
     fn signed(grant: &GrantV1) -> (Vec<u8>, Vec<u8>) {
@@ -1355,6 +2035,211 @@ mod tests {
             grant: active.grant.clone(),
             payload_sha256: active.payload_sha256,
             ledger_binding: active.ledger_binding,
+        }
+    }
+
+    fn downgrade_v4_to_v3(connection: &Connection) {
+        connection
+            .execute_batch(
+                "DROP TRIGGER policy_latch_events_immutable;
+                 DROP TRIGGER policy_latch_events_no_delete;
+                 DROP TABLE policy_latch_events;
+                 DROP TRIGGER terminal_control_receipts_immutable;
+                 DROP TRIGGER terminal_control_receipts_no_delete;
+                 DROP TRIGGER terminal_control_receipts_shared_sequence;
+                 DROP TRIGGER grant_rows_shared_sequence;
+                 DROP TABLE terminal_control_receipts;
+                 DROP TRIGGER grant_state_no_delete;
+                 DROP TRIGGER grant_state_sequence_monotonic;
+                 ALTER TABLE grant_state RENAME TO grant_state_v4;
+                 CREATE TABLE grant_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    issuer_id TEXT,
+                    last_issuer_seq BLOB,
+                    grant_count INTEGER NOT NULL CHECK (grant_count >= 0),
+                    total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+                    CHECK (
+                        (issuer_id IS NULL AND last_issuer_seq IS NULL AND grant_count = 0)
+                        OR
+                        (typeof(issuer_id) = 'text'
+                         AND length(CAST(issuer_id AS BLOB)) BETWEEN 1 AND 120
+                         AND issuer_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+                         AND typeof(last_issuer_seq) = 'blob'
+                         AND length(last_issuer_seq) = 8
+                         AND last_issuer_seq != zeroblob(8)
+                         AND grant_count > 0)
+                    )
+                 );
+                 INSERT INTO grant_state
+                 SELECT * FROM grant_state_v4;
+                 DROP TABLE grant_state_v4;
+                 CREATE TRIGGER grant_state_no_delete
+                 BEFORE DELETE ON grant_state
+                 BEGIN SELECT RAISE(ABORT, 'grant state cannot be deleted'); END;
+                 CREATE TRIGGER grant_state_sequence_monotonic
+                 BEFORE UPDATE OF issuer_id, last_issuer_seq ON grant_state
+                 WHEN NOT (
+                    (OLD.issuer_id IS NULL AND OLD.last_issuer_seq IS NULL
+                     AND NEW.issuer_id IS NOT NULL AND NEW.last_issuer_seq IS NOT NULL)
+                    OR
+                    (OLD.issuer_id = NEW.issuer_id
+                     AND typeof(NEW.last_issuer_seq) = 'blob'
+                     AND NEW.last_issuer_seq > OLD.last_issuer_seq)
+                 )
+                 BEGIN SELECT RAISE(ABORT, 'issuer sequence must advance'); END;
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+    }
+
+    fn flag_control(id: &str, sequence: u64, grant: &GrantV1) -> TerminalControlV1 {
+        let payload = grant.canonical_payload().unwrap();
+        TerminalControlV1 {
+            version: TERMINAL_CONTROL_VERSION,
+            control_id: id.into(),
+            issuer_id: "operator-1".into(),
+            issuer_seq: sequence,
+            executor_id: "executor-1".into(),
+            policy_epoch: 3,
+            target: TerminalControlActionV1::FlagGrant {
+                grant_id: grant.grant_id.clone(),
+                grant_payload_sha256: sha256(&payload)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            },
+            issued_at_unix_s: NOW,
+            expires_at_unix_s: NOW + 300,
+            nonce: NONCE.into(),
+        }
+    }
+
+    fn clear_control(id: &str, sequence: u64) -> TerminalControlV1 {
+        clear_control_for_policy(id, sequence, HASH_C)
+    }
+
+    fn clear_control_for_policy(id: &str, sequence: u64, policy_sha256: &str) -> TerminalControlV1 {
+        TerminalControlV1 {
+            version: TERMINAL_CONTROL_VERSION,
+            control_id: id.into(),
+            issuer_id: "operator-1".into(),
+            issuer_seq: sequence,
+            executor_id: "executor-1".into(),
+            policy_epoch: 3,
+            target: TerminalControlActionV1::ClearLatch {
+                profile_id: "sensitive-v1".into(),
+                policy_sha256: policy_sha256.into(),
+            },
+            issued_at_unix_s: NOW,
+            expires_at_unix_s: NOW + 300,
+            nonce: NONCE.into(),
+        }
+    }
+
+    fn insert_control_row(connection: &Connection, control: &TerminalControlV1) {
+        let payload = control.canonical_payload().unwrap();
+        let signature = key(7)
+            .sign(&terminal_control_signature_input(&payload).unwrap())
+            .as_ref()
+            .to_vec();
+        let (action, grant_id, grant_hash, profile_id, policy_hash) = match &control.target {
+            TerminalControlActionV1::RevokeGrant {
+                grant_id,
+                grant_payload_sha256,
+            } => (
+                "revoke_grant",
+                Some(grant_id.as_str()),
+                Some(lower_hex_hash(grant_payload_sha256).unwrap()),
+                None,
+                None,
+            ),
+            TerminalControlActionV1::FlagGrant {
+                grant_id,
+                grant_payload_sha256,
+            } => (
+                "flag_grant",
+                Some(grant_id.as_str()),
+                Some(lower_hex_hash(grant_payload_sha256).unwrap()),
+                None,
+                None,
+            ),
+            TerminalControlActionV1::ClearLatch {
+                profile_id,
+                policy_sha256,
+            } => (
+                "clear_latch",
+                None,
+                None,
+                Some(profile_id.as_str()),
+                Some(lower_hex_hash(policy_sha256).unwrap()),
+            ),
+        };
+        let next: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(receipt_seq), 0) + 1 FROM terminal_control_receipts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO terminal_control_receipts (
+                    receipt_seq, control_id, issuer_id, issuer_seq, executor_id, policy_epoch,
+                    target_action, target_grant_id, target_grant_payload_sha256,
+                    target_profile_id, target_policy_sha256, issued_at_unix_s,
+                    expires_at_unix_s, admitted_at_unix_s, payload_sha256, payload_bytes, signature
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    next,
+                    control.control_id,
+                    control.issuer_id,
+                    u64_blob(control.issuer_seq).as_slice(),
+                    control.executor_id,
+                    u64_blob(control.policy_epoch).as_slice(),
+                    action,
+                    grant_id,
+                    grant_hash.as_ref().map(|hash| hash.as_slice()),
+                    profile_id,
+                    policy_hash.as_ref().map(|hash| hash.as_slice()),
+                    u64_blob(control.issued_at_unix_s).as_slice(),
+                    u64_blob(control.expires_at_unix_s).as_slice(),
+                    u64_blob(NOW).as_slice(),
+                    sha256(&payload).as_slice(),
+                    payload,
+                    signature,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn insert_control(connection: &Connection, control: &TerminalControlV1) {
+        insert_control_row(connection, control);
+        let current: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT last_issuer_seq FROM grant_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        match current {
+            Some(last) => {
+                assert!(control.issuer_seq > decode_u64(last.clone(), "test sequence").unwrap());
+                connection
+                    .execute(
+                        "UPDATE grant_state SET last_issuer_seq = ?1 WHERE singleton = 1 AND last_issuer_seq = ?2",
+                        params![u64_blob(control.issuer_seq).as_slice(), last],
+                    )
+                    .unwrap();
+            }
+            None => {
+                connection
+                    .execute(
+                        "UPDATE grant_state SET issuer_id = ?1, last_issuer_seq = ?2
+                         WHERE singleton = 1 AND issuer_id IS NULL",
+                        params![control.issuer_id, u64_blob(control.issuer_seq).as_slice()],
+                    )
+                    .unwrap();
+            }
         }
     }
 
@@ -1542,6 +2427,7 @@ mod tests {
         let mut test = test_ledger(GrantLedgerLimits {
             max_grants: 1,
             max_bytes: bytes - 1,
+            ..GrantLedgerLimits::default()
         });
         assert!(matches!(
             test.ledger.admit(&payload, &signature, &binding()),
@@ -1555,6 +2441,7 @@ mod tests {
             GrantLedgerLimits {
                 max_grants: 1,
                 max_bytes: bytes,
+                ..GrantLedgerLimits::default()
             },
             Clock::Fixed(NOW),
         )
@@ -1612,6 +2499,7 @@ mod tests {
                 GrantLedgerLimits {
                     max_grants: 1,
                     max_bytes: 1,
+                    ..GrantLedgerLimits::default()
                 },
                 Clock::Fixed(NOW),
             ),
@@ -1958,12 +2846,543 @@ mod tests {
     }
 
     #[test]
+    fn schema_v3_migration_preserves_grants_and_terminal_receipts_exactly() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-v3", 7);
+        test.ledger.complete(active).unwrap();
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        let before_grant: (String, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT grant_id, issuer_id, issuer_seq, payload_sha256, payload_bytes, signature
+                 FROM grants WHERE grant_id = 'grant-v3'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let before_terminal: (i64, String, Vec<u8>, String, Vec<u8>) = connection
+            .query_row(
+                "SELECT event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+                 FROM grant_terminal_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        downgrade_v4_to_v3(&connection);
+        drop(connection);
+
+        let migrated = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let after_grant = migrated
+            .connection
+            .query_row(
+                "SELECT grant_id, issuer_id, issuer_seq, payload_sha256, payload_bytes, signature
+                 FROM grants WHERE grant_id = 'grant-v3'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let after_terminal = migrated
+            .connection
+            .query_row(
+                "SELECT event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+                 FROM grant_terminal_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(before_grant, after_grant);
+        assert_eq!(before_terminal, after_terminal);
+        assert_eq!(
+            migrated
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_v3_migration_failure_rolls_back_state_objects_and_version() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-v3", 7);
+        test.ledger.complete(active).unwrap();
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        downgrade_v4_to_v3(&connection);
+        connection
+            .execute(
+                "CREATE TABLE terminal_control_receipts (collision INTEGER)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        let connection = Connection::open(&test.path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let state_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM grant_state", [], |row| row.get(0))
+            .unwrap();
+        let old_state: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'grant_state_v3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let grant_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM grants", [], |row| row.get(0))
+            .unwrap();
+        let terminal_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM grant_terminal_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            (version, state_rows, old_state, grant_rows, terminal_rows),
+            (3, 1, 0, 1, 1)
+        );
+    }
+
+    #[test]
+    fn controls_share_the_grant_high_water_and_preserve_grant_only_counters() {
+        let mut test = default_test_ledger();
+        insert_control(&test.ledger.connection, &clear_control("control-5", 5));
+        let (count, bytes, issuer, sequence): (i64, i64, String, Vec<u8>) = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT grant_count, total_bytes, issuer_id, last_issuer_seq FROM grant_state",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((count, bytes, issuer.as_str()), (0, 0, "operator-1"));
+        assert_eq!(decode_u64(sequence, "sequence").unwrap(), 5);
+        let (payload, signature) = signed(&grant("stale-after-control", 4));
+        assert!(matches!(
+            test.ledger.admit(&payload, &signature, &binding()),
+            Err(GrantLedgerError::StaleIssuerSequence)
+        ));
+        let (payload, signature) = signed(&grant("new-after-control", 6));
+        test.ledger.admit(&payload, &signature, &binding()).unwrap();
+        drop(test.ledger);
+        GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn latch_state_is_latest_event_for_the_exact_three_part_key() {
+        let mut test = default_test_ledger();
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (payload, signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(&payload, &signature, &binding_for_policy(&policy_sha256))
+            .unwrap();
+        insert_control(
+            &test.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW + 1).as_slice()
+                ],
+            )
+            .unwrap();
+        assert!(
+            test.ledger
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        assert!(
+            !test
+                .ledger
+                .policy_latch_is_set("executor-1", "other-profile", &policy_hash)
+                .unwrap()
+        );
+
+        insert_control(
+            &test.ledger.connection,
+            &clear_control_for_policy("control-clear", 3, &policy_sha256),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (2, 'executor-1', 'sensitive-v1', ?1, NULL, 'clear', NULL,
+                           'control-clear', ?2)",
+                params![policy_hash.as_slice(), u64_blob(NOW + 2).as_slice()],
+            )
+            .unwrap();
+        assert!(
+            !test
+                .ledger
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        drop(test.ledger);
+        let reopened = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert!(
+            !reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn control_and_latch_rows_are_append_only_bounded_and_checked_on_reopen() {
+        let mut test = default_test_ledger();
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (payload, signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(&payload, &signature, &binding_for_policy(&policy_sha256))
+            .unwrap();
+        insert_control(
+            &test.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW + 1).as_slice()
+                ],
+            )
+            .unwrap();
+        insert_control(
+            &test.ledger.connection,
+            &clear_control_for_policy("control-clear", 3, &policy_sha256),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (2, 'executor-1', 'sensitive-v1', ?1, NULL, 'clear', NULL,
+                           'control-clear', ?2)",
+                params![policy_hash.as_slice(), u64_blob(NOW + 2).as_slice()],
+            )
+            .unwrap();
+        assert!(
+            test.ledger
+                .connection
+                .execute("DELETE FROM policy_latch_events", [])
+                .is_err()
+        );
+        assert!(
+            test.ledger
+                .connection
+                .execute("UPDATE policy_latch_events SET profile_id = 'other'", [])
+                .is_err()
+        );
+        assert!(
+            test.ledger
+                .connection
+                .execute("DELETE FROM terminal_control_receipts", [])
+                .is_err()
+        );
+        assert!(
+            test.ledger
+                .connection
+                .execute(
+                    "UPDATE terminal_control_receipts SET target_profile_id = 'other'",
+                    []
+                )
+                .is_err()
+        );
+        drop(test.ledger);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits {
+                    max_terminal_control_bytes: 1,
+                    ..GrantLedgerLimits::default()
+                },
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits {
+                    max_latch_bytes: 1,
+                    ..GrantLedgerLimits::default()
+                },
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+
+        let connection = Connection::open(&test.path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER terminal_control_receipts_immutable;
+             UPDATE terminal_control_receipts SET payload_sha256 = zeroblob(32);
+             CREATE TRIGGER terminal_control_receipts_immutable
+             BEFORE UPDATE ON terminal_control_receipts
+             BEGIN SELECT RAISE(ABORT, 'terminal control receipts are immutable'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn control_admission_time_must_remain_inside_signed_window() {
+        let test = default_test_ledger();
+        insert_control(&test.ledger.connection, &clear_control("control-1", 1));
+        test.ledger
+            .connection
+            .execute_batch(
+                "DROP TRIGGER terminal_control_receipts_immutable;
+                 UPDATE terminal_control_receipts
+                 SET admitted_at_unix_s = expires_at_unix_s;
+                 CREATE TRIGGER terminal_control_receipts_immutable
+                 BEFORE UPDATE ON terminal_control_receipts
+                 BEGIN SELECT RAISE(ABORT, 'terminal control receipts are immutable'); END;",
+            )
+            .unwrap();
+        drop(test.ledger);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn latch_events_require_exact_control_source_and_flag_before_clear() {
+        let mut wrong_source = default_test_ledger();
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (payload, signature) = signed(&claim);
+        let _active = wrong_source
+            .ledger
+            .admit(&payload, &signature, &binding_for_policy(&policy_sha256))
+            .unwrap();
+        insert_control(
+            &wrong_source.ledger.connection,
+            &clear_control_for_policy("control-clear", 2, &policy_sha256),
+        );
+        assert!(
+            wrong_source
+                .ledger
+                .connection
+                .execute(
+                    "INSERT INTO policy_latch_events (
+                event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                kind, grant_id, control_id, occurred_at_unix_s
+             ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                       'grant-flag', NULL, ?3)",
+                    params![
+                        policy_hash.as_slice(),
+                        policy_bytes.clone(),
+                        u64_blob(NOW + 1).as_slice()
+                    ]
+                )
+                .is_err()
+        );
+        wrong_source
+            .ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                kind, grant_id, control_id, occurred_at_unix_s
+             ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                       'grant-flag', 'control-clear', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW + 1).as_slice()
+                ],
+            )
+            .unwrap();
+        drop(wrong_source.ledger);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &wrong_source.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+
+        let clear_first = default_test_ledger();
+        insert_control(
+            &clear_first.ledger.connection,
+            &clear_control_for_policy("control-clear", 1, &policy_sha256),
+        );
+        clear_first
+            .ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                kind, grant_id, control_id, occurred_at_unix_s
+             ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, NULL, 'clear', NULL,
+                       'control-clear', ?2)",
+                params![policy_hash.as_slice(), u64_blob(NOW + 1).as_slice()],
+            )
+            .unwrap();
+        drop(clear_first.ledger);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &clear_first.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn reopen_rejects_cross_table_issuer_sequence_collision_after_trigger_bypass() {
+        let mut test = default_test_ledger();
+        let _active = admit(&mut test.ledger, "grant-1", 1);
+        test.ledger
+            .connection
+            .execute_batch("DROP TRIGGER terminal_control_receipts_shared_sequence")
+            .unwrap();
+        insert_control_row(
+            &test.ledger.connection,
+            &clear_control("control-collision", 1),
+        );
+        test.ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER terminal_control_receipts_shared_sequence
+                 BEFORE INSERT ON terminal_control_receipts
+                 WHEN EXISTS (SELECT 1 FROM grants
+                              WHERE issuer_id = NEW.issuer_id AND issuer_seq = NEW.issuer_seq)
+                 BEGIN SELECT RAISE(ABORT, 'issuer sequence was already used by a grant'); END;",
+            )
+            .unwrap();
+        drop(test.ledger);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
     fn schema_v2_migration_preserves_existing_terminal_receipts() {
         let mut test = default_test_ledger();
         let active = admit(&mut test.ledger, "grant-complete", 1);
         let before = test.ledger.complete(active).unwrap();
         drop(test.ledger);
         let connection = Connection::open(&test.path).unwrap();
+        downgrade_v4_to_v3(&connection);
         connection.pragma_update(None, "user_version", 2).unwrap();
         drop(connection);
 
@@ -1991,6 +3410,7 @@ mod tests {
         let path = test.path.clone();
         drop(test.ledger);
         let connection = Connection::open(&path).unwrap();
+        downgrade_v4_to_v3(&connection);
         connection
             .execute_batch(
                 "CREATE TABLE grant_terminal_events_v2 (collision INTEGER);
@@ -2041,6 +3461,7 @@ mod tests {
         let active = admit(&mut test.ledger, "grant-v1", 1);
         drop(test.ledger);
         let connection = Connection::open(&test.path).unwrap();
+        downgrade_v4_to_v3(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER grant_terminal_events_immutable;
@@ -2089,6 +3510,7 @@ mod tests {
         let path = test.path.clone();
         drop(test.ledger);
         let connection = Connection::open(&path).unwrap();
+        downgrade_v4_to_v3(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER grant_terminal_events_immutable;
@@ -2132,6 +3554,7 @@ mod tests {
         let path = test.path.clone();
         drop(test.ledger);
         let connection = Connection::open(&path).unwrap();
+        downgrade_v4_to_v3(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER grant_terminal_events_immutable;
