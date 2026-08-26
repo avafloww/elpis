@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    KubernetesResource, NetworkMethod, SensitiveProfileRef, ServiceAction, sha256_hex, validate_id,
-    validate_lower_hex_64,
+    KubernetesResource, NetworkMethod, PackageOperation, SensitiveProfileRef, ServiceAction,
+    sha256_hex, validate_id, validate_lower_hex_64,
 };
 
 pub const SENSITIVE_LOCAL_PROFILE_VERSION: u32 = 1;
@@ -40,6 +40,8 @@ const MAX_NETWORK_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SERVICE_UNITS: usize = 32;
 const MAX_SERVICE_UNIT_NAME_BYTES: usize = 128;
+const MAX_PACKAGE_NAMES: usize = 128;
+const MAX_PACKAGE_NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +171,17 @@ pub enum SensitiveLocalProfileKindV1 {
         scope: ServiceManagerScope,
         unit_resolution: ServiceUnitResolutionPolicy,
         units: Vec<ServiceUnitRule>,
+    },
+    PackageTransaction {
+        manager: PackageManagerKind,
+        target_root: SensitiveProfileRef,
+        repository_endpoint: SensitiveProfileRef,
+        repository_snapshot: PackageRepositorySnapshot,
+        operations: Vec<PackageOperation>,
+        packages: Vec<PackageSelection>,
+        dependencies: PackageDependencyPolicy,
+        maintainer_scripts: PackageMaintainerScriptPolicy,
+        configuration: PackageConfigurationPolicy,
     },
 }
 
@@ -306,6 +319,24 @@ impl SensitiveLocalProfileKindV1 {
             Self::ServiceManager { scope, units, .. } => {
                 scope.validate()?;
                 validate_service_unit_rules(units)
+            }
+            Self::PackageTransaction {
+                target_root,
+                repository_endpoint,
+                repository_snapshot,
+                operations,
+                packages,
+                ..
+            } => {
+                target_root
+                    .validate()
+                    .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+                repository_endpoint
+                    .validate()
+                    .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+                repository_snapshot.validate()?;
+                validate_package_operations(operations)?;
+                validate_package_names(packages)
             }
         }
     }
@@ -885,6 +916,75 @@ impl ServiceUnitRule {
     }
 }
 
+/// Repository artifacts are fetched through the separately joined endpoint, then consumed offline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageManagerKind {
+    DebianAptDpkgOffline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PackageRepositorySnapshot {
+    /// Exact signed repository metadata bytes; package archive hashes are derived from this snapshot.
+    pub metadata_sha256: String,
+    /// Exact public signing-key bytes accepted to verify the snapshot signature.
+    pub signing_key_sha256: String,
+}
+
+impl PackageRepositorySnapshot {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_lower_hex_64(&self.metadata_sha256)
+            .and_then(|_| validate_lower_hex_64(&self.signing_key_sha256))
+            .map_err(|_| SensitiveLocalProfileError::InvalidField)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSelection {
+    pub name: String,
+    pub version: String,
+    pub architecture: PackageArchitecture,
+    /// Exact package archive bytes; must also match the pinned snapshot metadata.
+    pub archive_sha256: String,
+}
+
+impl PackageSelection {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_package_name(&self.name)?;
+        validate_package_version(&self.version)?;
+        validate_lower_hex_64(&self.archive_sha256)
+            .map_err(|_| SensitiveLocalProfileError::InvalidField)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageArchitecture {
+    Amd64,
+    Arm64,
+    I386,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageDependencyPolicy {
+    ExactListedPackagesOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageMaintainerScriptPolicy {
+    Forbidden,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageConfigurationPolicy {
+    FailOnPromptOrConffileChange,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -899,6 +999,53 @@ pub enum SensitiveLocalProfileError {
     InvalidField,
     #[error("sensitive local profile lists must be nonempty, sorted, and unique")]
     NonCanonicalList,
+}
+
+fn validate_package_operations(
+    operations: &[PackageOperation],
+) -> Result<(), SensitiveLocalProfileError> {
+    if operations.is_empty() || operations.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    Ok(())
+}
+
+fn validate_package_names(packages: &[PackageSelection]) -> Result<(), SensitiveLocalProfileError> {
+    if packages.is_empty()
+        || packages.len() > MAX_PACKAGE_NAMES
+        || packages.windows(2).any(|pair| pair[0].name >= pair[1].name)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for package in packages {
+        package.validate()?;
+    }
+    Ok(())
+}
+
+fn validate_package_name(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > MAX_PACKAGE_NAME_BYTES
+        || !value.as_bytes()[0].is_ascii_lowercase()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')
+        })
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_package_version(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.is_empty()
+        || value.len() > MAX_PACKAGE_NAME_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b':' | b'~' | b'-')
+        })
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
 }
 
 fn validate_service_unit_rules(
@@ -2882,6 +3029,256 @@ mod tests {
                         serde_json::json!({"LD_PRELOAD":"/tmp/x.so"})
                 }
                 "transient" => value["profile"]["units"][0]["transient"] = serde_json::json!(true),
+                _ => value["profile"]["credential"] = serde_json::json!("secret"),
+            }
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
+    }
+    fn package_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "debian-tools".into(),
+            profile: SensitiveLocalProfileKindV1::PackageTransaction {
+                manager: PackageManagerKind::DebianAptDpkgOffline,
+                target_root: SensitiveProfileRef {
+                    id: "debian-root".into(),
+                    sha256: "a".repeat(64),
+                },
+                repository_endpoint: SensitiveProfileRef {
+                    id: "debian-snapshot".into(),
+                    sha256: "b".repeat(64),
+                },
+                repository_snapshot: PackageRepositorySnapshot {
+                    metadata_sha256: "c".repeat(64),
+                    signing_key_sha256: "d".repeat(64),
+                },
+                operations: vec![PackageOperation::Install, PackageOperation::Upgrade],
+                packages: vec![
+                    PackageSelection {
+                        name: "curl".into(),
+                        version: "7.88.1-10+deb12u12".into(),
+                        architecture: PackageArchitecture::Amd64,
+                        archive_sha256: "e".repeat(64),
+                    },
+                    PackageSelection {
+                        name: "jq".into(),
+                        version: "1.6-2.1+deb12u1".into(),
+                        architecture: PackageArchitecture::Amd64,
+                        archive_sha256: "f".repeat(64),
+                    },
+                ],
+                dependencies: PackageDependencyPolicy::ExactListedPackagesOnly,
+                maintainer_scripts: PackageMaintainerScriptPolicy::Forbidden,
+                configuration: PackageConfigurationPolicy::FailOnPromptOrConffileChange,
+            },
+        }
+    }
+
+    #[test]
+    fn package_profile_canonical_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change"}}"#;
+        const GOLDEN_SHA256: &str =
+            "fb46ecc46615da6808042a62358aab5d776b85f42f33504c595b898bd3712f3e";
+
+        let bytes = package_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &package_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn package_root_endpoint_snapshot_and_archive_hashes_are_exact() {
+        for target in ["root", "endpoint", "metadata", "key", "archive"] {
+            let mut value = package_profile();
+            if let SensitiveLocalProfileKindV1::PackageTransaction {
+                target_root,
+                repository_endpoint,
+                repository_snapshot,
+                packages,
+                ..
+            } = &mut value.profile
+            {
+                match target {
+                    "root" => target_root.sha256 = "A".repeat(64),
+                    "endpoint" => repository_endpoint.sha256 = "short".into(),
+                    "metadata" => repository_snapshot.metadata_sha256 = "c".repeat(63),
+                    "key" => repository_snapshot.signing_key_sha256 = "D".repeat(64),
+                    _ => packages[0].archive_sha256 = "e".repeat(63),
+                }
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let original = package_profile().canonical_bytes().unwrap();
+        let mut changed = package_profile();
+        if let SensitiveLocalProfileKindV1::PackageTransaction {
+            repository_snapshot,
+            ..
+        } = &mut changed.profile
+        {
+            repository_snapshot.metadata_sha256 = "9".repeat(64);
+        }
+        assert_ne!(original, changed.canonical_bytes().unwrap());
+    }
+
+    #[test]
+    fn package_operations_and_selections_are_nonempty_sorted_unique_and_bounded() {
+        for operations in [
+            vec![],
+            vec![PackageOperation::Upgrade, PackageOperation::Install],
+            vec![PackageOperation::Install, PackageOperation::Install],
+        ] {
+            let mut value = package_profile();
+            if let SensitiveLocalProfileKindV1::PackageTransaction {
+                operations: target, ..
+            } = &mut value.profile
+            {
+                *target = operations;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        for packages in [
+            vec![],
+            vec![
+                PackageSelection {
+                    name: "jq".into(),
+                    version: "1".into(),
+                    architecture: PackageArchitecture::Amd64,
+                    archive_sha256: "a".repeat(64),
+                },
+                PackageSelection {
+                    name: "curl".into(),
+                    version: "1".into(),
+                    architecture: PackageArchitecture::Amd64,
+                    archive_sha256: "b".repeat(64),
+                },
+            ],
+            vec![
+                PackageSelection {
+                    name: "curl".into(),
+                    version: "1".into(),
+                    architecture: PackageArchitecture::Amd64,
+                    archive_sha256: "a".repeat(64),
+                },
+                PackageSelection {
+                    name: "curl".into(),
+                    version: "2".into(),
+                    architecture: PackageArchitecture::Amd64,
+                    archive_sha256: "b".repeat(64),
+                },
+            ],
+        ] {
+            let mut value = package_profile();
+            if let SensitiveLocalProfileKindV1::PackageTransaction {
+                packages: target, ..
+            } = &mut value.profile
+            {
+                *target = packages;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        let mut value = package_profile();
+        if let SensitiveLocalProfileKindV1::PackageTransaction { packages, .. } = &mut value.profile
+        {
+            *packages = (0..=MAX_PACKAGE_NAMES)
+                .map(|index| PackageSelection {
+                    name: format!("pkg{index:03}"),
+                    version: "1".into(),
+                    architecture: PackageArchitecture::Amd64,
+                    archive_sha256: format!("{index:064x}"),
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+    }
+
+    #[test]
+    fn package_name_version_and_architecture_grammar_fail_closed() {
+        for (name, version) in [
+            ("Curl", "1"),
+            ("../curl", "1"),
+            ("curl:amd64", "1"),
+            ("curl", ""),
+            ("curl", "1/../../x"),
+            ("curl", "1 2"),
+        ] {
+            let mut value = package_profile();
+            if let SensitiveLocalProfileKindV1::PackageTransaction { packages, .. } =
+                &mut value.profile
+            {
+                packages.truncate(1);
+                packages[0].name = name.into();
+                packages[0].version = version.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = package_profile();
+        if let SensitiveLocalProfileKindV1::PackageTransaction { packages, .. } = &mut value.profile
+        {
+            packages.truncate(1);
+            packages[0].name = format!("p{}", "a".repeat(MAX_PACKAGE_NAME_BYTES));
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn package_encoding_rejects_online_urls_host_roots_scripts_hooks_and_args() {
+        let bytes = package_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "manager",
+            "root_path",
+            "repository_url",
+            "architecture",
+            "dependencies",
+            "scripts",
+            "configuration",
+            "arguments",
+            "hooks",
+            "credential",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "manager" => value["profile"]["manager"] = serde_json::json!("apt_online"),
+                "root_path" => value["profile"]["target_root"]["path"] = serde_json::json!("/"),
+                "repository_url" => {
+                    value["profile"]["repository_url"] = serde_json::json!("https://example.test")
+                }
+                "architecture" => {
+                    value["profile"]["packages"][0]["architecture"] = serde_json::json!("native")
+                }
+                "dependencies" => {
+                    value["profile"]["dependencies"] = serde_json::json!("resolve_any")
+                }
+                "scripts" => value["profile"]["maintainer_scripts"] = serde_json::json!("allow"),
+                "configuration" => value["profile"]["configuration"] = serde_json::json!("prompt"),
+                "arguments" => value["profile"]["arguments"] = serde_json::json!(["--force-yes"]),
+                "hooks" => value["profile"]["hooks"] = serde_json::json!(["pre-invoke"]),
                 _ => value["profile"]["credential"] = serde_json::json!("secret"),
             }
             assert_eq!(
