@@ -7,6 +7,7 @@
 //! operation before executing guest code.
 
 mod filesystem;
+mod namespace_child;
 
 use std::collections::BTreeSet;
 use std::fs;
