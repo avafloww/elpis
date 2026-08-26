@@ -1,4 +1,4 @@
-//! Deterministic request proof for filesystem and artifact capability families.
+//! Deterministic request proof for sensitive capability families.
 //!
 //! A proof here only establishes containment of canonical request claims by one exact signed
 //! capability and its content-addressed local profile. It does not inspect a filesystem, verify
@@ -6,6 +6,7 @@
 
 use elpis_grants::{
     CanonicalSensitiveEffectRequest, EditTreeOperation, EditTreeRequestOperationV1,
+    NetworkRequestBodyPolicy, NetworkRequestBodyV1, PackageDependencyPolicy,
     SensitiveCapabilityRule, SensitiveEffectV1, SensitiveLocalProfileKindV1,
     SensitiveLocalProfileV1,
 };
@@ -312,6 +313,447 @@ pub fn prove_path_artifact_effect(
         }
         _ => Err(PathArtifactEffectProofError::UnsupportedCapabilityFamily),
     }
+}
+
+/// A non-cloneable witness for one service, package, remote-action, or network request tuple.
+///
+/// This proof binds only canonical request claims to one exact signed rule and one exact local
+/// profile. In particular, it does not resolve a service unit, inspect package archives or
+/// dependency state, verify an executable or working directory, resolve an origin, construct
+/// headers, open a socket, verify an external body, or perform any effect.
+#[derive(Debug)]
+pub struct OperationalEffectProof {
+    request_sha256: String,
+    profile_id: String,
+    profile_sha256: String,
+    dimensions: SensitiveEffectProofDimensions,
+}
+
+impl OperationalEffectProof {
+    pub fn request_sha256(&self) -> &str {
+        &self.request_sha256
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn profile_sha256(&self) -> &str {
+        &self.profile_sha256
+    }
+
+    pub fn dimensions(&self) -> SensitiveEffectProofDimensions {
+        self.dimensions
+    }
+
+    pub fn request_bytes(&self) -> u64 {
+        self.dimensions.request_bytes
+    }
+
+    pub fn max_result_bytes(&self) -> u64 {
+        self.dimensions.max_result_bytes
+    }
+
+    pub fn io_read_bytes(&self) -> u64 {
+        self.dimensions.io_read_bytes
+    }
+
+    pub fn io_write_bytes(&self) -> u64 {
+        self.dimensions.io_write_bytes
+    }
+
+    pub fn artifact_count(&self) -> u32 {
+        self.dimensions.artifact_count
+    }
+
+    pub fn artifact_bytes(&self) -> u64 {
+        self.dimensions.artifact_bytes
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum OperationalEffectProofError {
+    #[error("capability does not belong to the service/package/remote/network family")]
+    UnsupportedCapabilityFamily,
+    #[error("request effect does not match the capability family")]
+    EffectKindMismatch,
+    #[error("local profile is invalid")]
+    InvalidProfile,
+    #[error("capability, request, and local profile are not exactly bound")]
+    ProfileBindingMismatch,
+    #[error("local profile kind does not match the capability family")]
+    ProfileKindMismatch,
+    #[error("canonical request exceeds the signed request-byte budget")]
+    RequestBytesExceeded,
+    #[error("requested result cap exceeds the signed result-byte budget")]
+    ResultBytesExceeded,
+    #[error("requested service action is absent from the signed rule")]
+    SignedServiceActionDenied,
+    #[error("requested service unit is absent from the bound profile")]
+    ServiceUnitDenied,
+    #[error("requested service action is absent from the exact unit rule")]
+    ProfileServiceActionDenied,
+    #[error("requested package operation is absent from the signed rule")]
+    SignedPackageOperationDenied,
+    #[error("requested package operation is absent from the bound profile")]
+    ProfilePackageOperationDenied,
+    #[error("requested package name is absent from the signed rule")]
+    SignedPackageDenied,
+    #[error("package request is not the bound profile's exact complete package list")]
+    PackageSelectionMismatch,
+    #[error("bound package dependency policy is unsupported")]
+    PackageDependencyPolicyMismatch,
+    #[error("requested remote action is absent from the signed rule")]
+    SignedRemoteActionDenied,
+    #[error("requested remote action is absent from the bound profile")]
+    RemoteActionDenied,
+    #[error("requested remote output exceeds the exact action limits")]
+    RemoteOutputExceeded,
+    #[error("requested network method is absent from the signed rule")]
+    SignedNetworkMethodDenied,
+    #[error("no exact-method route contains the requested path")]
+    NetworkRouteDenied,
+    #[error("request body presence conflicts with the exact route")]
+    NetworkBodyDenied,
+    #[error("request content type is absent from the exact route")]
+    NetworkContentTypeDenied,
+    #[error("request body exceeds the bound endpoint request limit")]
+    NetworkRequestBytesExceeded,
+    #[error("response cap exceeds the bound endpoint response limit")]
+    NetworkResponseBytesExceeded,
+    #[error("byte accounting overflowed")]
+    ArithmeticOverflow,
+}
+
+/// Proves one canonical ServiceAction, PackageOperation, RemoteExecProfile, or NetworkEndpoint
+/// request without performing an effect.
+pub fn prove_operational_effect(
+    capability: &SensitiveCapabilityRule,
+    profile: &SensitiveLocalProfileV1,
+    request: &CanonicalSensitiveEffectRequest,
+) -> Result<OperationalEffectProof, OperationalEffectProofError> {
+    let profile_bytes = profile
+        .canonical_bytes()
+        .map_err(|_| OperationalEffectProofError::InvalidProfile)?;
+    let request_bytes = request
+        .request()
+        .canonical_bytes()
+        .map_err(|_| OperationalEffectProofError::ArithmeticOverflow)?;
+    let request_bytes = u64::try_from(request_bytes.len())
+        .map_err(|_| OperationalEffectProofError::ArithmeticOverflow)?;
+    let profile_sha256 = sha256(&profile_bytes);
+
+    match capability {
+        SensitiveCapabilityRule::ServiceAction {
+            profile: profile_ref,
+            actions,
+            budget,
+        } => {
+            let SensitiveEffectV1::ServiceAction {
+                service_profile_id,
+                unit,
+                action,
+                max_result_bytes,
+            } = &request.request().effect
+            else {
+                return Err(OperationalEffectProofError::EffectKindMismatch);
+            };
+            bind_operational_profile(profile_ref, service_profile_id, profile, &profile_sha256)?;
+            check_operational_budget(request_bytes, *max_result_bytes, budget)?;
+            if !actions.contains(action) {
+                return Err(OperationalEffectProofError::SignedServiceActionDenied);
+            }
+            let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &profile.profile else {
+                return Err(OperationalEffectProofError::ProfileKindMismatch);
+            };
+            let unit_rule = units
+                .iter()
+                .find(|rule| rule.unit == *unit)
+                .ok_or(OperationalEffectProofError::ServiceUnitDenied)?;
+            if !unit_rule.actions.contains(action) {
+                return Err(OperationalEffectProofError::ProfileServiceActionDenied);
+            }
+            Ok(new_operational_proof(
+                request,
+                profile,
+                &profile_ref.sha256,
+                SensitiveEffectProofDimensions {
+                    request_bytes,
+                    max_result_bytes: *max_result_bytes,
+                    io_read_bytes: *max_result_bytes,
+                    io_write_bytes: 0,
+                    artifact_count: 0,
+                    artifact_bytes: 0,
+                },
+            ))
+        }
+        SensitiveCapabilityRule::PackageOperation {
+            profile: profile_ref,
+            operations,
+            packages: signed_packages,
+            budget,
+        } => {
+            let SensitiveEffectV1::PackageOperation {
+                package_profile_id,
+                operation,
+                selections,
+                max_result_bytes,
+            } = &request.request().effect
+            else {
+                return Err(OperationalEffectProofError::EffectKindMismatch);
+            };
+            bind_operational_profile(profile_ref, package_profile_id, profile, &profile_sha256)?;
+            check_operational_budget(request_bytes, *max_result_bytes, budget)?;
+            if !operations.contains(operation) {
+                return Err(OperationalEffectProofError::SignedPackageOperationDenied);
+            }
+            if selections
+                .iter()
+                .any(|selection| !signed_packages.contains(&selection.name))
+            {
+                return Err(OperationalEffectProofError::SignedPackageDenied);
+            }
+            let SensitiveLocalProfileKindV1::PackageTransaction {
+                operations: profile_operations,
+                packages,
+                dependencies,
+                max_io_read_bytes,
+                max_io_write_bytes,
+                ..
+            } = &profile.profile
+            else {
+                return Err(OperationalEffectProofError::ProfileKindMismatch);
+            };
+            if !profile_operations.contains(operation) {
+                return Err(OperationalEffectProofError::ProfilePackageOperationDenied);
+            }
+            if !matches!(
+                dependencies,
+                PackageDependencyPolicy::ExactListedPackagesOnly
+            ) {
+                return Err(OperationalEffectProofError::PackageDependencyPolicyMismatch);
+            }
+            let selections_match = selections.len() == packages.len()
+                && selections.iter().zip(packages).all(|(requested, exact)| {
+                    requested.name == exact.name
+                        && requested.version == exact.version
+                        && requested.architecture == exact.architecture
+                        && requested.archive_sha256 == exact.archive_sha256
+                });
+            if !selections_match {
+                return Err(OperationalEffectProofError::PackageSelectionMismatch);
+            }
+            Ok(new_operational_proof(
+                request,
+                profile,
+                &profile_ref.sha256,
+                SensitiveEffectProofDimensions {
+                    request_bytes,
+                    max_result_bytes: *max_result_bytes,
+                    io_read_bytes: *max_io_read_bytes,
+                    io_write_bytes: *max_io_write_bytes,
+                    artifact_count: 0,
+                    artifact_bytes: 0,
+                },
+            ))
+        }
+        SensitiveCapabilityRule::RemoteExecProfile {
+            profile: profile_ref,
+            actions,
+            budget,
+        } => {
+            let SensitiveEffectV1::RemoteExecProfile {
+                remote_profile_id,
+                action_id,
+                max_stdout_bytes,
+                max_stderr_bytes,
+            } = &request.request().effect
+            else {
+                return Err(OperationalEffectProofError::EffectKindMismatch);
+            };
+            bind_operational_profile(profile_ref, remote_profile_id, profile, &profile_sha256)?;
+            check_operational_request_budget(request_bytes, budget)?;
+            if !actions.contains(action_id) {
+                return Err(OperationalEffectProofError::SignedRemoteActionDenied);
+            }
+            let SensitiveLocalProfileKindV1::RemoteActions {
+                actions: profile_actions,
+            } = &profile.profile
+            else {
+                return Err(OperationalEffectProofError::ProfileKindMismatch);
+            };
+            let action = profile_actions
+                .iter()
+                .find(|action| action.id == *action_id)
+                .ok_or(OperationalEffectProofError::RemoteActionDenied)?;
+            if *max_stdout_bytes > action.max_stdout_bytes
+                || *max_stderr_bytes > action.max_stderr_bytes
+            {
+                return Err(OperationalEffectProofError::RemoteOutputExceeded);
+            }
+            let max_result_bytes = checked_operational_add(*max_stdout_bytes, *max_stderr_bytes)?;
+            if max_result_bytes > budget.max_result_bytes {
+                return Err(OperationalEffectProofError::ResultBytesExceeded);
+            }
+            Ok(new_operational_proof(
+                request,
+                profile,
+                &profile_ref.sha256,
+                SensitiveEffectProofDimensions {
+                    request_bytes,
+                    max_result_bytes,
+                    io_read_bytes: action.max_io_read_bytes,
+                    io_write_bytes: action.max_io_write_bytes,
+                    artifact_count: 0,
+                    artifact_bytes: 0,
+                },
+            ))
+        }
+        SensitiveCapabilityRule::NetworkEndpoint {
+            endpoint_profile,
+            methods,
+            budget,
+        } => {
+            let SensitiveEffectV1::NetworkEndpoint {
+                endpoint_profile_id,
+                method,
+                path,
+                body,
+                max_response_bytes,
+            } = &request.request().effect
+            else {
+                return Err(OperationalEffectProofError::EffectKindMismatch);
+            };
+            bind_operational_profile(
+                endpoint_profile,
+                endpoint_profile_id,
+                profile,
+                &profile_sha256,
+            )?;
+            check_operational_request_budget(request_bytes, budget)?;
+            if !methods.contains(method) {
+                return Err(OperationalEffectProofError::SignedNetworkMethodDenied);
+            }
+            let SensitiveLocalProfileKindV1::NetworkEndpoint {
+                routes,
+                max_request_bytes,
+                max_response_bytes: profile_max_response_bytes,
+                ..
+            } = &profile.profile
+            else {
+                return Err(OperationalEffectProofError::ProfileKindMismatch);
+            };
+            let route = routes
+                .iter()
+                .find(|route| {
+                    route.method == *method && network_path_is_within(path, &route.path_prefix)
+                })
+                .ok_or(OperationalEffectProofError::NetworkRouteDenied)?;
+            let content_bytes = match (&route.request_body, body) {
+                (NetworkRequestBodyPolicy::Forbidden, NetworkRequestBodyV1::Forbidden) => 0,
+                (
+                    NetworkRequestBodyPolicy::Allowed { content_types },
+                    NetworkRequestBodyV1::Content {
+                        content_type,
+                        content_bytes,
+                        ..
+                    },
+                ) => {
+                    if !content_types.contains(content_type) {
+                        return Err(OperationalEffectProofError::NetworkContentTypeDenied);
+                    }
+                    *content_bytes
+                }
+                _ => return Err(OperationalEffectProofError::NetworkBodyDenied),
+            };
+            if content_bytes > *max_request_bytes {
+                return Err(OperationalEffectProofError::NetworkRequestBytesExceeded);
+            }
+            if *max_response_bytes > *profile_max_response_bytes {
+                return Err(OperationalEffectProofError::NetworkResponseBytesExceeded);
+            }
+            if *max_response_bytes > budget.max_result_bytes {
+                return Err(OperationalEffectProofError::ResultBytesExceeded);
+            }
+            Ok(new_operational_proof(
+                request,
+                profile,
+                &endpoint_profile.sha256,
+                SensitiveEffectProofDimensions {
+                    request_bytes,
+                    max_result_bytes: *max_response_bytes,
+                    io_read_bytes: *max_response_bytes,
+                    io_write_bytes: content_bytes,
+                    artifact_count: 0,
+                    artifact_bytes: 0,
+                },
+            ))
+        }
+        _ => Err(OperationalEffectProofError::UnsupportedCapabilityFamily),
+    }
+}
+
+fn new_operational_proof(
+    request: &CanonicalSensitiveEffectRequest,
+    profile: &SensitiveLocalProfileV1,
+    profile_sha256: &str,
+    dimensions: SensitiveEffectProofDimensions,
+) -> OperationalEffectProof {
+    OperationalEffectProof {
+        request_sha256: request.request_sha256().to_owned(),
+        profile_id: profile.id.clone(),
+        profile_sha256: profile_sha256.to_owned(),
+        dimensions,
+    }
+}
+
+fn bind_operational_profile(
+    profile_ref: &elpis_grants::SensitiveProfileRef,
+    request_profile_id: &str,
+    profile: &SensitiveLocalProfileV1,
+    profile_sha256: &[u8; 32],
+) -> Result<(), OperationalEffectProofError> {
+    if profile_ref.id != profile.id
+        || request_profile_id != profile.id
+        || !lower_hex_matches(&profile_ref.sha256, profile_sha256)
+    {
+        return Err(OperationalEffectProofError::ProfileBindingMismatch);
+    }
+    Ok(())
+}
+
+fn check_operational_request_budget(
+    request_bytes: u64,
+    budget: &elpis_grants::CapabilityBudget,
+) -> Result<(), OperationalEffectProofError> {
+    if request_bytes > budget.max_request_bytes {
+        return Err(OperationalEffectProofError::RequestBytesExceeded);
+    }
+    Ok(())
+}
+
+fn check_operational_budget(
+    request_bytes: u64,
+    max_result_bytes: u64,
+    budget: &elpis_grants::CapabilityBudget,
+) -> Result<(), OperationalEffectProofError> {
+    check_operational_request_budget(request_bytes, budget)?;
+    if max_result_bytes > budget.max_result_bytes {
+        return Err(OperationalEffectProofError::ResultBytesExceeded);
+    }
+    Ok(())
+}
+
+fn checked_operational_add(left: u64, right: u64) -> Result<u64, OperationalEffectProofError> {
+    left.checked_add(right)
+        .ok_or(OperationalEffectProofError::ArithmeticOverflow)
+}
+
+fn network_path_is_within(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
 fn new_proof(
@@ -1042,6 +1484,823 @@ mod tests {
         assert_eq!(
             checked_add(u64::MAX, 1),
             Err(PathArtifactEffectProofError::ArithmeticOverflow)
+        );
+    }
+}
+
+#[cfg(test)]
+mod operational_tests {
+    use elpis_grants::*;
+
+    use super::*;
+
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn budget() -> CapabilityBudget {
+        CapabilityBudget {
+            max_calls: 4,
+            max_request_bytes: 16_384,
+            max_result_bytes: 4096,
+        }
+    }
+
+    fn profile_ref(profile: &SensitiveLocalProfileV1) -> SensitiveProfileRef {
+        let digest = sha256(&profile.canonical_bytes().unwrap());
+        let mut encoded = String::with_capacity(64);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in digest {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        SensitiveProfileRef {
+            id: profile.id.clone(),
+            sha256: encoded,
+        }
+    }
+
+    fn external_ref(id: &str) -> SensitiveProfileRef {
+        SensitiveProfileRef {
+            id: id.into(),
+            sha256: HASH_A.into(),
+        }
+    }
+
+    fn canonical(effect: SensitiveEffectV1) -> CanonicalSensitiveEffectRequest {
+        let value = SensitiveEffectRequestV1 {
+            version: SENSITIVE_EFFECT_REQUEST_VERSION,
+            effect,
+        };
+        CanonicalSensitiveEffectRequest::parse(&value.canonical_bytes().unwrap()).unwrap()
+    }
+
+    fn service_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "services".into(),
+            profile: SensitiveLocalProfileKindV1::ServiceManager {
+                manager: ServiceManagerKind::SystemdDbus,
+                scope: ServiceManagerScope::User { uid: 1000 },
+                unit_resolution: ServiceUnitResolutionPolicy::ExactCanonicalNameNoAlias,
+                units: vec![
+                    ServiceUnitRule {
+                        unit: "alpha.service".into(),
+                        actions: vec![ServiceAction::Restart, ServiceAction::Status],
+                    },
+                    ServiceUnitRule {
+                        unit: "beta.service".into(),
+                        actions: vec![ServiceAction::Status],
+                    },
+                ],
+            },
+        }
+    }
+
+    fn service_capability(profile: &SensitiveLocalProfileV1) -> SensitiveCapabilityRule {
+        SensitiveCapabilityRule::ServiceAction {
+            profile: profile_ref(profile),
+            actions: vec![ServiceAction::Restart, ServiceAction::Status],
+            budget: budget(),
+        }
+    }
+
+    fn service_request(
+        profile: &SensitiveLocalProfileV1,
+        unit: &str,
+        action: ServiceAction,
+        result: u64,
+    ) -> CanonicalSensitiveEffectRequest {
+        canonical(SensitiveEffectV1::ServiceAction {
+            service_profile_id: profile.id.clone(),
+            unit: unit.into(),
+            action,
+            max_result_bytes: result,
+        })
+    }
+
+    fn package_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "packages".into(),
+            profile: SensitiveLocalProfileKindV1::PackageTransaction {
+                manager: PackageManagerKind::DebianAptDpkgOffline,
+                target_root: external_ref("target-root"),
+                repository_endpoint: SensitiveProfileRef {
+                    id: "repository".into(),
+                    sha256: HASH_B.into(),
+                },
+                repository_snapshot: PackageRepositorySnapshot {
+                    metadata_sha256: HASH_A.into(),
+                    signing_key_sha256: HASH_B.into(),
+                },
+                operations: vec![PackageOperation::Install, PackageOperation::Upgrade],
+                packages: vec![
+                    PackageSelection {
+                        name: "alpha".into(),
+                        version: "1:2.3-4".into(),
+                        architecture: PackageArchitecture::Amd64,
+                        archive_sha256: HASH_A.into(),
+                    },
+                    PackageSelection {
+                        name: "beta".into(),
+                        version: "5.0~rc1".into(),
+                        architecture: PackageArchitecture::Arm64,
+                        archive_sha256: HASH_B.into(),
+                    },
+                ],
+                dependencies: PackageDependencyPolicy::ExactListedPackagesOnly,
+                maintainer_scripts: PackageMaintainerScriptPolicy::Forbidden,
+                configuration: PackageConfigurationPolicy::FailOnPromptOrConffileChange,
+                max_io_read_bytes: 10_000,
+                max_io_write_bytes: 20_000,
+            },
+        }
+    }
+
+    fn package_capability(profile: &SensitiveLocalProfileV1) -> SensitiveCapabilityRule {
+        SensitiveCapabilityRule::PackageOperation {
+            profile: profile_ref(profile),
+            operations: vec![PackageOperation::Install, PackageOperation::Upgrade],
+            packages: vec!["alpha".into(), "beta".into()],
+            budget: budget(),
+        }
+    }
+
+    fn package_selections(profile: &SensitiveLocalProfileV1) -> Vec<PackageRequestSelectionV1> {
+        let SensitiveLocalProfileKindV1::PackageTransaction { packages, .. } = &profile.profile
+        else {
+            unreachable!()
+        };
+        packages
+            .iter()
+            .map(|package| PackageRequestSelectionV1 {
+                name: package.name.clone(),
+                version: package.version.clone(),
+                architecture: package.architecture,
+                archive_sha256: package.archive_sha256.clone(),
+            })
+            .collect()
+    }
+
+    fn package_request(
+        profile: &SensitiveLocalProfileV1,
+        operation: PackageOperation,
+        selections: Vec<PackageRequestSelectionV1>,
+    ) -> CanonicalSensitiveEffectRequest {
+        canonical(SensitiveEffectV1::PackageOperation {
+            package_profile_id: profile.id.clone(),
+            operation,
+            selections,
+            max_result_bytes: 512,
+        })
+    }
+
+    fn remote_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "remote".into(),
+            profile: SensitiveLocalProfileKindV1::RemoteActions {
+                actions: vec![RemoteActionRule {
+                    id: "rotate".into(),
+                    execution: RemoteExecutionMode::DirectNativeElfNoShellOrInterpreter,
+                    executable_path: "/usr/bin/rotate-logs".into(),
+                    executable_sha256: HASH_A.into(),
+                    argv: vec!["/usr/bin/rotate-logs".into(), "--fixed".into()],
+                    environment: RemoteEnvironmentPolicy {
+                        mode: RemoteEnvironmentMode::ClearThenSetFixed,
+                        locale: RemoteLocale::CUtf8,
+                        timezone: RemoteTimezone::Utc,
+                    },
+                    cwd_profile: external_ref("remote-cwd"),
+                    uid: 1000,
+                    gid: 1000,
+                    capabilities: vec![],
+                    stdin: RemoteStdinPolicy::Closed,
+                    no_new_privileges: RemoteNoNewPrivilegesPolicy::Required,
+                    timeout_ms: 5000,
+                    max_stdout_bytes: 1000,
+                    max_stderr_bytes: 500,
+                    max_io_read_bytes: 30_000,
+                    max_io_write_bytes: 40_000,
+                }],
+            },
+        }
+    }
+
+    fn remote_capability(profile: &SensitiveLocalProfileV1) -> SensitiveCapabilityRule {
+        SensitiveCapabilityRule::RemoteExecProfile {
+            profile: profile_ref(profile),
+            actions: vec!["rotate".into()],
+            budget: budget(),
+        }
+    }
+
+    fn remote_request(
+        profile: &SensitiveLocalProfileV1,
+        action_id: &str,
+        stdout: u64,
+        stderr: u64,
+    ) -> CanonicalSensitiveEffectRequest {
+        canonical(SensitiveEffectV1::RemoteExecProfile {
+            remote_profile_id: profile.id.clone(),
+            action_id: action_id.into(),
+            max_stdout_bytes: stdout,
+            max_stderr_bytes: stderr,
+        })
+    }
+
+    fn network_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "network".into(),
+            profile: SensitiveLocalProfileKindV1::NetworkEndpoint {
+                origin: NetworkHttpsOrigin {
+                    protocol: NetworkProtocol::Https,
+                    host: "api.example.test".into(),
+                    port: 443,
+                },
+                address_policy: NetworkAddressPolicy {
+                    mode: NetworkAddressMode::DirectConnectOnlyPinnedNoProxy,
+                    addresses: vec!["198.51.100.10".into()],
+                },
+                tls: NetworkTlsPolicy {
+                    server_name: "api.example.test".into(),
+                    minimum_version: NetworkTlsVersion::Tls13,
+                    verification:
+                        NetworkTlsVerification::PinnedCaAndLeafSpkiWithHostnameAndValidity,
+                    ca_certificate_sha256: vec![HASH_A.into()],
+                    leaf_spki_sha256: vec![HASH_B.into()],
+                },
+                routes: vec![NetworkRouteRule {
+                    path_prefix: "/v1/items".into(),
+                    method: NetworkMethod::Post,
+                    query: NetworkQueryPolicy::Forbidden,
+                    request_body: NetworkRequestBodyPolicy::Allowed {
+                        content_types: vec![NetworkContentType::ApplicationJson],
+                    },
+                    response_content_types: vec![NetworkContentType::ApplicationJson],
+                }],
+                request_headers: NetworkRequestHeaderPolicy::GeneratedHostAndAllowedContentTypeOnly,
+                response_encoding: NetworkResponseEncodingPolicy::IdentityOnly,
+                redirects: NetworkRedirectPolicy::Deny,
+                max_request_bytes: 1000,
+                max_response_bytes: 2000,
+            },
+        }
+    }
+
+    fn network_capability(profile: &SensitiveLocalProfileV1) -> SensitiveCapabilityRule {
+        SensitiveCapabilityRule::NetworkEndpoint {
+            endpoint_profile: profile_ref(profile),
+            methods: vec![NetworkMethod::Post],
+            budget: budget(),
+        }
+    }
+
+    fn network_request(
+        profile: &SensitiveLocalProfileV1,
+        method: NetworkMethod,
+        path: &str,
+        body: NetworkRequestBodyV1,
+        response: u64,
+    ) -> CanonicalSensitiveEffectRequest {
+        canonical(SensitiveEffectV1::NetworkEndpoint {
+            endpoint_profile_id: profile.id.clone(),
+            method,
+            path: path.into(),
+            body,
+            max_response_bytes: response,
+        })
+    }
+
+    fn json_body(bytes: u64) -> NetworkRequestBodyV1 {
+        NetworkRequestBodyV1::Content {
+            content_type: NetworkContentType::ApplicationJson,
+            content_sha256: HASH_A.into(),
+            content_bytes: bytes,
+        }
+    }
+
+    #[test]
+    fn operational_accounting_rejects_integer_overflow() {
+        assert_eq!(
+            checked_operational_add(u64::MAX, 1).unwrap_err(),
+            OperationalEffectProofError::ArithmeticOverflow
+        );
+    }
+
+    #[test]
+    fn exact_operational_tuples_bind_hashes_and_reservation_dimensions() {
+        let service = service_profile();
+        let request = service_request(&service, "alpha.service", ServiceAction::Restart, 300);
+        let proof =
+            prove_operational_effect(&service_capability(&service), &service, &request).unwrap();
+        assert_eq!(proof.request_sha256(), request.request_sha256());
+        assert_eq!(proof.profile_id(), service.id);
+        assert_eq!(proof.profile_sha256(), profile_ref(&service).sha256);
+        assert_eq!(
+            proof.dimensions(),
+            SensitiveEffectProofDimensions {
+                request_bytes: request.request().canonical_bytes().unwrap().len() as u64,
+                max_result_bytes: 300,
+                io_read_bytes: 300,
+                io_write_bytes: 0,
+                artifact_count: 0,
+                artifact_bytes: 0,
+            }
+        );
+
+        let packages = package_profile();
+        let request = package_request(
+            &packages,
+            PackageOperation::Install,
+            package_selections(&packages),
+        );
+        let proof =
+            prove_operational_effect(&package_capability(&packages), &packages, &request).unwrap();
+        assert_eq!(proof.max_result_bytes(), 512);
+        assert_eq!(proof.io_read_bytes(), 10_000);
+        assert_eq!(proof.io_write_bytes(), 20_000);
+
+        let remote = remote_profile();
+        let request = remote_request(&remote, "rotate", 700, 300);
+        let proof =
+            prove_operational_effect(&remote_capability(&remote), &remote, &request).unwrap();
+        assert_eq!(proof.max_result_bytes(), 1000);
+        assert_eq!(proof.io_read_bytes(), 30_000);
+        assert_eq!(proof.io_write_bytes(), 40_000);
+
+        let network = network_profile();
+        let request = network_request(
+            &network,
+            NetworkMethod::Post,
+            "/v1/items/current",
+            json_body(123),
+            1500,
+        );
+        let proof =
+            prove_operational_effect(&network_capability(&network), &network, &request).unwrap();
+        assert_eq!(proof.max_result_bytes(), 1500);
+        assert_eq!(proof.io_read_bytes(), 1500);
+        assert_eq!(proof.io_write_bytes(), 123);
+        assert_eq!(proof.artifact_count(), 0);
+        assert_eq!(proof.artifact_bytes(), 0);
+
+        let different_body = network_request(
+            &network,
+            NetworkMethod::Post,
+            "/v1/items/current",
+            NetworkRequestBodyV1::Content {
+                content_type: NetworkContentType::ApplicationJson,
+                content_sha256: HASH_B.into(),
+                content_bytes: 123,
+            },
+            1500,
+        );
+        let different_proof =
+            prove_operational_effect(&network_capability(&network), &network, &different_body)
+                .unwrap();
+        assert_eq!(
+            different_proof.request_sha256(),
+            different_body.request_sha256()
+        );
+        assert_ne!(different_proof.request_sha256(), proof.request_sha256());
+
+        let mut bodyless = network_profile();
+        let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut bodyless.profile
+        else {
+            unreachable!()
+        };
+        routes[0].method = NetworkMethod::Get;
+        routes[0].request_body = NetworkRequestBodyPolicy::Forbidden;
+        let capability = SensitiveCapabilityRule::NetworkEndpoint {
+            endpoint_profile: profile_ref(&bodyless),
+            methods: vec![NetworkMethod::Get],
+            budget: budget(),
+        };
+        let request = network_request(
+            &bodyless,
+            NetworkMethod::Get,
+            "/v1/items",
+            NetworkRequestBodyV1::Forbidden,
+            100,
+        );
+        let proof = prove_operational_effect(&capability, &bodyless, &request).unwrap();
+        assert_eq!(proof.io_write_bytes(), 0);
+        assert_eq!(proof.io_read_bytes(), 100);
+    }
+
+    #[test]
+    fn service_requires_signed_action_and_exact_unit_action() {
+        let profile = service_profile();
+        let mut capability = service_capability(&profile);
+        let request = service_request(&profile, "alpha.service", ServiceAction::Restart, 300);
+        let SensitiveCapabilityRule::ServiceAction { actions, .. } = &mut capability else {
+            unreachable!()
+        };
+        *actions = vec![ServiceAction::Status];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::SignedServiceActionDenied
+        );
+
+        let capability = service_capability(&profile);
+        let request = service_request(&profile, "gamma.service", ServiceAction::Status, 300);
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::ServiceUnitDenied
+        );
+        let request = service_request(&profile, "beta.service", ServiceAction::Restart, 300);
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::ProfileServiceActionDenied
+        );
+    }
+
+    #[test]
+    fn package_requires_exact_operation_names_versions_archives_and_complete_closure() {
+        let profile = package_profile();
+        let selections = package_selections(&profile);
+        let request = package_request(&profile, PackageOperation::Install, selections.clone());
+        let mut capability = package_capability(&profile);
+        let SensitiveCapabilityRule::PackageOperation { operations, .. } = &mut capability else {
+            unreachable!()
+        };
+        *operations = vec![PackageOperation::Upgrade];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::SignedPackageOperationDenied
+        );
+
+        let mut capability = package_capability(&profile);
+        let SensitiveCapabilityRule::PackageOperation { packages, .. } = &mut capability else {
+            unreachable!()
+        };
+        *packages = vec!["alpha".into()];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::SignedPackageDenied
+        );
+
+        for changed in ["version", "architecture", "archive"] {
+            let mut altered = selections.clone();
+            match changed {
+                "version" => altered[0].version = "9.9".into(),
+                "architecture" => altered[0].architecture = PackageArchitecture::I386,
+                "archive" => altered[0].archive_sha256 = HASH_B.into(),
+                _ => unreachable!(),
+            }
+            let request = package_request(&profile, PackageOperation::Install, altered);
+            assert_eq!(
+                prove_operational_effect(&package_capability(&profile), &profile, &request)
+                    .unwrap_err(),
+                OperationalEffectProofError::PackageSelectionMismatch
+            );
+        }
+        let request = package_request(
+            &profile,
+            PackageOperation::Install,
+            vec![selections[0].clone()],
+        );
+        assert_eq!(
+            prove_operational_effect(&package_capability(&profile), &profile, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::PackageSelectionMismatch
+        );
+
+        let mut restricted = package_profile();
+        let SensitiveLocalProfileKindV1::PackageTransaction { operations, .. } =
+            &mut restricted.profile
+        else {
+            unreachable!()
+        };
+        *operations = vec![PackageOperation::Upgrade];
+        let request = package_request(
+            &restricted,
+            PackageOperation::Install,
+            package_selections(&restricted),
+        );
+        assert_eq!(
+            prove_operational_effect(&package_capability(&restricted), &restricted, &request,)
+                .unwrap_err(),
+            OperationalEffectProofError::ProfilePackageOperationDenied
+        );
+    }
+
+    #[test]
+    fn remote_action_binds_fixed_profile_identity_and_all_output_limits() {
+        let profile = remote_profile();
+        let request = remote_request(&profile, "rotate", 700, 300);
+        let mut capability = remote_capability(&profile);
+        let SensitiveCapabilityRule::RemoteExecProfile { actions, .. } = &mut capability else {
+            unreachable!()
+        };
+        *actions = vec!["other".into()];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::SignedRemoteActionDenied
+        );
+
+        let request = remote_request(&profile, "other", 1, 1);
+        let mut capability = remote_capability(&profile);
+        let SensitiveCapabilityRule::RemoteExecProfile { actions, .. } = &mut capability else {
+            unreachable!()
+        };
+        *actions = vec!["other".into()];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::RemoteActionDenied
+        );
+        for (stdout, stderr) in [(1001, 1), (1, 501)] {
+            let request = remote_request(&profile, "rotate", stdout, stderr);
+            assert_eq!(
+                prove_operational_effect(&remote_capability(&profile), &profile, &request)
+                    .unwrap_err(),
+                OperationalEffectProofError::RemoteOutputExceeded
+            );
+        }
+        let mut capability = remote_capability(&profile);
+        let SensitiveCapabilityRule::RemoteExecProfile { budget, .. } = &mut capability else {
+            unreachable!()
+        };
+        budget.max_result_bytes = 999;
+        assert_eq!(
+            prove_operational_effect(
+                &capability,
+                &profile,
+                &remote_request(&profile, "rotate", 700, 300),
+            )
+            .unwrap_err(),
+            OperationalEffectProofError::ResultBytesExceeded
+        );
+    }
+
+    #[test]
+    fn network_requires_signed_method_segment_route_exact_body_and_both_response_caps() {
+        let profile = network_profile();
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items/current",
+            json_body(100),
+            1500,
+        );
+        let mut capability = network_capability(&profile);
+        let SensitiveCapabilityRule::NetworkEndpoint { methods, .. } = &mut capability else {
+            unreachable!()
+        };
+        *methods = vec![NetworkMethod::Get];
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request).unwrap_err(),
+            OperationalEffectProofError::SignedNetworkMethodDenied
+        );
+
+        for path in ["/v1/item", "/v1/items-not-contained"] {
+            let request =
+                network_request(&profile, NetworkMethod::Post, path, json_body(100), 1500);
+            assert_eq!(
+                prove_operational_effect(&network_capability(&profile), &profile, &request)
+                    .unwrap_err(),
+                OperationalEffectProofError::NetworkRouteDenied
+            );
+        }
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items",
+            NetworkRequestBodyV1::Forbidden,
+            1500,
+        );
+        assert_eq!(
+            prove_operational_effect(&network_capability(&profile), &profile, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::NetworkBodyDenied
+        );
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items",
+            NetworkRequestBodyV1::Content {
+                content_type: NetworkContentType::TextPlainUtf8,
+                content_sha256: HASH_A.into(),
+                content_bytes: 100,
+            },
+            1500,
+        );
+        assert_eq!(
+            prove_operational_effect(&network_capability(&profile), &profile, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::NetworkContentTypeDenied
+        );
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items",
+            json_body(1001),
+            1500,
+        );
+        assert_eq!(
+            prove_operational_effect(&network_capability(&profile), &profile, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::NetworkRequestBytesExceeded
+        );
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items",
+            json_body(100),
+            2001,
+        );
+        assert_eq!(
+            prove_operational_effect(&network_capability(&profile), &profile, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::NetworkResponseBytesExceeded
+        );
+        let mut capability = network_capability(&profile);
+        let SensitiveCapabilityRule::NetworkEndpoint { budget, .. } = &mut capability else {
+            unreachable!()
+        };
+        budget.max_result_bytes = 1499;
+        assert_eq!(
+            prove_operational_effect(&capability, &profile, &request_for_response(&profile, 1500))
+                .unwrap_err(),
+            OperationalEffectProofError::ResultBytesExceeded
+        );
+    }
+
+    fn request_for_response(
+        profile: &SensitiveLocalProfileV1,
+        response: u64,
+    ) -> CanonicalSensitiveEffectRequest {
+        network_request(
+            profile,
+            NetworkMethod::Post,
+            "/v1/items",
+            json_body(100),
+            response,
+        )
+    }
+
+    #[test]
+    fn exact_profile_hash_binds_units_archives_argv_identity_origin_routes_and_headers_policy() {
+        let service = service_profile();
+        let capability = service_capability(&service);
+        let request = service_request(&service, "alpha.service", ServiceAction::Status, 1);
+        let mut changed = service.clone();
+        let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut changed.profile else {
+            unreachable!()
+        };
+        units[0].unit = "aardvark.service".into();
+        assert_eq!(
+            prove_operational_effect(&capability, &changed, &request).unwrap_err(),
+            OperationalEffectProofError::ProfileBindingMismatch
+        );
+
+        let packages = package_profile();
+        let capability = package_capability(&packages);
+        let request = package_request(
+            &packages,
+            PackageOperation::Install,
+            package_selections(&packages),
+        );
+        let mut changed = packages.clone();
+        let SensitiveLocalProfileKindV1::PackageTransaction {
+            packages: exact_packages,
+            ..
+        } = &mut changed.profile
+        else {
+            unreachable!()
+        };
+        exact_packages[0].archive_sha256 = HASH_B.into();
+        assert_eq!(
+            prove_operational_effect(&capability, &changed, &request).unwrap_err(),
+            OperationalEffectProofError::ProfileBindingMismatch
+        );
+
+        let remote = remote_profile();
+        let capability = remote_capability(&remote);
+        let request = remote_request(&remote, "rotate", 1, 1);
+        for change in ["argv", "identity"] {
+            let mut changed = remote.clone();
+            let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut changed.profile
+            else {
+                unreachable!()
+            };
+            match change {
+                "argv" => actions[0].argv[1] = "--different-fixed-value".into(),
+                "identity" => actions[0].uid = 1001,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                prove_operational_effect(&capability, &changed, &request).unwrap_err(),
+                OperationalEffectProofError::ProfileBindingMismatch
+            );
+        }
+
+        let network = network_profile();
+        let capability = network_capability(&network);
+        let request = request_for_response(&network, 100);
+        for change in ["origin", "route"] {
+            let mut changed = network.clone();
+            let SensitiveLocalProfileKindV1::NetworkEndpoint {
+                origin,
+                tls,
+                routes,
+                request_headers,
+                ..
+            } = &mut changed.profile
+            else {
+                unreachable!()
+            };
+            // The sole header policy is still hashed with all other adapter-facing facts. Request
+            // grammar has no caller-controlled header field to widen it.
+            assert!(matches!(
+                request_headers,
+                NetworkRequestHeaderPolicy::GeneratedHostAndAllowedContentTypeOnly
+            ));
+            match change {
+                "origin" => {
+                    origin.host = "other.example.test".into();
+                    tls.server_name = "other.example.test".into();
+                }
+                "route" => routes[0].path_prefix = "/v2/items".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                prove_operational_effect(&capability, &changed, &request).unwrap_err(),
+                OperationalEffectProofError::ProfileBindingMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn operational_proof_rejects_family_binding_kind_and_metadata_budget_mismatches() {
+        let service = service_profile();
+        let request = service_request(&service, "alpha.service", ServiceAction::Status, 300);
+        let mut capability = service_capability(&service);
+        let SensitiveCapabilityRule::ServiceAction { profile, .. } = &mut capability else {
+            unreachable!()
+        };
+        profile.sha256 = HASH_A.into();
+        assert_eq!(
+            prove_operational_effect(&capability, &service, &request).unwrap_err(),
+            OperationalEffectProofError::ProfileBindingMismatch
+        );
+
+        let mut capability = service_capability(&service);
+        if let SensitiveCapabilityRule::ServiceAction { budget, .. } = &mut capability {
+            budget.max_request_bytes = 1;
+        }
+        assert_eq!(
+            prove_operational_effect(&capability, &service, &request).unwrap_err(),
+            OperationalEffectProofError::RequestBytesExceeded
+        );
+        if let SensitiveCapabilityRule::ServiceAction { budget, .. } = &mut capability {
+            budget.max_request_bytes = 16_384;
+            budget.max_result_bytes = 299;
+        }
+        assert_eq!(
+            prove_operational_effect(&capability, &service, &request).unwrap_err(),
+            OperationalEffectProofError::ResultBytesExceeded
+        );
+
+        let packages = package_profile();
+        let wrong_kind_capability = service_capability(&packages);
+        let request = service_request(&packages, "alpha.service", ServiceAction::Status, 1);
+        assert_eq!(
+            prove_operational_effect(&wrong_kind_capability, &packages, &request).unwrap_err(),
+            OperationalEffectProofError::ProfileKindMismatch
+        );
+        let request = package_request(
+            &service,
+            PackageOperation::Install,
+            package_selections(&packages),
+        );
+        assert_eq!(
+            prove_operational_effect(&service_capability(&service), &service, &request)
+                .unwrap_err(),
+            OperationalEffectProofError::EffectKindMismatch
+        );
+        let unsupported = SensitiveCapabilityRule::ReadPath {
+            root: profile_ref(&service),
+            relative_prefixes: vec!["docs".into()],
+            budget: budget(),
+        };
+        assert_eq!(
+            prove_operational_effect(&unsupported, &service, &request).unwrap_err(),
+            OperationalEffectProofError::UnsupportedCapabilityFamily
+        );
+
+        let mut invalid = service_profile();
+        invalid.version = 999;
+        assert_eq!(
+            prove_operational_effect(
+                &service_capability(&service),
+                &invalid,
+                &service_request(&service, "alpha.service", ServiceAction::Status, 1),
+            )
+            .unwrap_err(),
+            OperationalEffectProofError::InvalidProfile
         );
     }
 }
