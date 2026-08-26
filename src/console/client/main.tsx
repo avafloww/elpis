@@ -23,6 +23,53 @@ const NAV: Array<{ view: ViewName; glyph: string; label: string }> = [
   { view: 'secretary', glyph: '◈', label: 'Secretary' },
 ];
 
+function BuildLinks({ state }: { state: ConsoleState }) {
+  const meta = state.meta;
+  const revision = text(meta?.gitHash);
+  const versionLabel = text(meta?.versionLabel);
+  const versionUrl = text(meta?.versionUrl);
+  const revisionUrl = text(meta?.revisionUrl);
+  if (versionLabel && versionUrl) {
+    return (
+      <>
+        <a
+          href={versionUrl}
+          target='_blank'
+          rel='noreferrer'
+          title={`Elpis ${versionLabel}`}
+        >
+          {versionLabel}
+        </a>
+        {!meta?.exactRelease &&
+        revision &&
+        revision !== 'unknown' &&
+        revisionUrl ? (
+          <a
+            href={revisionUrl}
+            target='_blank'
+            rel='noreferrer'
+            title={revision}
+          >
+            {revision.slice(0, 12)}
+          </a>
+        ) : null}
+      </>
+    );
+  }
+  return revision && revision !== 'unknown' ? (
+    <a
+      href={`https://github.com/avafloww/elpis/commit/${revision}`}
+      target='_blank'
+      rel='noreferrer'
+      title={revision}
+    >
+      {revision.slice(0, 12)}
+    </a>
+  ) : (
+    <span>local</span>
+  );
+}
+
 function useNarrow(): boolean {
   const [narrow, setNarrow] = useState(
     () => matchMedia('(max-width: 760px)').matches,
@@ -268,13 +315,7 @@ function Sidebar({
           <button onClick={close}>×</button>
         ) : (
           <>
-            <a
-              href={`https://github.com/avafloww/elpis/commit/${state.meta?.gitHash || ''}`}
-              target='_blank'
-              rel='noreferrer'
-            >
-              {state.meta?.gitHash?.slice(0, 7) || 'local'}
-            </a>
+            <BuildLinks state={state} />
             <span>{connectionLabel(state, now)}</span>
             <i style={{ background: connectionTone(state) }} />
           </>
@@ -545,11 +586,7 @@ function MobileTop({ state, open }: { state: ConsoleState; open(): void }) {
   return (
     <header class='mobile-topbar'>
       <img src='./elpis-logo-dark.svg' alt='Elpis' />
-      <a
-        href={`https://github.com/avafloww/elpis/commit/${state.meta?.gitHash || ''}`}
-      >
-        {state.meta?.gitHash?.slice(0, 7) || 'local'}
-      </a>
+      <BuildLinks state={state} />
       <span class='surface-spacer' />
       <i style={{ background: connectionTone(state) }} />
       <span>{Math.round(ratio(state))}%</span>

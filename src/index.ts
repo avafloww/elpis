@@ -98,8 +98,8 @@ import {
   type SecretarySupervisorRuntime,
 } from './secretary/supervisor.js';
 import { createUsageTracker } from './llm/usage-tracker.js';
-import { spawnText } from './lib/proc.js';
 import { migrateDataLayout } from './store/data-layout.js';
+import { resolveBuildIdentity, type BuildIdentity } from './build-identity.js';
 
 export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
@@ -108,6 +108,7 @@ export interface ElpisRuntimeAdapters {
   createDiscord?: typeof createDiscord;
   createSandbox?: typeof createSandbox;
   loadExtensions?: typeof loadExtensions;
+  resolveBuildIdentity?: typeof resolveBuildIdentity;
 }
 
 export interface ElpisRuntime {
@@ -119,6 +120,7 @@ export interface ElpisRuntime {
   extensions: Awaited<ReturnType<typeof loadExtensions>>;
   modules: BuiltinModuleRegistry;
   profile: RuntimeProfile;
+  buildIdentity: BuildIdentity;
   llms: LlmRoleClients;
   secretary: SecretarySupervisorRuntime | null;
   workerServer: ScopedWorkerServerRuntime | null;
@@ -180,6 +182,9 @@ export async function createElpisRuntime(
     process.uptime() * 1000,
   );
   const config = (adapters.loadConfigFile ?? loadConfigFile)();
+  const buildIdentity = await (
+    adapters.resolveBuildIdentity ?? resolveBuildIdentity
+  )(config.paths.harnessRoot);
   const profile = detectRuntimeProfile();
   const modules = resolveBuiltinModules(config, profile);
   if (modules.isActive('motor') && !config.llm.registry.targets.motor) {
@@ -211,6 +216,7 @@ export async function createElpisRuntime(
   ensureFile(config.paths.memoryPath, '# Agent Memory\n');
 
   const log = (...a: unknown[]) => config.logger.info(...a);
+  log(`build identity: ${buildIdentity.display} (${buildIdentity.source})`);
   log(
     `runtime profile: ${profile.restricted ? `restricted (${profile.source})` : 'normal'}`,
   );
@@ -626,8 +632,6 @@ export async function createElpisRuntime(
   let consoleServer: ConsoleServer | undefined;
   if (hub) {
     const archived = createArchivedReader(sessionsRoot);
-    const gitText = (args: string[]): Promise<string> =>
-      spawnText('git', ['-C', config.paths.harnessRoot, ...args]);
     hub.attach({
       usage: () => agent.usageSnapshot(),
       rooms: () => agent.roomsSnapshot(),
@@ -663,14 +667,17 @@ export async function createElpisRuntime(
         });
         return { ok: true, note: 'message accepted' };
       },
-      meta: async (): Promise<MetaInfo> => {
-        const [hash, dirty] = await Promise.all([
-          gitText(['rev-parse', '--short', 'HEAD']),
-          gitText(['status', '--porcelain']),
-        ]);
+      meta: (): MetaInfo => {
         return {
-          gitHash: hash.trim() || 'unknown',
-          treeClean: dirty.trim().length === 0,
+          gitHash: buildIdentity.revision ?? 'unknown',
+          treeClean: buildIdentity.treeClean,
+          version: buildIdentity.version,
+          versionTag: buildIdentity.versionTag,
+          versionLabel: buildIdentity.versionLabel,
+          versionUrl: buildIdentity.versionUrl,
+          revisionUrl: buildIdentity.revisionUrl,
+          exactRelease: buildIdentity.exactRelease,
+          buildState: buildIdentity.state,
           startedAt: processStartedAt,
           uptimeMs: Math.round(process.uptime() * 1000),
           model: config.llm.model,
@@ -855,6 +862,7 @@ export async function createElpisRuntime(
     extensions,
     modules,
     profile,
+    buildIdentity,
     llms,
     secretary: secretaryRuntime,
     workerServer,

@@ -8,6 +8,9 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev --legacy-peer-deps
 
 FROM node:24-trixie-slim AS runtime
+ARG ELPIS_BUILD_REVISION
+ARG ELPIS_BUILD_TAG
+ARG ELPIS_BUILD_DIRTY=false
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash ca-certificates curl file git jq less openssh-client procps \
@@ -27,6 +30,9 @@ RUN chmod 0555 /usr/local/bin/elpis-container-entrypoint \
   && chown 10001:10001 /data
 ENV NODE_ENV=production \
     ELPIS_CONFIG=/config.yaml \
+    ELPIS_BUILD_REVISION=${ELPIS_BUILD_REVISION} \
+    ELPIS_BUILD_TAG=${ELPIS_BUILD_TAG} \
+    ELPIS_BUILD_DIRTY=${ELPIS_BUILD_DIRTY} \
     HOME=/data/home \
     TMPDIR=/data/tmp
 VOLUME ["/data"]

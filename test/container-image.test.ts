@@ -49,6 +49,20 @@ test('container entrypoint fails closed around sentinel config and writable data
   assert.match(entry, /exec "\$@"/);
 });
 
+test('container embeds immutable build identity inputs', () => {
+  const docker = read('Dockerfile');
+  const workflow = read('.github/workflows/container.yml');
+  assert.match(docker, /ARG ELPIS_BUILD_REVISION/);
+  assert.match(
+    docker,
+    /ENV NODE_ENV=production[\s\S]*ELPIS_BUILD_REVISION=\$\{ELPIS_BUILD_REVISION\}/,
+  );
+  assert.match(docker, /ELPIS_BUILD_TAG=\$\{ELPIS_BUILD_TAG\}/);
+  assert.match(docker, /ELPIS_BUILD_DIRTY=\$\{ELPIS_BUILD_DIRTY\}/);
+  assert.match(workflow, /ELPIS_BUILD_REVISION=\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /ELPIS_BUILD_DIRTY=false/);
+});
+
 test('GHCR workflow publishes the official repository while PRs only build', () => {
   const workflow = read('.github/workflows/container.yml');
   assert.match(workflow, /ghcr\.io\/avafloww\/elpis/);

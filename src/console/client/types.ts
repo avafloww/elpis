@@ -31,7 +31,14 @@ export interface UsageInfo {
 
 export interface MetaInfo {
   gitHash?: string;
-  treeClean?: boolean;
+  treeClean?: boolean | null;
+  version?: string;
+  versionTag?: string;
+  versionLabel?: string;
+  versionUrl?: string;
+  revisionUrl?: string | null;
+  exactRelease?: boolean;
+  buildState?: 'release' | 'dev' | 'dirty' | 'unknown';
   startedAt?: number;
   uptimeMs?: number;
   model?: string;
