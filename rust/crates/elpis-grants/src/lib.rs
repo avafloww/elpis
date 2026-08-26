@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+mod policy;
+pub use policy::*;
+
 use std::fmt;
 
 use ring::signature::{ED25519, UnparsedPublicKey};
