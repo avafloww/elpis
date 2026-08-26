@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use elpis_grants::{
     CanonicalSensitivePolicy, ED25519_SIGNATURE_BYTES, GrantBinding, GrantError, GrantV1,
     GrantVerifier, MAX_GRANT_PAYLOAD_BYTES, MAX_TERMINAL_CONTROL_PAYLOAD_BYTES,
-    TerminalControlActionV1, TerminalControlV1,
+    TerminalControlActionV1, TerminalControlV1, TerminalControlVerifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -322,25 +322,41 @@ pub struct GrantLedger {
     ledger_binding: [u8; 32],
     connection: Connection,
     verifier: GrantVerifier,
+    control_verifier: Option<TerminalControlVerifier>,
     limits: GrantLedgerLimits,
     clock: Clock,
 }
 
 impl GrantLedger {
-    /// Opens a private ledger using the process wall clock.
+    /// Opens a private ledger using the process wall clock without terminal-control trust.
     ///
-    /// Before returning, every unterminated admission from an earlier owner is durably
-    /// expired or interrupted. The verifier is moved into the ledger so callers cannot
-    /// substitute an authenticated intermediate value during admission.
+    /// This path fails closed if durable terminal-control rows already exist. Use
+    /// [`Self::open_with_terminal_control_verifier`] to reopen such a ledger.
     pub fn open(
         path: impl AsRef<Path>,
         verifier: GrantVerifier,
         limits: GrantLedgerLimits,
     ) -> Result<Self, GrantLedgerError> {
-        Self::open_with_clock(path.as_ref(), verifier, limits, Clock::System)
+        Self::open_with_verifiers_and_clock(path.as_ref(), verifier, None, limits, Clock::System)
     }
 
-    /// Opens grants.sqlite in a private state directory.
+    /// Opens a private ledger with boot-frozen terminal-control verification custody.
+    pub fn open_with_terminal_control_verifier(
+        path: impl AsRef<Path>,
+        verifier: GrantVerifier,
+        control_verifier: TerminalControlVerifier,
+        limits: GrantLedgerLimits,
+    ) -> Result<Self, GrantLedgerError> {
+        Self::open_with_verifiers_and_clock(
+            path.as_ref(),
+            verifier,
+            Some(control_verifier),
+            limits,
+            Clock::System,
+        )
+    }
+
+    /// Opens grants.sqlite in a private state directory without terminal-control trust.
     pub fn open_directory(
         directory: impl AsRef<Path>,
         verifier: GrantVerifier,
@@ -353,9 +369,46 @@ impl GrantLedger {
         )
     }
 
+    /// Opens grants.sqlite with boot-frozen terminal-control verification custody.
+    pub fn open_directory_with_terminal_control_verifier(
+        directory: impl AsRef<Path>,
+        verifier: GrantVerifier,
+        control_verifier: TerminalControlVerifier,
+        limits: GrantLedgerLimits,
+    ) -> Result<Self, GrantLedgerError> {
+        Self::open_with_terminal_control_verifier(
+            directory.as_ref().join(GRANT_LEDGER_DATABASE_FILENAME),
+            verifier,
+            control_verifier,
+            limits,
+        )
+    }
+
+    #[cfg(test)]
     fn open_with_clock(
         path: &Path,
         verifier: GrantVerifier,
+        limits: GrantLedgerLimits,
+        clock: Clock,
+    ) -> Result<Self, GrantLedgerError> {
+        Self::open_with_verifiers_and_clock(path, verifier, None, limits, clock)
+    }
+
+    #[cfg(test)]
+    fn open_with_terminal_control_verifier_and_clock(
+        path: &Path,
+        verifier: GrantVerifier,
+        control_verifier: TerminalControlVerifier,
+        limits: GrantLedgerLimits,
+        clock: Clock,
+    ) -> Result<Self, GrantLedgerError> {
+        Self::open_with_verifiers_and_clock(path, verifier, Some(control_verifier), limits, clock)
+    }
+
+    fn open_with_verifiers_and_clock(
+        path: &Path,
+        verifier: GrantVerifier,
+        control_verifier: Option<TerminalControlVerifier>,
         limits: GrantLedgerLimits,
         clock: Clock,
     ) -> Result<Self, GrantLedgerError> {
@@ -391,12 +444,13 @@ impl GrantLedger {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         run_quick_check(&connection)?;
         initialize_schema(&mut connection)?;
-        validate_integrity(&connection, &verifier, limits)?;
+        validate_integrity(&connection, &verifier, control_verifier.as_ref(), limits)?;
         let mut ledger = Self {
             path,
             ledger_binding,
             connection,
             verifier,
+            control_verifier,
             limits,
             clock,
         };
@@ -579,6 +633,9 @@ impl GrantLedger {
         profile_id: &str,
         policy_sha256: &[u8; 32],
     ) -> Result<bool, GrantLedgerError> {
+        if self.control_verifier.is_none() {
+            return Err(GrantLedgerError::TerminalControlVerifierRequired);
+        }
         let latest = self
             .connection
             .query_row(
@@ -721,6 +778,8 @@ pub enum GrantLedgerError {
     InvalidLimits,
     #[error("system clock is before the Unix epoch")]
     ClockBeforeUnixEpoch,
+    #[error("terminal-control rows require boot-frozen verifier custody")]
+    TerminalControlVerifierRequired,
     #[error("grant is not yet valid")]
     NotYetValid,
     #[error("grant is expired")]
@@ -1345,6 +1404,7 @@ fn load_state(connection: &Connection) -> Result<(LedgerState, Option<String>), 
 fn validate_integrity(
     connection: &Connection,
     verifier: &GrantVerifier,
+    control_verifier: Option<&TerminalControlVerifier>,
     limits: GrantLedgerLimits,
 ) -> Result<(), GrantLedgerError> {
     let (state, state_issuer) = load_state(connection)?;
@@ -1420,7 +1480,12 @@ fn validate_integrity(
         ));
     }
 
-    let control_maximum = validate_control_integrity(connection, state_issuer.as_deref(), limits)?;
+    let control_maximum = validate_control_integrity(
+        connection,
+        control_verifier,
+        state_issuer.as_deref(),
+        limits,
+    )?;
     let durable_maximum = match (maximum_seq, control_maximum) {
         (Some(grant), Some(control)) => Some(grant.max(control)),
         (grant, control) => grant.or(control),
@@ -1504,6 +1569,7 @@ fn validate_terminal_integrity(
 
 fn validate_control_integrity(
     connection: &Connection,
+    verifier: Option<&TerminalControlVerifier>,
     state_issuer: Option<&str>,
     limits: GrantLedgerLimits,
 ) -> Result<Option<u64>, GrantLedgerError> {
@@ -1555,13 +1621,16 @@ fn validate_control_integrity(
                 "stored terminal control metadata is invalid".into(),
             ));
         }
-        let control: TerminalControlV1 = serde_json::from_slice(&payload).map_err(|error| {
-            GrantLedgerError::Corrupt(format!("stored terminal control is invalid: {error}"))
-        })?;
-        let canonical = control.canonical_payload().map_err(|error| {
-            GrantLedgerError::Corrupt(format!("stored terminal control is invalid: {error}"))
-        })?;
-        if canonical != payload
+        let verifier = verifier.ok_or(GrantLedgerError::TerminalControlVerifierRequired)?;
+        let authenticated = verifier
+            .authenticate(&payload, &signature)
+            .map_err(|error| {
+                GrantLedgerError::Corrupt(format!(
+                    "stored terminal control authentication failed: {error}"
+                ))
+            })?;
+        let control = authenticated.control();
+        if lower_hex_hash(authenticated.payload_sha256())? != payload_hash
             || control.control_id != control_id
             || control.issuer_id != issuer_id
             || control.issuer_seq != issuer_seq
@@ -1589,7 +1658,7 @@ fn validate_control_integrity(
         }
         count = count.checked_add(1).ok_or(GrantLedgerError::StorageLimit)?;
         total_bytes = total_bytes
-            .checked_add(accounted_control_bytes(&control, &payload, &signature)?)
+            .checked_add(accounted_control_bytes(control, &payload, &signature)?)
             .ok_or(GrantLedgerError::StorageLimit)?;
         maximum_seq = Some(maximum_seq.map_or(issuer_seq, |old: u64| old.max(issuer_seq)));
         expected_receipt = expected_receipt
@@ -1928,6 +1997,22 @@ mod tests {
         verifier_with_seed(7)
     }
 
+    fn control_verifier_with_seed(seed: u8) -> TerminalControlVerifier {
+        let key = key(seed);
+        TerminalControlVerifier::new(
+            "operator-1",
+            key.public_key().as_ref(),
+            "executor-1",
+            3,
+            900,
+        )
+        .unwrap()
+    }
+
+    fn control_verifier() -> TerminalControlVerifier {
+        control_verifier_with_seed(7)
+    }
+
     fn binding() -> GrantBinding {
         binding_for_policy(HASH_C)
     }
@@ -2012,8 +2097,14 @@ mod tests {
     fn test_ledger(limits: GrantLedgerLimits) -> TestLedger {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("private").join("grants.sqlite");
-        let ledger =
-            GrantLedger::open_with_clock(&path, verifier(), limits, Clock::Fixed(NOW)).unwrap();
+        let ledger = GrantLedger::open_with_terminal_control_verifier_and_clock(
+            &path,
+            verifier(),
+            control_verifier(),
+            limits,
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
         TestLedger {
             _temp: temp,
             path,
@@ -2023,6 +2114,21 @@ mod tests {
 
     fn default_test_ledger() -> TestLedger {
         test_ledger(GrantLedgerLimits::default())
+    }
+
+    fn open_with_control_clock(
+        path: &Path,
+        verifier: GrantVerifier,
+        limits: GrantLedgerLimits,
+        clock: Clock,
+    ) -> Result<GrantLedger, GrantLedgerError> {
+        GrantLedger::open_with_terminal_control_verifier_and_clock(
+            path,
+            verifier,
+            control_verifier(),
+            limits,
+            clock,
+        )
     }
 
     fn admit(ledger: &mut GrantLedger, id: &str, sequence: u64) -> ActiveGrant {
@@ -3017,7 +3123,7 @@ mod tests {
         let (payload, signature) = signed(&grant("new-after-control", 6));
         test.ledger.admit(&payload, &signature, &binding()).unwrap();
         drop(test.ledger);
-        GrantLedger::open_with_clock(
+        open_with_control_clock(
             &test.path,
             verifier(),
             GrantLedgerLimits::default(),
@@ -3090,7 +3196,7 @@ mod tests {
                 .unwrap()
         );
         drop(test.ledger);
-        let reopened = GrantLedger::open_with_clock(
+        let reopened = open_with_control_clock(
             &test.path,
             verifier(),
             GrantLedgerLimits::default(),
@@ -3178,7 +3284,7 @@ mod tests {
         );
         drop(test.ledger);
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &test.path,
                 verifier(),
                 GrantLedgerLimits {
@@ -3190,7 +3296,7 @@ mod tests {
             Err(GrantLedgerError::StorageLimit)
         ));
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &test.path,
                 verifier(),
                 GrantLedgerLimits {
@@ -3214,7 +3320,7 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &test.path,
                 verifier(),
                 GrantLedgerLimits::default(),
@@ -3302,7 +3408,7 @@ mod tests {
             .unwrap();
         drop(wrong_source.ledger);
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &wrong_source.path,
                 verifier(),
                 GrantLedgerLimits::default(),
@@ -3330,7 +3436,7 @@ mod tests {
             .unwrap();
         drop(clear_first.ledger);
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &clear_first.path,
                 verifier(),
                 GrantLedgerLimits::default(),
@@ -3365,13 +3471,65 @@ mod tests {
         drop(test.ledger);
 
         assert!(matches!(
-            GrantLedger::open_with_clock(
+            open_with_control_clock(
                 &test.path,
                 verifier(),
                 GrantLedgerLimits::default(),
                 Clock::Fixed(NOW),
             ),
             Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn control_rows_require_exact_verifier_custody_on_reopen() {
+        let test = default_test_ledger();
+        insert_control(&test.ledger.connection, &clear_control("control-1", 1));
+        drop(test.ledger);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::TerminalControlVerifierRequired)
+        ));
+        assert!(matches!(
+            GrantLedger::open_with_terminal_control_verifier_and_clock(
+                &test.path,
+                verifier(),
+                control_verifier_with_seed(8),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+        open_with_control_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn latch_queries_require_verifier_custody_even_without_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private").join("grants.sqlite");
+        let ledger = GrantLedger::open_with_clock(
+            &path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let policy_hash = lower_hex_hash(HASH_C).unwrap();
+        assert!(matches!(
+            ledger.policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash),
+            Err(GrantLedgerError::TerminalControlVerifierRequired)
         ));
     }
 
