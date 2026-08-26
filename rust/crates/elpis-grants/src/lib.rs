@@ -6,10 +6,12 @@
 #![forbid(unsafe_code)]
 
 mod control;
+mod narrowing;
 mod policy;
 mod profile;
 mod registry;
 pub use control::*;
+pub use narrowing::*;
 pub use policy::*;
 pub use profile::*;
 pub use registry::*;
