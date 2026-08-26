@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    SensitiveCapabilityRule, SensitiveLocalProfileKindV1, SensitiveLocalProfileV1,
-    SensitivePolicyV1, SensitiveProfileRef, sha256_hex,
+    KubernetesQueryRule, KubernetesVerb, SensitiveCapabilityRule, SensitiveLocalProfileKindV1,
+    SensitiveLocalProfileV1, SensitivePolicyV1, SensitiveProfileRef, sha256_hex,
 };
 
 pub const SENSITIVE_PROFILE_REGISTRY_VERSION: u32 = 1;
@@ -297,6 +297,83 @@ impl ValidatedSensitiveProfileBindings {
     }
 }
 
+/// Proves namespace equality and full signed verb-by-resource query coverage.
+///
+/// Create, patch, and update are unrepresentable in a cluster query profile and fail closed.
+pub fn prove_kubernetes_profile_subset(
+    capability: &SensitiveCapabilityRule,
+    profile: &SensitiveLocalProfileV1,
+) -> Result<(), SensitiveProfileSubsetError> {
+    match (capability, &profile.profile) {
+        (
+            SensitiveCapabilityRule::KubernetesNamespace {
+                namespace,
+                verbs,
+                resources,
+                ..
+            },
+            SensitiveLocalProfileKindV1::KubernetesCluster {
+                namespace: profile_namespace,
+                rules,
+                ..
+            },
+        ) => {
+            if namespace != profile_namespace {
+                return Err(SensitiveProfileSubsetError::ConstraintNotContained);
+            }
+            for verb in verbs {
+                if matches!(
+                    verb,
+                    KubernetesVerb::Create | KubernetesVerb::Patch | KubernetesVerb::Update
+                ) {
+                    return Err(SensitiveProfileSubsetError::ConstraintNotContained);
+                }
+                for resource in resources {
+                    let covered = rules.iter().any(|rule| match (verb, rule) {
+                        (
+                            KubernetesVerb::Delete,
+                            KubernetesQueryRule::Delete {
+                                resource: profile_resource,
+                                ..
+                            },
+                        )
+                        | (
+                            KubernetesVerb::Get,
+                            KubernetesQueryRule::Get {
+                                resource: profile_resource,
+                                ..
+                            },
+                        )
+                        | (
+                            KubernetesVerb::List,
+                            KubernetesQueryRule::List {
+                                resource: profile_resource,
+                                ..
+                            },
+                        )
+                        | (
+                            KubernetesVerb::Watch,
+                            KubernetesQueryRule::Watch {
+                                resource: profile_resource,
+                                ..
+                            },
+                        ) => resource == profile_resource,
+                        _ => false,
+                    });
+                    if !covered {
+                        return Err(SensitiveProfileSubsetError::ConstraintNotContained);
+                    }
+                }
+            }
+            Ok(())
+        }
+        (SensitiveCapabilityRule::KubernetesNamespace { .. }, _) => {
+            Err(SensitiveProfileSubsetError::ProfileKindMismatch)
+        }
+        _ => Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily),
+    }
+}
+
 /// Proves static membership of signed finite constraints in one exact local profile.
 ///
 /// This does not evaluate a runtime effect or prove a unit/action, route/body, or process tuple.
@@ -446,6 +523,7 @@ mod tests {
     const REMOTE_JSON: &str = r#"{"version":1,"id":"resident-actions","profile":{"kind":"remote_actions","actions":[{"id":"check-state","execution":"direct_native_elf_no_shell_or_interpreter","executable_path":"/usr/libexec/elpis/check-state","executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","argv":["/usr/libexec/elpis/check-state","--format","json"],"environment":{"mode":"clear_then_set_fixed","locale":"C.UTF-8","timezone":"UTC"},"cwd_profile":{"id":"work-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"uid":10001,"gid":10001,"capabilities":[],"stdin":"closed","no_new_privileges":"required","timeout_ms":30000,"max_stdout_bytes":65536,"max_stderr_bytes":65536}]}}"#;
     const NETWORK_JSON: &str = r#"{"version":1,"id":"package-index-endpoint","profile":{"kind":"network_endpoint","origin":{"protocol":"https","host":"api.example.test","port":443},"address_policy":{"mode":"direct_connect_only_pinned_no_proxy","addresses":["198.51.100.10","2001:db8::10"]},"tls":{"server_name":"api.example.test","minimum_version":"tls13","verification":"pinned_ca_and_leaf_spki_with_hostname_and_validity","ca_certificate_sha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"leaf_spki_sha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]},"routes":[{"path_prefix":"/v1/artifacts","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/octet-stream"]},{"path_prefix":"/v1/artifacts","method":"post","query":"forbidden","request_body":{"mode":"allowed","content_types":["application/json"]},"response_content_types":["application/json"]},{"path_prefix":"/v1/status","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/json"]}],"request_headers":"generated_host_and_allowed_content_type_only","response_encoding":"identity_only","redirects":"deny","max_request_bytes":65536,"max_response_bytes":1048576}}"#;
     const PACKAGE_JSON: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change"}}"#;
+    const KUBERNETES_JSON: &str = r#"{"version":1,"id":"cluster-query","profile":{"kind":"kubernetes_cluster","api_server":{"host":"api.cluster.example","port":6443,"tls_server_name":"api.cluster.example","ca_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","redirects":"deny"},"credential_profile":{"id":"cluster-credential","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"namespace":"elpis-workers","rules":[{"verb":"delete","resource":"config_map","names":["worker-lock"],"precondition":"exact_uid_and_resource_version"},{"verb":"get","resource":"pod","names":["worker-a","worker-b"]},{"verb":"list","resource":"pod","selectors":[{"key":"app.kubernetes.io/name","value":"elpis-worker"},{"key":"elpis.dev/mind","value":"elm-34v9m41b"}]},{"verb":"watch","resource":"service","selectors":[{"key":"app","value":"elpis"}]}],"max_request_bytes":65536,"max_response_bytes":1048576}}"#;
 
     fn service_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(SERVICE_JSON).unwrap()
@@ -461,6 +539,10 @@ mod tests {
 
     fn package_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(PACKAGE_JSON).unwrap()
+    }
+
+    fn kubernetes_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(KUBERNETES_JSON).unwrap()
     }
 
     fn registry() -> SensitiveProfileRegistryV1 {
@@ -954,6 +1036,102 @@ mod tests {
         };
         assert_eq!(
             prove_finite_profile_subset(&read, &service_profile()),
+            Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
+        );
+    }
+    #[test]
+    fn kubernetes_subset_requires_namespace_and_full_query_cross_product() {
+        let reference = SensitiveProfileRef {
+            id: "cluster-query".into(),
+            sha256: "a".repeat(64),
+        };
+        for (verbs, resources) in [
+            (
+                vec![crate::KubernetesVerb::Delete],
+                vec![crate::KubernetesResource::ConfigMap],
+            ),
+            (
+                vec![crate::KubernetesVerb::Get, crate::KubernetesVerb::List],
+                vec![crate::KubernetesResource::Pod],
+            ),
+            (
+                vec![crate::KubernetesVerb::Watch],
+                vec![crate::KubernetesResource::Service],
+            ),
+        ] {
+            let capability = SensitiveCapabilityRule::KubernetesNamespace {
+                cluster_profile: reference.clone(),
+                namespace: "elpis-workers".into(),
+                verbs,
+                resources,
+                budget: binding_budget(),
+            };
+            assert_eq!(
+                prove_kubernetes_profile_subset(&capability, &kubernetes_profile()),
+                Ok(())
+            );
+        }
+        let widened = SensitiveCapabilityRule::KubernetesNamespace {
+            cluster_profile: reference.clone(),
+            namespace: "elpis-workers".into(),
+            verbs: vec![crate::KubernetesVerb::Get, crate::KubernetesVerb::List],
+            resources: vec![
+                crate::KubernetesResource::Pod,
+                crate::KubernetesResource::Service,
+            ],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_kubernetes_profile_subset(&widened, &kubernetes_profile()),
+            Err(SensitiveProfileSubsetError::ConstraintNotContained)
+        );
+        let wrong_namespace = SensitiveCapabilityRule::KubernetesNamespace {
+            cluster_profile: reference,
+            namespace: "default".into(),
+            verbs: vec![crate::KubernetesVerb::Get],
+            resources: vec![crate::KubernetesResource::Pod],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_kubernetes_profile_subset(&wrong_namespace, &kubernetes_profile()),
+            Err(SensitiveProfileSubsetError::ConstraintNotContained)
+        );
+    }
+
+    #[test]
+    fn kubernetes_subset_fails_closed_for_writes_wrong_kind_and_other_families() {
+        let reference = SensitiveProfileRef {
+            id: "cluster-query".into(),
+            sha256: "a".repeat(64),
+        };
+        for verb in [
+            crate::KubernetesVerb::Create,
+            crate::KubernetesVerb::Patch,
+            crate::KubernetesVerb::Update,
+        ] {
+            let capability = SensitiveCapabilityRule::KubernetesNamespace {
+                cluster_profile: reference.clone(),
+                namespace: "elpis-workers".into(),
+                verbs: vec![verb],
+                resources: vec![crate::KubernetesResource::ConfigMap],
+                budget: binding_budget(),
+            };
+            assert_eq!(
+                prove_kubernetes_profile_subset(&capability, &kubernetes_profile()),
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            );
+            assert_eq!(
+                prove_kubernetes_profile_subset(&capability, &remote_profile()),
+                Err(SensitiveProfileSubsetError::ProfileKindMismatch)
+            );
+        }
+        let read = SensitiveCapabilityRule::ReadPath {
+            root: reference,
+            relative_prefixes: vec!["src".into()],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_kubernetes_profile_subset(&read, &kubernetes_profile()),
             Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
         );
     }
