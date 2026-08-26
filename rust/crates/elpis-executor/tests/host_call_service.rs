@@ -14,7 +14,7 @@ use elpis_effects::{
 };
 use elpis_executor::host_call_service::{
     HostExecCompletionFailure, HostExecLedger, HostExecLedgerError, HostExecLedgerOwner,
-    HostExecRunner, HostExecRunnerOutcome, HostExecService,
+    HostExecRunner, HostExecRunnerOutcome, HostExecService, OwnedHostExecService,
 };
 use elpis_executor::host_exec::{
     CapabilityProfile, HOST_EXEC_CAPABILITY, HostExecRequest, HostExecResult, HostExecTermination,
@@ -123,6 +123,21 @@ fn coordinator(
     coordinator_with_runner(owner, FakeRunner { calls, result })
 }
 
+fn owned_coordinator(owner: HostExecLedgerOwner) -> Coordinator {
+    Coordinator::with_host_service_factory(
+        PythonRuntime::system("python3"),
+        CoordinatorConfig::new(1, 8).unwrap(),
+        move |binding: &RunBinding, effects: RunEffectReporter| {
+            Ok(Box::new(OwnedHostExecService::new(
+                binding,
+                effects,
+                CapabilityProfile::OwnedPermissive,
+                owner.clone(),
+            )) as Box<dyn HostCallService>)
+        },
+    )
+}
+
 fn open(coordinator: &mut Coordinator) {
     let response = only(coordinator.submit(Request::Open {
         protocol: PROTOCOL_VERSION,
@@ -178,7 +193,11 @@ fn ledger(temp: &TempDir) -> EffectLedger {
 }
 
 fn current_identity() -> EffectIdentity {
-    let request = HostExecRequest::new(vec!["fake".into()], String::new()).unwrap();
+    identity_for(vec!["fake".into()], String::new())
+}
+
+fn identity_for(argv: Vec<String>, stdin: String) -> EffectIdentity {
+    let request = HostExecRequest::new(argv, stdin).unwrap();
     EffectIdentity::new(
         "request-1",
         "context-1",
@@ -189,6 +208,19 @@ fn current_identity() -> EffectIdentity {
         request.canonical_bytes(),
     )
     .unwrap()
+}
+
+fn python_host_call(argv: &[String]) -> String {
+    format!(
+        "host_call('elpis.host.exec',{})",
+        serde_json::to_string(argv).unwrap()
+    )
+}
+
+fn process_group_exists(pgid: i32) -> bool {
+    // SAFETY: signal zero only checks the dedicated test process group.
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[test]
@@ -518,6 +550,167 @@ fn swapped_runner_token_never_reaches_ledger_settlement() {
         EffectAmbiguityReason::ExecutorLost
     );
     assert_eq!(service.context_count(), 0);
+}
+
+#[test]
+fn owned_active_completion_reaps_persists_and_replays_exactly() {
+    let temp = TempDir::new().unwrap();
+    let marker = temp.path().join("executions");
+    let script = format!("printf x >> {}; printf owned", marker.display());
+    let argv = vec!["/bin/sh".into(), "-c".into(), script];
+    let source = python_host_call(&argv);
+    let owner = HostExecLedgerOwner::new(ledger(&temp));
+
+    let mut first = owned_coordinator(owner.clone());
+    open(&mut first);
+    let completed = run(&mut first, &source);
+    assert!(completed.ok, "{completed:?}");
+    assert_eq!(completed.completed_effects.len(), 1);
+    let receipt = URL_SAFE_NO_PAD
+        .decode(&completed.completed_effects[0].receipt)
+        .unwrap();
+    let result = HostExecResult::decode_canonical_receipt(&receipt).unwrap();
+    assert_eq!(result.termination(), HostExecTermination::Exited(0));
+    assert_eq!(result.stdout(), b"owned");
+    assert_eq!(std::fs::read(&marker).unwrap(), b"x");
+    drop(first);
+
+    let mut replay = owned_coordinator(owner);
+    open(&mut replay);
+    let replayed = run(&mut replay, &source);
+    assert!(replayed.ok, "{replayed:?}");
+    assert_eq!(replayed.completed_effects, completed.completed_effects);
+    assert_eq!(std::fs::read(marker).unwrap(), b"x");
+}
+
+#[test]
+fn owned_spawn_failure_executes_nothing_and_releases_reporter_claim() {
+    let temp = TempDir::new().unwrap();
+    let path = db_path(&temp);
+    let argv = vec!["/definitely/not/an/elpis-program".into()];
+    let identity = identity_for(argv.clone(), String::new());
+    let mut service = owned_coordinator(HostExecLedgerOwner::new(ledger(&temp)));
+    open(&mut service);
+    let response = run(&mut service, &python_host_call(&argv));
+    assert!(!response.ok);
+    assert_eq!(response.failure_kind.as_deref(), Some("runtime"));
+    assert!(response.ambiguity.is_none());
+    assert!(response.completed_effects.is_empty());
+    assert_eq!(service.context_count(), 1);
+    drop(service);
+
+    let reopened = EffectLedger::open(path, EffectLimits::default()).unwrap();
+    let stored = reopened.effect(identity.effect_id()).unwrap().unwrap();
+    assert_eq!(stored.status, EffectStatus::Ambiguous);
+    assert!(stored.receipt.is_none());
+}
+
+#[test]
+fn owned_output_overflow_reaps_then_fences_ledger_and_context() {
+    let temp = TempDir::new().unwrap();
+    let path = db_path(&temp);
+    let argv = vec![
+        "/usr/bin/head".into(),
+        "-c".into(),
+        "70000".into(),
+        "/dev/zero".into(),
+    ];
+    let identity = identity_for(argv.clone(), String::new());
+    let mut service = owned_coordinator(HostExecLedgerOwner::new(ledger(&temp)));
+    open(&mut service);
+    let response = run(&mut service, &python_host_call(&argv));
+    assert_eq!(response.failure_kind.as_deref(), Some("effect_ambiguous"));
+    assert_eq!(
+        response.ambiguity.unwrap().reason,
+        EffectAmbiguityReason::ExecutorLost
+    );
+    assert_eq!(service.context_count(), 0);
+    drop(service);
+
+    let reopened = EffectLedger::open(path, EffectLimits::default()).unwrap();
+    let stored = reopened.effect(identity.effect_id()).unwrap().unwrap();
+    assert_eq!(stored.status, EffectStatus::Ambiguous);
+    assert!(stored.receipt.is_none());
+}
+
+#[test]
+fn owned_active_cancel_reaps_group_and_settles_ambiguity_before_pair() {
+    let temp = TempDir::new().unwrap();
+    let path = db_path(&temp);
+    let pidfile = temp.path().join("pgid");
+    let script = format!("echo $$ > {}; sleep 30 & wait", pidfile.display());
+    let argv = vec!["/bin/sh".into(), "-c".into(), script];
+    let identity = identity_for(argv.clone(), String::new());
+    let source = python_host_call(&argv);
+    let mut service = owned_coordinator(HostExecLedgerOwner::new(ledger(&temp)));
+    open(&mut service);
+    assert!(
+        service
+            .submit(Request::Run {
+                protocol: PROTOCOL_VERSION,
+                request_id: "request-1".into(),
+                context_id: "context-1".into(),
+                generation: 1,
+                run_id: "run-1".into(),
+                source,
+                preview_max_bytes: DEFAULT_PREVIEW_BYTES,
+            })
+            .is_none()
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pgid = loop {
+        if let Ok(value) = std::fs::read_to_string(&pidfile)
+            && let Ok(pgid) = value.trim().parse::<i32>()
+        {
+            break pgid;
+        }
+        assert!(Instant::now() < deadline, "host process did not start");
+        std::thread::yield_now();
+    };
+    assert!(process_group_exists(pgid));
+
+    let immediate = service.submit(Request::Cancel {
+        protocol: PROTOCOL_VERSION,
+        request_id: "cancel-1".into(),
+        context_id: "context-1".into(),
+        generation: 1,
+        target_request_id: "request-1".into(),
+        run_id: "run-1".into(),
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let group = match immediate {
+        Some(group) => group,
+        None => loop {
+            if let Some(group) = service.poll().pop() {
+                break group;
+            }
+            assert!(Instant::now() < deadline, "cancel pair did not complete");
+            std::thread::yield_now();
+        },
+    };
+    let responses = group.into_responses();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].request_id.as_deref(), Some("request-1"));
+    assert_eq!(
+        responses[0].failure_kind.as_deref(),
+        Some("effect_ambiguous")
+    );
+    assert_eq!(
+        responses[0].ambiguity.as_ref().unwrap().reason,
+        EffectAmbiguityReason::ExecutorLost
+    );
+    assert_eq!(responses[1].request_id.as_deref(), Some("cancel-1"));
+    assert!(responses[1].ok, "{:?}", responses[1]);
+    assert_eq!(service.active_run_count(), 0);
+    assert_eq!(service.context_count(), 0);
+    assert!(!process_group_exists(pgid));
+    drop(service);
+
+    let reopened = EffectLedger::open(path, EffectLimits::default()).unwrap();
+    let stored = reopened.effect(identity.effect_id()).unwrap().unwrap();
+    assert_eq!(stored.status, EffectStatus::Ambiguous);
+    assert!(stored.receipt.is_none());
 }
 
 #[test]

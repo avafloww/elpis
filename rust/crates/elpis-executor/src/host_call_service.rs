@@ -1,8 +1,9 @@
-//! Ledger-gated synchronous core for the executor-owned host capability.
+//! Ledger-gated services for the executor-owned host capability.
 //!
-//! The runner is injected. This module never starts a process and never owns an
-//! asynchronous host-call handle.
+//! The injected runner keeps deterministic synchronous tests separate from the
+//! inert owned service whose active handle owns real process custody.
 
+use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,18 +15,23 @@ use elpis_effects::{
 use elpis_protocol::v2::{
     CompletedEffectReceipt, EffectAmbiguity, EffectAmbiguityReason, EffectBinding,
 };
-use elpis_python::{HostCall, HostCallService, HostResult};
+use elpis_python::{
+    ActiveHostCall, HostCall, HostCallService, HostCallStart, HostResult, PythonError,
+};
 use ring::digest::{SHA256, digest};
 
 use crate::host_exec::{
     CapabilityProfile, HostExecRequest, HostExecResult, HostExecTermination,
     MAX_HOST_EXEC_RECEIPT_BYTES,
 };
+use crate::host_exec_process::{HostExecProcess, HostExecProcessOutcome, HostExecStartDisposition};
 
 const REJECT_REQUEST: &str = "host execution request was rejected";
 const REJECT_LEDGER: &str = "host execution ledger rejected the call";
 const REJECT_AMBIGUOUS: &str = "host execution outcome is ambiguous";
 const REJECT_REPORTER: &str = "host execution outcome capacity is unavailable";
+const REJECT_START: &str = "host execution could not be started";
+const REJECT_ASYNC: &str = "host execution requires asynchronous custody";
 const REJECT_EXIT: &str = "host execution exited unsuccessfully";
 const REJECT_SIGNAL: &str = "host execution was terminated by a signal";
 const REJECT_UTF8: &str = "host execution stdout is not UTF-8";
@@ -117,6 +123,190 @@ impl HostExecLedgerOwner {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+pub struct OwnedHostExecService {
+    binding: RunBinding,
+    effects: RunEffectReporter,
+    profile: CapabilityProfile,
+    ledger: HostExecLedgerOwner,
+    ambiguity_reported: bool,
+}
+
+impl OwnedHostExecService {
+    pub fn new(
+        binding: &RunBinding,
+        effects: RunEffectReporter,
+        profile: CapabilityProfile,
+        ledger: HostExecLedgerOwner,
+    ) -> Self {
+        Self {
+            binding: binding.clone(),
+            effects,
+            profile,
+            ledger,
+            ambiguity_reported: false,
+        }
+    }
+
+    fn start_owned(&mut self, call: &HostCall) -> HostCallStart {
+        if self.ambiguity_reported {
+            return HostCallStart::Complete(HostResult::rejected(REJECT_AMBIGUOUS));
+        }
+        let request = match HostExecRequest::from_host_call(self.profile, call) {
+            Ok(request) => request,
+            Err(_) => return HostCallStart::Complete(HostResult::rejected(REJECT_REQUEST)),
+        };
+        let identity = match EffectIdentity::new(
+            self.binding.request_id(),
+            self.binding.context_id(),
+            self.binding.generation(),
+            self.binding.run_id(),
+            call.call_index,
+            &call.capability,
+            request.canonical_bytes(),
+        ) {
+            Ok(identity) => identity,
+            Err(_) => return HostCallStart::Complete(HostResult::rejected(REJECT_REQUEST)),
+        };
+        let claim = match self
+            .effects
+            .reserve(protocol_binding(&identity), MAX_HOST_EXEC_RECEIPT_BYTES)
+        {
+            Ok(claim) => claim,
+            Err(_) => return HostCallStart::Complete(HostResult::rejected(REJECT_REPORTER)),
+        };
+        let admission = self.ledger.lock().prepare(&identity);
+        match admission {
+            Err(HostExecLedgerError::ReceiptIntegrity) => {
+                self.ambiguity_reported = true;
+                HostCallStart::Complete(settle_ambiguity(
+                    claim,
+                    EffectAmbiguityReason::ReceiptIntegrityFailed,
+                ))
+            }
+            Err(HostExecLedgerError::Conflict | HostExecLedgerError::Unavailable) => {
+                HostCallStart::Complete(release_without_effect(claim, REJECT_LEDGER))
+            }
+            Ok(PrepareOutcome::Prepared | PrepareOutcome::Ambiguous) => {
+                self.ambiguity_reported = true;
+                HostCallStart::Complete(settle_ambiguity(
+                    claim,
+                    EffectAmbiguityReason::ExecutorLost,
+                ))
+            }
+            Ok(PrepareOutcome::Completed(receipt)) => {
+                HostCallStart::Complete(settle_completed(claim, receipt))
+            }
+            Ok(PrepareOutcome::New(token)) => match HostExecProcess::start(token, &request) {
+                Ok(process) => HostCallStart::Active(Box::new(ActiveOwnedHostExecCall {
+                    process: Some(process),
+                    claim: Some(claim),
+                    ledger: self.ledger.clone(),
+                })),
+                Err(failure) => {
+                    let (token, _error, disposition) = failure.into_parts();
+                    let marked = self.ledger.lock().mark_ambiguous(token).is_ok();
+                    match disposition {
+                        HostExecStartDisposition::NotStarted if marked => {
+                            HostCallStart::Complete(release_without_effect(claim, REJECT_START))
+                        }
+                        HostExecStartDisposition::NotStarted
+                        | HostExecStartDisposition::MayHaveExecuted => {
+                            self.ambiguity_reported = true;
+                            HostCallStart::Complete(settle_ambiguity(
+                                claim,
+                                EffectAmbiguityReason::ExecutorLost,
+                            ))
+                        }
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl HostCallService for OwnedHostExecService {
+    fn call(&mut self, _call: &HostCall) -> HostResult {
+        HostResult::rejected(REJECT_ASYNC)
+    }
+
+    fn start(&mut self, call: &HostCall) -> Result<HostCallStart, PythonError> {
+        Ok(self.start_owned(call))
+    }
+}
+
+struct ActiveOwnedHostExecCall {
+    process: Option<HostExecProcess>,
+    claim: Option<RunEffectClaim>,
+    ledger: HostExecLedgerOwner,
+}
+
+impl ActiveOwnedHostExecCall {
+    fn finish_process(&mut self, process: HostExecProcess) -> HostResult {
+        let claim = self
+            .claim
+            .take()
+            .expect("active host execution claim settles exactly once");
+        match process.wait_reaped() {
+            HostExecProcessOutcome::Completed { token, result } => {
+                let bytes = result.canonical_receipt_bytes();
+                match self.ledger.lock().complete(token, &bytes) {
+                    Ok(receipt) => settle_completed(claim, receipt),
+                    Err(_) => {
+                        settle_ambiguity(claim, EffectAmbiguityReason::CompletionPersistenceFailed)
+                    }
+                }
+            }
+            HostExecProcessOutcome::Cancelled { token }
+            | HostExecProcessOutcome::Ambiguous { token, .. } => {
+                let _ = self.ledger.lock().mark_ambiguous(token);
+                settle_ambiguity(claim, EffectAmbiguityReason::ExecutorLost)
+            }
+        }
+    }
+
+    fn finish_if_owned(&mut self) -> Option<HostResult> {
+        self.process
+            .take()
+            .map(|process| self.finish_process(process))
+    }
+}
+
+impl ActiveHostCall for ActiveOwnedHostExecCall {
+    fn try_wait(&mut self) -> Result<Option<HostResult>, PythonError> {
+        let Some(process) = self.process.as_mut() else {
+            return Ok(None);
+        };
+        if !process
+            .has_exited_unreaped()
+            .map_err(process_custody_error)?
+        {
+            return Ok(None);
+        }
+        Ok(self.finish_if_owned())
+    }
+
+    fn cancel(&mut self) -> Result<(), PythonError> {
+        match self.process.as_mut() {
+            Some(process) => process.cancel().map_err(process_custody_error),
+            None => Ok(()),
+        }
+    }
+
+    fn wait_reaped(&mut self) -> Result<(), PythonError> {
+        let _ = self.finish_if_owned();
+        Ok(())
+    }
+}
+
+impl Drop for ActiveOwnedHostExecCall {
+    fn drop(&mut self) {
+        if let Some(mut process) = self.process.take() {
+            let _ = process.cancel();
+            let _ = self.finish_process(process);
+        }
     }
 }
 
@@ -279,6 +469,47 @@ impl<R: HostExecRunner> HostCallService for HostCallServiceCore<R> {
     fn call(&mut self, call: &HostCall) -> HostResult {
         self.invoke(call)
     }
+}
+
+fn settle_completed(claim: RunEffectClaim, receipt: StoredReceipt) -> HostResult {
+    let result = match verify_and_decode(&receipt) {
+        Ok(result) => result,
+        Err(()) => {
+            return settle_ambiguity(claim, EffectAmbiguityReason::ReceiptIntegrityFailed);
+        }
+    };
+    let completed = CompletedEffectReceipt {
+        binding: claim.binding().clone(),
+        receipt: URL_SAFE_NO_PAD.encode(&receipt.bytes),
+        receipt_sha256: hex::encode(receipt.sha256),
+    };
+    if claim.completed(completed).is_err() {
+        return HostResult::rejected(REJECT_AMBIGUOUS);
+    }
+    guest_result(result)
+}
+
+fn settle_ambiguity(claim: RunEffectClaim, reason: EffectAmbiguityReason) -> HostResult {
+    let ambiguity = EffectAmbiguity {
+        binding: claim.binding().clone(),
+        reason,
+        may_have_occurred: true,
+        context_invalidated: true,
+    };
+    let _ = claim.ambiguous(ambiguity);
+    HostResult::rejected(REJECT_AMBIGUOUS)
+}
+
+fn release_without_effect(claim: RunEffectClaim, message: &'static str) -> HostResult {
+    if claim.release().is_ok() {
+        HostResult::rejected(message)
+    } else {
+        HostResult::rejected(REJECT_AMBIGUOUS)
+    }
+}
+
+fn process_custody_error(_error: impl std::error::Error) -> PythonError {
+    PythonError::Io(io::Error::other("host execution process custody failed"))
 }
 
 fn classify_prepare_error(error: EffectError) -> HostExecLedgerError {
