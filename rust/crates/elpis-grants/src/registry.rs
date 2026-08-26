@@ -297,6 +297,70 @@ impl ValidatedSensitiveProfileBindings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSensitiveProfileSubsetProof {
+    policy: SensitivePolicyV1,
+    bindings: ValidatedSensitiveProfileBindings,
+}
+
+impl ValidatedSensitiveProfileSubsetProof {
+    /// Binds every signed profile reference exactly, then proves all representable signed
+    /// constraints are contained by the matched immutable local profiles.
+    pub fn prove(
+        policy: &SensitivePolicyV1,
+        registry: &CanonicalSensitiveProfileRegistry,
+    ) -> Result<Self, SensitiveProfileProofError> {
+        let bindings = ValidatedSensitiveProfileBindings::bind_exact(policy, registry)?;
+        for capability in &policy.capabilities {
+            let requirement = SensitiveProfileRequirement::from_capability(capability);
+            let binding = bindings
+                .bindings()
+                .iter()
+                .find(|binding| binding.requirement.profile_ref.id == requirement.profile_ref.id)
+                .ok_or(SensitiveProfileProofError::BindingInvariant)?;
+            let result = match capability {
+                SensitiveCapabilityRule::ReadPath { .. }
+                | SensitiveCapabilityRule::EditTree { .. }
+                | SensitiveCapabilityRule::ArtifactExport { .. } => {
+                    prove_path_artifact_profile_subset(capability, &binding.profile)
+                }
+                SensitiveCapabilityRule::KubernetesNamespace { .. } => {
+                    prove_kubernetes_profile_subset(capability, &binding.profile)
+                }
+                SensitiveCapabilityRule::ServiceAction { .. }
+                | SensitiveCapabilityRule::PackageOperation { .. }
+                | SensitiveCapabilityRule::RemoteExecProfile { .. }
+                | SensitiveCapabilityRule::NetworkEndpoint { .. } => {
+                    prove_finite_profile_subset(capability, &binding.profile)
+                }
+            };
+            result?;
+        }
+        Ok(Self {
+            policy: policy.clone(),
+            bindings,
+        })
+    }
+
+    pub fn policy(&self) -> &SensitivePolicyV1 {
+        &self.policy
+    }
+
+    pub fn bindings(&self) -> &ValidatedSensitiveProfileBindings {
+        &self.bindings
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveProfileProofError {
+    #[error(transparent)]
+    Binding(#[from] SensitiveProfileBindingError),
+    #[error(transparent)]
+    Subset(#[from] SensitiveProfileSubsetError),
+    #[error("validated profile binding invariant failed")]
+    BindingInvariant,
+}
+
 /// Proves signed relative-prefix and artifact-size bounds against one exact local profile.
 ///
 /// This validates profile containment only; it does not resolve paths, inspect files, or prevent
@@ -874,6 +938,98 @@ mod tests {
         CanonicalSensitiveProfileRegistry::parse(&value.canonical_bytes().unwrap()).unwrap()
     }
 
+    fn exact_ref(profile: &SensitiveLocalProfileV1) -> SensitiveProfileRef {
+        let bytes = profile.canonical_bytes().unwrap();
+        SensitiveProfileRef {
+            id: profile.id.clone(),
+            sha256: sha256_hex(&bytes),
+        }
+    }
+
+    fn total_registry() -> CanonicalSensitiveProfileRegistry {
+        let mut profiles = vec![
+            read_profile(),
+            edit_profile(),
+            service_profile(),
+            package_profile(),
+            kubernetes_profile(),
+            remote_profile(),
+            network_profile(),
+            artifact_profile(),
+        ]
+        .into_iter()
+        .map(|profile| SensitiveProfileRegistryEntryV1::from_profile(profile).unwrap())
+        .collect::<Vec<_>>();
+        profiles.sort_by(|left, right| left.profile.id.cmp(&right.profile.id));
+        canonical_registry(SensitiveProfileRegistryV1 {
+            version: SENSITIVE_PROFILE_REGISTRY_VERSION,
+            profiles,
+        })
+    }
+
+    fn total_policy() -> SensitivePolicyV1 {
+        let read = exact_ref(&read_profile());
+        let edit = exact_ref(&edit_profile());
+        let service = exact_ref(&service_profile());
+        let package = exact_ref(&package_profile());
+        let kubernetes = exact_ref(&kubernetes_profile());
+        let remote = exact_ref(&remote_profile());
+        let network = exact_ref(&network_profile());
+        let artifact = exact_ref(&artifact_profile());
+        let mut policy = binding_policy();
+        policy.capabilities = vec![
+            SensitiveCapabilityRule::ArtifactExport {
+                destination_profile: artifact,
+                max_artifact_bytes: 1024,
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::EditTree {
+                tree: edit,
+                relative_prefixes: vec!["src".into()],
+                max_files: 4096,
+                max_changed_bytes: 1024,
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::KubernetesNamespace {
+                cluster_profile: kubernetes,
+                namespace: "elpis-workers".into(),
+                verbs: vec![crate::KubernetesVerb::Get],
+                resources: vec![crate::KubernetesResource::Pod],
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::NetworkEndpoint {
+                endpoint_profile: network,
+                methods: vec![crate::NetworkMethod::Get],
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::PackageOperation {
+                profile: package,
+                operations: vec![crate::PackageOperation::Install],
+                packages: vec!["curl".into()],
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::ReadPath {
+                root: read,
+                relative_prefixes: vec!["src".into()],
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::RemoteExecProfile {
+                profile: remote,
+                actions: vec!["check-state".into()],
+                budget: binding_budget(),
+            },
+            SensitiveCapabilityRule::ServiceAction {
+                profile: service,
+                actions: vec![crate::ServiceAction::Status],
+                budget: binding_budget(),
+            },
+        ];
+        policy.persistence.max_artifacts = 1;
+        policy.persistence.max_total_artifact_bytes = 1024;
+        policy.validate().unwrap();
+        policy
+    }
+
     #[test]
     fn all_capability_variants_derive_fixed_profile_kinds() {
         let reference = |id: &str| SensitiveProfileRef {
@@ -1360,6 +1516,82 @@ mod tests {
         assert_eq!(
             prove_path_artifact_profile_subset(&service, &read_profile()),
             Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
+        );
+    }
+    #[test]
+    fn total_subset_proof_owns_validated_policy_and_all_exact_bindings() {
+        let policy = total_policy();
+        let proof =
+            ValidatedSensitiveProfileSubsetProof::prove(&policy, &total_registry()).unwrap();
+        assert_eq!(proof.policy(), &policy);
+        assert_eq!(proof.bindings().bindings().len(), 8);
+    }
+
+    #[test]
+    fn total_subset_proof_fails_closed_across_all_three_proof_families() {
+        let registry = total_registry();
+        let mut path = total_policy();
+        for capability in &mut path.capabilities {
+            if let SensitiveCapabilityRule::ReadPath {
+                relative_prefixes, ..
+            } = capability
+            {
+                *relative_prefixes = vec!["a".repeat(121)];
+            }
+        }
+        path.validate().unwrap();
+        assert_eq!(
+            ValidatedSensitiveProfileSubsetProof::prove(&path, &registry),
+            Err(SensitiveProfileProofError::Subset(
+                SensitiveProfileSubsetError::ConstraintNotContained
+            ))
+        );
+
+        let mut kubernetes = total_policy();
+        for capability in &mut kubernetes.capabilities {
+            if let SensitiveCapabilityRule::KubernetesNamespace {
+                verbs, resources, ..
+            } = capability
+            {
+                *verbs = vec![crate::KubernetesVerb::Create];
+                *resources = vec![crate::KubernetesResource::ConfigMap];
+            }
+        }
+        kubernetes.validate().unwrap();
+        assert_eq!(
+            ValidatedSensitiveProfileSubsetProof::prove(&kubernetes, &registry),
+            Err(SensitiveProfileProofError::Subset(
+                SensitiveProfileSubsetError::ConstraintNotContained
+            ))
+        );
+
+        let mut finite = total_policy();
+        for capability in &mut finite.capabilities {
+            if let SensitiveCapabilityRule::ServiceAction { actions, .. } = capability {
+                *actions = vec![crate::ServiceAction::Stop];
+            }
+        }
+        finite.validate().unwrap();
+        assert_eq!(
+            ValidatedSensitiveProfileSubsetProof::prove(&finite, &registry),
+            Err(SensitiveProfileProofError::Subset(
+                SensitiveProfileSubsetError::ConstraintNotContained
+            ))
+        );
+    }
+
+    #[test]
+    fn total_subset_proof_requires_exact_binding_before_containment() {
+        let mut policy = total_policy();
+        if let SensitiveCapabilityRule::ReadPath { root, .. } = &mut policy.capabilities[5] {
+            root.sha256 = "0".repeat(64);
+        }
+        policy.validate().unwrap();
+        assert_eq!(
+            ValidatedSensitiveProfileSubsetProof::prove(&policy, &total_registry()),
+            Err(SensitiveProfileProofError::Binding(
+                SensitiveProfileBindingError::HashMismatch
+            ))
         );
     }
 }
