@@ -311,6 +311,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-grants"
+version = "0.7.1"
+dependencies = [
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "elpis-identity"
 version = "0.7.1"
 dependencies = [
