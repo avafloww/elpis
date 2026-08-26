@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    KubernetesResource, NetworkMethod, SensitiveProfileRef, sha256_hex, validate_id,
+    KubernetesResource, NetworkMethod, SensitiveProfileRef, ServiceAction, sha256_hex, validate_id,
     validate_lower_hex_64,
 };
 
@@ -38,6 +38,8 @@ const MAX_NETWORK_CONTENT_TYPES: usize = 3;
 const MAX_NETWORK_PATH_BYTES: usize = 256;
 const MAX_NETWORK_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SERVICE_UNITS: usize = 32;
+const MAX_SERVICE_UNIT_NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +163,12 @@ pub enum SensitiveLocalProfileKindV1 {
         redirects: NetworkRedirectPolicy,
         max_request_bytes: u64,
         max_response_bytes: u64,
+    },
+    ServiceManager {
+        manager: ServiceManagerKind,
+        scope: ServiceManagerScope,
+        unit_resolution: ServiceUnitResolutionPolicy,
+        units: Vec<ServiceUnitRule>,
     },
 }
 
@@ -294,6 +302,10 @@ impl SensitiveLocalProfileKindV1 {
                     return Err(SensitiveLocalProfileError::InvalidField);
                 }
                 Ok(())
+            }
+            Self::ServiceManager { scope, units, .. } => {
+                scope.validate()?;
+                validate_service_unit_rules(units)
             }
         }
     }
@@ -825,6 +837,54 @@ pub enum NetworkRedirectPolicy {
     Deny,
 }
 
+/// Exact systemd D-Bus authority. No manager executable or command string is represented.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceManagerKind {
+    SystemdDbus,
+}
+
+/// The manager must return the same canonical unit name requested; aliases are not accepted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceUnitResolutionPolicy {
+    ExactCanonicalNameNoAlias,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceManagerScope {
+    System,
+    User { uid: u32 },
+}
+
+impl ServiceManagerScope {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        match self {
+            Self::System => Ok(()),
+            Self::User { uid } if *uid > 0 => Ok(()),
+            Self::User { .. } => Err(SensitiveLocalProfileError::InvalidField),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceUnitRule {
+    pub unit: String,
+    pub actions: Vec<ServiceAction>,
+}
+
+impl ServiceUnitRule {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_service_unit_name(&self.unit)?;
+        if self.actions.is_empty() || self.actions.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(SensitiveLocalProfileError::NonCanonicalList);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -839,6 +899,42 @@ pub enum SensitiveLocalProfileError {
     InvalidField,
     #[error("sensitive local profile lists must be nonempty, sorted, and unique")]
     NonCanonicalList,
+}
+
+fn validate_service_unit_rules(
+    units: &[ServiceUnitRule],
+) -> Result<(), SensitiveLocalProfileError> {
+    if units.is_empty()
+        || units.len() > MAX_SERVICE_UNITS
+        || units.windows(2).any(|pair| pair[0].unit >= pair[1].unit)
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for unit in units {
+        unit.validate()?;
+    }
+    Ok(())
+}
+
+fn validate_service_unit_name(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    let Some(stem) = value.strip_suffix(".service") else {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    };
+    if value.len() > MAX_SERVICE_UNIT_NAME_BYTES
+        || stem.is_empty()
+        || stem.starts_with(['-', '.', '_', '@'])
+        || stem.ends_with(['-', '.', '_', '@'])
+        || stem.contains("..")
+        || stem.matches('@').count() > 1
+        || !stem.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'.' | b'_' | b'@')
+        })
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
 }
 
 fn validate_network_routes(routes: &[NetworkRouteRule]) -> Result<(), SensitiveLocalProfileError> {
@@ -2574,6 +2670,219 @@ mod tests {
                 }
                 "credential" => value["profile"]["credential"] = serde_json::json!("secret"),
                 _ => value["profile"]["origin"]["path"] = serde_json::json!("/admin"),
+            }
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
+    }
+    fn service_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "resident-services".into(),
+            profile: SensitiveLocalProfileKindV1::ServiceManager {
+                manager: ServiceManagerKind::SystemdDbus,
+                scope: ServiceManagerScope::System,
+                unit_resolution: ServiceUnitResolutionPolicy::ExactCanonicalNameNoAlias,
+                units: vec![
+                    ServiceUnitRule {
+                        unit: "elpis-harness.service".into(),
+                        actions: vec![ServiceAction::Restart, ServiceAction::Status],
+                    },
+                    ServiceUnitRule {
+                        unit: "nginx.service".into(),
+                        actions: vec![
+                            ServiceAction::Reload,
+                            ServiceAction::Restart,
+                            ServiceAction::Status,
+                        ],
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn service_profile_canonical_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"resident-services","profile":{"kind":"service_manager","manager":"systemd_dbus","scope":{"mode":"system"},"unit_resolution":"exact_canonical_name_no_alias","units":[{"unit":"elpis-harness.service","actions":["restart","status"]},{"unit":"nginx.service","actions":["reload","restart","status"]}]}}"#;
+        const GOLDEN_SHA256: &str =
+            "2e63e14a85c5a09b324e494ccd23af19c967c3702e4b3407b07f5086ebb625fe";
+
+        let bytes = service_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &service_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn service_scope_and_unit_list_are_exact_and_bounded() {
+        let mut value = service_profile();
+        if let SensitiveLocalProfileKindV1::ServiceManager { scope, .. } = &mut value.profile {
+            *scope = ServiceManagerScope::User { uid: 0 };
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = service_profile();
+        if let SensitiveLocalProfileKindV1::ServiceManager { scope, .. } = &mut value.profile {
+            *scope = ServiceManagerScope::User { uid: 1000 };
+        }
+        assert!(value.validate().is_ok());
+        assert_ne!(
+            value.canonical_bytes().unwrap(),
+            service_profile().canonical_bytes().unwrap()
+        );
+
+        for units in [
+            vec![],
+            vec![
+                ServiceUnitRule {
+                    unit: "nginx.service".into(),
+                    actions: vec![ServiceAction::Status],
+                },
+                ServiceUnitRule {
+                    unit: "elpis-harness.service".into(),
+                    actions: vec![ServiceAction::Status],
+                },
+            ],
+            vec![
+                ServiceUnitRule {
+                    unit: "nginx.service".into(),
+                    actions: vec![ServiceAction::Status],
+                },
+                ServiceUnitRule {
+                    unit: "nginx.service".into(),
+                    actions: vec![ServiceAction::Restart],
+                },
+            ],
+        ] {
+            let mut value = service_profile();
+            if let SensitiveLocalProfileKindV1::ServiceManager { units: target, .. } =
+                &mut value.profile
+            {
+                *target = units;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        let mut value = service_profile();
+        if let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut value.profile {
+            *units = (0..=MAX_SERVICE_UNITS)
+                .map(|index| ServiceUnitRule {
+                    unit: format!("unit-{index:02}.service"),
+                    actions: vec![ServiceAction::Status],
+                })
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+    }
+
+    #[test]
+    fn service_names_and_actions_are_conservative_sorted_and_unique() {
+        for unit in [
+            "",
+            ".service",
+            "nginx",
+            "nginx.socket",
+            "Nginx.service",
+            "../nginx.service",
+            "path/nginx.service",
+            "nginx*.service",
+            "-nginx.service",
+            "nginx-.service",
+            "nginx@.service",
+            "nginx@@blue.service",
+            "nginx..blue.service",
+        ] {
+            let mut value = service_profile();
+            if let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut value.profile {
+                units.truncate(1);
+                units[0].unit = unit.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = service_profile();
+        if let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut value.profile {
+            units.truncate(1);
+            units[0].unit = format!("{}.service", "a".repeat(MAX_SERVICE_UNIT_NAME_BYTES));
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = service_profile();
+        if let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut value.profile {
+            units[1].unit = "worker@blue.service".into();
+        }
+        assert!(value.validate().is_ok());
+
+        for actions in [
+            vec![],
+            vec![ServiceAction::Status, ServiceAction::Restart],
+            vec![ServiceAction::Status, ServiceAction::Status],
+        ] {
+            let mut value = service_profile();
+            if let SensitiveLocalProfileKindV1::ServiceManager { units, .. } = &mut value.profile {
+                units[0].actions = actions;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+    }
+
+    #[test]
+    fn service_encoding_rejects_commands_daemon_reload_and_unit_overrides() {
+        let bytes = service_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "manager",
+            "scope",
+            "alias_resolution",
+            "daemon_reload",
+            "command",
+            "unit_path",
+            "environment",
+            "transient",
+            "credential",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "manager" => value["profile"]["manager"] = serde_json::json!("shell"),
+                "scope" => value["profile"]["scope"] = serde_json::json!({"mode":"global"}),
+                "alias_resolution" => {
+                    value["profile"]["unit_resolution"] = serde_json::json!("allow_alias")
+                }
+                "daemon_reload" => {
+                    value["profile"]["units"][0]["actions"][0] = serde_json::json!("daemon_reload")
+                }
+                "command" => value["profile"]["command"] = serde_json::json!("systemctl"),
+                "unit_path" => {
+                    value["profile"]["units"][0]["path"] =
+                        serde_json::json!("/etc/systemd/system/nginx.service")
+                }
+                "environment" => {
+                    value["profile"]["units"][0]["environment"] =
+                        serde_json::json!({"LD_PRELOAD":"/tmp/x.so"})
+                }
+                "transient" => value["profile"]["units"][0]["transient"] = serde_json::json!(true),
+                _ => value["profile"]["credential"] = serde_json::json!("secret"),
             }
             assert_eq!(
                 CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
