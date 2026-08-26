@@ -30,7 +30,12 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+elpis-client = { path = "../elpis-client" }
+elpis-transport = { path = "../elpis-transport" }
+rcgen = { workspace = true, features = ["x509-parser"] }
+rustls.workspace = true
 tempfile = "3"
+tungstenite.workspace = true
 
 [build-dependencies]
 hex.workspace = true

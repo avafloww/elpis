@@ -283,6 +283,7 @@ name = "elpis-executor"
 version = "0.7.1"
 dependencies = [
  "base64",
+ "elpis-client",
  "elpis-coordinator",
  "elpis-effects",
  "elpis-identity",
@@ -291,10 +292,13 @@ dependencies = [
  "elpis-protocol",
  "elpis-python",
  "elpis-runtime",
+ "elpis-transport",
  "hex",
  "libc",
+ "rcgen",
  "ring",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -303,6 +307,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "tungstenite",
 ]
 
 [[package]]
