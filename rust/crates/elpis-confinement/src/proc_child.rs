@@ -67,6 +67,11 @@ enum TerminalDisposition {
     Dumped(i32),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseState {
+    Stopped,
+    Terminal(TerminalDisposition),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalReceipt {
     start: ChildStartIdentity,
     disposition: TerminalDisposition,
@@ -99,6 +104,7 @@ enum ExactError<E> {
 trait ChildCustody: Sized {
     fn pid(&self) -> libc::pid_t;
     fn pidfd(&self) -> Option<RawFd>;
+    fn close_protocol(&mut self);
     fn disarm_after_exact_reap(&mut self);
 }
 impl ChildCustody for NextChildCustody {
@@ -107,6 +113,9 @@ impl ChildCustody for NextChildCustody {
     }
     fn pidfd(&self) -> Option<RawFd> {
         self.child().pidfd().map(|fd| fd.as_raw_fd())
+    }
+    fn close_protocol(&mut self) {
+        NextChildCustody::close_protocol(self)
     }
     fn disarm_after_exact_reap(&mut self) {
         NextChildCustody::disarm_after_exact_reap(self)
@@ -146,6 +155,9 @@ trait ProcKernel: Sized {
     ) -> Result<NamespaceIdentity, Self::Error>;
     fn pidfd_send_signal(&mut self, pidfd: RawFd, signal: i32) -> Result<(), Self::Error>;
     fn waitid_pidfd(&mut self, pidfd: RawFd) -> Result<TerminalDisposition, Self::Error>;
+    /// Waits without consuming for either the helper's exact SIGSTOP handoff
+    /// or a terminal disposition that still requires an exact reap.
+    fn waitid_release_state(&mut self, pidfd: RawFd) -> Result<ReleaseState, Self::Error>;
 }
 
 struct ExactChild<K: ProcKernel, C: ChildCustody> {
@@ -202,6 +214,9 @@ impl<K: ProcKernel, C: ChildCustody> ExactChild<K, C> {
             return Err(ExactError::PidfdSubstitution);
         }
         let state = self.kernel.pidfd_state(pidfd).map_err(ExactError::Kernel)?;
+        if state == PidfdState::Terminal && !terminal_ok {
+            return Err(ExactError::PidfdTerminal);
+        }
         let target = self
             .kernel
             .pidfd_target(pidfd)
@@ -210,9 +225,6 @@ impl<K: ProcKernel, C: ChildCustody> ExactChild<K, C> {
             PidfdTarget::Process(pid) if pid == self.start.outer_pid => {}
             PidfdTarget::NoTask if terminal_ok && state == PidfdState::Terminal => {}
             _ => return Err(ExactError::PidfdSubstitution),
-        }
-        if state == PidfdState::Terminal && !terminal_ok {
-            return Err(ExactError::PidfdTerminal);
         }
         if self
             .kernel
@@ -331,6 +343,19 @@ impl<K: ProcKernel, C: ChildCustody> ExactChild<K, C> {
             Err(e) => Err(ExactError::Kernel(e)),
         }
     }
+    fn wait_release_state(&mut self) -> Result<ReleaseState, ExactError<K::Error>> {
+        self.revalidate(false)?;
+        let pidfd = self.custody.pidfd().ok_or(ExactError::MissingPidfd)?;
+        let state = self
+            .kernel
+            .waitid_release_state(pidfd)
+            .map_err(ExactError::Kernel)?;
+        if state == ReleaseState::Stopped {
+            self.revalidate(false)?;
+        }
+        Ok(state)
+    }
+
     fn wait(mut self) -> Result<TerminalReceipt, WaitFailure<K, C>> {
         let Some(fd) = self.custody.pidfd() else {
             return Err(WaitFailure::Uncertain(UncertainCustody {
@@ -382,6 +407,7 @@ fn bind_with<K: ProcKernel, C: ChildCustody>(
             Ok(child)
         }
         Err(cause) => {
+            custody.close_protocol();
             let Some(fd) = custody.pidfd() else {
                 return Err(BindFailure::Uncertain {
                     cause,
@@ -474,6 +500,7 @@ fn abort_bound<K: ProcKernel, C: ChildCustody>(
     mut child: ExactChild<K, C>,
     cause: ExactError<K::Error>,
 ) -> BindFailure<K, C> {
+    child.custody.close_protocol();
     let Some(fd) = child.custody.pidfd() else {
         let ExactChild {
             kernel,
@@ -804,6 +831,25 @@ impl ProcKernel for LinuxKernel {
             _ => Err(std::io::Error::from_raw_os_error(libc::EIO)),
         }
     }
+    fn waitid_release_state(&mut self, fd: RawFd) -> Result<ReleaseState, Self::Error> {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        let options = libc::WSTOPPED | libc::WEXITED | libc::WNOWAIT;
+        let n = unsafe { libc::waitid(P_PIDFD, fd as libc::id_t, info.as_mut_ptr(), options) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        let status = unsafe { info.si_status() };
+        match info.si_code {
+            libc::CLD_STOPPED if status == libc::SIGSTOP => Ok(ReleaseState::Stopped),
+            libc::CLD_EXITED => Ok(ReleaseState::Terminal(TerminalDisposition::Exited(status))),
+            libc::CLD_KILLED => Ok(ReleaseState::Terminal(TerminalDisposition::Signaled(
+                status,
+            ))),
+            libc::CLD_DUMPED => Ok(ReleaseState::Terminal(TerminalDisposition::Dumped(status))),
+            _ => Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        }
+    }
 }
 
 fn read_pidfd_target(fd: RawFd) -> Result<PidfdTarget, std::io::Error> {
@@ -974,6 +1020,7 @@ mod tests {
         fn pidfd(&self) -> Option<RawFd> {
             self.pidfd
         }
+        fn close_protocol(&mut self) {}
         fn disarm_after_exact_reap(&mut self) {
             self.armed.set(false);
         }
@@ -999,6 +1046,7 @@ mod tests {
         writes: RecordedWrites,
         signal: Result<(), i32>,
         wait: Result<TerminalDisposition, i32>,
+        release_state: Result<ReleaseState, i32>,
         wait_calls: Rc<Cell<usize>>,
         opens: Rc<RefCell<Vec<(&'static str, Access)>>>,
     }
@@ -1041,6 +1089,7 @@ mod tests {
                 writes: Rc::new(RefCell::new(Vec::new())),
                 signal: Ok(()),
                 wait: Ok(TerminalDisposition::Signaled(libc::SIGKILL)),
+                release_state: Ok(ReleaseState::Stopped),
                 wait_calls: Rc::new(Cell::new(0)),
                 opens: Rc::new(RefCell::new(Vec::new())),
             }
@@ -1136,6 +1185,9 @@ mod tests {
         fn waitid_pidfd(&mut self, _fd: RawFd) -> Result<TerminalDisposition, i32> {
             self.wait_calls.set(self.wait_calls.get() + 1);
             self.wait
+        }
+        fn waitid_release_state(&mut self, _fd: RawFd) -> Result<ReleaseState, i32> {
+            self.release_state
         }
     }
 
@@ -1368,6 +1420,29 @@ mod tests {
     }
 
     #[test]
+    fn release_state_requires_exact_stop_or_preserves_terminal_for_reap() {
+        let mut stopped = bound();
+        assert_eq!(stopped.wait_release_state(), Ok(ReleaseState::Stopped));
+
+        let mut terminal = bound();
+        terminal.kernel.state = PidfdState::Terminal;
+        terminal.kernel.pidfd_target = PidfdTarget::NoTask;
+        terminal.kernel.release_state =
+            Ok(ReleaseState::Terminal(TerminalDisposition::Exited(125)));
+        assert_eq!(
+            terminal.wait_release_state(),
+            Err(ExactError::PidfdTerminal)
+        );
+
+        let mut failed = bound();
+        failed.kernel.release_state = Err(libc::EIO);
+        assert_eq!(
+            failed.wait_release_state(),
+            Err(ExactError::Kernel(libc::EIO))
+        );
+    }
+
+    #[test]
     fn waitid_pidfd_exactly_disarms_only_on_terminal_receipt() {
         let (c, armed) = custody();
         let mut child = match bind_with(FakeKernel::good(), c) {
@@ -1448,5 +1523,1232 @@ mod tests {
             _ => panic!("expected uncertain custody"),
         }
         assert!(armed.get());
+    }
+}
+
+// The namespace_child module is the frozen policy typestate.  This private
+// composition is the concrete custody implementation beneath the future boot
+// integration boundary; it deliberately is not wired to a public entrypoint.
+mod stopped_child_composition {
+    use super::*;
+    use crate::raw_clone::{
+        BootFrozenHelperFd, CloneExecError, NextChildCustody, RawChild, clone_exec_fixed,
+    };
+    use std::io;
+    use std::os::fd::RawFd;
+
+    const FRAME_LEN: usize = 48;
+    const NONCE_LEN: usize = 32;
+    const MAGIC: &[u8; 8] = b"ELPISNS\0";
+    const VERSION: u8 = 1;
+    const BOOT: u8 = 1;
+    const READY: u8 = 2;
+    const RELEASE: u8 = 3;
+    const SETGROUPS_ALLOW: &[u8] = b"allow\n";
+    const SETGROUPS_DENY: &[u8] = b"deny\n";
+    const CHILD_ERROR_LEN: usize = 16;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FrozenIds {
+        uid: u32,
+        gid: u32,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct BootNonce([u8; NONCE_LEN]);
+
+    impl BootNonce {
+        fn valid(self) -> bool {
+            self.0.iter().any(|byte| *byte != 0)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct StartIdentity {
+        outer_pid: u32,
+        pidfd_device: u64,
+        pidfd_inode: u64,
+        proc_device: u64,
+        proc_inode: u64,
+        start_time_ticks: u64,
+    }
+
+    impl From<ChildStartIdentity> for StartIdentity {
+        fn from(value: ChildStartIdentity) -> Self {
+            Self {
+                outer_pid: value.outer_pid,
+                pidfd_device: value.pidfd.device,
+                pidfd_inode: value.pidfd.inode,
+                proc_device: value.proc_dir.device,
+                proc_inode: value.proc_dir.inode,
+                start_time_ticks: value.start_time_ticks,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NamespaceSet {
+        user: (u64, u64),
+        mount: (u64, u64),
+        pid: (u64, u64),
+        network: (u64, u64),
+    }
+
+    impl NamespaceSet {
+        fn exact(values: NamespaceIdentities) -> Self {
+            let pair = |value: NamespaceIdentity| (value.device, value.inode);
+            Self {
+                user: pair(values.user),
+                mount: pair(values.mount),
+                pid: pair(values.pid),
+                network: pair(values.network),
+            }
+        }
+
+        fn valid(self) -> bool {
+            let values = [self.user, self.mount, self.pid, self.network];
+            values
+                .iter()
+                .all(|(device, inode)| *device != 0 && *inode != 0)
+                && values
+                    .iter()
+                    .enumerate()
+                    .all(|(index, value)| !values[index + 1..].contains(value))
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Step {
+        FrozenInputs,
+        Clone3,
+        ProcBind,
+        ExecStatus,
+        BootNonce,
+        Ready,
+        ReadyQuiet,
+        ReadSetgroupsCurrent,
+        WriteSetgroupsDeny,
+        ReadSetgroupsDeny,
+        WriteUidMap,
+        WriteGidMap,
+        ReadUidMap,
+        ReadGidMap,
+        StartIdentity,
+        Nspid,
+        Namespaces,
+        ReleaseToMountAssembly,
+        ReleaseEof,
+        StoppedHandoff,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum FailureCause<E> {
+        Kernel { step: Step, error: E },
+        Evidence { step: Step },
+    }
+
+    enum CloneAttempt<E> {
+        /// This is the only result classified as NoChild: clone3 returned negative.
+        NoChild(E),
+        /// Descriptor preparation failed before clone3 was attempted.
+        NotStarted(E),
+    }
+
+    enum ComposedBindFailure<E, U, R> {
+        Reaped { cause: E, receipt: R },
+        Uncertain { cause: E, custody: U },
+    }
+
+    type ProcBindResult<E, C, U, R> = Result<(C, StartIdentity), ComposedBindFailure<E, U, R>>;
+
+    trait StoppedBackend: Sized {
+        type Error;
+        type Raw;
+        type Child;
+        type BindUncertain;
+        type ReapUncertain;
+        type Receipt;
+
+        fn frozen_ids(&self) -> FrozenIds;
+        fn nonce(&self) -> BootNonce;
+        fn raw_clone(&mut self) -> Result<Self::Raw, CloneAttempt<Self::Error>>;
+        fn proc_bind(
+            &mut self,
+            raw: Self::Raw,
+        ) -> ProcBindResult<Self::Error, Self::Child, Self::BindUncertain, Self::Receipt>;
+        fn exec_succeeded(child: &mut Self::Child) -> Result<(), Self::Error>;
+        /// Exactly one SOCK_SEQPACKET send; callers never retry short writes.
+        fn send_control(
+            child: &mut Self::Child,
+            frame: &[u8; FRAME_LEN],
+        ) -> Result<usize, Self::Error>;
+        /// Exactly one canonical packet. EOF, truncation, and oversize are errors.
+        fn receive_receipt(child: &mut Self::Child) -> Result<[u8; FRAME_LEN], Self::Error>;
+        /// Peeks without consuming. false means a duplicate packet is queued.
+        fn receipt_is_quiet(child: &mut Self::Child) -> Result<bool, Self::Error>;
+        /// Blocks until the helper closes its receipt endpoint after validating
+        /// post-map state; any additional packet is malformed.
+        fn release_receipt_eof(child: &mut Self::Child) -> Result<(), Self::Error>;
+        fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error>;
+        fn read_setgroups(child: &mut Self::Child) -> Result<Vec<u8>, Self::Error>;
+        fn write_setgroups_deny(child: &mut Self::Child) -> Result<(), Self::Error>;
+        fn write_uid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error>;
+        fn write_gid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error>;
+        fn read_uid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error>;
+        fn read_gid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error>;
+        fn identity(child: &mut Self::Child) -> Result<StartIdentity, Self::Error>;
+        fn nspid(child: &mut Self::Child) -> Result<Vec<u32>, Self::Error>;
+        fn namespaces(child: &mut Self::Child) -> Result<NamespaceSet, Self::Error>;
+        /// Infallible ownership operation: both protocol directions and exec status close.
+        fn close_protocol(child: &mut Self::Child);
+        fn send_sigkill(child: &mut Self::Child) -> Result<(), Self::Error>;
+        fn exact_reap(child: Self::Child) -> Result<Self::Receipt, Self::ReapUncertain>;
+    }
+
+    struct ArmedStoppedChild<K: StoppedBackend> {
+        kernel: K,
+        child: K::Child,
+        start: StartIdentity,
+        namespaces: NamespaceSet,
+    }
+
+    struct ComposedUncertainCustody<K: StoppedBackend> {
+        kernel: K,
+        custody: K::ReapUncertain,
+        kill_error: Option<K::Error>,
+    }
+
+    enum LaunchFailure<K: StoppedBackend> {
+        NotStarted {
+            cause: FailureCause<K::Error>,
+            kernel: K,
+        },
+        NoChild {
+            cause: FailureCause<K::Error>,
+            kernel: K,
+        },
+        BindReaped {
+            cause: FailureCause<K::Error>,
+            receipt: K::Receipt,
+        },
+        BindUncertain {
+            cause: FailureCause<K::Error>,
+            custody: K::BindUncertain,
+        },
+        Reaped {
+            cause: FailureCause<K::Error>,
+            receipt: K::Receipt,
+        },
+        Uncertain {
+            cause: FailureCause<K::Error>,
+            custody: ComposedUncertainCustody<K>,
+        },
+    }
+
+    fn frame(kind: u8, nonce: BootNonce) -> [u8; FRAME_LEN] {
+        let mut frame = [0u8; FRAME_LEN];
+        frame[..8].copy_from_slice(MAGIC);
+        frame[8] = VERSION;
+        frame[9] = kind;
+        frame[16..].copy_from_slice(&nonce.0);
+        frame
+    }
+
+    fn canonical(frame: &[u8; FRAME_LEN], kind: u8, nonce: BootNonce) -> bool {
+        frame[..8] == MAGIC[..]
+            && frame[8] == VERSION
+            && frame[9] == kind
+            && frame[10..16].iter().all(|byte| *byte == 0)
+            && frame[16..] == nonce.0[..]
+    }
+
+    fn exact_extent(extent: IdMapExtent, outside: u32) -> bool {
+        extent
+            == IdMapExtent {
+                inside: 0,
+                outside,
+                length: 1,
+            }
+    }
+
+    fn abort<K: StoppedBackend>(
+        kernel: K,
+        mut child: K::Child,
+        cause: FailureCause<K::Error>,
+    ) -> LaunchFailure<K> {
+        // EOF is established before signalling. Even a signal error therefore
+        // cannot leave the fixed helper able to pass the one-shot protocol.
+        K::close_protocol(&mut child);
+        let kill_error = K::send_sigkill(&mut child).err();
+        match K::exact_reap(child) {
+            Ok(receipt) => LaunchFailure::Reaped { cause, receipt },
+            Err(custody) => LaunchFailure::Uncertain {
+                cause,
+                custody: ComposedUncertainCustody {
+                    kernel,
+                    custody,
+                    kill_error,
+                },
+            },
+        }
+    }
+
+    fn reap_without_signal<K: StoppedBackend>(
+        kernel: K,
+        mut child: K::Child,
+        cause: FailureCause<K::Error>,
+    ) -> LaunchFailure<K> {
+        K::close_protocol(&mut child);
+        match K::exact_reap(child) {
+            Ok(receipt) => LaunchFailure::Reaped { cause, receipt },
+            Err(custody) => LaunchFailure::Uncertain {
+                cause,
+                custody: ComposedUncertainCustody {
+                    kernel,
+                    custody,
+                    kill_error: None,
+                },
+            },
+        }
+    }
+
+    fn launch<K: StoppedBackend>(mut kernel: K) -> Result<ArmedStoppedChild<K>, LaunchFailure<K>> {
+        let ids = kernel.frozen_ids();
+        let nonce = kernel.nonce();
+        if ids.uid == 0 || ids.gid == 0 || !nonce.valid() {
+            return Err(LaunchFailure::NotStarted {
+                cause: FailureCause::Evidence {
+                    step: Step::FrozenInputs,
+                },
+                kernel,
+            });
+        }
+
+        let raw = match kernel.raw_clone() {
+            Ok(raw) => raw,
+            Err(CloneAttempt::NoChild(error)) => {
+                return Err(LaunchFailure::NoChild {
+                    cause: FailureCause::Kernel {
+                        step: Step::Clone3,
+                        error,
+                    },
+                    kernel,
+                });
+            }
+            Err(CloneAttempt::NotStarted(error)) => {
+                return Err(LaunchFailure::NotStarted {
+                    cause: FailureCause::Kernel {
+                        step: Step::Clone3,
+                        error,
+                    },
+                    kernel,
+                });
+            }
+        };
+        let (mut child, start) = match kernel.proc_bind(raw) {
+            Ok(bound) => bound,
+            Err(ComposedBindFailure::Reaped { cause, receipt }) => {
+                return Err(LaunchFailure::BindReaped {
+                    cause: FailureCause::Kernel {
+                        step: Step::ProcBind,
+                        error: cause,
+                    },
+                    receipt,
+                });
+            }
+            Err(ComposedBindFailure::Uncertain { cause, custody }) => {
+                return Err(LaunchFailure::BindUncertain {
+                    cause: FailureCause::Kernel {
+                        step: Step::ProcBind,
+                        error: cause,
+                    },
+                    custody,
+                });
+            }
+        };
+
+        macro_rules! operation {
+            ($step:expr, $operation:expr) => {
+                match $operation {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(abort(
+                            kernel,
+                            child,
+                            FailureCause::Kernel { step: $step, error },
+                        ));
+                    }
+                }
+            };
+        }
+        macro_rules! evidence {
+            ($step:expr, $condition:expr) => {
+                if !$condition {
+                    return Err(abort(kernel, child, FailureCause::Evidence { step: $step }));
+                }
+            };
+        }
+
+        operation!(Step::ExecStatus, K::exec_succeeded(&mut child));
+        let boot = frame(BOOT, nonce);
+        let sent = operation!(Step::BootNonce, K::send_control(&mut child, &boot));
+        evidence!(Step::BootNonce, sent == FRAME_LEN);
+        let ready = operation!(Step::Ready, K::receive_receipt(&mut child));
+        evidence!(Step::Ready, canonical(&ready, READY, nonce));
+        let quiet = operation!(Step::ReadyQuiet, K::receipt_is_quiet(&mut child));
+        evidence!(Step::ReadyQuiet, quiet);
+
+        let current = operation!(Step::ReadSetgroupsCurrent, K::read_setgroups(&mut child));
+        evidence!(
+            Step::ReadSetgroupsCurrent,
+            current.as_slice() == SETGROUPS_ALLOW
+        );
+        operation!(
+            Step::WriteSetgroupsDeny,
+            K::write_setgroups_deny(&mut child)
+        );
+        let denied = operation!(Step::ReadSetgroupsDeny, K::read_setgroups(&mut child));
+        evidence!(Step::ReadSetgroupsDeny, denied.as_slice() == SETGROUPS_DENY);
+
+        operation!(Step::WriteUidMap, K::write_uid_map(&mut child, ids.uid));
+        operation!(Step::WriteGidMap, K::write_gid_map(&mut child, ids.gid));
+        let uid = operation!(Step::ReadUidMap, K::read_uid_map(&mut child));
+        evidence!(Step::ReadUidMap, exact_extent(uid, ids.uid));
+        let gid = operation!(Step::ReadGidMap, K::read_gid_map(&mut child));
+        evidence!(Step::ReadGidMap, exact_extent(gid, ids.gid));
+
+        let observed_start = operation!(Step::StartIdentity, K::identity(&mut child));
+        evidence!(Step::StartIdentity, observed_start == start);
+        let nspid = operation!(Step::Nspid, K::nspid(&mut child));
+        evidence!(Step::Nspid, nspid.as_slice() == [start.outer_pid, 1]);
+        let namespaces = operation!(Step::Namespaces, K::namespaces(&mut child));
+        evidence!(Step::Namespaces, namespaces.valid());
+
+        let release = frame(RELEASE, nonce);
+        let sent = operation!(
+            Step::ReleaseToMountAssembly,
+            K::send_control(&mut child, &release)
+        );
+        evidence!(Step::ReleaseToMountAssembly, sent == FRAME_LEN);
+        operation!(Step::ReleaseEof, K::release_receipt_eof(&mut child));
+        let release_state = operation!(Step::StoppedHandoff, K::release_state(&mut child));
+        if matches!(release_state, ReleaseState::Terminal(_)) {
+            return Err(reap_without_signal(
+                kernel,
+                child,
+                FailureCause::Evidence {
+                    step: Step::StoppedHandoff,
+                },
+            ));
+        }
+        K::close_protocol(&mut child);
+
+        Ok(ArmedStoppedChild {
+            kernel,
+            child,
+            start,
+            namespaces,
+        })
+    }
+
+    #[derive(Debug)]
+    enum ProtocolError {
+        Io(io::Error),
+        Eof,
+        MalformedExecStatus,
+        MalformedPacket,
+        ChildExecFailure([u8; CHILD_ERROR_LEN]),
+        UnexpectedReleasePacket,
+    }
+
+    #[derive(Debug)]
+    enum LinuxStoppedError {
+        ClonePreparation(io::Error),
+        Clone3(io::Error),
+        Proc(ExactError<io::Error>),
+        Protocol(ProtocolError),
+        ConsumedHelper,
+    }
+
+    enum LinuxReceipt {
+        Bound(TerminalReceipt),
+        DuringBind(TerminalDisposition),
+    }
+
+    /// Private and unconstructible from paths. Future boot integration can only
+    /// supply the already verified BootFrozenHelperFd capability. There is no
+    /// path opener, fd-number constructor, or public launch function here.
+    struct StoppedChildKernel {
+        helper: Option<BootFrozenHelperFd>,
+        nonce: BootNonce,
+        ids: FrozenIds,
+    }
+
+    type LinuxChild = ExactChild<LinuxKernel, NextChildCustody>;
+    type LinuxBindUncertain = UnboundCustody<LinuxKernel, NextChildCustody>;
+    type LinuxReapUncertain = super::UncertainCustody<LinuxKernel, NextChildCustody>;
+
+    impl StoppedBackend for StoppedChildKernel {
+        type Error = LinuxStoppedError;
+        type Raw = RawChild;
+        type Child = LinuxChild;
+        type BindUncertain = LinuxBindUncertain;
+        type ReapUncertain = LinuxReapUncertain;
+        type Receipt = LinuxReceipt;
+
+        fn frozen_ids(&self) -> FrozenIds {
+            self.ids
+        }
+        fn nonce(&self) -> BootNonce {
+            self.nonce
+        }
+        fn raw_clone(&mut self) -> Result<Self::Raw, CloneAttempt<Self::Error>> {
+            let Some(helper) = self.helper.take() else {
+                return Err(CloneAttempt::NotStarted(LinuxStoppedError::ConsumedHelper));
+            };
+            match clone_exec_fixed(helper) {
+                Ok(child) => Ok(child),
+                Err(CloneExecError::Preparation(error)) => Err(CloneAttempt::NotStarted(
+                    LinuxStoppedError::ClonePreparation(error),
+                )),
+                Err(CloneExecError::NoChild(error)) => {
+                    Err(CloneAttempt::NoChild(LinuxStoppedError::Clone3(error)))
+                }
+            }
+        }
+        fn proc_bind(
+            &mut self,
+            raw: Self::Raw,
+        ) -> ProcBindResult<Self::Error, Self::Child, Self::BindUncertain, Self::Receipt> {
+            match bind_with(LinuxKernel, raw.into_next_custody()) {
+                Ok(child) => {
+                    let start = StartIdentity::from(child.start);
+                    Ok((child, start))
+                }
+                Err(BindFailure::Reaped { cause, disposition }) => {
+                    Err(ComposedBindFailure::Reaped {
+                        cause: LinuxStoppedError::Proc(cause),
+                        receipt: LinuxReceipt::DuringBind(disposition),
+                    })
+                }
+                Err(BindFailure::Uncertain { cause, custody }) => {
+                    Err(ComposedBindFailure::Uncertain {
+                        cause: LinuxStoppedError::Proc(cause),
+                        custody,
+                    })
+                }
+            }
+        }
+        fn exec_succeeded(child: &mut Self::Child) -> Result<(), Self::Error> {
+            read_exec_status(child.custody.exec_status_fd()).map_err(LinuxStoppedError::Protocol)
+        }
+        fn send_control(
+            child: &mut Self::Child,
+            frame: &[u8; FRAME_LEN],
+        ) -> Result<usize, Self::Error> {
+            let n = unsafe {
+                libc::send(
+                    child.custody.control_fd(),
+                    frame.as_ptr().cast(),
+                    frame.len(),
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if n < 0 {
+                Err(LinuxStoppedError::Protocol(ProtocolError::Io(
+                    io::Error::last_os_error(),
+                )))
+            } else {
+                Ok(n as usize)
+            }
+        }
+        fn receive_receipt(child: &mut Self::Child) -> Result<[u8; FRAME_LEN], Self::Error> {
+            let mut frame = [0u8; FRAME_LEN];
+            let n = unsafe {
+                libc::recv(
+                    child.custody.receipt_fd(),
+                    frame.as_mut_ptr().cast(),
+                    frame.len(),
+                    libc::MSG_TRUNC | libc::MSG_CMSG_CLOEXEC,
+                )
+            };
+            if n == 0 {
+                Err(LinuxStoppedError::Protocol(ProtocolError::Eof))
+            } else if n < 0 {
+                Err(LinuxStoppedError::Protocol(ProtocolError::Io(
+                    io::Error::last_os_error(),
+                )))
+            } else if n as usize != FRAME_LEN {
+                Err(LinuxStoppedError::Protocol(ProtocolError::MalformedPacket))
+            } else {
+                Ok(frame)
+            }
+        }
+        fn receipt_is_quiet(child: &mut Self::Child) -> Result<bool, Self::Error> {
+            let mut byte = 0u8;
+            let n = unsafe {
+                libc::recv(
+                    child.custody.receipt_fd(),
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    libc::MSG_DONTWAIT | libc::MSG_PEEK | libc::MSG_TRUNC,
+                )
+            };
+            if n > 0 {
+                Ok(false)
+            } else if n == 0 {
+                Err(LinuxStoppedError::Protocol(ProtocolError::Eof))
+            } else {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EAGAIN) {
+                    Ok(true)
+                } else {
+                    Err(LinuxStoppedError::Protocol(ProtocolError::Io(error)))
+                }
+            }
+        }
+        fn release_receipt_eof(child: &mut Self::Child) -> Result<(), Self::Error> {
+            let mut byte = 0u8;
+            loop {
+                let count = unsafe {
+                    libc::recv(
+                        child.custody.receipt_fd(),
+                        (&mut byte as *mut u8).cast(),
+                        1,
+                        0,
+                    )
+                };
+                if count == 0 {
+                    return Ok(());
+                }
+                if count > 0 {
+                    return Err(LinuxStoppedError::Protocol(
+                        ProtocolError::UnexpectedReleasePacket,
+                    ));
+                }
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    return Err(LinuxStoppedError::Protocol(ProtocolError::Io(error)));
+                }
+            }
+        }
+        fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error> {
+            child.wait_release_state().map_err(LinuxStoppedError::Proc)
+        }
+        fn read_setgroups(child: &mut Self::Child) -> Result<Vec<u8>, Self::Error> {
+            child.read_setgroups().map_err(LinuxStoppedError::Proc)
+        }
+        fn write_setgroups_deny(child: &mut Self::Child) -> Result<(), Self::Error> {
+            child
+                .write_setgroups_deny()
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn write_uid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error> {
+            child
+                .write_uid_map(outside)
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn write_gid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error> {
+            child
+                .write_gid_map(outside)
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn read_uid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error> {
+            child.read_uid_map().map_err(LinuxStoppedError::Proc)
+        }
+        fn read_gid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error> {
+            child.read_gid_map().map_err(LinuxStoppedError::Proc)
+        }
+        fn identity(child: &mut Self::Child) -> Result<StartIdentity, Self::Error> {
+            child
+                .identity()
+                .map(StartIdentity::from)
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn nspid(child: &mut Self::Child) -> Result<Vec<u32>, Self::Error> {
+            child.read_nspid().map_err(LinuxStoppedError::Proc)
+        }
+        fn namespaces(child: &mut Self::Child) -> Result<NamespaceSet, Self::Error> {
+            child
+                .read_namespaces()
+                .map(NamespaceSet::exact)
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn close_protocol(child: &mut Self::Child) {
+            child.custody.close_protocol();
+        }
+        fn send_sigkill(child: &mut Self::Child) -> Result<(), Self::Error> {
+            child
+                .send_signal(libc::SIGKILL)
+                .map(|_| ())
+                .map_err(LinuxStoppedError::Proc)
+        }
+        fn exact_reap(child: Self::Child) -> Result<Self::Receipt, Self::ReapUncertain> {
+            match child.wait() {
+                Ok(receipt) => Ok(LinuxReceipt::Bound(receipt)),
+                Err(WaitFailure::Uncertain(custody)) => Err(custody),
+            }
+        }
+    }
+
+    fn read_exec_status(fd: RawFd) -> Result<(), ProtocolError> {
+        let mut frame = [0u8; CHILD_ERROR_LEN];
+        let mut used = 0usize;
+        loop {
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    frame[used..].as_mut_ptr().cast(),
+                    CHILD_ERROR_LEN - used,
+                )
+            };
+            if n == 0 {
+                return if used == 0 {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::MalformedExecStatus)
+                };
+            }
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(ProtocolError::Io(error));
+            }
+            used += n as usize;
+            if used == CHILD_ERROR_LEN {
+                return Err(ProtocolError::ChildExecFailure(frame));
+            }
+        }
+    }
+
+    // Kept private and unused until a verified boot integration can construct
+    // StoppedChildKernel. This is intentionally not a real integration launch.
+    fn launch_linux(
+        kernel: StoppedChildKernel,
+    ) -> Result<ArmedStoppedChild<StoppedChildKernel>, Box<LaunchFailure<StoppedChildKernel>>> {
+        launch(kernel).map_err(Box::new)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Call {
+            Clone,
+            Bind,
+            Exec,
+            Boot,
+            Ready,
+            ReadyQuiet,
+            ReadSetgroups,
+            DenySetgroups,
+            WriteUid,
+            WriteGid,
+            ReadUid,
+            ReadGid,
+            Identity,
+            Nspid,
+            Namespaces,
+            Release,
+            ReleaseEof,
+            AwaitStopped,
+            CloseProtocol,
+            Kill,
+            Reap,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct FakeError(Call);
+
+        struct RawCustody;
+        struct BindUnknown;
+        struct ReapUnknown;
+
+        struct FakeState {
+            calls: Vec<Call>,
+            fail: Option<Call>,
+            short: Option<Call>,
+            drift_identity: bool,
+            bad_nspid: bool,
+            malformed_ready: bool,
+            duplicate_ready: bool,
+            bind_pid_reuse: bool,
+            reap_fails: bool,
+            terminal_after_release: bool,
+            read_setgroups_count: usize,
+        }
+
+        struct ChildCustody {
+            state: Rc<RefCell<FakeState>>,
+        }
+
+        struct Fake {
+            state: Rc<RefCell<FakeState>>,
+        }
+
+        const IDS: FrozenIds = FrozenIds {
+            uid: 62001,
+            gid: 62002,
+        };
+        const NONCE: BootNonce = BootNonce([7; NONCE_LEN]);
+        const START: StartIdentity = StartIdentity {
+            outer_pid: 4242,
+            pidfd_device: 1,
+            pidfd_inode: 2,
+            proc_device: 3,
+            proc_inode: 4,
+            start_time_ticks: 5,
+        };
+        const NAMESPACES: NamespaceSet = NamespaceSet {
+            user: (10, 11),
+            mount: (10, 12),
+            pid: (10, 13),
+            network: (10, 14),
+        };
+
+        impl Fake {
+            fn new() -> Self {
+                Self {
+                    state: Rc::new(RefCell::new(FakeState {
+                        calls: Vec::new(),
+                        fail: None,
+                        short: None,
+                        drift_identity: false,
+                        bad_nspid: false,
+                        malformed_ready: false,
+                        duplicate_ready: false,
+                        bind_pid_reuse: false,
+                        reap_fails: false,
+                        terminal_after_release: false,
+                        read_setgroups_count: 0,
+                    })),
+                }
+            }
+
+            fn calls(&self) -> Vec<Call> {
+                self.state.borrow().calls.clone()
+            }
+        }
+
+        fn child_call(child: &ChildCustody, call: Call) -> Result<(), FakeError> {
+            let mut state = child.state.borrow_mut();
+            state.calls.push(call);
+            if state.fail == Some(call)
+                || (state.short == Some(call) && matches!(call, Call::WriteUid | Call::WriteGid))
+            {
+                Err(FakeError(call))
+            } else {
+                Ok(())
+            }
+        }
+
+        impl StoppedBackend for Fake {
+            type Error = FakeError;
+            type Raw = RawCustody;
+            type Child = ChildCustody;
+            type BindUncertain = BindUnknown;
+            type ReapUncertain = ReapUnknown;
+            type Receipt = ();
+
+            fn frozen_ids(&self) -> FrozenIds {
+                IDS
+            }
+            fn nonce(&self) -> BootNonce {
+                NONCE
+            }
+            fn raw_clone(&mut self) -> Result<Self::Raw, CloneAttempt<Self::Error>> {
+                let mut state = self.state.borrow_mut();
+                state.calls.push(Call::Clone);
+                if state.fail == Some(Call::Clone) {
+                    Err(CloneAttempt::NoChild(FakeError(Call::Clone)))
+                } else {
+                    Ok(RawCustody)
+                }
+            }
+            fn proc_bind(
+                &mut self,
+                _: Self::Raw,
+            ) -> ProcBindResult<Self::Error, Self::Child, Self::BindUncertain, Self::Receipt>
+            {
+                let mut state = self.state.borrow_mut();
+                state.calls.push(Call::Bind);
+                if state.bind_pid_reuse {
+                    Err(ComposedBindFailure::Uncertain {
+                        cause: FakeError(Call::Bind),
+                        custody: BindUnknown,
+                    })
+                } else if state.fail == Some(Call::Bind) {
+                    Err(ComposedBindFailure::Reaped {
+                        cause: FakeError(Call::Bind),
+                        receipt: (),
+                    })
+                } else {
+                    drop(state);
+                    Ok((
+                        ChildCustody {
+                            state: self.state.clone(),
+                        },
+                        START,
+                    ))
+                }
+            }
+            fn exec_succeeded(child: &mut Self::Child) -> Result<(), Self::Error> {
+                child_call(child, Call::Exec)
+            }
+            fn send_control(
+                child: &mut Self::Child,
+                bytes: &[u8; FRAME_LEN],
+            ) -> Result<usize, Self::Error> {
+                let call = if bytes[9] == BOOT {
+                    Call::Boot
+                } else {
+                    Call::Release
+                };
+                assert!(canonical(bytes, bytes[9], NONCE));
+                child_call(child, call)?;
+                Ok(if child.state.borrow().short == Some(call) {
+                    FRAME_LEN - 1
+                } else {
+                    FRAME_LEN
+                })
+            }
+            fn receive_receipt(child: &mut Self::Child) -> Result<[u8; FRAME_LEN], Self::Error> {
+                child_call(child, Call::Ready)?;
+                let mut value = frame(READY, NONCE);
+                if child.state.borrow().malformed_ready {
+                    value[10] = 1;
+                }
+                Ok(value)
+            }
+            fn receipt_is_quiet(child: &mut Self::Child) -> Result<bool, Self::Error> {
+                child_call(child, Call::ReadyQuiet)?;
+                Ok(!child.state.borrow().duplicate_ready)
+            }
+            fn release_receipt_eof(child: &mut Self::Child) -> Result<(), Self::Error> {
+                child_call(child, Call::ReleaseEof)
+            }
+            fn release_state(child: &mut Self::Child) -> Result<ReleaseState, Self::Error> {
+                child_call(child, Call::AwaitStopped)?;
+                Ok(if child.state.borrow().terminal_after_release {
+                    ReleaseState::Terminal(TerminalDisposition::Exited(125))
+                } else {
+                    ReleaseState::Stopped
+                })
+            }
+            fn read_setgroups(child: &mut Self::Child) -> Result<Vec<u8>, Self::Error> {
+                child_call(child, Call::ReadSetgroups)?;
+                let mut state = child.state.borrow_mut();
+                let value = if state.read_setgroups_count == 0 {
+                    SETGROUPS_ALLOW
+                } else {
+                    SETGROUPS_DENY
+                };
+                state.read_setgroups_count += 1;
+                Ok(value.to_vec())
+            }
+            fn write_setgroups_deny(child: &mut Self::Child) -> Result<(), Self::Error> {
+                child_call(child, Call::DenySetgroups)
+            }
+            fn write_uid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error> {
+                assert_eq!(outside, IDS.uid);
+                child_call(child, Call::WriteUid)
+            }
+            fn write_gid_map(child: &mut Self::Child, outside: u32) -> Result<(), Self::Error> {
+                assert_eq!(outside, IDS.gid);
+                child_call(child, Call::WriteGid)
+            }
+            fn read_uid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error> {
+                child_call(child, Call::ReadUid)?;
+                Ok(IdMapExtent {
+                    inside: 0,
+                    outside: IDS.uid,
+                    length: 1,
+                })
+            }
+            fn read_gid_map(child: &mut Self::Child) -> Result<IdMapExtent, Self::Error> {
+                child_call(child, Call::ReadGid)?;
+                Ok(IdMapExtent {
+                    inside: 0,
+                    outside: IDS.gid,
+                    length: 1,
+                })
+            }
+            fn identity(child: &mut Self::Child) -> Result<StartIdentity, Self::Error> {
+                child_call(child, Call::Identity)?;
+                Ok(if child.state.borrow().drift_identity {
+                    StartIdentity {
+                        start_time_ticks: 999,
+                        ..START
+                    }
+                } else {
+                    START
+                })
+            }
+            fn nspid(child: &mut Self::Child) -> Result<Vec<u32>, Self::Error> {
+                child_call(child, Call::Nspid)?;
+                Ok(if child.state.borrow().bad_nspid {
+                    vec![4243, 1]
+                } else {
+                    vec![4242, 1]
+                })
+            }
+            fn namespaces(child: &mut Self::Child) -> Result<NamespaceSet, Self::Error> {
+                child_call(child, Call::Namespaces)?;
+                Ok(NAMESPACES)
+            }
+            fn close_protocol(child: &mut Self::Child) {
+                child.state.borrow_mut().calls.push(Call::CloseProtocol);
+            }
+            fn send_sigkill(child: &mut Self::Child) -> Result<(), Self::Error> {
+                child_call(child, Call::Kill)
+            }
+            fn exact_reap(child: Self::Child) -> Result<Self::Receipt, Self::ReapUncertain> {
+                let mut state = child.state.borrow_mut();
+                state.calls.push(Call::Reap);
+                if state.reap_fails {
+                    Err(ReapUnknown)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        const SUCCESS_ORDER: &[Call] = &[
+            Call::Clone,
+            Call::Bind,
+            Call::Exec,
+            Call::Boot,
+            Call::Ready,
+            Call::ReadyQuiet,
+            Call::ReadSetgroups,
+            Call::DenySetgroups,
+            Call::ReadSetgroups,
+            Call::WriteUid,
+            Call::WriteGid,
+            Call::ReadUid,
+            Call::ReadGid,
+            Call::Identity,
+            Call::Nspid,
+            Call::Namespaces,
+            Call::Release,
+            Call::ReleaseEof,
+            Call::AwaitStopped,
+            Call::CloseProtocol,
+        ];
+
+        #[test]
+        fn full_order_hands_off_armed_exact_custody() {
+            let fake = Fake::new();
+            let state = fake.state.clone();
+            let armed = match launch(fake) {
+                Ok(armed) => armed,
+                Err(_) => panic!("valid launch failed"),
+            };
+            assert_eq!(state.borrow().calls, SUCCESS_ORDER);
+            assert_eq!(armed.start, START);
+            assert_eq!(armed.namespaces, NAMESPACES);
+            assert_eq!(armed.kernel.calls(), SUCCESS_ORDER);
+            let _still_armed = armed.child;
+        }
+
+        fn assert_reaped_after(fake: Fake, failure: Call) -> Vec<Call> {
+            fake.state.borrow_mut().fail = Some(failure);
+            let state = fake.state.clone();
+            assert!(matches!(launch(fake), Err(LaunchFailure::Reaped { .. })));
+            let calls = state.borrow().calls.clone();
+            assert!(calls.ends_with(&[Call::CloseProtocol, Call::Kill, Call::Reap]));
+            calls
+        }
+
+        #[test]
+        fn partial_map_write_closes_protocol_kills_and_exact_reaps() {
+            let fake = Fake::new();
+            fake.state.borrow_mut().short = Some(Call::WriteUid);
+            let state = fake.state.clone();
+            assert!(matches!(launch(fake), Err(LaunchFailure::Reaped { .. })));
+            let calls = state.borrow().calls.clone();
+            assert!(calls.ends_with(&[
+                Call::WriteUid,
+                Call::CloseProtocol,
+                Call::Kill,
+                Call::Reap,
+            ]));
+            assert!(!calls.contains(&Call::WriteGid));
+        }
+
+        #[test]
+        fn every_composed_kernel_error_seam_closes_before_kill_and_reap() {
+            for failure in [
+                Call::Exec,
+                Call::Boot,
+                Call::Ready,
+                Call::ReadyQuiet,
+                Call::ReadSetgroups,
+                Call::DenySetgroups,
+                Call::WriteUid,
+                Call::WriteGid,
+                Call::ReadUid,
+                Call::ReadGid,
+                Call::Identity,
+                Call::Nspid,
+                Call::Namespaces,
+                Call::Release,
+                Call::ReleaseEof,
+                Call::AwaitStopped,
+            ] {
+                let calls = assert_reaped_after(Fake::new(), failure);
+                assert!(calls.ends_with(&[Call::CloseProtocol, Call::Kill, Call::Reap,]));
+                assert_eq!(calls[calls.len() - 4], failure);
+            }
+        }
+
+        #[test]
+        fn short_boot_or_release_packet_is_never_retried() {
+            for at in [Call::Boot, Call::Release] {
+                let fake = Fake::new();
+                fake.state.borrow_mut().short = Some(at);
+                let state = fake.state.clone();
+                assert!(matches!(launch(fake), Err(LaunchFailure::Reaped { .. })));
+                let calls = state.borrow().calls.clone();
+                assert_eq!(calls.iter().filter(|call| **call == at).count(), 1);
+                assert!(calls.ends_with(&[Call::CloseProtocol, Call::Kill, Call::Reap,]));
+            }
+        }
+
+        #[test]
+        fn exec_failure_is_post_clone_and_never_no_child() {
+            let calls = assert_reaped_after(Fake::new(), Call::Exec);
+            assert_eq!(&calls[..3], &[Call::Clone, Call::Bind, Call::Exec]);
+        }
+
+        #[test]
+        fn identity_drift_fails_closed_before_nspid_or_release() {
+            let fake = Fake::new();
+            fake.state.borrow_mut().drift_identity = true;
+            let state = fake.state.clone();
+            assert!(matches!(launch(fake), Err(LaunchFailure::Reaped { .. })));
+            let state = state.borrow();
+            assert!(state.calls.contains(&Call::Identity));
+            assert!(!state.calls.contains(&Call::Nspid));
+            assert!(!state.calls.contains(&Call::Release));
+        }
+
+        #[test]
+        fn pid_reuse_during_proc_bind_returns_owned_uncertain_not_no_child() {
+            let fake = Fake::new();
+            fake.state.borrow_mut().bind_pid_reuse = true;
+            let state = fake.state.clone();
+            assert!(matches!(
+                launch(fake),
+                Err(LaunchFailure::BindUncertain {
+                    custody: BindUnknown,
+                    ..
+                })
+            ));
+            assert_eq!(state.borrow().calls, &[Call::Clone, Call::Bind]);
+        }
+
+        #[test]
+        fn malformed_or_duplicate_ready_closes_before_signal() {
+            let malformed = Fake::new();
+            malformed.state.borrow_mut().malformed_ready = true;
+            let malformed_state = malformed.state.clone();
+            assert!(matches!(
+                launch(malformed),
+                Err(LaunchFailure::Reaped { .. })
+            ));
+            assert!(malformed_state.borrow().calls.ends_with(&[
+                Call::Ready,
+                Call::CloseProtocol,
+                Call::Kill,
+                Call::Reap
+            ]));
+
+            let duplicate = Fake::new();
+            duplicate.state.borrow_mut().duplicate_ready = true;
+            let duplicate_state = duplicate.state.clone();
+            assert!(matches!(
+                launch(duplicate),
+                Err(LaunchFailure::Reaped { .. })
+            ));
+            assert!(duplicate_state.borrow().calls.ends_with(&[
+                Call::ReadyQuiet,
+                Call::CloseProtocol,
+                Call::Kill,
+                Call::Reap
+            ]));
+        }
+
+        #[test]
+        fn release_error_never_hands_off_live_child() {
+            let calls = assert_reaped_after(Fake::new(), Call::Release);
+            assert_eq!(calls[..calls.len() - 3].last(), Some(&Call::Release));
+        }
+
+        #[test]
+        fn post_release_terminal_child_is_reaped_without_signalling() {
+            let fake = Fake::new();
+            fake.state.borrow_mut().terminal_after_release = true;
+            let state = fake.state.clone();
+            assert!(matches!(launch(fake), Err(LaunchFailure::Reaped { .. })));
+            let calls = state.borrow().calls.clone();
+            assert!(calls.ends_with(&[Call::AwaitStopped, Call::CloseProtocol, Call::Reap,]));
+            assert!(!calls.contains(&Call::Kill));
+        }
+
+        #[test]
+        fn signal_and_reap_errors_preserve_owned_uncertain_custody() {
+            let kill = Fake::new();
+            {
+                let mut state = kill.state.borrow_mut();
+                state.malformed_ready = true;
+                state.fail = Some(Call::Kill);
+            }
+            let kill_state = kill.state.clone();
+            assert!(matches!(launch(kill), Err(LaunchFailure::Reaped { .. })));
+            assert!(kill_state.borrow().calls.ends_with(&[
+                Call::CloseProtocol,
+                Call::Kill,
+                Call::Reap
+            ]));
+
+            let both = Fake::new();
+            {
+                let mut state = both.state.borrow_mut();
+                state.malformed_ready = true;
+                state.fail = Some(Call::Kill);
+                state.reap_fails = true;
+            }
+            let both_state = both.state.clone();
+            match launch(both) {
+                Err(LaunchFailure::Uncertain { custody, .. }) => {
+                    assert_eq!(custody.kill_error, Some(FakeError(Call::Kill)));
+                    let _owned = custody.custody;
+                    let _kernel = custody.kernel;
+                }
+                _ => panic!("unknown terminality was discarded"),
+            }
+            assert!(both_state.borrow().calls.ends_with(&[
+                Call::CloseProtocol,
+                Call::Kill,
+                Call::Reap
+            ]));
+        }
+
+        #[test]
+        fn only_negative_clone_attempt_is_no_child() {
+            let fake = Fake::new();
+            fake.state.borrow_mut().fail = Some(Call::Clone);
+            assert!(matches!(launch(fake), Err(LaunchFailure::NoChild { .. })));
+
+            let exec = Fake::new();
+            exec.state.borrow_mut().fail = Some(Call::Exec);
+            assert!(!matches!(launch(exec), Err(LaunchFailure::NoChild { .. })));
+        }
     }
 }

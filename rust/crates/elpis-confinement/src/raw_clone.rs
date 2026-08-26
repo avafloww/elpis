@@ -394,6 +394,12 @@ impl RawChild {
     pub(super) fn exec_status(&self) -> BorrowedFd<'_> {
         self.exec_status.as_ref().expect("armed child").as_fd()
     }
+    /// Establish protocol EOF before any post-clone failure is signalled.
+    pub(super) fn close_protocol(&mut self) {
+        drop(self.control.take());
+        drop(self.receipt.take());
+        drop(self.exec_status.take());
+    }
     pub(super) fn abort_and_reap(mut self) -> Result<(), AbortError> {
         self.abort_inner()
     }
@@ -435,6 +441,18 @@ pub(super) struct NextChildCustody {
 impl NextChildCustody {
     pub(super) fn child(&self) -> &RawChild {
         &self.child
+    }
+    pub(super) fn control_fd(&self) -> RawFd {
+        self.child.control().as_raw_fd()
+    }
+    pub(super) fn receipt_fd(&self) -> RawFd {
+        self.child.receipt().as_raw_fd()
+    }
+    pub(super) fn exec_status_fd(&self) -> RawFd {
+        self.child.exec_status().as_raw_fd()
+    }
+    pub(super) fn close_protocol(&mut self) {
+        self.child.close_protocol();
     }
 
     /// Called only after waitid(P_PIDFD) returned an exact terminal disposition.
