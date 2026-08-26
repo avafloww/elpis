@@ -50,6 +50,13 @@ pub struct SensitiveEffectReservation {
     pub artifact_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveSessionTerminalReason {
+    LeaseEnded,
+    BudgetExhausted,
+    Unavailable,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct CapabilityUsage {
     calls: u32,
@@ -102,6 +109,7 @@ pub struct SensitiveSession {
     binding: [u8; 32],
     lease_deadline_unix_s: u64,
     clock: SessionClock,
+    terminal_reason: Option<SensitiveSessionTerminalReason>,
     runs_used: u32,
     effects_used: u32,
     wall_ms_reserved: u64,
@@ -158,43 +166,53 @@ impl SensitiveSession {
         self.effects_used
     }
 
+    pub fn terminal_reason(&self) -> Option<SensitiveSessionTerminalReason> {
+        self.terminal_reason
+    }
+
     pub fn mint_run_permit(
         &mut self,
         reservation: SensitiveRunReservation,
     ) -> Result<SensitiveRunPermit, SensitiveSessionDenied> {
         self.ensure_live()?;
         let budgets = &self.policy.policy().budgets;
-        let run_index = self
-            .runs_used
-            .checked_add(1)
-            .filter(|value| *value <= budgets.max_runs)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_wall_ms = self
-            .wall_ms_reserved
-            .checked_add(reservation.max_wall_ms)
-            .filter(|value| *value <= budgets.max_wall_ms)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_cpu_ms = self
-            .cpu_ms_reserved
-            .checked_add(reservation.max_cpu_ms)
-            .filter(|value| *value <= budgets.max_cpu_ms)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_rss_bytes = self
-            .rss_bytes_reserved
-            .checked_add(reservation.max_rss_bytes)
-            .filter(|value| *value <= budgets.max_rss_bytes)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_scratch_bytes = self
-            .scratch_bytes_reserved
-            .checked_add(reservation.max_scratch_bytes)
-            .filter(|value| *value <= budgets.max_scratch_bytes)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
         if reservation.max_wall_ms == 0
+            || reservation.max_wall_ms > budgets.max_wall_ms
             || reservation.max_cpu_ms == 0
+            || reservation.max_cpu_ms > budgets.max_cpu_ms
             || reservation.max_rss_bytes == 0
+            || reservation.max_rss_bytes > budgets.max_rss_bytes
+            || reservation.max_scratch_bytes > budgets.max_scratch_bytes
         {
             return Err(SensitiveSessionDenied::BudgetDenied);
         }
+        let next = (
+            self.runs_used
+                .checked_add(1)
+                .filter(|value| *value <= budgets.max_runs),
+            self.wall_ms_reserved
+                .checked_add(reservation.max_wall_ms)
+                .filter(|value| *value <= budgets.max_wall_ms),
+            self.cpu_ms_reserved
+                .checked_add(reservation.max_cpu_ms)
+                .filter(|value| *value <= budgets.max_cpu_ms),
+            self.rss_bytes_reserved
+                .checked_add(reservation.max_rss_bytes)
+                .filter(|value| *value <= budgets.max_rss_bytes),
+            self.scratch_bytes_reserved
+                .checked_add(reservation.max_scratch_bytes)
+                .filter(|value| *value <= budgets.max_scratch_bytes),
+        );
+        let (
+            Some(run_index),
+            Some(next_wall_ms),
+            Some(next_cpu_ms),
+            Some(next_rss_bytes),
+            Some(next_scratch_bytes),
+        ) = next
+        else {
+            return self.deny_budget_exhausted();
+        };
         self.runs_used = run_index;
         self.wall_ms_reserved = next_wall_ms;
         self.cpu_ms_reserved = next_cpu_ms;
@@ -225,40 +243,47 @@ impl SensitiveSession {
             .get(capability_index)
             .ok_or(SensitiveSessionDenied::BudgetDenied)?;
         let capability_budget = capability_budget(capability);
-        let next_capability_calls = self.capability_usage[capability_index]
-            .calls
-            .checked_add(1)
-            .filter(|value| *value <= capability_budget.max_calls)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
         if reservation.request_bytes > capability_budget.max_request_bytes
             || reservation.max_result_bytes > capability_budget.max_result_bytes
         {
             return Err(SensitiveSessionDenied::BudgetDenied);
         }
 
+        validate_artifact_reservation(self.policy.policy(), capability, reservation)?;
         let budgets = &self.policy.policy().budgets;
-        let next_effects = self
-            .effects_used
-            .checked_add(1)
-            .filter(|value| *value <= budgets.max_effects)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_io_read = self
-            .io_read_bytes_used
-            .checked_add(reservation.io_read_bytes)
-            .filter(|value| *value <= budgets.max_io_read_bytes)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let next_io_write = self
-            .io_write_bytes_used
-            .checked_add(reservation.io_write_bytes)
-            .filter(|value| *value <= budgets.max_io_write_bytes)
-            .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-        let (next_artifacts, next_artifact_bytes) = reserve_artifacts(
-            self.policy.policy(),
-            capability,
-            self.artifacts_used,
-            self.artifact_bytes_used,
-            reservation,
-        )?;
+        let persistence = &self.policy.policy().persistence;
+        let next = (
+            self.effects_used
+                .checked_add(1)
+                .filter(|value| *value <= budgets.max_effects),
+            self.capability_usage[capability_index]
+                .calls
+                .checked_add(1)
+                .filter(|value| *value <= capability_budget.max_calls),
+            self.io_read_bytes_used
+                .checked_add(reservation.io_read_bytes)
+                .filter(|value| *value <= budgets.max_io_read_bytes),
+            self.io_write_bytes_used
+                .checked_add(reservation.io_write_bytes)
+                .filter(|value| *value <= budgets.max_io_write_bytes),
+            self.artifacts_used
+                .checked_add(reservation.artifact_count)
+                .filter(|value| *value <= persistence.max_artifacts),
+            self.artifact_bytes_used
+                .checked_add(reservation.artifact_bytes)
+                .filter(|value| *value <= persistence.max_total_artifact_bytes),
+        );
+        let (
+            Some(next_effects),
+            Some(next_capability_calls),
+            Some(next_io_read),
+            Some(next_io_write),
+            Some(next_artifacts),
+            Some(next_artifact_bytes),
+        ) = next
+        else {
+            return self.deny_budget_exhausted();
+        };
 
         self.capability_usage[capability_index].calls = next_capability_calls;
         self.effects_used = next_effects;
@@ -275,11 +300,36 @@ impl SensitiveSession {
         })
     }
 
-    fn ensure_live(&self) -> Result<(), SensitiveSessionDenied> {
-        if !self.clock.is_live(self.lease_deadline_unix_s)? {
-            return Err(SensitiveSessionDenied::LeaseEnded);
+    fn ensure_live(&mut self) -> Result<(), SensitiveSessionDenied> {
+        if let Some(reason) = self.terminal_reason {
+            return Err(reason.denial());
         }
-        Ok(())
+        match self.clock.is_live(self.lease_deadline_unix_s) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.terminal_reason = Some(SensitiveSessionTerminalReason::LeaseEnded);
+                Err(SensitiveSessionDenied::LeaseEnded)
+            }
+            Err(error) => {
+                self.terminal_reason = Some(SensitiveSessionTerminalReason::Unavailable);
+                Err(error)
+            }
+        }
+    }
+
+    fn deny_budget_exhausted<T>(&mut self) -> Result<T, SensitiveSessionDenied> {
+        self.terminal_reason = Some(SensitiveSessionTerminalReason::BudgetExhausted);
+        Err(SensitiveSessionDenied::BudgetDenied)
+    }
+}
+
+impl SensitiveSessionTerminalReason {
+    fn denial(self) -> SensitiveSessionDenied {
+        match self {
+            Self::LeaseEnded => SensitiveSessionDenied::LeaseEnded,
+            Self::BudgetExhausted => SensitiveSessionDenied::BudgetDenied,
+            Self::Unavailable => SensitiveSessionDenied::Unavailable,
+        }
     }
 }
 
@@ -396,6 +446,7 @@ impl GrantLedger {
             binding,
             lease_deadline_unix_s,
             clock: SessionClock::from_ledger(&self.clock, lease_deadline_unix_s - now),
+            terminal_reason: None,
             runs_used: 0,
             effects_used: 0,
             wall_ms_reserved: 0,
@@ -408,6 +459,22 @@ impl GrantLedger {
             artifact_bytes_used: 0,
             capability_usage,
         })
+    }
+
+    pub fn finish_sensitive_session(
+        &mut self,
+        mut session: SensitiveSession,
+    ) -> Result<super::GrantTerminalReceipt, super::GrantLedgerError> {
+        let _ = session.ensure_live();
+        let kind = match session.terminal_reason {
+            None => super::GrantTerminalKind::Completed,
+            Some(SensitiveSessionTerminalReason::LeaseEnded) => super::GrantTerminalKind::Expired,
+            Some(
+                SensitiveSessionTerminalReason::BudgetExhausted
+                | SensitiveSessionTerminalReason::Unavailable,
+            ) => super::GrantTerminalKind::Interrupted,
+        };
+        self.terminate(session.active_grant, kind)
     }
 }
 
@@ -424,20 +491,18 @@ fn capability_budget(capability: &SensitiveCapabilityRule) -> &CapabilityBudget 
     }
 }
 
-fn reserve_artifacts(
+fn validate_artifact_reservation(
     policy: &SensitivePolicyV1,
     capability: &SensitiveCapabilityRule,
-    artifacts_used: u32,
-    artifact_bytes_used: u64,
     reservation: SensitiveEffectReservation,
-) -> Result<(u32, u64), SensitiveSessionDenied> {
+) -> Result<(), SensitiveSessionDenied> {
     if (reservation.artifact_count == 0) != (reservation.artifact_bytes == 0)
         || reservation.artifact_count > 1
     {
         return Err(SensitiveSessionDenied::BudgetDenied);
     }
     if reservation.artifact_count == 0 {
-        return Ok((artifacts_used, artifact_bytes_used));
+        return Ok(());
     }
     let SensitiveCapabilityRule::ArtifactExport {
         max_artifact_bytes, ..
@@ -448,15 +513,10 @@ fn reserve_artifacts(
     if reservation.artifact_bytes > *max_artifact_bytes {
         return Err(SensitiveSessionDenied::BudgetDenied);
     }
-    let next_artifacts = artifacts_used
-        .checked_add(reservation.artifact_count)
-        .filter(|value| *value <= policy.persistence.max_artifacts)
-        .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-    let next_bytes = artifact_bytes_used
-        .checked_add(reservation.artifact_bytes)
-        .filter(|value| *value <= policy.persistence.max_total_artifact_bytes)
-        .ok_or(SensitiveSessionDenied::BudgetDenied)?;
-    Ok((next_artifacts, next_bytes))
+    if policy.persistence.max_artifacts == 0 || policy.persistence.max_total_artifact_bytes == 0 {
+        return Err(SensitiveSessionDenied::BudgetDenied);
+    }
+    Ok(())
 }
 
 fn session_binding(
@@ -685,36 +745,6 @@ mod tests {
         let run = session.mint_run_permit(run_reservation()).unwrap();
         assert_eq!(run.run_index(), 1);
         assert_eq!(run.reservation(), run_reservation());
-
-        let first_reservation = reservation(60, 30, 20);
-        let first = session.mint_effect_permit(&run, first_reservation).unwrap();
-        assert_eq!(first.run_index(), 1);
-        assert_eq!(first.effect_index(), 1);
-        assert_eq!(first.reservation(), first_reservation);
-
-        assert_eq!(
-            session.mint_effect_permit(&run, reservation(41, 10, 1)),
-            Err(SensitiveSessionDenied::BudgetDenied)
-        );
-        assert_eq!(session.effects_used(), 1);
-
-        let second = session
-            .mint_effect_permit(&run, reservation(40, 70, 30))
-            .unwrap();
-        assert_eq!(second.effect_index(), 2);
-        assert_eq!(session.effects_used(), 2);
-        assert_eq!(
-            session.mint_effect_permit(&run, reservation(0, 0, 0)),
-            Err(SensitiveSessionDenied::BudgetDenied)
-        );
-
-        let mut over_wall = run_reservation();
-        over_wall.max_wall_ms += 1;
-        assert_eq!(
-            session.mint_run_permit(over_wall),
-            Err(SensitiveSessionDenied::BudgetDenied)
-        );
-        assert_eq!(session.runs_used(), 1);
         assert_eq!(
             session
                 .mint_run_permit(run_reservation())
@@ -722,10 +752,130 @@ mod tests {
                 .run_index(),
             2
         );
+
+        let first_reservation = reservation(60, 30, 20);
+        let first = session.mint_effect_permit(&run, first_reservation).unwrap();
+        assert_eq!(first.run_index(), 1);
+        assert_eq!(first.effect_index(), 1);
+        assert_eq!(first.reservation(), first_reservation);
+
+        let mut invalid_per_call = reservation(1, 1, 1);
+        invalid_per_call.request_bytes = 31;
+        assert_eq!(
+            session.mint_effect_permit(&run, invalid_per_call),
+            Err(SensitiveSessionDenied::BudgetDenied)
+        );
+        assert_eq!(session.effects_used(), 1);
+        assert_eq!(session.terminal_reason(), None);
+
+        let second = session
+            .mint_effect_permit(&run, reservation(40, 70, 30))
+            .unwrap();
+        assert_eq!(second.effect_index(), 2);
+        assert_eq!(session.effects_used(), 2);
+        assert_eq!(session.terminal_reason(), None);
+    }
+
+    #[test]
+    fn cumulative_denial_latches_and_settles_interrupted_once() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (_, active) = admit(
+            &mut fixture.ledger,
+            "grant-budget-terminal",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let mut session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        session.mint_run_permit(run_reservation()).unwrap();
+        let mut cumulative_overdraw = run_reservation();
+        cumulative_overdraw.max_wall_ms += 1;
+        assert_eq!(
+            session.mint_run_permit(cumulative_overdraw),
+            Err(SensitiveSessionDenied::BudgetDenied)
+        );
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::BudgetExhausted)
+        );
         assert_eq!(
             session.mint_run_permit(run_reservation()),
             Err(SensitiveSessionDenied::BudgetDenied)
         );
+        let receipt = fixture.ledger.finish_sensitive_session(session).unwrap();
+        assert_eq!(receipt.kind(), crate::GrantTerminalKind::Interrupted);
+        assert_eq!(receipt.grant_id(), "grant-budget-terminal");
+    }
+
+    #[test]
+    fn durable_terminal_receipt_wins_against_duplicated_test_authority() {
+        let mut fixture = fixture(true);
+        let (_, policy_one) = policy();
+        let policy_sha256 = policy_one.policy_sha256().to_owned();
+        let (_, active) = admit(
+            &mut fixture.ledger,
+            "grant-exact-once",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let duplicate = ActiveGrant {
+            grant: active.grant.clone(),
+            payload_sha256: active.payload_sha256,
+            ledger_binding: active.ledger_binding,
+        };
+        let session_one = fixture
+            .ledger
+            .begin_sensitive_session(active, policy_one)
+            .unwrap();
+        let (_, policy_two) = policy();
+        let session_two = fixture
+            .ledger
+            .begin_sensitive_session(duplicate, policy_two)
+            .unwrap();
+        fixture
+            .ledger
+            .finish_sensitive_session(session_one)
+            .unwrap();
+        assert!(matches!(
+            fixture.ledger.finish_sensitive_session(session_two),
+            Err(crate::GrantLedgerError::AlreadyTerminal)
+        ));
+        assert_eq!(
+            fixture
+                .ledger
+                .terminal_receipt("grant-exact-once")
+                .unwrap()
+                .unwrap()
+                .kind(),
+            crate::GrantTerminalKind::Completed
+        );
+    }
+
+    #[test]
+    fn live_session_finishes_completed() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (_, active) = admit(
+            &mut fixture.ledger,
+            "grant-completed-session",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        let receipt = fixture.ledger.finish_sensitive_session(session).unwrap();
+        assert_eq!(receipt.kind(), crate::GrantTerminalKind::Completed);
+        assert_eq!(receipt.grant_id(), "grant-completed-session");
     }
 
     #[test]
@@ -978,5 +1128,11 @@ mod tests {
             session.mint_run_permit(run_reservation()),
             Err(SensitiveSessionDenied::LeaseEnded)
         );
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::LeaseEnded)
+        );
+        let receipt = expiry.ledger.finish_sensitive_session(session).unwrap();
+        assert_eq!(receipt.kind(), crate::GrantTerminalKind::Expired);
     }
 }
