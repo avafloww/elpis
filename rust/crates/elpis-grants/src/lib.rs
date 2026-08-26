@@ -7,8 +7,10 @@
 
 mod policy;
 mod profile;
+mod registry;
 pub use policy::*;
 pub use profile::*;
+pub use registry::*;
 
 use std::fmt;
 
