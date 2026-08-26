@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod effect_proof;
 mod session;
 pub use session::*;
 
