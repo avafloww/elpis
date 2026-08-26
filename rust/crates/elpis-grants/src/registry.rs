@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    SensitiveLocalProfileKindV1, SensitiveLocalProfileV1, SensitiveProfileRef, sha256_hex,
+    SensitiveCapabilityRule, SensitiveLocalProfileKindV1, SensitiveLocalProfileV1,
+    SensitivePolicyV1, SensitiveProfileRef, sha256_hex,
 };
 
 pub const SENSITIVE_PROFILE_REGISTRY_VERSION: u32 = 1;
@@ -179,6 +180,137 @@ impl CanonicalSensitiveProfileRegistry {
         }
         Ok(&entry.profile)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensitiveProfileRequirement {
+    pub profile_ref: SensitiveProfileRef,
+    pub expected_kind: SensitiveLocalProfileKind,
+}
+
+impl SensitiveProfileRequirement {
+    fn from_capability(capability: &SensitiveCapabilityRule) -> Self {
+        let (profile_ref, expected_kind) = match capability {
+            SensitiveCapabilityRule::ReadPath { root, .. } => {
+                (root, SensitiveLocalProfileKind::FilesystemRoot)
+            }
+            SensitiveCapabilityRule::EditTree { tree, .. } => {
+                (tree, SensitiveLocalProfileKind::EditableTree)
+            }
+            SensitiveCapabilityRule::ServiceAction { profile, .. } => {
+                (profile, SensitiveLocalProfileKind::ServiceManager)
+            }
+            SensitiveCapabilityRule::PackageOperation { profile, .. } => {
+                (profile, SensitiveLocalProfileKind::PackageTransaction)
+            }
+            SensitiveCapabilityRule::KubernetesNamespace {
+                cluster_profile, ..
+            } => (
+                cluster_profile,
+                SensitiveLocalProfileKind::KubernetesCluster,
+            ),
+            SensitiveCapabilityRule::RemoteExecProfile { profile, .. } => {
+                (profile, SensitiveLocalProfileKind::RemoteActions)
+            }
+            SensitiveCapabilityRule::NetworkEndpoint {
+                endpoint_profile, ..
+            } => (endpoint_profile, SensitiveLocalProfileKind::NetworkEndpoint),
+            SensitiveCapabilityRule::ArtifactExport {
+                destination_profile,
+                ..
+            } => (
+                destination_profile,
+                SensitiveLocalProfileKind::ArtifactCustody,
+            ),
+        };
+        Self {
+            profile_ref: profile_ref.clone(),
+            expected_kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSensitiveProfileBinding {
+    pub requirement: SensitiveProfileRequirement,
+    pub profile: SensitiveLocalProfileV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSensitiveProfileBindings {
+    bindings: Vec<ValidatedSensitiveProfileBinding>,
+}
+
+impl ValidatedSensitiveProfileBindings {
+    pub fn bind_exact(
+        policy: &SensitivePolicyV1,
+        registry: &CanonicalSensitiveProfileRegistry,
+    ) -> Result<Self, SensitiveProfileBindingError> {
+        policy
+            .validate()
+            .map_err(|_| SensitiveProfileBindingError::InvalidPolicy)?;
+        let mut requirements: Vec<_> = policy
+            .capabilities
+            .iter()
+            .map(SensitiveProfileRequirement::from_capability)
+            .collect();
+        requirements.sort_by(|left, right| left.profile_ref.id.cmp(&right.profile_ref.id));
+        if requirements
+            .windows(2)
+            .any(|pair| pair[0].profile_ref.id == pair[1].profile_ref.id)
+        {
+            return Err(SensitiveProfileBindingError::DuplicateRequirementId);
+        }
+        let entries = &registry.registry().profiles;
+        if entries.len() < requirements.len() {
+            return Err(SensitiveProfileBindingError::MissingProfile);
+        }
+        if entries.len() > requirements.len() {
+            return Err(SensitiveProfileBindingError::ExtraProfile);
+        }
+        let mut bindings = Vec::with_capacity(requirements.len());
+        for (requirement, entry) in requirements.into_iter().zip(entries) {
+            if entry.profile.id != requirement.profile_ref.id {
+                return Err(SensitiveProfileBindingError::MissingProfile);
+            }
+            let profile = registry
+                .lookup_exact(&requirement.profile_ref, requirement.expected_kind)
+                .map_err(|error| match error {
+                    SensitiveProfileRegistryError::HashMismatch => {
+                        SensitiveProfileBindingError::HashMismatch
+                    }
+                    SensitiveProfileRegistryError::KindMismatch => {
+                        SensitiveProfileBindingError::KindMismatch
+                    }
+                    _ => SensitiveProfileBindingError::MissingProfile,
+                })?;
+            bindings.push(ValidatedSensitiveProfileBinding {
+                requirement,
+                profile: profile.clone(),
+            });
+        }
+        Ok(Self { bindings })
+    }
+
+    pub fn bindings(&self) -> &[ValidatedSensitiveProfileBinding] {
+        &self.bindings
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveProfileBindingError {
+    #[error("sensitive policy is invalid")]
+    InvalidPolicy,
+    #[error("sensitive policy reuses one profile id across capabilities")]
+    DuplicateRequirementId,
+    #[error("required sensitive profile is missing")]
+    MissingProfile,
+    #[error("sensitive profile registry contains an unrequested profile")]
+    ExtraProfile,
+    #[error("sensitive profile hash does not match signed policy")]
+    HashMismatch,
+    #[error("sensitive profile kind does not match signed capability")]
+    KindMismatch,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -370,6 +502,239 @@ mod tests {
         assert_eq!(
             parsed.lookup_exact(&missing, SensitiveLocalProfileKind::RemoteActions),
             Err(SensitiveProfileRegistryError::MissingProfile)
+        );
+    }
+    fn binding_budget() -> crate::CapabilityBudget {
+        crate::CapabilityBudget {
+            max_calls: 4,
+            max_request_bytes: 4096,
+            max_result_bytes: 8192,
+        }
+    }
+
+    fn binding_policy() -> SensitivePolicyV1 {
+        SensitivePolicyV1 {
+            version: crate::SENSITIVE_POLICY_VERSION,
+            profile_id: "binding-test".into(),
+            capabilities: vec![
+                SensitiveCapabilityRule::RemoteExecProfile {
+                    profile: SensitiveProfileRef {
+                        id: "resident-actions".into(),
+                        sha256: "76c010f20c81f47bf54296effcae7f18b3d4c316d88cec3d53f97d399f9bd45e"
+                            .into(),
+                    },
+                    actions: vec!["check-state".into()],
+                    budget: binding_budget(),
+                },
+                SensitiveCapabilityRule::ServiceAction {
+                    profile: SensitiveProfileRef {
+                        id: "resident-services".into(),
+                        sha256: "2e63e14a85c5a09b324e494ccd23af19c967c3702e4b3407b07f5086ebb625fe"
+                            .into(),
+                    },
+                    actions: vec![crate::ServiceAction::Status],
+                    budget: binding_budget(),
+                },
+            ],
+            budgets: crate::SensitiveBudgets {
+                max_runs: 2,
+                max_effects: 8,
+                max_lease_s: 300,
+                max_wall_ms: 60_000,
+                max_cpu_ms: 30_000,
+                max_rss_bytes: 536_870_912,
+                max_io_read_bytes: 16_777_216,
+                max_io_write_bytes: 16_777_216,
+                max_scratch_bytes: 67_108_864,
+            },
+            classifier: crate::SensitiveClassifierPolicy::Required {
+                trust_domain: crate::ClassifierTrustDomain::LocalOnly,
+                profile_id: "source-v1".into(),
+                model_ref: "local/classifier-v1".into(),
+                policy_sha256: "a".repeat(64),
+                timeout_ms: 5000,
+                max_source_bytes: 65_536,
+                max_effect_bytes: 16_384,
+            },
+            persistence: crate::SensitivePersistencePolicy {
+                guest_persistence: crate::GuestPersistence::Disabled,
+                max_artifacts: 0,
+                max_total_artifact_bytes: 0,
+            },
+        }
+    }
+
+    fn canonical_registry(value: SensitiveProfileRegistryV1) -> CanonicalSensitiveProfileRegistry {
+        CanonicalSensitiveProfileRegistry::parse(&value.canonical_bytes().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn all_capability_variants_derive_fixed_profile_kinds() {
+        let reference = |id: &str| SensitiveProfileRef {
+            id: id.into(),
+            sha256: "a".repeat(64),
+        };
+        let cases = vec![
+            (
+                SensitiveCapabilityRule::ReadPath {
+                    root: reference("read"),
+                    relative_prefixes: vec!["src".into()],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::FilesystemRoot,
+            ),
+            (
+                SensitiveCapabilityRule::EditTree {
+                    tree: reference("edit"),
+                    relative_prefixes: vec!["src".into()],
+                    max_files: 1,
+                    max_changed_bytes: 1,
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::EditableTree,
+            ),
+            (
+                SensitiveCapabilityRule::ServiceAction {
+                    profile: reference("service"),
+                    actions: vec![crate::ServiceAction::Status],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::ServiceManager,
+            ),
+            (
+                SensitiveCapabilityRule::PackageOperation {
+                    profile: reference("package"),
+                    operations: vec![crate::PackageOperation::Install],
+                    packages: vec!["curl".into()],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::PackageTransaction,
+            ),
+            (
+                SensitiveCapabilityRule::KubernetesNamespace {
+                    cluster_profile: reference("kube"),
+                    namespace: "default".into(),
+                    verbs: vec![crate::KubernetesVerb::Get],
+                    resources: vec![crate::KubernetesResource::Pod],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::KubernetesCluster,
+            ),
+            (
+                SensitiveCapabilityRule::RemoteExecProfile {
+                    profile: reference("remote"),
+                    actions: vec!["check".into()],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::RemoteActions,
+            ),
+            (
+                SensitiveCapabilityRule::NetworkEndpoint {
+                    endpoint_profile: reference("network"),
+                    methods: vec![crate::NetworkMethod::Get],
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::NetworkEndpoint,
+            ),
+            (
+                SensitiveCapabilityRule::ArtifactExport {
+                    destination_profile: reference("artifact"),
+                    max_artifact_bytes: 1,
+                    budget: binding_budget(),
+                },
+                SensitiveLocalProfileKind::ArtifactCustody,
+            ),
+        ];
+        for (capability, expected_kind) in cases {
+            assert_eq!(
+                SensitiveProfileRequirement::from_capability(&capability).expected_kind,
+                expected_kind
+            );
+        }
+    }
+
+    #[test]
+    fn exact_binding_accepts_only_one_to_one_policy_and_registry() {
+        let policy = binding_policy();
+        let registry = canonical_registry(registry());
+        let bound = ValidatedSensitiveProfileBindings::bind_exact(&policy, &registry).unwrap();
+        assert_eq!(bound.bindings().len(), 2);
+        assert_eq!(
+            bound.bindings()[0].requirement.profile_ref.id,
+            "resident-actions"
+        );
+        assert_eq!(
+            bound.bindings()[1].requirement.profile_ref.id,
+            "resident-services"
+        );
+    }
+
+    #[test]
+    fn exact_binding_rejects_invalid_duplicate_missing_extra_hash_and_kind() {
+        let registry = canonical_registry(registry());
+        let mut invalid = binding_policy();
+        invalid.version = 2;
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&invalid, &registry),
+            Err(SensitiveProfileBindingError::InvalidPolicy)
+        );
+
+        let mut duplicate = binding_policy();
+        let shared = match &duplicate.capabilities[0] {
+            SensitiveCapabilityRule::RemoteExecProfile { profile, .. } => profile.clone(),
+            _ => unreachable!(),
+        };
+        if let SensitiveCapabilityRule::ServiceAction { profile, .. } =
+            &mut duplicate.capabilities[1]
+        {
+            *profile = shared;
+        }
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&duplicate, &registry),
+            Err(SensitiveProfileBindingError::DuplicateRequirementId)
+        );
+
+        let missing = canonical_registry(SensitiveProfileRegistryV1 {
+            version: SENSITIVE_PROFILE_REGISTRY_VERSION,
+            profiles: vec![
+                SensitiveProfileRegistryEntryV1::from_profile(remote_profile()).unwrap(),
+            ],
+        });
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&binding_policy(), &missing),
+            Err(SensitiveProfileBindingError::MissingProfile)
+        );
+
+        let mut one = binding_policy();
+        one.capabilities.truncate(1);
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&one, &registry),
+            Err(SensitiveProfileBindingError::ExtraProfile)
+        );
+
+        let mut bad_hash = binding_policy();
+        if let SensitiveCapabilityRule::RemoteExecProfile { profile, .. } =
+            &mut bad_hash.capabilities[0]
+        {
+            profile.sha256 = "0".repeat(64);
+        }
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&bad_hash, &registry),
+            Err(SensitiveProfileBindingError::HashMismatch)
+        );
+
+        let mut wrong_kind = binding_policy();
+        wrong_kind.capabilities[0] = SensitiveCapabilityRule::ServiceAction {
+            profile: SensitiveProfileRef {
+                id: "resident-actions".into(),
+                sha256: "76c010f20c81f47bf54296effcae7f18b3d4c316d88cec3d53f97d399f9bd45e".into(),
+            },
+            actions: vec![crate::ServiceAction::Status],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            ValidatedSensitiveProfileBindings::bind_exact(&wrong_kind, &registry),
+            Err(SensitiveProfileBindingError::KindMismatch)
         );
     }
 }
