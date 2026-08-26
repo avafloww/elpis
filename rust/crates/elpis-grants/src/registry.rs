@@ -297,6 +297,103 @@ impl ValidatedSensitiveProfileBindings {
     }
 }
 
+/// Proves static membership of signed finite constraints in one exact local profile.
+///
+/// This does not evaluate a runtime effect or prove a unit/action, route/body, or process tuple.
+pub fn prove_finite_profile_subset(
+    capability: &SensitiveCapabilityRule,
+    profile: &SensitiveLocalProfileV1,
+) -> Result<(), SensitiveProfileSubsetError> {
+    match (capability, &profile.profile) {
+        (
+            SensitiveCapabilityRule::ServiceAction { actions, .. },
+            SensitiveLocalProfileKindV1::ServiceManager { units, .. },
+        ) => {
+            if actions
+                .iter()
+                .all(|action| units.iter().any(|unit| unit.actions.contains(action)))
+            {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::PackageOperation {
+                operations,
+                packages,
+                ..
+            },
+            SensitiveLocalProfileKindV1::PackageTransaction {
+                operations: profile_operations,
+                packages: profile_packages,
+                ..
+            },
+        ) => {
+            if operations
+                .iter()
+                .all(|operation| profile_operations.contains(operation))
+                && packages.iter().all(|package| {
+                    profile_packages
+                        .iter()
+                        .any(|selection| selection.name == *package)
+                })
+            {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::RemoteExecProfile { actions, .. },
+            SensitiveLocalProfileKindV1::RemoteActions {
+                actions: profile_actions,
+            },
+        ) => {
+            if actions.iter().all(|action| {
+                profile_actions
+                    .iter()
+                    .any(|profile_action| profile_action.id == *action)
+            }) {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::NetworkEndpoint { methods, .. },
+            SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. },
+        ) => {
+            if methods
+                .iter()
+                .all(|method| routes.iter().any(|route| route.method == *method))
+            {
+                Ok(())
+            } else {
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            }
+        }
+        (
+            SensitiveCapabilityRule::ServiceAction { .. }
+            | SensitiveCapabilityRule::PackageOperation { .. }
+            | SensitiveCapabilityRule::RemoteExecProfile { .. }
+            | SensitiveCapabilityRule::NetworkEndpoint { .. },
+            _,
+        ) => Err(SensitiveProfileSubsetError::ProfileKindMismatch),
+        _ => Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily),
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveProfileSubsetError {
+    #[error("signed capability does not match the local profile kind")]
+    ProfileKindMismatch,
+    #[error("signed capability constraint is not contained by the local profile")]
+    ConstraintNotContained,
+    #[error("signed capability belongs to another subset proof family")]
+    UnsupportedCapabilityFamily,
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum SensitiveProfileBindingError {
     #[error("sensitive policy is invalid")]
@@ -347,6 +444,8 @@ mod tests {
 
     const SERVICE_JSON: &str = r#"{"version":1,"id":"resident-services","profile":{"kind":"service_manager","manager":"systemd_dbus","scope":{"mode":"system"},"unit_resolution":"exact_canonical_name_no_alias","units":[{"unit":"elpis-harness.service","actions":["restart","status"]},{"unit":"nginx.service","actions":["reload","restart","status"]}]}}"#;
     const REMOTE_JSON: &str = r#"{"version":1,"id":"resident-actions","profile":{"kind":"remote_actions","actions":[{"id":"check-state","execution":"direct_native_elf_no_shell_or_interpreter","executable_path":"/usr/libexec/elpis/check-state","executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","argv":["/usr/libexec/elpis/check-state","--format","json"],"environment":{"mode":"clear_then_set_fixed","locale":"C.UTF-8","timezone":"UTC"},"cwd_profile":{"id":"work-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"uid":10001,"gid":10001,"capabilities":[],"stdin":"closed","no_new_privileges":"required","timeout_ms":30000,"max_stdout_bytes":65536,"max_stderr_bytes":65536}]}}"#;
+    const NETWORK_JSON: &str = r#"{"version":1,"id":"package-index-endpoint","profile":{"kind":"network_endpoint","origin":{"protocol":"https","host":"api.example.test","port":443},"address_policy":{"mode":"direct_connect_only_pinned_no_proxy","addresses":["198.51.100.10","2001:db8::10"]},"tls":{"server_name":"api.example.test","minimum_version":"tls13","verification":"pinned_ca_and_leaf_spki_with_hostname_and_validity","ca_certificate_sha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"leaf_spki_sha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]},"routes":[{"path_prefix":"/v1/artifacts","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/octet-stream"]},{"path_prefix":"/v1/artifacts","method":"post","query":"forbidden","request_body":{"mode":"allowed","content_types":["application/json"]},"response_content_types":["application/json"]},{"path_prefix":"/v1/status","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/json"]}],"request_headers":"generated_host_and_allowed_content_type_only","response_encoding":"identity_only","redirects":"deny","max_request_bytes":65536,"max_response_bytes":1048576}}"#;
+    const PACKAGE_JSON: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change"}}"#;
 
     fn service_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(SERVICE_JSON).unwrap()
@@ -354,6 +453,14 @@ mod tests {
 
     fn remote_profile() -> SensitiveLocalProfileV1 {
         serde_json::from_str(REMOTE_JSON).unwrap()
+    }
+
+    fn network_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(NETWORK_JSON).unwrap()
+    }
+
+    fn package_profile() -> SensitiveLocalProfileV1 {
+        serde_json::from_str(PACKAGE_JSON).unwrap()
     }
 
     fn registry() -> SensitiveProfileRegistryV1 {
@@ -735,6 +842,119 @@ mod tests {
         assert_eq!(
             ValidatedSensitiveProfileBindings::bind_exact(&wrong_kind, &registry),
             Err(SensitiveProfileBindingError::KindMismatch)
+        );
+    }
+    #[test]
+    fn finite_profile_subsets_accept_contained_and_reject_widened_constraints() {
+        let reference = |id: &str| SensitiveProfileRef {
+            id: id.into(),
+            sha256: "a".repeat(64),
+        };
+        let cases = [
+            (
+                SensitiveCapabilityRule::ServiceAction {
+                    profile: reference("service"),
+                    actions: vec![crate::ServiceAction::Reload, crate::ServiceAction::Status],
+                    budget: binding_budget(),
+                },
+                service_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::PackageOperation {
+                    profile: reference("package"),
+                    operations: vec![crate::PackageOperation::Install],
+                    packages: vec!["curl".into()],
+                    budget: binding_budget(),
+                },
+                package_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::RemoteExecProfile {
+                    profile: reference("remote"),
+                    actions: vec!["check-state".into()],
+                    budget: binding_budget(),
+                },
+                remote_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::NetworkEndpoint {
+                    endpoint_profile: reference("network"),
+                    methods: vec![crate::NetworkMethod::Get, crate::NetworkMethod::Post],
+                    budget: binding_budget(),
+                },
+                network_profile(),
+            ),
+        ];
+        for (capability, profile) in cases {
+            assert_eq!(prove_finite_profile_subset(&capability, &profile), Ok(()));
+        }
+
+        let widened = [
+            (
+                SensitiveCapabilityRule::ServiceAction {
+                    profile: reference("service"),
+                    actions: vec![crate::ServiceAction::Stop],
+                    budget: binding_budget(),
+                },
+                service_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::PackageOperation {
+                    profile: reference("package"),
+                    operations: vec![crate::PackageOperation::Remove],
+                    packages: vec!["curl".into()],
+                    budget: binding_budget(),
+                },
+                package_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::RemoteExecProfile {
+                    profile: reference("remote"),
+                    actions: vec!["shell".into()],
+                    budget: binding_budget(),
+                },
+                remote_profile(),
+            ),
+            (
+                SensitiveCapabilityRule::NetworkEndpoint {
+                    endpoint_profile: reference("network"),
+                    methods: vec![crate::NetworkMethod::Delete],
+                    budget: binding_budget(),
+                },
+                network_profile(),
+            ),
+        ];
+        for (capability, profile) in widened {
+            assert_eq!(
+                prove_finite_profile_subset(&capability, &profile),
+                Err(SensitiveProfileSubsetError::ConstraintNotContained)
+            );
+        }
+    }
+
+    #[test]
+    fn finite_profile_subsets_reject_wrong_kind_and_other_families() {
+        let reference = SensitiveProfileRef {
+            id: "x".into(),
+            sha256: "a".repeat(64),
+        };
+        let service = SensitiveCapabilityRule::ServiceAction {
+            profile: reference.clone(),
+            actions: vec![crate::ServiceAction::Status],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_finite_profile_subset(&service, &remote_profile()),
+            Err(SensitiveProfileSubsetError::ProfileKindMismatch)
+        );
+        let read = SensitiveCapabilityRule::ReadPath {
+            root: reference,
+            relative_prefixes: vec!["src".into()],
+            budget: binding_budget(),
+        };
+        assert_eq!(
+            prove_finite_profile_subset(&read, &service_profile()),
+            Err(SensitiveProfileSubsetError::UnsupportedCapabilityFamily)
         );
     }
 }
