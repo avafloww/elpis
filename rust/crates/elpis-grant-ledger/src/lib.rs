@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use elpis_grants::{
     CanonicalSensitivePolicy, ED25519_SIGNATURE_BYTES, GrantBinding, GrantError, GrantV1,
     GrantVerifier, MAX_GRANT_PAYLOAD_BYTES, MAX_TERMINAL_CONTROL_PAYLOAD_BYTES,
-    TerminalControlActionV1, TerminalControlV1, TerminalControlVerifier,
+    TerminalControlActionV1, TerminalControlError, TerminalControlV1, TerminalControlVerifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -285,6 +285,40 @@ impl GrantTerminalReceipt {
 
     pub fn occurred_at_unix_s(&self) -> u64 {
         self.occurred_at_unix_s
+    }
+}
+
+/// Bounded evidence of one durable terminal-control admission.
+///
+/// This is informational receipt data, not grant or effect authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalControlReceipt {
+    receipt_seq: u64,
+    control: TerminalControlV1,
+    payload_sha256: [u8; 32],
+    admitted_at_unix_s: u64,
+    latch_event_seq: Option<u64>,
+}
+
+impl TerminalControlReceipt {
+    pub fn receipt_seq(&self) -> u64 {
+        self.receipt_seq
+    }
+
+    pub fn control(&self) -> &TerminalControlV1 {
+        &self.control
+    }
+
+    pub fn payload_sha256(&self) -> &[u8; 32] {
+        &self.payload_sha256
+    }
+
+    pub fn admitted_at_unix_s(&self) -> u64 {
+        self.admitted_at_unix_s
+    }
+
+    pub fn latch_event_seq(&self) -> Option<u64> {
+        self.latch_event_seq
     }
 }
 
@@ -601,6 +635,177 @@ impl GrantLedger {
         })
     }
 
+    /// Authenticates and atomically admits one untrusted signed terminal control.
+    ///
+    /// Revoke and flag controls record receipt evidence only. A clear control also appends
+    /// the exact clear event for a currently flagged latch in the same transaction.
+    pub fn admit_terminal_control(
+        &mut self,
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<TerminalControlReceipt, GrantLedgerError> {
+        let verifier = self
+            .control_verifier
+            .as_ref()
+            .ok_or(GrantLedgerError::TerminalControlVerifierRequired)?;
+        let authenticated = verifier.authenticate(payload, signature)?;
+        let control = authenticated.control().clone();
+        let payload_sha256 = lower_hex_hash(authenticated.payload_sha256())?;
+        let added_control_bytes = accounted_control_bytes(&control, payload, signature)?;
+        let limits = self.limits;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.clock.now_unix_s()?;
+        if now < control.issued_at_unix_s {
+            return Err(GrantLedgerError::ControlNotYetValid);
+        }
+        if now >= control.expires_at_unix_s {
+            return Err(GrantLedgerError::ControlExpired);
+        }
+
+        if let Some(existing_payload) = transaction
+            .query_row(
+                "SELECT payload_bytes FROM terminal_control_receipts WHERE control_id = ?1",
+                params![control.control_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        {
+            return if existing_payload == payload {
+                Err(GrantLedgerError::ControlReplay)
+            } else {
+                Err(GrantLedgerError::ControlIdConflict)
+            };
+        }
+        if transaction
+            .query_row(
+                "SELECT 1 FROM terminal_control_receipts WHERE payload_bytes = ?1",
+                params![payload],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(GrantLedgerError::ControlReplay);
+        }
+        let sequence_exists = transaction
+            .query_row(
+                "SELECT 1 FROM terminal_control_receipts
+                 WHERE issuer_id = ?1 AND issuer_seq = ?2
+                 UNION ALL
+                 SELECT 1 FROM grants WHERE issuer_id = ?1 AND issuer_seq = ?2
+                 LIMIT 1",
+                params![control.issuer_id, u64_blob(control.issuer_seq).as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if sequence_exists {
+            return Err(GrantLedgerError::IssuerSequenceReplay);
+        }
+
+        let (state, state_issuer) = load_state(&transaction)?;
+        if state_issuer.as_deref() != Some(control.issuer_id.as_str()) {
+            return Err(GrantLedgerError::IssuerMismatch);
+        }
+        if state
+            .last_issuer_seq
+            .is_some_and(|last| control.issuer_seq <= last)
+        {
+            return Err(GrantLedgerError::StaleIssuerSequence);
+        }
+        validate_live_control_target(&transaction, &control)?;
+
+        let control_usage = load_control_usage(&transaction)?;
+        if control_usage
+            .count
+            .checked_add(1)
+            .is_none_or(|count| count > limits.max_terminal_controls)
+            || control_usage
+                .bytes
+                .checked_add(added_control_bytes)
+                .is_none_or(|bytes| bytes > limits.max_terminal_control_bytes)
+        {
+            return Err(GrantLedgerError::StorageLimit);
+        }
+
+        let added_latch_bytes = match &control.target {
+            TerminalControlActionV1::ClearLatch { profile_id, .. } => Some(accounted_latch_bytes(
+                &control.executor_id,
+                profile_id,
+                "clear",
+                None,
+                &control.control_id,
+                None,
+            )?),
+            _ => None,
+        };
+        if let Some(added_latch_bytes) = added_latch_bytes {
+            let latch_usage = load_latch_usage(&transaction)?;
+            if latch_usage
+                .count
+                .checked_add(1)
+                .is_none_or(|count| count > limits.max_latch_events)
+                || latch_usage
+                    .bytes
+                    .checked_add(added_latch_bytes)
+                    .is_none_or(|bytes| bytes > limits.max_latch_bytes)
+            {
+                return Err(GrantLedgerError::StorageLimit);
+            }
+        }
+
+        let receipt_seq = next_control_receipt_sequence(&transaction)?;
+        insert_terminal_control_row(
+            &transaction,
+            receipt_seq,
+            &control,
+            now,
+            payload_sha256,
+            payload,
+            signature,
+        )?;
+        let latch_event_seq =
+            if matches!(control.target, TerminalControlActionV1::ClearLatch { .. }) {
+                let event_seq = next_latch_event_sequence(&transaction)?;
+                insert_clear_latch_event(&transaction, event_seq, &control, now)?;
+                Some(event_seq as u64)
+            } else {
+                None
+            };
+
+        let changed = transaction.execute(
+            "UPDATE grant_state SET last_issuer_seq = ?1
+             WHERE singleton = 1 AND issuer_id = ?2 AND last_issuer_seq = ?3
+               AND grant_count = ?4 AND total_bytes = ?5",
+            params![
+                u64_blob(control.issuer_seq).as_slice(),
+                control.issuer_id,
+                state
+                    .last_issuer_seq
+                    .map(u64_blob)
+                    .as_ref()
+                    .map(|value| value.as_slice()),
+                to_i64(state.grant_count)?,
+                to_i64(state.total_bytes)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(GrantLedgerError::ConcurrentChange);
+        }
+        transaction.commit()?;
+
+        Ok(TerminalControlReceipt {
+            receipt_seq: receipt_seq as u64,
+            control,
+            payload_sha256,
+            admitted_at_unix_s: now,
+            latch_event_seq,
+        })
+    }
+
     pub fn complete(
         &mut self,
         active: ActiveGrant,
@@ -778,8 +983,28 @@ pub enum GrantLedgerError {
     InvalidLimits,
     #[error("system clock is before the Unix epoch")]
     ClockBeforeUnixEpoch,
+    #[error("terminal-control authentication failed: {0}")]
+    TerminalControl(#[from] TerminalControlError),
     #[error("terminal-control rows require boot-frozen verifier custody")]
     TerminalControlVerifierRequired,
+    #[error("terminal control is not yet valid")]
+    ControlNotYetValid,
+    #[error("terminal control is expired")]
+    ControlExpired,
+    #[error("the exact signed terminal control was already admitted")]
+    ControlReplay,
+    #[error("terminal control ID was already used for different signed claims")]
+    ControlIdConflict,
+    #[error("terminal control target does not match a live durable object")]
+    ControlTargetMismatch,
+    #[error("terminal control target grant is already terminal")]
+    ControlTargetAlreadyTerminal,
+    #[error("the exact policy latch is not currently flagged")]
+    PolicyLatchNotFlagged,
+    #[error("terminal-control receipt sequence is exhausted")]
+    ControlReceiptSequenceExhausted,
+    #[error("policy-latch event sequence is exhausted")]
+    LatchEventSequenceExhausted,
     #[error("grant is not yet valid")]
     NotYetValid,
     #[error("grant is expired")]
@@ -1567,6 +1792,285 @@ fn validate_terminal_integrity(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StorageUsage {
+    count: u64,
+    bytes: u64,
+}
+
+fn load_control_usage(connection: &Connection) -> Result<StorageUsage, GrantLedgerError> {
+    let mut statement = connection.prepare(
+        "SELECT payload_bytes, signature FROM terminal_control_receipts ORDER BY receipt_seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut usage = StorageUsage { count: 0, bytes: 0 };
+    while let Some(row) = rows.next()? {
+        let payload: Vec<u8> = row.get(0)?;
+        let signature: Vec<u8> = row.get(1)?;
+        let control: TerminalControlV1 = serde_json::from_slice(&payload).map_err(|error| {
+            GrantLedgerError::Corrupt(format!("stored terminal control is invalid: {error}"))
+        })?;
+        usage.count = usage
+            .count
+            .checked_add(1)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+        usage.bytes = usage
+            .bytes
+            .checked_add(accounted_control_bytes(&control, &payload, &signature)?)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+    }
+    Ok(usage)
+}
+
+fn load_latch_usage(connection: &Connection) -> Result<StorageUsage, GrantLedgerError> {
+    let mut statement = connection.prepare(
+        "SELECT executor_id, profile_id, kind, grant_id, control_id, policy_bytes
+         FROM policy_latch_events ORDER BY event_seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut usage = StorageUsage { count: 0, bytes: 0 };
+    while let Some(row) = rows.next()? {
+        let executor_id: String = row.get(0)?;
+        let profile_id: String = row.get(1)?;
+        let kind: String = row.get(2)?;
+        let grant_id: Option<String> = row.get(3)?;
+        let control_id: String = row.get(4)?;
+        let policy_bytes: Option<Vec<u8>> = row.get(5)?;
+        usage.count = usage
+            .count
+            .checked_add(1)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+        usage.bytes = usage
+            .bytes
+            .checked_add(accounted_latch_bytes(
+                &executor_id,
+                &profile_id,
+                &kind,
+                grant_id.as_deref(),
+                &control_id,
+                policy_bytes.as_deref(),
+            )?)
+            .ok_or(GrantLedgerError::StorageLimit)?;
+    }
+    Ok(usage)
+}
+
+fn next_control_receipt_sequence(connection: &Connection) -> Result<i64, GrantLedgerError> {
+    let (count, last): (i64, Option<i64>) = connection.query_row(
+        "SELECT COUNT(*), MAX(receipt_seq) FROM terminal_control_receipts",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match (count, last) {
+        (0, None) => Ok(1),
+        (count, Some(last)) if count > 0 && count == last => last
+            .checked_add(1)
+            .ok_or(GrantLedgerError::ControlReceiptSequenceExhausted),
+        _ => Err(GrantLedgerError::Corrupt(
+            "control receipt sequence is not gap-free".into(),
+        )),
+    }
+}
+
+fn next_latch_event_sequence(connection: &Connection) -> Result<i64, GrantLedgerError> {
+    let (count, last): (i64, Option<i64>) = connection.query_row(
+        "SELECT COUNT(*), MAX(event_seq) FROM policy_latch_events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match (count, last) {
+        (0, None) => Ok(1),
+        (count, Some(last)) if count > 0 && count == last => last
+            .checked_add(1)
+            .ok_or(GrantLedgerError::LatchEventSequenceExhausted),
+        _ => Err(GrantLedgerError::Corrupt(
+            "policy latch event sequence is not gap-free".into(),
+        )),
+    }
+}
+
+fn validate_live_control_target(
+    connection: &Connection,
+    control: &TerminalControlV1,
+) -> Result<(), GrantLedgerError> {
+    match &control.target {
+        TerminalControlActionV1::RevokeGrant {
+            grant_id,
+            grant_payload_sha256,
+        }
+        | TerminalControlActionV1::FlagGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => {
+            let target = connection
+                .query_row(
+                    "SELECT grant.payload_sha256, grant.payload_bytes,
+                            EXISTS(SELECT 1 FROM grant_terminal_events AS event
+                                   WHERE event.grant_id = grant.grant_id)
+                     FROM grants AS grant WHERE grant.grant_id = ?1",
+                    params![grant_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((stored_hash, stored_payload, terminal)) = target else {
+                return Err(GrantLedgerError::ControlTargetMismatch);
+            };
+            let grant: GrantV1 = serde_json::from_slice(&stored_payload).map_err(|error| {
+                GrantLedgerError::Corrupt(format!("control target grant is invalid: {error}"))
+            })?;
+            if decode_hash(stored_hash, "control target grant hash")?
+                != lower_hex_hash(grant_payload_sha256)?
+                || grant.executor_id != control.executor_id
+            {
+                return Err(GrantLedgerError::ControlTargetMismatch);
+            }
+            if terminal {
+                return Err(GrantLedgerError::ControlTargetAlreadyTerminal);
+            }
+            Ok(())
+        }
+        TerminalControlActionV1::ClearLatch {
+            profile_id,
+            policy_sha256,
+        } => {
+            let policy_hash = lower_hex_hash(policy_sha256)?;
+            let latest = connection
+                .query_row(
+                    "SELECT event.kind, source.issuer_seq
+                     FROM policy_latch_events AS event
+                     JOIN terminal_control_receipts AS source
+                       ON source.control_id = event.control_id
+                     WHERE event.executor_id = ?1 AND event.profile_id = ?2
+                       AND event.policy_sha256 = ?3
+                     ORDER BY event.event_seq DESC LIMIT 1",
+                    params![control.executor_id, profile_id, policy_hash.as_slice()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            let Some((kind, source_sequence)) = latest else {
+                return Err(GrantLedgerError::PolicyLatchNotFlagged);
+            };
+            if kind != "flag" {
+                return Err(GrantLedgerError::PolicyLatchNotFlagged);
+            }
+            if control.issuer_seq <= decode_u64(source_sequence, "latch source control sequence")? {
+                return Err(GrantLedgerError::StaleIssuerSequence);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn insert_terminal_control_row(
+    connection: &Connection,
+    receipt_seq: i64,
+    control: &TerminalControlV1,
+    admitted_at_unix_s: u64,
+    payload_sha256: [u8; 32],
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<(), GrantLedgerError> {
+    let (action, grant_id, grant_hash, profile_id, policy_hash) = match &control.target {
+        TerminalControlActionV1::RevokeGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => (
+            "revoke_grant",
+            Some(grant_id.as_str()),
+            Some(lower_hex_hash(grant_payload_sha256)?),
+            None,
+            None,
+        ),
+        TerminalControlActionV1::FlagGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => (
+            "flag_grant",
+            Some(grant_id.as_str()),
+            Some(lower_hex_hash(grant_payload_sha256)?),
+            None,
+            None,
+        ),
+        TerminalControlActionV1::ClearLatch {
+            profile_id,
+            policy_sha256,
+        } => (
+            "clear_latch",
+            None,
+            None,
+            Some(profile_id.as_str()),
+            Some(lower_hex_hash(policy_sha256)?),
+        ),
+    };
+    connection.execute(
+        "INSERT INTO terminal_control_receipts (
+            receipt_seq, control_id, issuer_id, issuer_seq, executor_id, policy_epoch,
+            target_action, target_grant_id, target_grant_payload_sha256,
+            target_profile_id, target_policy_sha256, issued_at_unix_s,
+            expires_at_unix_s, admitted_at_unix_s, payload_sha256, payload_bytes, signature
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            receipt_seq,
+            control.control_id,
+            control.issuer_id,
+            u64_blob(control.issuer_seq).as_slice(),
+            control.executor_id,
+            u64_blob(control.policy_epoch).as_slice(),
+            action,
+            grant_id,
+            grant_hash.as_ref().map(|hash| hash.as_slice()),
+            profile_id,
+            policy_hash.as_ref().map(|hash| hash.as_slice()),
+            u64_blob(control.issued_at_unix_s).as_slice(),
+            u64_blob(control.expires_at_unix_s).as_slice(),
+            u64_blob(admitted_at_unix_s).as_slice(),
+            payload_sha256.as_slice(),
+            payload,
+            signature,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_clear_latch_event(
+    connection: &Connection,
+    event_seq: i64,
+    control: &TerminalControlV1,
+    occurred_at_unix_s: u64,
+) -> Result<(), GrantLedgerError> {
+    let TerminalControlActionV1::ClearLatch {
+        profile_id,
+        policy_sha256,
+    } = &control.target
+    else {
+        return Err(GrantLedgerError::Corrupt(
+            "non-clear control reached clear latch insertion".into(),
+        ));
+    };
+    let policy_hash = lower_hex_hash(policy_sha256)?;
+    connection.execute(
+        "INSERT INTO policy_latch_events (
+            event_seq, executor_id, profile_id, policy_sha256, kind,
+            grant_id, control_id, occurred_at_unix_s, policy_bytes
+         ) VALUES (?1, ?2, ?3, ?4, 'clear', NULL, ?5, ?6, NULL)",
+        params![
+            event_seq,
+            control.executor_id,
+            profile_id,
+            policy_hash.as_slice(),
+            control.control_id,
+            u64_blob(occurred_at_unix_s).as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn validate_control_integrity(
     connection: &Connection,
     verifier: Option<&TerminalControlVerifier>,
@@ -2198,6 +2702,22 @@ mod tests {
             .unwrap();
     }
 
+    fn revoke_control(id: &str, sequence: u64, grant: &GrantV1) -> TerminalControlV1 {
+        let mut control = flag_control(id, sequence, grant);
+        let TerminalControlActionV1::FlagGrant {
+            grant_id,
+            grant_payload_sha256,
+        } = control.target
+        else {
+            unreachable!()
+        };
+        control.target = TerminalControlActionV1::RevokeGrant {
+            grant_id,
+            grant_payload_sha256,
+        };
+        control
+    }
+
     fn flag_control(id: &str, sequence: u64, grant: &GrantV1) -> TerminalControlV1 {
         let payload = grant.canonical_payload().unwrap();
         TerminalControlV1 {
@@ -2240,6 +2760,15 @@ mod tests {
             expires_at_unix_s: NOW + 300,
             nonce: NONCE.into(),
         }
+    }
+
+    fn signed_control(control: &TerminalControlV1) -> (Vec<u8>, Vec<u8>) {
+        let payload = control.canonical_payload().unwrap();
+        let signature = key(7)
+            .sign(&terminal_control_signature_input(&payload).unwrap())
+            .as_ref()
+            .to_vec();
+        (payload, signature)
     }
 
     fn insert_control_row(connection: &Connection, control: &TerminalControlV1) {
@@ -2347,6 +2876,610 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn signed_revoke_and_flag_admission_return_receipts_without_terminal_effects() {
+        let mut test = default_test_ledger();
+        let claim = grant("grant-1", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+
+        let revoke = revoke_control("control-revoke", 2, &claim);
+        let (payload, signature) = signed_control(&revoke);
+        let receipt = test
+            .ledger
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        assert_eq!(receipt.receipt_seq(), 1);
+        assert_eq!(receipt.control(), &revoke);
+        assert_eq!(receipt.payload_sha256(), &sha256(&payload));
+        assert_eq!(receipt.admitted_at_unix_s(), NOW);
+        assert_eq!(receipt.latch_event_seq(), None);
+
+        let flag = flag_control("control-flag", 3, &claim);
+        let (payload, signature) = signed_control(&flag);
+        let receipt = test
+            .ledger
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        assert_eq!(receipt.receipt_seq(), 2);
+        assert_eq!(receipt.control(), &flag);
+        assert_eq!(receipt.latch_event_seq(), None);
+        assert!(test.ledger.terminal_receipt("grant-1").unwrap().is_none());
+        let (last, grant_count, control_count, latch_count): (Vec<u8>, i64, i64, i64) = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT state.last_issuer_seq, state.grant_count,
+                        (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events)
+                 FROM grant_state AS state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 3);
+        assert_eq!((grant_count, control_count, latch_count), (1, 2, 0));
+    }
+
+    #[test]
+    fn terminal_control_authentication_and_daemon_time_fail_before_persistence() {
+        let mut test = default_test_ledger();
+        let claim = grant("grant-1", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+
+        let valid = flag_control("control-invalid-signature", 2, &claim);
+        let (payload, mut signature) = signed_control(&valid);
+        signature[0] ^= 1;
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::TerminalControl(_))
+        ));
+
+        let mut future = flag_control("control-future", 2, &claim);
+        future.issued_at_unix_s = NOW + 1;
+        future.expires_at_unix_s = NOW + 301;
+        let (payload, signature) = signed_control(&future);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlNotYetValid)
+        ));
+
+        let mut expired = flag_control("control-expired", 2, &claim);
+        expired.issued_at_unix_s = NOW - 300;
+        expired.expires_at_unix_s = NOW;
+        let (payload, signature) = signed_control(&expired);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlExpired)
+        ));
+        let count: i64 = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM terminal_control_receipts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private").join("grants.sqlite");
+        let mut no_control_trust = GrantLedger::open_with_clock(
+            &path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let claim = grant("grant-2", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = no_control_trust
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let control = flag_control("control-no-trust", 2, &claim);
+        let (payload, signature) = signed_control(&control);
+        assert!(matches!(
+            no_control_trust.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::TerminalControlVerifierRequired)
+        ));
+    }
+
+    #[test]
+    fn terminal_control_replay_conflict_and_shared_sequence_fail_closed() {
+        let mut test = default_test_ledger();
+        let claim = grant("grant-1", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let first = flag_control("control-1", 2, &claim);
+        let (payload, signature) = signed_control(&first);
+        test.ledger
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlReplay)
+        ));
+
+        let conflict = revoke_control("control-1", 3, &claim);
+        let (payload, signature) = signed_control(&conflict);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlIdConflict)
+        ));
+        let reused_sequence = revoke_control("control-2", 2, &claim);
+        let (payload, signature) = signed_control(&reused_sequence);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::IssuerSequenceReplay)
+        ));
+
+        let mut stale_test = default_test_ledger();
+        let claim = grant("grant-2", 2);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = stale_test
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let stale = flag_control("control-stale", 1, &claim);
+        let (payload, signature) = signed_control(&stale);
+        assert!(matches!(
+            stale_test
+                .ledger
+                .admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::StaleIssuerSequence)
+        ));
+    }
+
+    #[test]
+    fn grant_target_controls_require_exact_unterminated_admission() {
+        let mut missing = default_test_ledger();
+        let admitted = grant("grant-1", 1);
+        let (grant_payload, grant_signature) = signed(&admitted);
+        let _active = missing
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let absent = flag_control("control-missing", 2, &grant("other-grant", 1));
+        let (payload, signature) = signed_control(&absent);
+        assert!(matches!(
+            missing.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlTargetMismatch)
+        ));
+
+        let mut mismatch = default_test_ledger();
+        let claim = grant("grant-2", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = mismatch
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let mut wrong_hash = flag_control("control-wrong-hash", 2, &claim);
+        let TerminalControlActionV1::FlagGrant {
+            grant_payload_sha256,
+            ..
+        } = &mut wrong_hash.target
+        else {
+            unreachable!()
+        };
+        *grant_payload_sha256 = HASH_A.into();
+        let (payload, signature) = signed_control(&wrong_hash);
+        assert!(matches!(
+            mismatch.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlTargetMismatch)
+        ));
+
+        let mut terminal = default_test_ledger();
+        let claim = grant("grant-3", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let active = terminal
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        terminal.ledger.complete(active).unwrap();
+        let control = flag_control("control-terminal", 2, &claim);
+        let (payload, signature) = signed_control(&control);
+        assert!(matches!(
+            terminal.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::ControlTargetAlreadyTerminal)
+        ));
+    }
+
+    #[test]
+    fn exact_flagged_latch_clear_is_atomic_and_does_not_terminalize_grant() {
+        let mut test = default_test_ledger();
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(
+                &grant_payload,
+                &grant_signature,
+                &binding_for_policy(&policy_sha256),
+            )
+            .unwrap();
+        insert_control(
+            &test.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW).as_slice()
+                ],
+            )
+            .unwrap();
+
+        let wrong_key = clear_control_for_policy("control-wrong-key", 3, HASH_A);
+        let (payload, signature) = signed_control(&wrong_key);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::PolicyLatchNotFlagged)
+        ));
+        let before: (i64, i64, Vec<u8>) = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((before.0, before.1), (1, 1));
+        assert_eq!(decode_u64(before.2, "test high-water").unwrap(), 2);
+
+        let clear = clear_control_for_policy("control-clear", 3, &policy_sha256);
+        let (payload, signature) = signed_control(&clear);
+        let receipt = test
+            .ledger
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        assert_eq!(receipt.receipt_seq(), 2);
+        assert_eq!(receipt.latch_event_seq(), Some(2));
+        assert!(
+            !test
+                .ledger
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+        assert!(
+            test.ledger
+                .terminal_receipt("grant-flag")
+                .unwrap()
+                .is_none()
+        );
+
+        let second_clear = clear_control_for_policy("control-clear-2", 4, &policy_sha256);
+        let (payload, signature) = signed_control(&second_clear);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::PolicyLatchNotFlagged)
+        ));
+        let (controls, events, last): (i64, i64, Vec<u8>) = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((controls, events), (2, 2));
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 3);
+
+        drop(test.ledger);
+        let reopened = open_with_control_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert!(
+            !reopened
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn control_and_latch_capacity_failures_roll_back_sequence_and_rows() {
+        let mut control_limited = test_ledger(GrantLedgerLimits {
+            max_terminal_control_bytes: 1,
+            ..GrantLedgerLimits::default()
+        });
+        let claim = grant("grant-1", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = control_limited
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let control = flag_control("control-too-large", 2, &claim);
+        let (payload, signature) = signed_control(&control);
+        assert!(matches!(
+            control_limited
+                .ledger
+                .admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+        let (count, last): (i64, Vec<u8>) = control_limited
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 1);
+
+        let mut latch_limited = test_ledger(GrantLedgerLimits {
+            max_latch_events: 1,
+            ..GrantLedgerLimits::default()
+        });
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = latch_limited
+            .ledger
+            .admit(
+                &grant_payload,
+                &grant_signature,
+                &binding_for_policy(&policy_sha256),
+            )
+            .unwrap();
+        insert_control(
+            &latch_limited.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        latch_limited
+            .ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW).as_slice()
+                ],
+            )
+            .unwrap();
+        let clear = clear_control_for_policy("control-clear", 3, &policy_sha256);
+        let (payload, signature) = signed_control(&clear);
+        assert!(matches!(
+            latch_limited
+                .ledger
+                .admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+        let (controls, events, last): (i64, i64, Vec<u8>) = latch_limited
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((controls, events), (1, 1));
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 2);
+    }
+
+    #[test]
+    fn control_count_and_latch_byte_limits_fail_before_new_rows() {
+        let mut control_limited = test_ledger(GrantLedgerLimits {
+            max_terminal_controls: 1,
+            ..GrantLedgerLimits::default()
+        });
+        let claim = grant("grant-count", 1);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = control_limited
+            .ledger
+            .admit(&grant_payload, &grant_signature, &binding())
+            .unwrap();
+        let first = flag_control("control-first", 2, &claim);
+        let (payload, signature) = signed_control(&first);
+        control_limited
+            .ledger
+            .admit_terminal_control(&payload, &signature)
+            .unwrap();
+        let second = revoke_control("control-second", 3, &claim);
+        let (payload, signature) = signed_control(&second);
+        assert!(matches!(
+            control_limited
+                .ledger
+                .admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+        let (count, last): (i64, Vec<u8>) = control_limited
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 2);
+
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let exact_flag_bytes = accounted_latch_bytes(
+            "executor-1",
+            "sensitive-v1",
+            "flag",
+            Some("grant-flag"),
+            "control-flag",
+            Some(&policy_bytes),
+        )
+        .unwrap();
+        let mut latch_limited = test_ledger(GrantLedgerLimits {
+            max_latch_bytes: exact_flag_bytes,
+            ..GrantLedgerLimits::default()
+        });
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = latch_limited
+            .ledger
+            .admit(
+                &grant_payload,
+                &grant_signature,
+                &binding_for_policy(&policy_sha256),
+            )
+            .unwrap();
+        insert_control(
+            &latch_limited.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        latch_limited
+            .ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW).as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            load_latch_usage(&latch_limited.ledger.connection)
+                .unwrap()
+                .bytes,
+            exact_flag_bytes
+        );
+        let clear = clear_control_for_policy("control-clear", 3, &policy_sha256);
+        let (payload, signature) = signed_control(&clear);
+        assert!(matches!(
+            latch_limited
+                .ledger
+                .admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::StorageLimit)
+        ));
+        let (controls, events, last): (i64, i64, Vec<u8>) = latch_limited
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((controls, events), (1, 1));
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 2);
+    }
+
+    #[test]
+    fn clear_state_update_failure_rolls_back_control_event_and_high_water() {
+        let mut test = default_test_ledger();
+        let (policy_bytes, policy_sha256) = latch_policy_fixture();
+        let policy_hash = lower_hex_hash(&policy_sha256).unwrap();
+        let claim = latch_grant("grant-flag", 1, &policy_sha256);
+        let (grant_payload, grant_signature) = signed(&claim);
+        let _active = test
+            .ledger
+            .admit(
+                &grant_payload,
+                &grant_signature,
+                &binding_for_policy(&policy_sha256),
+            )
+            .unwrap();
+        insert_control(
+            &test.ledger.connection,
+            &flag_control("control-flag", 2, &claim),
+        );
+        test.ledger
+            .connection
+            .execute(
+                "INSERT INTO policy_latch_events (
+                    event_seq, executor_id, profile_id, policy_sha256, policy_bytes,
+                    kind, grant_id, control_id, occurred_at_unix_s
+                 ) VALUES (1, 'executor-1', 'sensitive-v1', ?1, ?2, 'flag',
+                           'grant-flag', 'control-flag', ?3)",
+                params![
+                    policy_hash.as_slice(),
+                    policy_bytes,
+                    u64_blob(NOW).as_slice()
+                ],
+            )
+            .unwrap();
+        test.ledger
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_control_state_update
+                 BEFORE UPDATE ON grant_state
+                 BEGIN SELECT RAISE(ABORT, 'control state failpoint'); END;",
+            )
+            .unwrap();
+
+        let clear = clear_control_for_policy("control-clear", 3, &policy_sha256);
+        let (payload, signature) = signed_control(&clear);
+        assert!(matches!(
+            test.ledger.admit_terminal_control(&payload, &signature),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        let (controls, events, last): (i64, i64, Vec<u8>) = test
+            .ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM terminal_control_receipts),
+                        (SELECT COUNT(*) FROM policy_latch_events), last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((controls, events), (1, 1));
+        assert_eq!(decode_u64(last, "test high-water").unwrap(), 2);
+        assert!(
+            test.ledger
+                .policy_latch_is_set("executor-1", "sensitive-v1", &policy_hash)
+                .unwrap()
+        );
     }
 
     #[test]
