@@ -20,7 +20,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 // "ELGL", deliberately distinct from the transport, effect, and other ledgers.
 const APPLICATION_ID: i64 = 0x454c_474c;
 const ADMISSION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
@@ -41,7 +41,7 @@ const TERMINAL_SCHEMA_SQL: &str = "CREATE TABLE grant_terminal_events (
     grant_id TEXT NOT NULL UNIQUE REFERENCES grants(grant_id),
     payload_sha256 BLOB NOT NULL
         CHECK (typeof(payload_sha256) = 'blob' AND length(payload_sha256) = 32),
-    kind TEXT NOT NULL CHECK (kind IN ('completed', 'revoked', 'flagged')),
+    kind TEXT NOT NULL CHECK (kind IN ('completed', 'revoked', 'flagged', 'expired', 'interrupted')),
     occurred_at_unix_s BLOB NOT NULL
         CHECK (typeof(occurred_at_unix_s) = 'blob' AND length(occurred_at_unix_s) = 8)
 );
@@ -97,6 +97,8 @@ pub enum GrantTerminalKind {
     Completed,
     Revoked,
     Flagged,
+    Expired,
+    Interrupted,
 }
 
 impl GrantTerminalKind {
@@ -105,6 +107,8 @@ impl GrantTerminalKind {
             Self::Completed => "completed",
             Self::Revoked => "revoked",
             Self::Flagged => "flagged",
+            Self::Expired => "expired",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -113,6 +117,8 @@ impl GrantTerminalKind {
             "completed" => Ok(Self::Completed),
             "revoked" => Ok(Self::Revoked),
             "flagged" => Ok(Self::Flagged),
+            "expired" => Ok(Self::Expired),
+            "interrupted" => Ok(Self::Interrupted),
             _ => Err(GrantLedgerError::Corrupt(
                 "stored terminal kind is invalid".into(),
             )),
@@ -192,8 +198,9 @@ pub struct GrantLedger {
 impl GrantLedger {
     /// Opens a private ledger using the process wall clock.
     ///
-    /// The verifier is moved into the ledger so callers cannot substitute an
-    /// authenticated intermediate value during admission.
+    /// Before returning, every unterminated admission from an earlier owner is durably
+    /// expired or interrupted. The verifier is moved into the ledger so callers cannot
+    /// substitute an authenticated intermediate value during admission.
     pub fn open(
         path: impl AsRef<Path>,
         verifier: GrantVerifier,
@@ -254,14 +261,16 @@ impl GrantLedger {
         run_quick_check(&connection)?;
         initialize_schema(&mut connection)?;
         validate_integrity(&connection, &verifier, limits)?;
-        Ok(Self {
+        let mut ledger = Self {
             path,
             ledger_binding,
             connection,
             verifier,
             limits,
             clock,
-        })
+        };
+        ledger.recover_unsettled_on_open()?;
+        Ok(ledger)
     }
 
     pub fn path(&self) -> &Path {
@@ -432,6 +441,68 @@ impl GrantLedger {
         load_terminal_receipt(&self.connection, grant_id)
     }
 
+    pub fn expire_due(&mut self) -> Result<Vec<GrantTerminalReceipt>, GrantLedgerError> {
+        self.terminalize_unsettled(false)
+    }
+
+    fn recover_unsettled_on_open(&mut self) -> Result<(), GrantLedgerError> {
+        self.terminalize_unsettled(true).map(|_| ())
+    }
+
+    fn terminalize_unsettled(
+        &mut self,
+        cold_open: bool,
+    ) -> Result<Vec<GrantTerminalReceipt>, GrantLedgerError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.clock.now_unix_s()?;
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT grant.grant_id, grant.payload_sha256, grant.expires_at_unix_s
+                 FROM grants AS grant
+                 LEFT JOIN grant_terminal_events AS event ON event.grant_id = grant.grant_id
+                 WHERE event.grant_id IS NULL
+                 ORDER BY grant.issuer_seq",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut next = next_terminal_sequence(&transaction)?;
+        let mut receipts = Vec::new();
+        for (grant_id, payload_sha256, expires_at) in candidates {
+            let payload_sha256 = decode_hash(payload_sha256, "grant payload hash")?;
+            let expires_at = decode_u64(expires_at, "grant expiry")?;
+            let kind = if expires_at <= now {
+                GrantTerminalKind::Expired
+            } else if cold_open {
+                GrantTerminalKind::Interrupted
+            } else {
+                continue;
+            };
+            receipts.push(insert_terminal_receipt(
+                &transaction,
+                next,
+                &grant_id,
+                payload_sha256,
+                kind,
+                now,
+            )?);
+            next = next
+                .checked_add(1)
+                .ok_or(GrantLedgerError::TerminalSequenceExhausted)?;
+        }
+        transaction.commit()?;
+        Ok(receipts)
+    }
+
     fn terminate(
         &mut self,
         active: ActiveGrant,
@@ -463,42 +534,17 @@ impl GrantLedger {
         if load_terminal_receipt(&transaction, &grant.grant_id)?.is_some() {
             return Err(GrantLedgerError::AlreadyTerminal);
         }
-        let (count, last): (i64, Option<i64>) = transaction.query_row(
-            "SELECT COUNT(*), MAX(event_seq) FROM grant_terminal_events",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let next = match (count, last) {
-            (0, None) => 1_i64,
-            (count, Some(last)) if count > 0 && count == last => last
-                .checked_add(1)
-                .ok_or(GrantLedgerError::TerminalSequenceExhausted)?,
-            _ => {
-                return Err(GrantLedgerError::Corrupt(
-                    "terminal event sequence is not gap-free".into(),
-                ));
-            }
-        };
-        transaction.execute(
-            "INSERT INTO grant_terminal_events (
-                event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                next,
-                grant.grant_id,
-                payload_sha256.as_slice(),
-                kind.as_db(),
-                u64_blob(now).as_slice(),
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(GrantTerminalReceipt {
-            event_seq: next as u64,
-            grant_id: grant.grant_id,
+        let next = next_terminal_sequence(&transaction)?;
+        let receipt = insert_terminal_receipt(
+            &transaction,
+            next,
+            &grant.grant_id,
             payload_sha256,
             kind,
-            occurred_at_unix_s: now,
-        })
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(receipt)
     }
 }
 
@@ -582,6 +628,52 @@ fn decode_hash(bytes: Vec<u8>, field: &str) -> Result<[u8; 32], GrantLedgerError
     bytes
         .try_into()
         .map_err(|_| GrantLedgerError::Corrupt(format!("{field} is not a SHA-256 digest")))
+}
+
+fn next_terminal_sequence(connection: &Connection) -> Result<i64, GrantLedgerError> {
+    let (count, last): (i64, Option<i64>) = connection.query_row(
+        "SELECT COUNT(*), MAX(event_seq) FROM grant_terminal_events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match (count, last) {
+        (0, None) => Ok(1),
+        (count, Some(last)) if count > 0 && count == last => last
+            .checked_add(1)
+            .ok_or(GrantLedgerError::TerminalSequenceExhausted),
+        _ => Err(GrantLedgerError::Corrupt(
+            "terminal event sequence is not gap-free".into(),
+        )),
+    }
+}
+
+fn insert_terminal_receipt(
+    connection: &Connection,
+    event_seq: i64,
+    grant_id: &str,
+    payload_sha256: [u8; 32],
+    kind: GrantTerminalKind,
+    occurred_at_unix_s: u64,
+) -> Result<GrantTerminalReceipt, GrantLedgerError> {
+    connection.execute(
+        "INSERT INTO grant_terminal_events (
+            event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event_seq,
+            grant_id,
+            payload_sha256.as_slice(),
+            kind.as_db(),
+            u64_blob(occurred_at_unix_s).as_slice(),
+        ],
+    )?;
+    Ok(GrantTerminalReceipt {
+        event_seq: event_seq as u64,
+        grant_id: grant_id.to_owned(),
+        payload_sha256,
+        kind,
+        occurred_at_unix_s,
+    })
 }
 
 fn load_terminal_receipt(
@@ -820,7 +912,7 @@ fn run_quick_check(connection: &Connection) -> Result<(), GrantLedgerError> {
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 0 | 1 | SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | 2 | SCHEMA_VERSION) {
         return Err(GrantLedgerError::Corrupt(format!(
             "unsupported schema version {version}"
         )));
@@ -921,6 +1013,29 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
         require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
+    }
+    if version == 2 {
+        require_application_id(connection)?;
+        require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
+        require_schema_objects(connection, TERMINAL_SCHEMA_OBJECTS)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "DROP TRIGGER grant_terminal_events_immutable;
+             DROP TRIGGER grant_terminal_events_no_delete;
+             ALTER TABLE grant_terminal_events RENAME TO grant_terminal_events_v2;",
+        )?;
+        transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
+        transaction.execute(
+            "INSERT INTO grant_terminal_events (
+                event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+             )
+             SELECT event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+             FROM grant_terminal_events_v2 ORDER BY event_seq",
+            [],
+        )?;
+        transaction.execute_batch("DROP TABLE grant_terminal_events_v2")?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
     }
@@ -1594,8 +1709,6 @@ mod tests {
         use std::sync::{Arc, Barrier};
 
         let mut test = default_test_ledger();
-        let active = admit(&mut test.ledger, "grant-race", 1);
-        let duplicate = duplicate_active(&active);
         let mut other = GrantLedger::open_with_clock(
             &test.path,
             verifier(),
@@ -1603,6 +1716,8 @@ mod tests {
             Clock::Fixed(NOW),
         )
         .unwrap();
+        let active = admit(&mut test.ledger, "grant-race", 1);
+        let duplicate = duplicate_active(&active);
         let barrier = Arc::new(Barrier::new(2));
         let first_barrier = Arc::clone(&barrier);
         let first = std::thread::spawn(move || {
@@ -1652,6 +1767,275 @@ mod tests {
     }
 
     #[test]
+    fn expire_due_uses_internal_clock_and_leaves_future_authority_live() {
+        let mut test = default_test_ledger();
+        let mut due_grant = grant("grant-due", 1);
+        due_grant.expires_at_unix_s = NOW + 10;
+        let (payload, signature) = signed(&due_grant);
+        let due = test.ledger.admit(&payload, &signature, &binding()).unwrap();
+        let future = admit(&mut test.ledger, "grant-future", 2);
+        test.ledger.clock = Clock::Fixed(NOW + 10);
+
+        let receipts = test.ledger.expire_due().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            (
+                receipts[0].grant_id(),
+                receipts[0].event_seq(),
+                receipts[0].kind()
+            ),
+            ("grant-due", 1, GrantTerminalKind::Expired)
+        );
+        assert!(test.ledger.expire_due().unwrap().is_empty());
+        assert!(matches!(
+            test.ledger.complete(due),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
+        let completed = test.ledger.complete(future).unwrap();
+        assert_eq!(
+            (completed.event_seq(), completed.kind()),
+            (2, GrantTerminalKind::Completed)
+        );
+    }
+
+    #[test]
+    fn cold_open_expires_due_grants_interrupts_the_rest_and_fences_stale_tokens() {
+        let mut test = default_test_ledger();
+        let mut due_grant = grant("grant-due", 1);
+        due_grant.expires_at_unix_s = NOW + 5;
+        let (payload, signature) = signed(&due_grant);
+        let due = test.ledger.admit(&payload, &signature, &binding()).unwrap();
+        let future = admit(&mut test.ledger, "grant-future", 2);
+        drop(test.ledger);
+
+        let mut reopened = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW + 5),
+        )
+        .unwrap();
+        let due_receipt = reopened.terminal_receipt("grant-due").unwrap().unwrap();
+        let future_receipt = reopened.terminal_receipt("grant-future").unwrap().unwrap();
+        assert_eq!(
+            (due_receipt.event_seq(), due_receipt.kind()),
+            (1, GrantTerminalKind::Expired)
+        );
+        assert_eq!(
+            (future_receipt.event_seq(), future_receipt.kind()),
+            (2, GrantTerminalKind::Interrupted)
+        );
+        assert!(matches!(
+            reopened.complete(due),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
+        assert!(matches!(
+            reopened.complete(future),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
+        drop(reopened);
+
+        let reopened = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW + 20),
+        )
+        .unwrap();
+        let count: i64 = reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM grant_terminal_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn cold_open_recovery_failure_rolls_back_all_receipts_before_return() {
+        let mut test = default_test_ledger();
+        let _first = admit(&mut test.ledger, "grant-first", 1);
+        let _second = admit(&mut test.ledger, "grant-second", 2);
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_cold_recovery
+                 BEFORE INSERT ON grant_terminal_events
+                 WHEN NEW.grant_id = 'grant-second'
+                 BEGIN SELECT RAISE(ABORT, 'injected cold recovery failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        let connection = Connection::open(&test.path).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM grant_terminal_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        connection
+            .execute_batch("DROP TRIGGER fail_cold_recovery")
+            .unwrap();
+        drop(connection);
+
+        let reopened = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let first = reopened.terminal_receipt("grant-first").unwrap().unwrap();
+        let second = reopened.terminal_receipt("grant-second").unwrap().unwrap();
+        assert_eq!(
+            (first.event_seq(), first.kind()),
+            (1, GrantTerminalKind::Interrupted)
+        );
+        assert_eq!(
+            (second.event_seq(), second.kind()),
+            (2, GrantTerminalKind::Interrupted)
+        );
+    }
+
+    #[test]
+    fn concurrent_second_open_interrupts_and_fences_the_first_owner() {
+        let mut first = default_test_ledger();
+        let active = admit(&mut first.ledger, "grant-live", 1);
+        let second = GrantLedger::open_with_clock(
+            &first.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let receipt = second.terminal_receipt("grant-live").unwrap().unwrap();
+        assert_eq!(receipt.kind(), GrantTerminalKind::Interrupted);
+        assert!(matches!(
+            first.ledger.complete(active),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
+    }
+
+    #[test]
+    fn expire_due_failure_rolls_back_and_can_be_retried_without_a_token() {
+        let mut test = default_test_ledger();
+        let mut due_grant = grant("grant-due", 1);
+        due_grant.expires_at_unix_s = NOW + 1;
+        let (payload, signature) = signed(&due_grant);
+        let _active = test.ledger.admit(&payload, &signature, &binding()).unwrap();
+        test.ledger.clock = Clock::Fixed(NOW + 1);
+        test.ledger
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_expiry
+                 BEFORE INSERT ON grant_terminal_events
+                 BEGIN SELECT RAISE(ABORT, 'injected expiry failure'); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            test.ledger.expire_due(),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        assert_eq!(test.ledger.terminal_receipt("grant-due").unwrap(), None);
+        test.ledger
+            .connection
+            .execute_batch("DROP TRIGGER fail_expiry")
+            .unwrap();
+        let receipts = test.ledger.expire_due().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].kind(), GrantTerminalKind::Expired);
+    }
+
+    #[test]
+    fn schema_v2_migration_preserves_existing_terminal_receipts() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-complete", 1);
+        let before = test.ledger.complete(active).unwrap();
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        drop(connection);
+
+        let migrated = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated.terminal_receipt("grant-complete").unwrap(),
+            Some(before)
+        );
+        let version: i64 = migrated
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema_v2_migration_failure_restores_triggers_and_version() {
+        let test = default_test_ledger();
+        let path = test.path.clone();
+        drop(test.ledger);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE grant_terminal_events_v2 (collision INTEGER);
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        let connection = Connection::open(&path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let triggers: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'trigger' AND name IN (
+                    'grant_terminal_events_immutable', 'grant_terminal_events_no_delete'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                    'grant_terminal_events', 'grant_terminal_events_v2'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((version, triggers, tables), (2, 2, 2));
+    }
+
+    #[test]
     fn schema_v1_migrates_transactionally_without_weakening_admission_rows() {
         let mut test = default_test_ledger();
         let active = admit(&mut test.ledger, "grant-v1", 1);
@@ -1674,7 +2058,15 @@ mod tests {
             Clock::Fixed(NOW),
         )
         .unwrap();
-        assert_eq!(migrated.complete(active).unwrap().event_seq(), 1);
+        let receipt = migrated.terminal_receipt("grant-v1").unwrap().unwrap();
+        assert_eq!(
+            (receipt.event_seq(), receipt.kind()),
+            (1, GrantTerminalKind::Interrupted)
+        );
+        assert!(matches!(
+            migrated.complete(active),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
         let version: i64 = migrated
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
