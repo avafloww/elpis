@@ -170,6 +170,26 @@ impl SensitiveSession {
         self.terminal_reason
     }
 
+    pub(super) fn ledger_binding(&self) -> [u8; 32] {
+        self.active_grant.ledger_binding
+    }
+
+    pub(super) fn grant_payload_sha256(&self) -> &[u8; 32] {
+        &self.active_grant.payload_sha256
+    }
+
+    pub(super) fn canonical_policy_bytes(&self) -> Result<Vec<u8>, super::GrantLedgerError> {
+        self.policy.policy().canonical_bytes().map_err(|error| {
+            super::GrantLedgerError::Corrupt(format!(
+                "live sensitive session policy is no longer canonical: {error}"
+            ))
+        })
+    }
+
+    pub(super) fn disable_after_terminal_control(&mut self) {
+        self.terminal_reason = Some(SensitiveSessionTerminalReason::Unavailable);
+    }
+
     pub fn mint_run_permit(
         &mut self,
         reservation: SensitiveRunReservation,
@@ -300,7 +320,7 @@ impl SensitiveSession {
         })
     }
 
-    fn ensure_live(&mut self) -> Result<(), SensitiveSessionDenied> {
+    pub(super) fn ensure_live(&mut self) -> Result<(), SensitiveSessionDenied> {
         if let Some(reason) = self.terminal_reason {
             return Err(reason.denial());
         }
@@ -475,6 +495,37 @@ impl GrantLedger {
             ) => super::GrantTerminalKind::Interrupted,
         };
         self.terminate(session.active_grant, kind)
+    }
+
+    /// Atomically admits a signed revoke/flag for this exact live session and settles its grant.
+    ///
+    /// The session is consumed on every path. Only a committed admission returns an
+    /// informational kill request; this method never kills or launches anything.
+    pub fn admit_terminal_control_for_sensitive_session(
+        &mut self,
+        payload: &[u8],
+        signature: &[u8],
+        mut session: SensitiveSession,
+    ) -> Result<super::SensitiveSessionKillRequest, super::GrantLedgerError> {
+        let admission =
+            self.admit_terminal_control_inner(payload, signature, Some(&mut session))?;
+        let terminal_receipt = admission.terminal_receipt.ok_or_else(|| {
+            super::GrantLedgerError::Corrupt(
+                "integrated terminal control committed without a terminal receipt".into(),
+            )
+        })?;
+
+        // The durable transaction has committed before the in-memory session is disabled and
+        // before the non-authority request becomes observable.
+        let executor_id = session.executor_id().to_owned();
+        let grant_id = session.grant_id().to_owned();
+        session.disable_after_terminal_control();
+        Ok(super::SensitiveSessionKillRequest {
+            executor_id,
+            grant_id,
+            control_receipt: admission.receipt,
+            terminal_receipt,
+        })
     }
 }
 
@@ -693,6 +744,48 @@ mod tests {
         (grant, active)
     }
 
+    fn terminal_control(
+        id: &str,
+        sequence: u64,
+        grant: &GrantV1,
+        flagged: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let grant_payload = grant.canonical_payload().unwrap();
+        let target = if flagged {
+            TerminalControlActionV1::FlagGrant {
+                grant_id: grant.grant_id.clone(),
+                grant_payload_sha256: hex_hash(sha256(&grant_payload)),
+            }
+        } else {
+            TerminalControlActionV1::RevokeGrant {
+                grant_id: grant.grant_id.clone(),
+                grant_payload_sha256: hex_hash(sha256(&grant_payload)),
+            }
+        };
+        let control = TerminalControlV1 {
+            version: elpis_grants::TERMINAL_CONTROL_VERSION,
+            control_id: id.into(),
+            issuer_id: "operator-1".into(),
+            issuer_seq: sequence,
+            executor_id: "executor-1".into(),
+            policy_epoch: 3,
+            target,
+            issued_at_unix_s: NOW,
+            expires_at_unix_s: NOW + 60,
+            nonce: NONCE.into(),
+        };
+        let payload = control.canonical_payload().unwrap();
+        let signature = key()
+            .sign(&terminal_control_signature_input(&payload).unwrap())
+            .as_ref()
+            .to_vec();
+        (payload, signature)
+    }
+
+    fn hex_hash(hash: [u8; 32]) -> String {
+        hash.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     fn run_reservation() -> SensitiveRunReservation {
         SensitiveRunReservation {
             max_wall_ms: 500,
@@ -716,6 +809,276 @@ mod tests {
             artifact_count: u32::from(artifact_bytes > 0),
             artifact_bytes,
         }
+    }
+
+    #[test]
+    fn integrated_revoke_atomically_settles_exact_session_and_returns_request() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-integrated-revoke",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        let (payload, signature) = terminal_control("revoke-session", 2, &grant, false);
+
+        let request = fixture
+            .ledger
+            .admit_terminal_control_for_sensitive_session(&payload, &signature, session)
+            .unwrap();
+        assert_eq!(request.executor_id(), "executor-1");
+        assert_eq!(request.grant_id(), "grant-integrated-revoke");
+        assert_eq!(request.control_receipt().receipt_seq(), 1);
+        assert_eq!(request.control_receipt().latch_event_seq(), None);
+        assert_eq!(
+            request.terminal_receipt().kind(),
+            crate::GrantTerminalKind::Revoked
+        );
+        assert_eq!(request.terminal_receipt().event_seq(), 1);
+        assert_eq!(
+            fixture
+                .ledger
+                .terminal_receipt("grant-integrated-revoke")
+                .unwrap()
+                .unwrap(),
+            request.terminal_receipt().clone()
+        );
+        let durable_sequence = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT last_issuer_seq FROM grant_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            super::super::decode_u64(durable_sequence, "test sequence").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn integrated_flag_persists_exact_canonical_policy_and_latches() {
+        let mut fixture = fixture(true);
+        let (policy_bytes, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-integrated-flag",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        let (payload, signature) = terminal_control("flag-session", 2, &grant, true);
+
+        let request = fixture
+            .ledger
+            .admit_terminal_control_for_sensitive_session(&payload, &signature, session)
+            .unwrap();
+        assert_eq!(request.control_receipt().latch_event_seq(), Some(1));
+        assert_eq!(
+            request.terminal_receipt().kind(),
+            crate::GrantTerminalKind::Flagged
+        );
+        let stored: (String, Vec<u8>, Vec<u8>) = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT profile_id, policy_sha256, policy_bytes
+                 FROM policy_latch_events WHERE event_seq = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "sensitive-v1");
+        // The latch is bound to the session policy, while the terminal receipt is bound
+        // independently to the exact admitted grant payload.
+        assert_eq!(
+            stored.1.as_slice(),
+            lower_hex_hash(&policy_sha256).unwrap().as_slice()
+        );
+        assert_eq!(stored.2, policy_bytes);
+        assert!(
+            fixture
+                .ledger
+                .policy_latch_is_set(
+                    "executor-1",
+                    "sensitive-v1",
+                    &lower_hex_hash(&policy_sha256).unwrap(),
+                )
+                .unwrap()
+        );
+        super::super::validate_latch_integrity(
+            &fixture.ledger.connection,
+            GrantLedgerLimits::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn integrated_flag_late_write_failure_leaves_no_receipt_only_gap() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-atomic-flag",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        fixture
+            .ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER test_reject_flag_latch
+                 BEFORE INSERT ON policy_latch_events WHEN NEW.kind = 'flag'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic late flag failure'); END;",
+            )
+            .unwrap();
+        let (payload, signature) = terminal_control("atomic-flag", 2, &grant, true);
+
+        assert!(matches!(
+            fixture
+                .ledger
+                .admit_terminal_control_for_sensitive_session(&payload, &signature, session,),
+            Err(crate::GrantLedgerError::Sql(_))
+        ));
+        let durable: (i64, i64, i64, Vec<u8>) = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM terminal_control_receipts),
+                    (SELECT COUNT(*) FROM grant_terminal_events),
+                    (SELECT COUNT(*) FROM policy_latch_events),
+                    last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((durable.0, durable.1, durable.2), (0, 0, 0));
+        assert_eq!(
+            super::super::decode_u64(durable.3, "test sequence").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn integrated_control_requires_live_session_and_rolls_back() {
+        let mut fixture = fixture(true);
+        let (_, canonical) = policy();
+        let policy_sha256 = canonical.policy_sha256().to_owned();
+        let (grant, active) = admit(
+            &mut fixture.ledger,
+            "grant-expired-control",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let mut session = fixture
+            .ledger
+            .begin_sensitive_session(active, canonical)
+            .unwrap();
+        session.clock = SessionClock::Fixed(NOW + 60);
+        let (payload, signature) = terminal_control("expired-session", 2, &grant, false);
+
+        assert!(matches!(
+            fixture
+                .ledger
+                .admit_terminal_control_for_sensitive_session(&payload, &signature, session,),
+            Err(crate::GrantLedgerError::SensitiveSessionUnavailable)
+        ));
+        let durable: (i64, i64, i64, Vec<u8>) = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM terminal_control_receipts),
+                    (SELECT COUNT(*) FROM grant_terminal_events),
+                    (SELECT COUNT(*) FROM policy_latch_events),
+                    last_issuer_seq
+                 FROM grant_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((durable.0, durable.1, durable.2), (0, 0, 0));
+        assert_eq!(
+            super::super::decode_u64(durable.3, "test sequence").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn integrated_target_mismatch_rolls_back_every_receipt_and_sequence() {
+        let mut fixture = fixture(true);
+        let (_, policy_one) = policy();
+        let policy_sha256 = policy_one.policy_sha256().to_owned();
+        let (_, active_one) = admit(
+            &mut fixture.ledger,
+            "grant-session-target",
+            1,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let (other_grant, _) = admit(
+            &mut fixture.ledger,
+            "grant-control-target",
+            2,
+            &policy_sha256,
+            NOW + 60,
+        );
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active_one, policy_one)
+            .unwrap();
+        let (payload, signature) = terminal_control("wrong-exact-target", 3, &other_grant, false);
+
+        assert!(matches!(
+            fixture
+                .ledger
+                .admit_terminal_control_for_sensitive_session(&payload, &signature, session,),
+            Err(crate::GrantLedgerError::ControlTargetMismatch)
+        ));
+        let counts: (i64, i64, i64) = fixture
+            .ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM terminal_control_receipts),
+                    (SELECT COUNT(*) FROM grant_terminal_events),
+                    (SELECT COUNT(*) FROM policy_latch_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
+        let (_, replacement) = admit(
+            &mut fixture.ledger,
+            "grant-sequence-not-consumed",
+            3,
+            &policy_sha256,
+            NOW + 60,
+        );
+        fixture.ledger.revoke(replacement).unwrap();
     }
 
     #[test]

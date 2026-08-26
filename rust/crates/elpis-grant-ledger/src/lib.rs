@@ -325,6 +325,47 @@ impl TerminalControlReceipt {
     }
 }
 
+/// Post-commit request for the session owner to stop work associated with one grant.
+///
+/// This value is deliberately non-cloneable and contains no process handle, permit, token,
+/// or other authority. Admission only records the durable decision; the caller remains
+/// responsible for interpreting this informational request at its own execution boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SensitiveSessionKillRequest {
+    executor_id: String,
+    grant_id: String,
+    control_receipt: TerminalControlReceipt,
+    terminal_receipt: GrantTerminalReceipt,
+}
+
+impl SensitiveSessionKillRequest {
+    pub fn executor_id(&self) -> &str {
+        &self.executor_id
+    }
+
+    pub fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+
+    pub fn control_receipt(&self) -> &TerminalControlReceipt {
+        &self.control_receipt
+    }
+
+    pub fn terminal_receipt(&self) -> &GrantTerminalReceipt {
+        &self.terminal_receipt
+    }
+
+    pub fn into_receipts(self) -> (TerminalControlReceipt, GrantTerminalReceipt) {
+        (self.control_receipt, self.terminal_receipt)
+    }
+}
+
+#[derive(Debug)]
+struct TerminalControlAdmission {
+    receipt: TerminalControlReceipt,
+    terminal_receipt: Option<GrantTerminalReceipt>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LedgerState {
     grant_count: u64,
@@ -642,11 +683,24 @@ impl GrantLedger {
     ///
     /// Revoke and flag controls record receipt evidence only. A clear control also appends
     /// the exact clear event for a currently flagged latch in the same transaction.
+    /// This receipt-only method never disables a live [`SensitiveSession`]; session owners
+    /// must use [`GrantLedger::admit_terminal_control_for_sensitive_session`] instead.
     pub fn admit_terminal_control(
         &mut self,
         payload: &[u8],
         signature: &[u8],
     ) -> Result<TerminalControlReceipt, GrantLedgerError> {
+        let admission = self.admit_terminal_control_inner(payload, signature, None)?;
+        debug_assert!(admission.terminal_receipt.is_none());
+        Ok(admission.receipt)
+    }
+
+    fn admit_terminal_control_inner(
+        &mut self,
+        payload: &[u8],
+        signature: &[u8],
+        mut session: Option<&mut SensitiveSession>,
+    ) -> Result<TerminalControlAdmission, GrantLedgerError> {
         let verifier = self
             .control_verifier
             .as_ref()
@@ -656,6 +710,10 @@ impl GrantLedger {
         let payload_sha256 = lower_hex_hash(authenticated.payload_sha256())?;
         let added_control_bytes = accounted_control_bytes(&control, payload, signature)?;
         let limits = self.limits;
+        let policy_bytes = session
+            .as_deref()
+            .map(SensitiveSession::canonical_policy_bytes)
+            .transpose()?;
 
         let transaction = self
             .connection
@@ -666,6 +724,14 @@ impl GrantLedger {
         }
         if now >= control.expires_at_unix_s {
             return Err(GrantLedgerError::ControlExpired);
+        }
+        if let Some(exact_session) = session.as_deref_mut() {
+            exact_session
+                .ensure_live()
+                .map_err(|_| GrantLedgerError::SensitiveSessionUnavailable)?;
+            if exact_session.ledger_binding() != self.ledger_binding {
+                return Err(GrantLedgerError::WrongLedger);
+            }
         }
 
         if let Some(existing_payload) = transaction
@@ -720,6 +786,9 @@ impl GrantLedger {
             return Err(GrantLedgerError::StaleIssuerSequence);
         }
         validate_live_control_target(&transaction, &control)?;
+        if let Some(exact_session) = session.as_deref() {
+            validate_sensitive_session_control_target(&transaction, &control, exact_session)?;
+        }
 
         let control_usage = load_control_usage(&transaction)?;
         if control_usage
@@ -734,14 +803,29 @@ impl GrantLedger {
             return Err(GrantLedgerError::StorageLimit);
         }
 
-        let added_latch_bytes = match &control.target {
-            TerminalControlActionV1::ClearLatch { profile_id, .. } => Some(accounted_latch_bytes(
-                &control.executor_id,
-                profile_id,
-                "clear",
-                None,
+        let added_latch_bytes = match (&control.target, session.as_deref(), policy_bytes.as_deref())
+        {
+            (TerminalControlActionV1::ClearLatch { profile_id, .. }, None, None) => {
+                Some(accounted_latch_bytes(
+                    &control.executor_id,
+                    profile_id,
+                    "clear",
+                    None,
+                    &control.control_id,
+                    None,
+                )?)
+            }
+            (
+                TerminalControlActionV1::FlagGrant { grant_id, .. },
+                Some(exact_session),
+                Some(policy_bytes),
+            ) => Some(accounted_latch_bytes(
+                exact_session.executor_id(),
+                exact_session.profile_id(),
+                "flag",
+                Some(grant_id),
                 &control.control_id,
-                None,
+                Some(policy_bytes),
             )?),
             _ => None,
         };
@@ -770,14 +854,49 @@ impl GrantLedger {
             payload,
             signature,
         )?;
-        let latch_event_seq =
-            if matches!(control.target, TerminalControlActionV1::ClearLatch { .. }) {
+
+        let terminal_receipt = if session.is_some() {
+            let kind = match &control.target {
+                TerminalControlActionV1::RevokeGrant { .. } => GrantTerminalKind::Revoked,
+                TerminalControlActionV1::FlagGrant { .. } => GrantTerminalKind::Flagged,
+                TerminalControlActionV1::ClearLatch { .. } => {
+                    return Err(GrantLedgerError::ControlDoesNotTerminateSession);
+                }
+            };
+            let exact_session = session.as_deref().expect("checked above");
+            let next = next_terminal_sequence(&transaction)?;
+            Some(insert_terminal_receipt(
+                &transaction,
+                next,
+                exact_session.grant_id(),
+                *exact_session.grant_payload_sha256(),
+                kind,
+                now,
+            )?)
+        } else {
+            None
+        };
+
+        let latch_event_seq = match (&control.target, session.as_deref(), policy_bytes.as_deref()) {
+            (TerminalControlActionV1::ClearLatch { .. }, None, None) => {
                 let event_seq = next_latch_event_sequence(&transaction)?;
                 insert_clear_latch_event(&transaction, event_seq, &control, now)?;
                 Some(event_seq as u64)
-            } else {
-                None
-            };
+            }
+            (TerminalControlActionV1::FlagGrant { .. }, Some(exact_session), Some(bytes)) => {
+                let event_seq = next_latch_event_sequence(&transaction)?;
+                insert_flag_latch_event(
+                    &transaction,
+                    event_seq,
+                    &control,
+                    exact_session,
+                    bytes,
+                    now,
+                )?;
+                Some(event_seq as u64)
+            }
+            _ => None,
+        };
 
         let changed = transaction.execute(
             "UPDATE grant_state SET last_issuer_seq = ?1
@@ -800,12 +919,15 @@ impl GrantLedger {
         }
         transaction.commit()?;
 
-        Ok(TerminalControlReceipt {
-            receipt_seq: receipt_seq as u64,
-            control,
-            payload_sha256,
-            admitted_at_unix_s: now,
-            latch_event_seq,
+        Ok(TerminalControlAdmission {
+            receipt: TerminalControlReceipt {
+                receipt_seq: receipt_seq as u64,
+                control,
+                payload_sha256,
+                admitted_at_unix_s: now,
+                latch_event_seq,
+            },
+            terminal_receipt,
         })
     }
 
@@ -1004,6 +1126,12 @@ pub enum GrantLedgerError {
     ControlTargetAlreadyTerminal,
     #[error("the exact policy latch is not currently flagged")]
     PolicyLatchNotFlagged,
+    #[error("the exact policy latch is already flagged")]
+    PolicyLatchAlreadyFlagged,
+    #[error("terminal control does not revoke or flag a sensitive session")]
+    ControlDoesNotTerminateSession,
+    #[error("sensitive session is not live and available for terminal control")]
+    SensitiveSessionUnavailable,
     #[error("terminal-control receipt sequence is exhausted")]
     ControlReceiptSequenceExhausted,
     #[error("policy-latch event sequence is exhausted")]
@@ -1970,6 +2098,56 @@ fn validate_live_control_target(
     }
 }
 
+fn validate_sensitive_session_control_target(
+    connection: &Connection,
+    control: &TerminalControlV1,
+    session: &SensitiveSession,
+) -> Result<(), GrantLedgerError> {
+    let (grant_id, grant_payload_sha256, flagged) = match &control.target {
+        TerminalControlActionV1::RevokeGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => (grant_id, grant_payload_sha256, false),
+        TerminalControlActionV1::FlagGrant {
+            grant_id,
+            grant_payload_sha256,
+        } => (grant_id, grant_payload_sha256, true),
+        TerminalControlActionV1::ClearLatch { .. } => {
+            return Err(GrantLedgerError::ControlDoesNotTerminateSession);
+        }
+    };
+    if grant_id.as_str() != session.grant_id()
+        || lower_hex_hash(grant_payload_sha256)? != *session.grant_payload_sha256()
+        || control.executor_id.as_str() != session.executor_id()
+    {
+        return Err(GrantLedgerError::ControlTargetMismatch);
+    }
+    if !flagged {
+        return Ok(());
+    }
+
+    let latest = connection
+        .query_row(
+            "SELECT kind FROM policy_latch_events
+             WHERE executor_id = ?1 AND profile_id = ?2 AND policy_sha256 = ?3
+             ORDER BY event_seq DESC LIMIT 1",
+            params![
+                session.executor_id(),
+                session.profile_id(),
+                session.policy_sha256().as_slice(),
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match latest.as_deref() {
+        None | Some("clear") => Ok(()),
+        Some("flag") => Err(GrantLedgerError::PolicyLatchAlreadyFlagged),
+        Some(_) => Err(GrantLedgerError::Corrupt(
+            "stored policy latch event kind is invalid".into(),
+        )),
+    }
+}
+
 fn insert_terminal_control_row(
     connection: &Connection,
     receipt_seq: i64,
@@ -2036,6 +2214,38 @@ fn insert_terminal_control_row(
             payload_sha256.as_slice(),
             payload,
             signature,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_flag_latch_event(
+    connection: &Connection,
+    event_seq: i64,
+    control: &TerminalControlV1,
+    session: &SensitiveSession,
+    policy_bytes: &[u8],
+    occurred_at_unix_s: u64,
+) -> Result<(), GrantLedgerError> {
+    let TerminalControlActionV1::FlagGrant { grant_id, .. } = &control.target else {
+        return Err(GrantLedgerError::Corrupt(
+            "non-flag control reached flag latch insertion".into(),
+        ));
+    };
+    connection.execute(
+        "INSERT INTO policy_latch_events (
+            event_seq, executor_id, profile_id, policy_sha256, kind,
+            grant_id, control_id, occurred_at_unix_s, policy_bytes
+         ) VALUES (?1, ?2, ?3, ?4, 'flag', ?5, ?6, ?7, ?8)",
+        params![
+            event_seq,
+            session.executor_id(),
+            session.profile_id(),
+            session.policy_sha256().as_slice(),
+            grant_id,
+            control.control_id,
+            u64_blob(occurred_at_unix_s).as_slice(),
+            policy_bytes,
         ],
     )?;
     Ok(())
