@@ -6,7 +6,8 @@
 
 use elpis_grants::{
     CanonicalSensitiveEffectRequest, EditTreeOperation, EditTreeRequestOperationV1,
-    NetworkRequestBodyPolicy, NetworkRequestBodyV1, PackageDependencyPolicy,
+    KubernetesDeletePrecondition, KubernetesQueryRule, KubernetesRequestOperationV1,
+    KubernetesVerb, NetworkRequestBodyPolicy, NetworkRequestBodyV1, PackageDependencyPolicy,
     SensitiveCapabilityRule, SensitiveEffectV1, SensitiveLocalProfileKindV1,
     SensitiveLocalProfileV1,
 };
@@ -691,6 +692,273 @@ pub fn prove_operational_effect(
         }
         _ => Err(OperationalEffectProofError::UnsupportedCapabilityFamily),
     }
+}
+
+/// A non-cloneable witness for one namespaced Kubernetes query or delete tuple.
+///
+/// This proof binds canonical request claims to the exact signed cluster profile. The profile
+/// hash consequently binds the API origin, TLS identity, credential reference, namespace, query
+/// rules, and wire byte caps. It does not resolve credentials, contact Kubernetes, verify a
+/// returned object, or perform any effect. Create, patch, update, and object-template authority
+/// are deliberately outside this proof family.
+#[derive(Debug)]
+pub struct KubernetesEffectProof {
+    request_sha256: String,
+    profile_id: String,
+    profile_sha256: String,
+    dimensions: SensitiveEffectProofDimensions,
+}
+
+impl KubernetesEffectProof {
+    pub fn request_sha256(&self) -> &str {
+        &self.request_sha256
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn profile_sha256(&self) -> &str {
+        &self.profile_sha256
+    }
+
+    pub fn dimensions(&self) -> SensitiveEffectProofDimensions {
+        self.dimensions
+    }
+
+    pub fn request_bytes(&self) -> u64 {
+        self.dimensions.request_bytes
+    }
+
+    pub fn max_result_bytes(&self) -> u64 {
+        self.dimensions.max_result_bytes
+    }
+
+    pub fn io_read_bytes(&self) -> u64 {
+        self.dimensions.io_read_bytes
+    }
+
+    pub fn io_write_bytes(&self) -> u64 {
+        self.dimensions.io_write_bytes
+    }
+
+    pub fn artifact_count(&self) -> u32 {
+        self.dimensions.artifact_count
+    }
+
+    pub fn artifact_bytes(&self) -> u64 {
+        self.dimensions.artifact_bytes
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum KubernetesEffectProofError {
+    #[error("capability does not belong to the Kubernetes namespace family")]
+    UnsupportedCapabilityFamily,
+    #[error("request effect does not match the Kubernetes namespace family")]
+    EffectKindMismatch,
+    #[error("local profile is invalid")]
+    InvalidProfile,
+    #[error("capability, request, and cluster profile are not exactly bound")]
+    ProfileBindingMismatch,
+    #[error("local profile is not a Kubernetes cluster profile")]
+    ProfileKindMismatch,
+    #[error("signed, requested, and profile namespaces do not match")]
+    NamespaceMismatch,
+    #[error("requested Kubernetes verb is absent from the signed rule")]
+    SignedVerbDenied,
+    #[error("requested Kubernetes resource is absent from the signed rule")]
+    SignedResourceDenied,
+    #[error("bound cluster profile has no exact verb/resource rule")]
+    ProfileRuleDenied,
+    #[error("requested Kubernetes object name is absent from the exact profile rule")]
+    ProfileNameDenied,
+    #[error("requested Kubernetes selectors do not exactly match the profile rule")]
+    ProfileSelectorsMismatch,
+    #[error("delete is not protected by exact UID and resourceVersion preconditions")]
+    DeletePreconditionMismatch,
+    #[error("canonical request exceeds the signed request-byte budget")]
+    RequestBytesExceeded,
+    #[error("canonical request exceeds the cluster profile request-byte cap")]
+    ProfileRequestBytesExceeded,
+    #[error("requested response cap exceeds the signed result-byte budget")]
+    ResultBytesExceeded,
+    #[error("requested response cap exceeds the cluster profile response-byte cap")]
+    ProfileResponseBytesExceeded,
+    #[error("byte accounting overflowed")]
+    ArithmeticOverflow,
+}
+
+/// Proves one canonical Kubernetes Get, List, Watch, or Delete request without performing I/O.
+pub fn prove_kubernetes_effect(
+    capability: &SensitiveCapabilityRule,
+    profile: &SensitiveLocalProfileV1,
+    request: &CanonicalSensitiveEffectRequest,
+) -> Result<KubernetesEffectProof, KubernetesEffectProofError> {
+    let SensitiveCapabilityRule::KubernetesNamespace {
+        cluster_profile,
+        namespace: signed_namespace,
+        verbs,
+        resources,
+        budget,
+    } = capability
+    else {
+        return Err(KubernetesEffectProofError::UnsupportedCapabilityFamily);
+    };
+    let SensitiveEffectV1::KubernetesNamespace {
+        cluster_profile_id,
+        namespace: request_namespace,
+        operation,
+        max_response_bytes,
+    } = &request.request().effect
+    else {
+        return Err(KubernetesEffectProofError::EffectKindMismatch);
+    };
+
+    let profile_bytes = profile
+        .canonical_bytes()
+        .map_err(|_| KubernetesEffectProofError::InvalidProfile)?;
+    let profile_digest = sha256(&profile_bytes);
+    if cluster_profile.id != profile.id
+        || cluster_profile_id != &profile.id
+        || !lower_hex_matches(&cluster_profile.sha256, &profile_digest)
+    {
+        return Err(KubernetesEffectProofError::ProfileBindingMismatch);
+    }
+
+    let SensitiveLocalProfileKindV1::KubernetesCluster {
+        namespace: profile_namespace,
+        rules,
+        max_request_bytes: profile_max_request_bytes,
+        max_response_bytes: profile_max_response_bytes,
+        ..
+    } = &profile.profile
+    else {
+        // A hash-joined KubernetesObjectTemplates profile is not signed by this capability and
+        // must never be treated as indirect write authority.
+        return Err(KubernetesEffectProofError::ProfileKindMismatch);
+    };
+    if signed_namespace != request_namespace || request_namespace != profile_namespace {
+        return Err(KubernetesEffectProofError::NamespaceMismatch);
+    }
+
+    let (verb, resource) = match operation {
+        KubernetesRequestOperationV1::Get { resource, .. } => (KubernetesVerb::Get, resource),
+        KubernetesRequestOperationV1::List { resource, .. } => (KubernetesVerb::List, resource),
+        KubernetesRequestOperationV1::Watch { resource, .. } => (KubernetesVerb::Watch, resource),
+        KubernetesRequestOperationV1::Delete { resource, .. } => (KubernetesVerb::Delete, resource),
+    };
+    if !verbs.contains(&verb) {
+        return Err(KubernetesEffectProofError::SignedVerbDenied);
+    }
+    if !resources.contains(resource) {
+        return Err(KubernetesEffectProofError::SignedResourceDenied);
+    }
+
+    let rule = rules
+        .iter()
+        .find(|rule| {
+            matches!(
+                (operation, rule),
+                (
+                    KubernetesRequestOperationV1::Get { resource, .. },
+                    KubernetesQueryRule::Get { resource: allowed, .. }
+                ) | (
+                    KubernetesRequestOperationV1::List { resource, .. },
+                    KubernetesQueryRule::List { resource: allowed, .. }
+                ) | (
+                    KubernetesRequestOperationV1::Watch { resource, .. },
+                    KubernetesQueryRule::Watch { resource: allowed, .. }
+                ) | (
+                    KubernetesRequestOperationV1::Delete { resource, .. },
+                    KubernetesQueryRule::Delete { resource: allowed, .. }
+                ) if resource == allowed
+            )
+        })
+        .ok_or(KubernetesEffectProofError::ProfileRuleDenied)?;
+
+    match (operation, rule) {
+        (
+            KubernetesRequestOperationV1::Get { name, .. },
+            KubernetesQueryRule::Get { names, .. },
+        ) => {
+            if !names.contains(name) {
+                return Err(KubernetesEffectProofError::ProfileNameDenied);
+            }
+        }
+        (
+            KubernetesRequestOperationV1::List { selectors, .. },
+            KubernetesQueryRule::List {
+                selectors: allowed, ..
+            },
+        )
+        | (
+            KubernetesRequestOperationV1::Watch { selectors, .. },
+            KubernetesQueryRule::Watch {
+                selectors: allowed, ..
+            },
+        ) => {
+            if selectors != allowed {
+                return Err(KubernetesEffectProofError::ProfileSelectorsMismatch);
+            }
+        }
+        (
+            KubernetesRequestOperationV1::Delete { name, .. },
+            KubernetesQueryRule::Delete {
+                names,
+                precondition,
+                ..
+            },
+        ) => {
+            if !names.contains(name) {
+                return Err(KubernetesEffectProofError::ProfileNameDenied);
+            }
+            if !matches!(
+                precondition,
+                KubernetesDeletePrecondition::ExactUidAndResourceVersion
+            ) {
+                return Err(KubernetesEffectProofError::DeletePreconditionMismatch);
+            }
+            // Canonical request construction has already required concrete, validated UID and
+            // resourceVersion values. Their values remain in the request hash for the adapter.
+        }
+        _ => return Err(KubernetesEffectProofError::ProfileRuleDenied),
+    }
+
+    let request_bytes = request
+        .request()
+        .canonical_bytes()
+        .map_err(|_| KubernetesEffectProofError::ArithmeticOverflow)?;
+    let request_bytes = u64::try_from(request_bytes.len())
+        .map_err(|_| KubernetesEffectProofError::ArithmeticOverflow)?;
+    if request_bytes > budget.max_request_bytes {
+        return Err(KubernetesEffectProofError::RequestBytesExceeded);
+    }
+    if request_bytes > *profile_max_request_bytes {
+        return Err(KubernetesEffectProofError::ProfileRequestBytesExceeded);
+    }
+    if *max_response_bytes > budget.max_result_bytes {
+        return Err(KubernetesEffectProofError::ResultBytesExceeded);
+    }
+    if *max_response_bytes > *profile_max_response_bytes {
+        return Err(KubernetesEffectProofError::ProfileResponseBytesExceeded);
+    }
+
+    Ok(KubernetesEffectProof {
+        request_sha256: request.request_sha256().to_owned(),
+        profile_id: profile.id.clone(),
+        profile_sha256: cluster_profile.sha256.clone(),
+        dimensions: SensitiveEffectProofDimensions {
+            request_bytes,
+            max_result_bytes: *max_response_bytes,
+            io_read_bytes: *max_response_bytes,
+            // Canonical metadata does not account for HTTP framing. Reserve the profile's full
+            // signed request cap conservatively rather than undercounting adapter writes.
+            io_write_bytes: *profile_max_request_bytes,
+            artifact_count: 0,
+            artifact_bytes: 0,
+        },
+    })
 }
 
 fn new_operational_proof(
@@ -2301,6 +2569,514 @@ mod operational_tests {
             )
             .unwrap_err(),
             OperationalEffectProofError::InvalidProfile
+        );
+    }
+}
+
+#[cfg(test)]
+mod kubernetes_tests {
+    use elpis_grants::*;
+
+    use super::*;
+
+    fn profile_ref(profile: &SensitiveLocalProfileV1) -> SensitiveProfileRef {
+        let digest = sha256(&profile.canonical_bytes().unwrap());
+        let mut encoded = String::with_capacity(64);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in digest {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        SensitiveProfileRef {
+            id: profile.id.clone(),
+            sha256: encoded,
+        }
+    }
+
+    fn selector(key: &str, value: &str) -> KubernetesLabelSelector {
+        KubernetesLabelSelector {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    fn cluster_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "worker-cluster".into(),
+            profile: SensitiveLocalProfileKindV1::KubernetesCluster {
+                api_server: KubernetesApiServer {
+                    host: "api.cluster.example".into(),
+                    port: 6443,
+                    tls_server_name: "api.cluster.example".into(),
+                    ca_sha256: "a".repeat(64),
+                    redirects: KubernetesRedirectPolicy::Deny,
+                },
+                credential_profile: SensitiveProfileRef {
+                    id: "worker-cluster-credential".into(),
+                    sha256: "b".repeat(64),
+                },
+                namespace: "workers".into(),
+                rules: vec![
+                    KubernetesQueryRule::Delete {
+                        resource: KubernetesResource::ConfigMap,
+                        names: vec!["worker-lock".into()],
+                        precondition: KubernetesDeletePrecondition::ExactUidAndResourceVersion,
+                    },
+                    KubernetesQueryRule::Get {
+                        resource: KubernetesResource::Pod,
+                        names: vec!["worker-a".into(), "worker-b".into()],
+                    },
+                    KubernetesQueryRule::List {
+                        resource: KubernetesResource::Pod,
+                        selectors: vec![
+                            selector("app", "worker"),
+                            selector("elpis.dev/mind", "elm-test"),
+                        ],
+                    },
+                    KubernetesQueryRule::Watch {
+                        resource: KubernetesResource::Service,
+                        selectors: vec![selector("app", "worker")],
+                    },
+                ],
+                max_request_bytes: 4096,
+                max_response_bytes: 8192,
+            },
+        }
+    }
+
+    fn capability(profile: &SensitiveLocalProfileV1) -> SensitiveCapabilityRule {
+        SensitiveCapabilityRule::KubernetesNamespace {
+            cluster_profile: profile_ref(profile),
+            namespace: "workers".into(),
+            verbs: vec![
+                KubernetesVerb::Delete,
+                KubernetesVerb::Get,
+                KubernetesVerb::List,
+                KubernetesVerb::Watch,
+            ],
+            resources: vec![
+                KubernetesResource::ConfigMap,
+                KubernetesResource::Pod,
+                KubernetesResource::Service,
+            ],
+            budget: CapabilityBudget {
+                max_calls: 8,
+                max_request_bytes: 4096,
+                max_result_bytes: 8192,
+            },
+        }
+    }
+
+    fn request(
+        profile_id: &str,
+        operation: KubernetesRequestOperationV1,
+        max_response_bytes: u64,
+    ) -> CanonicalSensitiveEffectRequest {
+        let value = SensitiveEffectRequestV1 {
+            version: SENSITIVE_EFFECT_REQUEST_VERSION,
+            effect: SensitiveEffectV1::KubernetesNamespace {
+                cluster_profile_id: profile_id.into(),
+                namespace: "workers".into(),
+                operation,
+                max_response_bytes,
+            },
+        };
+        CanonicalSensitiveEffectRequest::parse(&value.canonical_bytes().unwrap()).unwrap()
+    }
+
+    fn get(profile: &SensitiveLocalProfileV1, name: &str) -> CanonicalSensitiveEffectRequest {
+        request(
+            &profile.id,
+            KubernetesRequestOperationV1::Get {
+                resource: KubernetesResource::Pod,
+                name: name.into(),
+            },
+            2048,
+        )
+    }
+
+    fn delete(profile: &SensitiveLocalProfileV1) -> CanonicalSensitiveEffectRequest {
+        request(
+            &profile.id,
+            KubernetesRequestOperationV1::Delete {
+                resource: KubernetesResource::ConfigMap,
+                name: "worker-lock".into(),
+                precondition: KubernetesDeletePreconditionV1 {
+                    uid: "123e4567-e89b-12d3-a456-426614174000".into(),
+                    resource_version: "184467".into(),
+                },
+            },
+            1024,
+        )
+    }
+
+    #[test]
+    fn get_list_watch_and_delete_bind_exact_hashes_and_dimensions() {
+        let profile = cluster_profile();
+        let requests = [
+            get(&profile, "worker-a"),
+            request(
+                &profile.id,
+                KubernetesRequestOperationV1::List {
+                    resource: KubernetesResource::Pod,
+                    selectors: vec![
+                        selector("app", "worker"),
+                        selector("elpis.dev/mind", "elm-test"),
+                    ],
+                },
+                3072,
+            ),
+            request(
+                &profile.id,
+                KubernetesRequestOperationV1::Watch {
+                    resource: KubernetesResource::Service,
+                    selectors: vec![selector("app", "worker")],
+                },
+                4096,
+            ),
+            delete(&profile),
+        ];
+
+        for request in requests {
+            let proof = prove_kubernetes_effect(&capability(&profile), &profile, &request).unwrap();
+            let canonical_len = request.request().canonical_bytes().unwrap().len() as u64;
+            assert_eq!(proof.request_sha256(), request.request_sha256());
+            assert_eq!(proof.profile_id(), profile.id);
+            assert_eq!(proof.profile_sha256(), profile_ref(&profile).sha256);
+            assert_eq!(proof.request_bytes(), canonical_len);
+            let response_cap = match &request.request().effect {
+                SensitiveEffectV1::KubernetesNamespace {
+                    max_response_bytes, ..
+                } => *max_response_bytes,
+                _ => unreachable!(),
+            };
+            assert_eq!(proof.max_result_bytes(), response_cap);
+            assert_eq!(proof.io_read_bytes(), response_cap);
+            assert_eq!(proof.io_write_bytes(), 4096);
+            assert_eq!(proof.artifact_count(), 0);
+            assert_eq!(proof.artifact_bytes(), 0);
+        }
+
+        let first = delete(&profile);
+        let mut second_value = first.request().clone();
+        let SensitiveEffectV1::KubernetesNamespace { operation, .. } = &mut second_value.effect
+        else {
+            unreachable!()
+        };
+        let KubernetesRequestOperationV1::Delete { precondition, .. } = operation else {
+            unreachable!()
+        };
+        precondition.resource_version = "184468".into();
+        let second =
+            CanonicalSensitiveEffectRequest::parse(&second_value.canonical_bytes().unwrap())
+                .unwrap();
+        let first_proof = prove_kubernetes_effect(&capability(&profile), &profile, &first).unwrap();
+        let second_proof =
+            prove_kubernetes_effect(&capability(&profile), &profile, &second).unwrap();
+        assert_ne!(first_proof.request_sha256(), second_proof.request_sha256());
+    }
+
+    #[test]
+    fn signed_namespace_verb_resource_and_exact_profile_rule_are_all_required() {
+        let profile = cluster_profile();
+        let base_request = get(&profile, "worker-a");
+
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace { namespace, .. } = &mut signed else {
+            unreachable!()
+        };
+        *namespace = "other".into();
+        assert_eq!(
+            prove_kubernetes_effect(&signed, &profile, &base_request).unwrap_err(),
+            KubernetesEffectProofError::NamespaceMismatch
+        );
+
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace { verbs, .. } = &mut signed else {
+            unreachable!()
+        };
+        verbs.retain(|verb| *verb != KubernetesVerb::Get);
+        assert_eq!(
+            prove_kubernetes_effect(&signed, &profile, &base_request).unwrap_err(),
+            KubernetesEffectProofError::SignedVerbDenied
+        );
+
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace { resources, .. } = &mut signed else {
+            unreachable!()
+        };
+        resources.retain(|resource| *resource != KubernetesResource::Pod);
+        assert_eq!(
+            prove_kubernetes_effect(&signed, &profile, &base_request).unwrap_err(),
+            KubernetesEffectProofError::SignedResourceDenied
+        );
+
+        let service_get = request(
+            &profile.id,
+            KubernetesRequestOperationV1::Get {
+                resource: KubernetesResource::Service,
+                name: "worker-api".into(),
+            },
+            1,
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &service_get).unwrap_err(),
+            KubernetesEffectProofError::ProfileRuleDenied
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &get(&profile, "worker-c"))
+                .unwrap_err(),
+            KubernetesEffectProofError::ProfileNameDenied
+        );
+
+        let mut wrong_request_value = base_request.request().clone();
+        let SensitiveEffectV1::KubernetesNamespace { namespace, .. } =
+            &mut wrong_request_value.effect
+        else {
+            unreachable!()
+        };
+        *namespace = "other".into();
+        let wrong_request =
+            CanonicalSensitiveEffectRequest::parse(&wrong_request_value.canonical_bytes().unwrap())
+                .unwrap();
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &wrong_request).unwrap_err(),
+            KubernetesEffectProofError::NamespaceMismatch
+        );
+    }
+
+    #[test]
+    fn list_and_watch_selectors_must_equal_the_exact_rule() {
+        let profile = cluster_profile();
+        let omitted = request(
+            &profile.id,
+            KubernetesRequestOperationV1::List {
+                resource: KubernetesResource::Pod,
+                selectors: vec![selector("app", "worker")],
+            },
+            1,
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &omitted).unwrap_err(),
+            KubernetesEffectProofError::ProfileSelectorsMismatch
+        );
+
+        let added = request(
+            &profile.id,
+            KubernetesRequestOperationV1::List {
+                resource: KubernetesResource::Pod,
+                selectors: vec![
+                    selector("app", "worker"),
+                    selector("elpis.dev/mind", "elm-test"),
+                    selector("extra", "not-signed"),
+                ],
+            },
+            1,
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &added).unwrap_err(),
+            KubernetesEffectProofError::ProfileSelectorsMismatch
+        );
+
+        let wrong_watch = request(
+            &profile.id,
+            KubernetesRequestOperationV1::Watch {
+                resource: KubernetesResource::Service,
+                selectors: vec![selector("app", "other")],
+            },
+            1,
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &wrong_watch).unwrap_err(),
+            KubernetesEffectProofError::ProfileSelectorsMismatch
+        );
+    }
+
+    #[test]
+    fn cluster_hash_binds_api_tls_credential_rules_and_caps() {
+        let profile = cluster_profile();
+        let signed = capability(&profile);
+        let request = get(&profile, "worker-a");
+
+        for field in 0..6 {
+            let mut changed = profile.clone();
+            let SensitiveLocalProfileKindV1::KubernetesCluster {
+                api_server,
+                credential_profile,
+                rules,
+                max_response_bytes,
+                ..
+            } = &mut changed.profile
+            else {
+                unreachable!()
+            };
+            match field {
+                0 => api_server.host = "api-2.cluster.example".into(),
+                1 => api_server.tls_server_name = "api-2.cluster.example".into(),
+                2 => api_server.ca_sha256 = "c".repeat(64),
+                3 => credential_profile.sha256 = "d".repeat(64),
+                4 => {
+                    let KubernetesQueryRule::Get { names, .. } = &mut rules[1] else {
+                        unreachable!()
+                    };
+                    names[0] = "worker-0".into();
+                }
+                5 => *max_response_bytes -= 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                prove_kubernetes_effect(&signed, &changed, &request).unwrap_err(),
+                KubernetesEffectProofError::ProfileBindingMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn profile_id_hash_kind_and_object_templates_fail_closed() {
+        let profile = cluster_profile();
+        let request = get(&profile, "worker-a");
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace {
+            cluster_profile, ..
+        } = &mut signed
+        else {
+            unreachable!()
+        };
+        cluster_profile.sha256 = "f".repeat(64);
+        assert_eq!(
+            prove_kubernetes_effect(&signed, &profile, &request).unwrap_err(),
+            KubernetesEffectProofError::ProfileBindingMismatch
+        );
+
+        let mut template_profile = SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "worker-templates".into(),
+            profile: SensitiveLocalProfileKindV1::KubernetesObjectTemplates {
+                cluster_profile: profile_ref(&profile),
+                templates: vec![KubernetesWriteTemplate::CreateConfigMap {
+                    precondition: KubernetesCreatePrecondition::Exclusive,
+                    name: "worker-config".into(),
+                    labels: vec![],
+                    immutable: KubernetesImmutablePolicy::Required,
+                    data: vec![],
+                }],
+            },
+        };
+        template_profile.validate().unwrap();
+        let template_request = get(&template_profile, "worker-a");
+        assert_eq!(
+            prove_kubernetes_effect(
+                &capability(&template_profile),
+                &template_profile,
+                &template_request,
+            )
+            .unwrap_err(),
+            KubernetesEffectProofError::ProfileKindMismatch
+        );
+
+        template_profile.version = 999;
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &template_profile, &template_request,)
+                .unwrap_err(),
+            KubernetesEffectProofError::InvalidProfile
+        );
+    }
+
+    #[test]
+    fn signed_and_profile_request_and_response_caps_are_independent() {
+        let profile = cluster_profile();
+        let base_request = get(&profile, "worker-a");
+
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace { budget, .. } = &mut signed else {
+            unreachable!()
+        };
+        budget.max_request_bytes = 1;
+        assert_eq!(
+            prove_kubernetes_effect(&signed, &profile, &base_request).unwrap_err(),
+            KubernetesEffectProofError::RequestBytesExceeded
+        );
+
+        let mut capped_profile = profile.clone();
+        let SensitiveLocalProfileKindV1::KubernetesCluster {
+            max_request_bytes, ..
+        } = &mut capped_profile.profile
+        else {
+            unreachable!()
+        };
+        *max_request_bytes = 1;
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&capped_profile), &capped_profile, &base_request)
+                .unwrap_err(),
+            KubernetesEffectProofError::ProfileRequestBytesExceeded
+        );
+
+        let large_response = request(
+            &profile.id,
+            KubernetesRequestOperationV1::Get {
+                resource: KubernetesResource::Pod,
+                name: "worker-a".into(),
+            },
+            8193,
+        );
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &large_response).unwrap_err(),
+            KubernetesEffectProofError::ResultBytesExceeded
+        );
+
+        let mut response_profile = profile.clone();
+        let SensitiveLocalProfileKindV1::KubernetesCluster {
+            max_response_bytes, ..
+        } = &mut response_profile.profile
+        else {
+            unreachable!()
+        };
+        *max_response_bytes = 1024;
+        let response_request = get(&response_profile, "worker-a");
+        assert_eq!(
+            prove_kubernetes_effect(
+                &capability(&response_profile),
+                &response_profile,
+                &response_request,
+            )
+            .unwrap_err(),
+            KubernetesEffectProofError::ProfileResponseBytesExceeded
+        );
+    }
+
+    #[test]
+    fn family_and_effect_mismatches_are_typed_denials() {
+        let profile = cluster_profile();
+        let request = get(&profile, "worker-a");
+        let unsupported = SensitiveCapabilityRule::ReadPath {
+            root: profile_ref(&profile),
+            relative_prefixes: vec![".".into()],
+            budget: CapabilityBudget {
+                max_calls: 1,
+                max_request_bytes: 4096,
+                max_result_bytes: 4096,
+            },
+        };
+        assert_eq!(
+            prove_kubernetes_effect(&unsupported, &profile, &request).unwrap_err(),
+            KubernetesEffectProofError::UnsupportedCapabilityFamily
+        );
+
+        let other_request_value = SensitiveEffectRequestV1 {
+            version: SENSITIVE_EFFECT_REQUEST_VERSION,
+            effect: SensitiveEffectV1::ReadPath {
+                root_profile_id: profile.id.clone(),
+                relative_path: ".".into(),
+                max_result_bytes: 1,
+            },
+        };
+        let other_request =
+            CanonicalSensitiveEffectRequest::parse(&other_request_value.canonical_bytes().unwrap())
+                .unwrap();
+        assert_eq!(
+            prove_kubernetes_effect(&capability(&profile), &profile, &other_request).unwrap_err(),
+            KubernetesEffectProofError::EffectKindMismatch
         );
     }
 }
