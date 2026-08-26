@@ -48,6 +48,7 @@ const MAX_REMOTE_ARG_BYTES: usize = 4096;
 const MAX_REMOTE_ARGV_BYTES: usize = 65_536;
 const MAX_REMOTE_TIMEOUT_MS: u64 = 300_000;
 const MAX_REMOTE_OUTPUT_BYTES: u64 = 1024 * 1024;
+const MAX_PROFILE_IO_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +189,10 @@ pub enum SensitiveLocalProfileKindV1 {
         dependencies: PackageDependencyPolicy,
         maintainer_scripts: PackageMaintainerScriptPolicy,
         configuration: PackageConfigurationPolicy,
+        /// Conservative whole-effect read ceiling for pre-effect reservation.
+        max_io_read_bytes: u64,
+        /// Conservative whole-effect write ceiling for pre-effect reservation.
+        max_io_write_bytes: u64,
     },
     RemoteActions {
         actions: Vec<RemoteActionRule>,
@@ -335,6 +340,8 @@ impl SensitiveLocalProfileKindV1 {
                 repository_snapshot,
                 operations,
                 packages,
+                max_io_read_bytes,
+                max_io_write_bytes,
                 ..
             } => {
                 target_root
@@ -345,7 +352,8 @@ impl SensitiveLocalProfileKindV1 {
                     .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
                 repository_snapshot.validate()?;
                 validate_package_operations(operations)?;
-                validate_package_names(packages)
+                validate_package_names(packages)?;
+                validate_profile_io_bounds(*max_io_read_bytes, *max_io_write_bytes)
             }
             Self::RemoteActions { actions } => validate_remote_actions(actions),
         }
@@ -1013,6 +1021,10 @@ pub struct RemoteActionRule {
     pub timeout_ms: u64,
     pub max_stdout_bytes: u64,
     pub max_stderr_bytes: u64,
+    /// Conservative whole-effect read ceiling for pre-effect reservation.
+    pub max_io_read_bytes: u64,
+    /// Conservative whole-effect write ceiling for pre-effect reservation.
+    pub max_io_write_bytes: u64,
 }
 
 impl RemoteActionRule {
@@ -1037,7 +1049,7 @@ impl RemoteActionRule {
         {
             return Err(SensitiveLocalProfileError::InvalidField);
         }
-        Ok(())
+        validate_profile_io_bounds(self.max_io_read_bytes, self.max_io_write_bytes)
     }
 }
 
@@ -1106,6 +1118,20 @@ pub enum SensitiveLocalProfileError {
     InvalidField,
     #[error("sensitive local profile lists must be nonempty, sorted, and unique")]
     NonCanonicalList,
+}
+
+fn validate_profile_io_bounds(
+    max_io_read_bytes: u64,
+    max_io_write_bytes: u64,
+) -> Result<(), SensitiveLocalProfileError> {
+    if max_io_read_bytes == 0
+        || max_io_read_bytes > MAX_PROFILE_IO_BYTES
+        || max_io_write_bytes == 0
+        || max_io_write_bytes > MAX_PROFILE_IO_BYTES
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
 }
 
 fn validate_remote_actions(actions: &[RemoteActionRule]) -> Result<(), SensitiveLocalProfileError> {
@@ -3218,15 +3244,17 @@ mod tests {
                 dependencies: PackageDependencyPolicy::ExactListedPackagesOnly,
                 maintainer_scripts: PackageMaintainerScriptPolicy::Forbidden,
                 configuration: PackageConfigurationPolicy::FailOnPromptOrConffileChange,
+                max_io_read_bytes: 1_073_741_824,
+                max_io_write_bytes: 2_147_483_648,
             },
         }
     }
 
     #[test]
     fn package_profile_canonical_bytes_and_hash_are_frozen() {
-        const GOLDEN: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change"}}"#;
+        const GOLDEN: &str = r#"{"version":1,"id":"debian-tools","profile":{"kind":"package_transaction","manager":"debian_apt_dpkg_offline","target_root":{"id":"debian-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository_endpoint":{"id":"debian-snapshot","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository_snapshot":{"metadata_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signing_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operations":["install","upgrade"],"packages":[{"name":"curl","version":"7.88.1-10+deb12u12","architecture":"amd64","archive_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"jq","version":"1.6-2.1+deb12u1","architecture":"amd64","archive_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"dependencies":"exact_listed_packages_only","maintainer_scripts":"forbidden","configuration":"fail_on_prompt_or_conffile_change","max_io_read_bytes":1073741824,"max_io_write_bytes":2147483648}}"#;
         const GOLDEN_SHA256: &str =
-            "fb46ecc46615da6808042a62358aab5d776b85f42f33504c595b898bd3712f3e";
+            "e59f13b3919bbb9300528095659023d405a6b4239817fda6c2d9ff97b5c5d4c2";
 
         let bytes = package_profile().canonical_bytes().unwrap();
         assert_eq!(bytes, GOLDEN.as_bytes());
@@ -3393,6 +3421,31 @@ mod tests {
     }
 
     #[test]
+    fn package_io_bounds_are_nonzero_and_hard_capped() {
+        for (max_io_read_bytes, max_io_write_bytes) in [
+            (0, 1),
+            (MAX_PROFILE_IO_BYTES + 1, 1),
+            (1, 0),
+            (1, MAX_PROFILE_IO_BYTES + 1),
+        ] {
+            let mut value = package_profile();
+            if let SensitiveLocalProfileKindV1::PackageTransaction {
+                max_io_read_bytes: read,
+                max_io_write_bytes: write,
+                ..
+            } = &mut value.profile
+            {
+                *read = max_io_read_bytes;
+                *write = max_io_write_bytes;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
     fn package_encoding_rejects_online_urls_host_roots_scripts_hooks_and_args() {
         let bytes = package_profile().canonical_bytes().unwrap();
         for mutation in [
@@ -3461,6 +3514,8 @@ mod tests {
                     timeout_ms: 30_000,
                     max_stdout_bytes: 65_536,
                     max_stderr_bytes: 65_536,
+                    max_io_read_bytes: 8_388_608,
+                    max_io_write_bytes: 4_194_304,
                 }],
             },
         }
@@ -3468,9 +3523,9 @@ mod tests {
 
     #[test]
     fn remote_profile_canonical_bytes_and_hash_are_frozen() {
-        const GOLDEN: &str = r#"{"version":1,"id":"resident-actions","profile":{"kind":"remote_actions","actions":[{"id":"check-state","execution":"direct_native_elf_no_shell_or_interpreter","executable_path":"/usr/libexec/elpis/check-state","executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","argv":["/usr/libexec/elpis/check-state","--format","json"],"environment":{"mode":"clear_then_set_fixed","locale":"C.UTF-8","timezone":"UTC"},"cwd_profile":{"id":"work-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"uid":10001,"gid":10001,"capabilities":[],"stdin":"closed","no_new_privileges":"required","timeout_ms":30000,"max_stdout_bytes":65536,"max_stderr_bytes":65536}]}}"#;
+        const GOLDEN: &str = r#"{"version":1,"id":"resident-actions","profile":{"kind":"remote_actions","actions":[{"id":"check-state","execution":"direct_native_elf_no_shell_or_interpreter","executable_path":"/usr/libexec/elpis/check-state","executable_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","argv":["/usr/libexec/elpis/check-state","--format","json"],"environment":{"mode":"clear_then_set_fixed","locale":"C.UTF-8","timezone":"UTC"},"cwd_profile":{"id":"work-root","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"uid":10001,"gid":10001,"capabilities":[],"stdin":"closed","no_new_privileges":"required","timeout_ms":30000,"max_stdout_bytes":65536,"max_stderr_bytes":65536,"max_io_read_bytes":8388608,"max_io_write_bytes":4194304}]}}"#;
         const GOLDEN_SHA256: &str =
-            "76c010f20c81f47bf54296effcae7f18b3d4c316d88cec3d53f97d399f9bd45e";
+            "38a372a64ace0b1df1589f2f57752a180f0431c6a6f16861369bf1c6f4b6a0d5";
 
         let bytes = remote_profile().canonical_bytes().unwrap();
         assert_eq!(bytes, GOLDEN.as_bytes());
@@ -3563,7 +3618,18 @@ mod tests {
     #[test]
     fn remote_identity_capabilities_and_resource_bounds_fail_closed() {
         for mutation in [
-            "cwd", "uid", "gid", "caps", "timeout0", "timeout", "stdout", "stderr",
+            "cwd",
+            "uid",
+            "gid",
+            "caps",
+            "timeout0",
+            "timeout",
+            "stdout",
+            "stderr",
+            "io_read_zero",
+            "io_read_overflow",
+            "io_write_zero",
+            "io_write_overflow",
         ] {
             let mut value = remote_profile();
             if let SensitiveLocalProfileKindV1::RemoteActions { actions } = &mut value.profile {
@@ -3581,7 +3647,11 @@ mod tests {
                     "timeout0" => action.timeout_ms = 0,
                     "timeout" => action.timeout_ms = MAX_REMOTE_TIMEOUT_MS + 1,
                     "stdout" => action.max_stdout_bytes = MAX_REMOTE_OUTPUT_BYTES + 1,
-                    _ => action.max_stderr_bytes = 0,
+                    "stderr" => action.max_stderr_bytes = 0,
+                    "io_read_zero" => action.max_io_read_bytes = 0,
+                    "io_read_overflow" => action.max_io_read_bytes = MAX_PROFILE_IO_BYTES + 1,
+                    "io_write_zero" => action.max_io_write_bytes = 0,
+                    _ => action.max_io_write_bytes = MAX_PROFILE_IO_BYTES + 1,
                 }
             }
             assert_eq!(
