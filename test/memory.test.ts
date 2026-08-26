@@ -6,7 +6,13 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createMemory, appendDatedBullet } from '../src/store/memory.js';
+import {
+  appendDatedBullet,
+  createMemory,
+  ensureFile,
+  hardenAuthoredMemoryFiles,
+  writePrivateFileAtomic,
+} from '../src/store/memory.js';
 
 function tmpFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-mem-'));
@@ -51,4 +57,85 @@ test('appendDatedBullet creates a missing file', () => {
   const file = tmpFile();
   appendDatedBullet(file, 'first', '2026-07-02');
   assert.equal(fs.readFileSync(file, 'utf8'), '\n- [2026-07-02] first\n');
+});
+
+test('non-missing read errors are not mistaken for empty memory', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-mem-read-'));
+  assert.throws(() => appendDatedBullet(dir, 'must not replace directory'));
+  assert.throws(() => createMemory(dir).read());
+  assert.equal(fs.statSync(dir).isDirectory(), true);
+});
+
+test('memory writes atomically replace permissive files with mode 0600', () => {
+  const file = tmpFile();
+  fs.writeFileSync(file, 'old', { mode: 0o664 });
+  fs.chmodSync(file, 0o664);
+  const before = fs.statSync(file).ino;
+  createMemory(file).overwrite('new');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'new');
+  assert.notEqual(fs.statSync(file).ino, before);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(
+    fs
+      .readdirSync(path.dirname(file))
+      .filter((name) => name.includes('.writing-')),
+    [],
+  );
+});
+
+test('failed atomic write preserves the prior file and cleans its temp', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-mem-fail-'));
+  const file = path.join(dir, 'MEMORY.md');
+  fs.writeFileSync(file, 'keep me', { mode: 0o600 });
+  fs.chmodSync(dir, 0o500);
+  try {
+    assert.throws(() => writePrivateFileAtomic(file, 'lose me'));
+    assert.equal(fs.readFileSync(file, 'utf8'), 'keep me');
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes('.writing-')),
+      [],
+    );
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
+});
+
+test('startup hardens authored memory files without touching unrelated data', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-mem-mode-'));
+  const exact = ['SOUL.md', 'MEMORY.md', 'NOW.md'].map((name) =>
+    path.join(dir, name),
+  );
+  const nested = [
+    path.join(dir, 'people', 'person.md'),
+    path.join(dir, 'people', 'guild', 'person.md'),
+    path.join(dir, 'ponder', 'question.md'),
+  ];
+  const unrelated = path.join(dir, 'library.md');
+  for (const file of [...exact, ...nested, unrelated]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, file, { mode: 0o664 });
+    fs.chmodSync(file, 0o664);
+  }
+  hardenAuthoredMemoryFiles(dir, exact);
+  for (const file of [...exact, ...nested]) {
+    assert.equal(fs.readFileSync(file, 'utf8'), file);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  }
+  for (const dirPath of [
+    path.join(dir, 'people'),
+    path.join(dir, 'people', 'guild'),
+    path.join(dir, 'ponder'),
+  ]) {
+    assert.equal(fs.statSync(dirPath).mode & 0o777, 0o700);
+  }
+  assert.equal(fs.statSync(unrelated).mode & 0o777, 0o664);
+});
+
+test('ensureFile hardens an existing file without replacing its content', () => {
+  const file = tmpFile();
+  fs.writeFileSync(file, 'mine', { mode: 0o664 });
+  fs.chmodSync(file, 0o664);
+  ensureFile(file, 'default');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'mine');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });

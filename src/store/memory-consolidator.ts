@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { LLM } from '../llm/llm.js';
 import type { Logger } from '../lib/log.js';
 import { resolveDataLayout } from './data-layout.js';
+import { writePrivateFileAtomic } from './memory.js';
 
 export const MEMORY_CONSOLIDATION_PROMPT = `This is your memory, not anyone else's profile of you. Rewrite it for future-you as compact first-person internal monologue.
 
@@ -128,30 +129,8 @@ function atomicReplace(
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const prefix = `${rel}-${stamp}-${digest(original).slice(0, 12)}`;
   const backup = path.join(backups, `${prefix}.md`);
-  fs.writeFileSync(backup, original, { mode: 0o600 });
-
-  const mode = (() => {
-    try {
-      return fs.statSync(file).mode & 0o777;
-    } catch {
-      return 0o600;
-    }
-  })();
-  const temp = path.join(
-    path.dirname(file),
-    `.${path.basename(file)}.consolidating-${process.pid}-${crypto.randomUUID()}`,
-  );
-  try {
-    fs.writeFileSync(temp, replacement, { mode });
-    fs.renameSync(temp, file);
-    fs.chmodSync(file, mode);
-  } finally {
-    try {
-      fs.unlinkSync(temp);
-    } catch {
-      /* renamed or absent */
-    }
-  }
+  writePrivateFileAtomic(backup, original);
+  writePrivateFileAtomic(file, replacement);
 
   const old = fs
     .readdirSync(backups)

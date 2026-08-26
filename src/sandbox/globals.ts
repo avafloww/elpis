@@ -32,7 +32,7 @@ import {
   type BuiltinModuleId,
 } from '../builtin-modules.js';
 import { parseFrontmatter } from '../lib/frontmatter.js';
-import { appendDatedBullet } from '../store/memory.js';
+import { appendDatedBullet, writePrivateFileAtomic } from '../store/memory.js';
 import { clearResumeMarker, writeResumeMarker } from '../store/resume.js';
 import { requestRestrictedRestart } from '../lib/restart-request.js';
 import { restartHarnessService } from '../lib/lifecycle.js';
@@ -868,7 +868,8 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   const ponderDir = path.join(deps.config.paths.dataDirectory, 'ponder');
   const ponderResolvedDir = path.join(ponderDir, 'resolved');
   const ponderFn = ((thread: string, text: string) => {
-    fs.mkdirSync(ponderDir, { recursive: true });
+    fs.mkdirSync(ponderDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(ponderDir, 0o700);
     // Slugify the thread name so `ponder('../SOUL',...)` can't escape the
     // ponder dir and `design/api` doesn't ENOENT on a missing subdir. Same
     // mapping as people/<slug>.md.
@@ -881,7 +882,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     if (fs.existsSync(file)) {
       appendDatedBullet(file, text, stamp);
     } else {
-      fs.writeFileSync(file, `${text}\n- [${stamp}] (thread opened)\n`);
+      writePrivateFileAtomic(file, `${text}\n- [${stamp}] (thread opened)\n`);
     }
     return { ok: true, thread, file };
   }) as ((
@@ -896,11 +897,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   ponderFn.close = (thread: string, conclusion?: string) => {
     const slug = slugifyName(thread);
     const file = path.join(ponderDir, `${slug}.md`);
-    fs.mkdirSync(ponderResolvedDir, { recursive: true });
+    fs.mkdirSync(ponderResolvedDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(ponderResolvedDir, 0o700);
     let body = '';
     try {
       body = fs.readFileSync(file, 'utf8');
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       return { ok: true, thread };
     }
     if (conclusion) {
@@ -915,7 +918,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     for (let n = 2; fs.existsSync(dest); n++) {
       dest = path.join(ponderResolvedDir, `${slug}-${n}.md`);
     }
-    fs.writeFileSync(dest, body);
+    writePrivateFileAtomic(dest, body);
     try {
       fs.unlinkSync(file);
     } catch {
@@ -950,13 +953,15 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // author has no file yet). General, non-person facts use remember.
   const peopleDir = path.join(deps.config.paths.dataDirectory, 'people');
   const personFn = (name: string, text: string) => {
-    fs.mkdirSync(peopleDir, { recursive: true });
+    fs.mkdirSync(peopleDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(peopleDir, 0o700);
     const slug = slugifyName(name);
     const file = path.join(peopleDir, `${slug}.md`);
     // Ensure frontmatter stub exists for a new person.
     try {
       fs.readFileSync(file, 'utf8');
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       // Pre-fill ids ONLY when this new file plausibly belongs to the current
       // inbound author: the slug matches the author's own name AND that author
       // has no people/ file yet. Without both guards,
@@ -968,7 +973,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         slug === slugifyName(deps.inbound!.author) &&
         !authorHasPeopleFile(peopleDir, authorId);
       const ids = isAuthorFile ? `ids: [discord:${authorId}]` : 'ids: []';
-      fs.writeFileSync(file, `---\nname: ${name}\n${ids}\n---\n\n`);
+      writePrivateFileAtomic(file, `---\nname: ${name}\n${ids}\n---\n\n`);
     }
     appendDatedBullet(file, text);
     return { ok: true, name, file };
@@ -1509,7 +1514,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   // since `now` is a near-certain local-variable collision (A6).
   const nowPath = path.join(deps.config.paths.dataDirectory, 'NOW.md');
   e.focus = (text: string) => {
-    fs.writeFileSync(nowPath, text);
+    writePrivateFileAtomic(nowPath, text);
     return { ok: true, note: 'NOW.md updated — visible in every room' };
   };
   const extensionRoot = Object.create(null) as Record<string, unknown>;

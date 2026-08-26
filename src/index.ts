@@ -19,7 +19,12 @@ import {
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
 } from './llm/llm.js';
-import { createMemory, ensureFile, type MemoryHooks } from './store/memory.js';
+import {
+  createMemory,
+  ensureFile,
+  hardenAuthoredMemoryFiles,
+  type MemoryHooks,
+} from './store/memory.js';
 import {
   MemoryConsolidator,
   effectiveMemoryLimits,
@@ -214,6 +219,11 @@ export async function createElpisRuntime(
     '---\nname: Agent\n---\n\n# Soul\n\nWrite your identity here.\n',
   );
   ensureFile(config.paths.memoryPath, '# Agent Memory\n');
+  hardenAuthoredMemoryFiles(config.paths.dataDirectory, [
+    config.paths.soulPath,
+    config.paths.memoryPath,
+    path.join(config.paths.dataDirectory, 'NOW.md'),
+  ]);
 
   const log = (...a: unknown[]) => config.logger.info(...a);
   log(`build identity: ${buildIdentity.display} (${buildIdentity.source})`);

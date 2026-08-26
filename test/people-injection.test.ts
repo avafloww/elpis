@@ -66,18 +66,25 @@ async function waitFor(
   }
 }
 
-test('person-memory renderer matches by Discord id, then slug, and names a missing file', () => {
+test('person-memory renderer requires exact Discord id and withholds colliding names', () => {
   const dir = tmpDataDir();
   writePerson(dir, 'bramble', ['discord:111'], 'ID_MATCH_FACT');
-  writePerson(dir, 'clover', [], 'SLUG_MATCH_FACT');
+  writePerson(dir, 'clover', ['discord:222'], 'PRIVATE_CLOVER_FACT');
   const files = loadPeopleFiles(dir);
   assert.match(
     buildPersonMemoryContent(files, { authorId: '111', author: 'Elsewhere' }),
     /ID_MATCH_FACT/,
   );
+  const collision = buildPersonMemoryContent(files, {
+    authorId: '999',
+    author: 'Clover',
+  });
+  assert.doesNotMatch(collision, /PRIVATE_CLOVER_FACT/);
+  assert.match(collision, /profile withheld/);
+  assert.match(collision, /not linked to discord:999/);
   assert.match(
-    buildPersonMemoryContent(files, { authorId: '999', author: 'Clover' }),
-    /SLUG_MATCH_FACT/,
+    buildPersonMemoryContent(files, { authorId: '222', author: 'Clover' }),
+    /PRIVATE_CLOVER_FACT/,
   );
   const missing = buildPersonMemoryContent(files, {
     authorId: '333',

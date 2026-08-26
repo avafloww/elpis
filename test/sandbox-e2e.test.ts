@@ -825,6 +825,7 @@ test('F3c: elpis.focus() writes NOW.md', async () => {
     fs.readFileSync(nowPath, 'utf8'),
     'currently: testing\nnext: commit',
   );
+  assert.equal(fs.statSync(nowPath).mode & 0o777, 0o600);
 });
 
 test('F3c: elpis.focus() overwrites (not appends)', async () => {
@@ -901,6 +902,8 @@ test('E2: elpis.ponder() creates and appends a thread file', async () => {
   assert.equal(r1.ok, true, String(r1.error));
   const file = path.join(tmp, 'ponder', 'e2-thread.md');
   assert.ok(fs.existsSync(file));
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
   const body = fs.readFileSync(file, 'utf8');
   assert.match(body, /what is the question\?/);
   // second call appends a dated bullet
@@ -917,6 +920,8 @@ test('E2: elpis.ponder.close() archives to resolved/', async () => {
   const arch = path.join(tmp, 'ponder', 'resolved', 'e2-close.md');
   assert.ok(!fs.existsSync(orig), 'original moved');
   assert.ok(fs.existsSync(arch), 'archive created');
+  assert.equal(fs.statSync(arch).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(arch)).mode & 0o777, 0o700);
   assert.match(fs.readFileSync(arch, 'utf8'), /it resolved/);
 });
 
@@ -968,6 +973,8 @@ test('E3: elpis.memory.person() creates people/ file with frontmatter stub', asy
   assert.equal(r.ok, true, String(r.error));
   const file = path.join(tmp, 'people', 'bramble.md');
   assert.ok(fs.existsSync(file));
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
   const body = fs.readFileSync(file, 'utf8');
   assert.match(body, /name: Bramble/);
   assert.match(body, /discord:111111111111111101/);

@@ -102,19 +102,20 @@ function readPeopleDir(peopleDir: string): PersonFile[] {
 
 const PERSON_MEMORY_CONTENT_CAP = 4000;
 
-/** Render the append-only profile message for one identity. ID matching wins;
- * slug fallback preserves older files without frontmatter ids. */
+/** Render the append-only profile message for one identity. Profile contents
+ * require an exact Discord id match; display names are neither unique nor stable. */
 export function buildPersonMemoryContent(
   files: PersonFile[],
   person: PersonIdentity,
 ): string {
   const slug = slugify(person.author);
-  const file =
-    files.find((f) => f.ids.includes(`discord:${person.authorId}`)) ??
-    files.find((f) => f.slug === slug);
+  const file = files.find((f) => f.ids.includes(`discord:${person.authorId}`));
+  const sameSlug = files.find((f) => f.slug === slug);
   const content = file
     ? `[person-memory — first appearance of ${person.author} in the current context]\n--- people/${file.slug}.md ---\n${file.raw.trim()}`
-    : `[person-memory — first appearance of ${person.author} in the current context]\n(no people/ file yet for ${slug} — use elpis.memory.person('${slug}', '...') to start one)`;
+    : sameSlug
+      ? `[person-memory — first appearance of ${person.author} in the current context]\n(people/${slug}.md exists but is not linked to discord:${person.authorId}; profile withheld. Verify the identity before adding that id to its frontmatter.)`
+      : `[person-memory — first appearance of ${person.author} in the current context]\n(no people/ file yet for ${slug} — use elpis.memory.person('${slug}', '...') to start one)`;
   if (content.length <= PERSON_MEMORY_CONTENT_CAP) return content;
   const suffix = '\n[person-memory truncated to bound context growth]';
   return content.slice(0, PERSON_MEMORY_CONTENT_CAP - suffix.length) + suffix;
@@ -595,7 +596,8 @@ elpis.remember("Decided: deploy script ...")
 is what \`elpis.remember\` calls; \`elpis.memory.write(text)\` REPLACES the entire file (use rarely, e.g.
 to reorganize or dedupe); \`elpis.memory.person(name, text)\` appends a dated bullet to
 \`people/<name>.md\` (creating it with a frontmatter stub, ids pre-filled from the current
-inbound author when new) — facts about a person go there, not in MEMORY.md;
+inbound author when new). Profile injection requires an exact \`discord:<id>\` link; a matching
+display name alone never exposes the file. Facts about a person go there, not in MEMORY.md;
 \`elpis.memory.search(pattern)\` greps your whole brain (MEMORY.md, NOW.md, SOUL.md, people/,
 ponder/, notes/) in one call → \`{ count, matches: [{ file, line, text }] }\`.
 \`\`\`js

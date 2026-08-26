@@ -88,6 +88,7 @@ test('oversized memory is atomically consolidated and backed up', async () => {
   const p = fixture();
   const original = '# Memory\n' + 'old repeated fact\n'.repeat(80);
   fs.writeFileSync(p.memoryPath, original);
+  fs.chmodSync(p.memoryPath, 0o664);
   let seenSystem = '';
   const m = manager(
     p,
@@ -102,6 +103,7 @@ test('oversized memory is atomically consolidated and backed up', async () => {
     fs.readFileSync(p.memoryPath, 'utf8'),
     '# memory\nthing keep. fix known.\n',
   );
+  assert.equal(fs.statSync(p.memoryPath).mode & 0o777, 0o600);
   assert.match(seenSystem, /first-person internal monologue/);
   assert.match(seenSystem, /Small identity anchor/);
   const backupDir = resolveDataLayout(p.dataDirectory).memoryBackups;
