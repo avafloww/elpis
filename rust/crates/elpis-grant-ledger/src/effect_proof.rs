@@ -1754,6 +1754,86 @@ mod tests {
             Err(PathArtifactEffectProofError::ArithmeticOverflow)
         );
     }
+
+    #[test]
+    fn total_authorization_dispatches_all_path_and_artifact_families() {
+        use crate::effect_authorization::{
+            AuthorizedSensitiveEffectKind, authorize_sensitive_effect, test_canonical_inputs,
+        };
+
+        let profile = read_profile();
+        let request = read_request(&profile.id, "docs/file.txt", 512);
+        let (policy, registry) = test_canonical_inputs(read_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::ReadPath
+        );
+        assert_eq!(authorization.capability_index(), 0);
+        assert_eq!(authorization.request_sha256(), request.request_sha256());
+        assert_eq!(authorization.policy_sha256(), policy.policy_sha256());
+        assert_eq!(authorization.registry_sha256(), registry.registry_sha256());
+        assert_eq!(authorization.dimensions().max_result_bytes, 512);
+
+        let profile = editable_profile();
+        let request = edit_request(&profile.id, edit_operations());
+        let (policy, registry) = test_canonical_inputs(edit_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::EditTree
+        );
+        assert_eq!(authorization.capability_index(), 0);
+        assert_eq!(authorization.dimensions().io_write_bytes, 30);
+
+        let profile = artifact_profile();
+        let request = artifact_request(&profile.id, 100);
+        let (policy, registry) = test_canonical_inputs(artifact_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::ArtifactExport
+        );
+        assert_eq!(authorization.capability_index(), 0);
+        assert_eq!(authorization.dimensions().artifact_count, 1);
+        assert_eq!(authorization.dimensions().artifact_bytes, 100);
+    }
+
+    #[test]
+    fn total_authorization_proves_static_bindings_before_tuple_dispatch() {
+        use crate::effect_authorization::{
+            DeterministicSensitiveEffectAuthorizationError, authorize_sensitive_effect,
+            test_canonical_inputs,
+        };
+
+        let profile = read_profile();
+        let request = read_request(&profile.id, "docs/file.txt", 64);
+        let (policy, registry) = test_canonical_inputs(read_capability(&profile), profile.clone());
+        let first = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        let second = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(first.policy_profile_id(), "effect-authorization-test");
+        assert_eq!(first.profile_id(), profile.id);
+        assert_eq!(first.profile_sha256(), second.profile_sha256());
+        assert_eq!(first.request_sha256(), second.request_sha256());
+        assert_eq!(first.dimensions(), second.dimensions());
+
+        let wrong_request = read_request("another-root", "docs/file.txt", 64);
+        assert!(matches!(
+            authorize_sensitive_effect(&policy, &registry, &wrong_request),
+            Err(DeterministicSensitiveEffectAuthorizationError::MissingCapability)
+        ));
+
+        let mut wrong_hash = read_capability(&profile);
+        let SensitiveCapabilityRule::ReadPath { root, .. } = &mut wrong_hash else {
+            unreachable!()
+        };
+        root.sha256 = HASH.into();
+        let (wrong_policy, exact_registry) = test_canonical_inputs(wrong_hash, profile);
+        assert!(matches!(
+            authorize_sensitive_effect(&wrong_policy, &exact_registry, &wrong_request),
+            Err(DeterministicSensitiveEffectAuthorizationError::Profile(_))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2571,6 +2651,66 @@ mod operational_tests {
             OperationalEffectProofError::InvalidProfile
         );
     }
+
+    #[test]
+    fn total_authorization_dispatches_all_operational_families() {
+        use crate::effect_authorization::{
+            AuthorizedSensitiveEffectKind, authorize_sensitive_effect, test_canonical_inputs,
+        };
+
+        let profile = service_profile();
+        let request = service_request(&profile, "alpha.service", ServiceAction::Restart, 300);
+        let (policy, registry) = test_canonical_inputs(service_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::ServiceAction
+        );
+        assert_eq!(authorization.capability_index(), 0);
+        assert_eq!(authorization.dimensions().max_result_bytes, 300);
+
+        let profile = package_profile();
+        let request = package_request(
+            &profile,
+            PackageOperation::Install,
+            package_selections(&profile),
+        );
+        let (policy, registry) = test_canonical_inputs(package_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::PackageOperation
+        );
+        assert_eq!(authorization.dimensions().io_read_bytes, 10_000);
+        assert_eq!(authorization.dimensions().io_write_bytes, 20_000);
+
+        let profile = remote_profile();
+        let request = remote_request(&profile, "rotate", 700, 300);
+        let (policy, registry) = test_canonical_inputs(remote_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::RemoteExecProfile
+        );
+        assert_eq!(authorization.dimensions().max_result_bytes, 1000);
+
+        let profile = network_profile();
+        let request = network_request(
+            &profile,
+            NetworkMethod::Post,
+            "/v1/items/current",
+            json_body(100),
+            1500,
+        );
+        let (policy, registry) = test_canonical_inputs(network_capability(&profile), profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::NetworkEndpoint
+        );
+        assert_eq!(authorization.dimensions().io_read_bytes, 1500);
+        assert_eq!(authorization.dimensions().io_write_bytes, 100);
+    }
 }
 
 #[cfg(test)]
@@ -3078,5 +3218,34 @@ mod kubernetes_tests {
             prove_kubernetes_effect(&capability(&profile), &profile, &other_request).unwrap_err(),
             KubernetesEffectProofError::EffectKindMismatch
         );
+    }
+
+    #[test]
+    fn total_authorization_dispatches_kubernetes_family() {
+        use crate::effect_authorization::{
+            AuthorizedSensitiveEffectKind, authorize_sensitive_effect, test_canonical_inputs,
+        };
+
+        let profile = cluster_profile();
+        let request = get(&profile, "worker-a");
+        let mut signed = capability(&profile);
+        let SensitiveCapabilityRule::KubernetesNamespace {
+            verbs, resources, ..
+        } = &mut signed
+        else {
+            unreachable!()
+        };
+        *verbs = vec![KubernetesVerb::Get];
+        *resources = vec![KubernetesResource::Pod];
+        let (policy, registry) = test_canonical_inputs(signed, profile);
+        let authorization = authorize_sensitive_effect(&policy, &registry, &request).unwrap();
+        assert_eq!(
+            authorization.capability_kind(),
+            AuthorizedSensitiveEffectKind::KubernetesNamespace
+        );
+        assert_eq!(authorization.capability_index(), 0);
+        assert_eq!(authorization.dimensions().max_result_bytes, 2048);
+        assert_eq!(authorization.dimensions().io_read_bytes, 2048);
+        assert_eq!(authorization.dimensions().io_write_bytes, 4096);
     }
 }
