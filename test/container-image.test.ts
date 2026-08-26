@@ -51,7 +51,7 @@ test('container entrypoint fails closed around sentinel config and writable data
 
 test('container embeds immutable build identity inputs', () => {
   const docker = read('Dockerfile');
-  const workflow = read('.github/workflows/container.yml');
+  const workflow = read('.github/workflows/release.yml');
   assert.match(docker, /ARG ELPIS_BUILD_REVISION/);
   assert.match(
     docker,
@@ -59,15 +59,22 @@ test('container embeds immutable build identity inputs', () => {
   );
   assert.match(docker, /ELPIS_BUILD_TAG=\$\{ELPIS_BUILD_TAG\}/);
   assert.match(docker, /ELPIS_BUILD_DIRTY=\$\{ELPIS_BUILD_DIRTY\}/);
-  assert.match(workflow, /ELPIS_BUILD_REVISION=\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /ELPIS_BUILD_REVISION=\$\{GITHUB_SHA\}/);
+  assert.match(
+    workflow,
+    /ELPIS_BUILD_REVISION=\$\{\{ steps\.prep\.outputs\.release_sha \}\}/,
+  );
+  assert.match(
+    workflow,
+    /ELPIS_BUILD_TAG=\$\{\{ steps\.prep\.outputs\.tag \}\}/,
+  );
   assert.match(workflow, /ELPIS_BUILD_DIRTY=false/);
 });
 
-test('GHCR workflow publishes the official repository while PRs only build', () => {
-  const workflow = read('.github/workflows/container.yml');
-  assert.match(workflow, /ghcr\.io\/avafloww\/elpis/);
-  assert.match(
-    workflow,
-    /push: \$\{\{ github\.event_name != 'pull_request' \}\}/,
-  );
+test('unified workflow publishes the current repository while PRs only build', () => {
+  const workflow = read('.github/workflows/release.yml');
+  assert.match(workflow, /image="ghcr\.io\/\$\{GITHUB_REPOSITORY,,\}"/);
+  assert.match(workflow, /Build pull-request container without push/);
+  assert.match(workflow, /if: github\.event_name == 'pull_request'/);
+  assert.match(workflow, /docker push "\$target"/);
 });

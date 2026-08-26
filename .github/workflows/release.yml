@@ -1,0 +1,266 @@
+name: ci-release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Publish the explicit first v0.1.0 release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('elpis-pr-{0}', github.event.pull_request.number) || 'elpis-main-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  validate:
+    name: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run tools:check
+      - run: npm run build
+      - run: npm run bench:check
+      - run: npm audit --omit=dev --audit-level=moderate
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: github.event_name == 'pull_request'
+        with:
+          version: v0.36.1
+      - name: Build pull-request container without push
+        if: github.event_name == 'pull_request'
+        run: |
+          docker buildx build \
+            --load \
+            --tag "elpis-pr:${GITHUB_SHA}" \
+            --build-arg "ELPIS_BUILD_REVISION=${GITHUB_SHA}" \
+            --build-arg ELPIS_BUILD_TAG= \
+            --build-arg ELPIS_BUILD_DIRTY=false \
+            .
+
+  release:
+    name: release
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Refetch live main and tags
+        run: |
+          git fetch --force origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            '+refs/tags/*:refs/tags/*'
+      - name: Prepare or resume release
+        id: prep
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap || false }}
+        run: |
+          actor=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.committer.login // ""')
+          notes="$RUNNER_TEMP/elpis-release-notes.md"
+          rm -f "$notes"
+          npm run release:workflow -- prepare \
+            --root "$GITHUB_WORKSPACE" \
+            --tested-sha "$GITHUB_SHA" \
+            --actor-login "$actor" \
+            --bootstrap "$BOOTSTRAP" \
+            --output "$GITHUB_OUTPUT" \
+            --notes-output "$notes"
+          mode=$(sed -n 's/^mode=//p' "$GITHUB_OUTPUT")
+          if [ "$mode" = none ]; then
+            test ! -e "$notes"
+          else
+            test -f "$notes"
+            test "$(stat -c %a "$notes")" = 600
+            notes_sha=$(sha256sum "$notes" | cut -d' ' -f1)
+            grep -Fx "release_notes_sha256=$notes_sha" "$GITHUB_OUTPUT"
+          fi
+      - name: No version tag yet
+        if: steps.prep.outputs.mode == 'none'
+        run: echo 'No reachable version tag; bootstrap remains a separate explicit operation.'
+      - name: Exact release commit gates
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          npm run test:unit
+          npm run tools:check
+          npm run build
+          npm run bench:check
+          npm audit --omit=dev --audit-level=moderate
+          test "$(git rev-parse HEAD)" = '${{ steps.prep.outputs.release_sha }}'
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: steps.prep.outputs.mode != 'none'
+        with:
+          version: v0.36.1
+      - name: Build exact release container once
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          image="elpis-release:${{ steps.prep.outputs.release_sha }}"
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --tag "$image" \
+            --build-arg 'ELPIS_BUILD_REVISION=${{ steps.prep.outputs.release_sha }}' \
+            --build-arg 'ELPIS_BUILD_TAG=${{ steps.prep.outputs.tag }}' \
+            --build-arg ELPIS_BUILD_DIRTY=false \
+            --label 'org.opencontainers.image.revision=${{ steps.prep.outputs.release_sha }}' \
+            --label 'org.opencontainers.image.version=${{ steps.prep.outputs.version }}' \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --cache-from type=gha,scope=release-container \
+            --cache-to type=gha,mode=max,scope=release-container \
+            .
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = \
+            '${{ steps.prep.outputs.release_sha }}'
+          test "$(docker run --rm --entrypoint node "$image" -e 'process.stdout.write(process.env.ELPIS_BUILD_REVISION || "")')" = \
+            '${{ steps.prep.outputs.release_sha }}'
+          test "$(docker run --rm --entrypoint node "$image" -e 'process.stdout.write(process.env.ELPIS_BUILD_TAG || "")')" = \
+            '${{ steps.prep.outputs.tag }}'
+      - name: Refetch and atomically publish release refs
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          if [ '${{ steps.prep.outputs.mode }}' = release ]; then
+            test "$(git rev-parse refs/remotes/origin/main)" = '${{ steps.prep.outputs.base_sha }}'
+            if git ls-remote --exit-code --tags origin \
+              'refs/tags/${{ steps.prep.outputs.tag }}' >/dev/null 2>&1; then
+              echo 'Release tag appeared before compare-and-swap.' >&2
+              exit 1
+            fi
+            git push --atomic origin \
+              '${{ steps.prep.outputs.release_sha }}:refs/heads/main' \
+              'refs/tags/${{ steps.prep.outputs.tag }}:refs/tags/${{ steps.prep.outputs.tag }}'
+          elif [ '${{ steps.prep.outputs.mode }}' = bootstrap ]; then
+            test "$(git rev-parse refs/remotes/origin/main)" = '${{ steps.prep.outputs.base_sha }}'
+            if ! git ls-remote --exit-code --tags origin \
+              'refs/tags/${{ steps.prep.outputs.tag }}' >/dev/null 2>&1; then
+              git push --atomic origin \
+                '${{ steps.prep.outputs.release_sha }}:refs/heads/main' \
+                'refs/tags/${{ steps.prep.outputs.tag }}:refs/tags/${{ steps.prep.outputs.tag }}'
+            fi
+          fi
+          git fetch --no-tags --force origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = '${{ steps.prep.outputs.release_sha }}'
+          peeled=$(git ls-remote origin 'refs/tags/${{ steps.prep.outputs.tag }}^{}' | cut -f1)
+          test "$peeled" = '${{ steps.prep.outputs.release_sha }}'
+      - name: Validate pushed bot-associated commit
+        if: steps.prep.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ steps.prep.outputs.mode == 'bootstrap' }}
+        run: |
+          actor=$(gh api \
+            'repos/${{ github.repository }}/commits/${{ steps.prep.outputs.release_sha }}' \
+            --jq '.committer.login // ""')
+          output="$RUNNER_TEMP/elpis-post-push-output"
+          notes="$RUNNER_TEMP/elpis-post-push-notes.md"
+          : >"$output"
+          rm -f "$notes"
+          npm run release:workflow -- prepare \
+            --root "$GITHUB_WORKSPACE" \
+            --tested-sha '${{ steps.prep.outputs.release_sha }}' \
+            --actor-login "$actor" \
+            --bootstrap "$BOOTSTRAP" \
+            --output "$output" \
+            --notes-output "$notes"
+          expected=resume
+          if [ "$BOOTSTRAP" = true ]; then expected=bootstrap; fi
+          grep -Fx "mode=$expected" "$output"
+          grep -Fx 'release_sha=${{ steps.prep.outputs.release_sha }}' "$output"
+          grep -Fx 'tag=${{ steps.prep.outputs.tag }}' "$output"
+          grep -Fx 'release_notes_sha256=${{ steps.prep.outputs.release_notes_sha256 }}' "$output"
+          cmp -s "$RUNNER_TEMP/elpis-release-notes.md" "$notes"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        if: steps.prep.outputs.mode != 'none'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish one built image under every release tag
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags=(
+            "$image:${{ steps.prep.outputs.tag }}"
+            "$image:${{ steps.prep.outputs.minor_tag }}"
+            "$image:sha-${{ steps.prep.outputs.short_sha }}"
+            "$image:latest"
+          )
+          for target in "${tags[@]}"; do
+            docker tag "$local_image" "$target"
+            docker push "$target"
+          done
+          expected=
+          for target in "${tags[@]}"; do
+            digest=$(docker buildx imagetools inspect --raw "$target" | sha256sum | cut -d' ' -f1)
+            if [ -z "$expected" ]; then expected=$digest; fi
+            test "$digest" = "$expected"
+          done
+      - name: Publish GitHub release notes without binary assets
+        if: steps.prep.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.prep.outputs.tag }}
+        run: |
+          notes="$RUNNER_TEMP/elpis-release-notes.md"
+          test -f "$notes"
+          test "$(sha256sum "$notes" | cut -d' ' -f1)" = \
+            '${{ steps.prep.outputs.release_notes_sha256 }}'
+          if gh release view '${{ steps.prep.outputs.tag }}' >/dev/null 2>&1; then
+            test "$(gh release view '${{ steps.prep.outputs.tag }}' --json assets --jq '.assets | length')" = 0
+            gh release edit '${{ steps.prep.outputs.tag }}' --notes-file "$notes"
+          else
+            gh release create '${{ steps.prep.outputs.tag }}' \
+              --verify-tag \
+              --title 'Elpis ${{ steps.prep.outputs.tag }}' \
+              --notes-file "$notes"
+          fi
+          release_json="$RUNNER_TEMP/elpis-release.json"
+          remote_notes="$RUNNER_TEMP/elpis-release-remote-notes.md"
+          gh api 'repos/${{ github.repository }}/releases/tags/${{ steps.prep.outputs.tag }}' >"$release_json"
+          node -e '
+            const fs = require("node:fs");
+            const [source, target] = process.argv.slice(1);
+            const release = JSON.parse(fs.readFileSync(source, "utf8"));
+            if (release.draft || release.prerelease || release.tag_name !== process.env.TAG) process.exit(1);
+            if (!Array.isArray(release.assets) || release.assets.length !== 0) process.exit(1);
+            if (typeof release.body !== "string") process.exit(1);
+            fs.writeFileSync(target, release.body, { encoding: "utf8", mode: 0o600 });
+          ' "$release_json" "$remote_notes"
+          cmp -s "$notes" "$remote_notes"
