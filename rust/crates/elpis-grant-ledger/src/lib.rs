@@ -3,7 +3,8 @@
 //! GrantLedger owns both authentication trust and the wall clock. Its only admission
 //! input is an untrusted payload/signature pair plus the local binding to check. Successful
 //! admission durably inserts the exact signed grant and advances the issuer sequence in one
-//! BEGIN IMMEDIATE transaction before minting a non-cloneable ActiveGrant.
+//! BEGIN IMMEDIATE transaction before minting a non-cloneable ActiveGrant. Terminal operations
+//! consume that authority into one append-only receipt bound to the same durable admission.
 
 #![forbid(unsafe_code)]
 
@@ -19,9 +20,37 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 // "ELGL", deliberately distinct from the transport, effect, and other ledgers.
 const APPLICATION_ID: i64 = 0x454c_474c;
+const ADMISSION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "grant_state"),
+    ("table", "grants"),
+    ("trigger", "grant_rows_immutable"),
+    ("trigger", "grant_rows_no_delete"),
+    ("trigger", "grant_state_no_delete"),
+    ("trigger", "grant_state_sequence_monotonic"),
+];
+const TERMINAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "grant_terminal_events"),
+    ("trigger", "grant_terminal_events_immutable"),
+    ("trigger", "grant_terminal_events_no_delete"),
+];
+const TERMINAL_SCHEMA_SQL: &str = "CREATE TABLE grant_terminal_events (
+    event_seq INTEGER PRIMARY KEY CHECK (event_seq > 0),
+    grant_id TEXT NOT NULL UNIQUE REFERENCES grants(grant_id),
+    payload_sha256 BLOB NOT NULL
+        CHECK (typeof(payload_sha256) = 'blob' AND length(payload_sha256) = 32),
+    kind TEXT NOT NULL CHECK (kind IN ('completed', 'revoked', 'flagged')),
+    occurred_at_unix_s BLOB NOT NULL
+        CHECK (typeof(occurred_at_unix_s) = 'blob' AND length(occurred_at_unix_s) = 8)
+);
+CREATE TRIGGER grant_terminal_events_immutable
+BEFORE UPDATE ON grant_terminal_events
+BEGIN SELECT RAISE(ABORT, 'grant terminal events are immutable'); END;
+CREATE TRIGGER grant_terminal_events_no_delete
+BEFORE DELETE ON grant_terminal_events
+BEGIN SELECT RAISE(ABORT, 'grant terminal events are append-only'); END;";
 
 /// Conventional filename for the daemon-private grant ledger.
 pub const GRANT_LEDGER_DATABASE_FILENAME: &str = "grants.sqlite";
@@ -50,6 +79,7 @@ impl Default for GrantLedgerLimits {
 pub struct ActiveGrant {
     grant: GrantV1,
     payload_sha256: [u8; 32],
+    ledger_binding: [u8; 32],
 }
 
 impl ActiveGrant {
@@ -59,6 +89,65 @@ impl ActiveGrant {
 
     pub fn payload_sha256(&self) -> &[u8; 32] {
         &self.payload_sha256
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantTerminalKind {
+    Completed,
+    Revoked,
+    Flagged,
+}
+
+impl GrantTerminalKind {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Revoked => "revoked",
+            Self::Flagged => "flagged",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self, GrantLedgerError> {
+        match value {
+            "completed" => Ok(Self::Completed),
+            "revoked" => Ok(Self::Revoked),
+            "flagged" => Ok(Self::Flagged),
+            _ => Err(GrantLedgerError::Corrupt(
+                "stored terminal kind is invalid".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantTerminalReceipt {
+    event_seq: u64,
+    grant_id: String,
+    payload_sha256: [u8; 32],
+    kind: GrantTerminalKind,
+    occurred_at_unix_s: u64,
+}
+
+impl GrantTerminalReceipt {
+    pub fn event_seq(&self) -> u64 {
+        self.event_seq
+    }
+
+    pub fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+
+    pub fn payload_sha256(&self) -> &[u8; 32] {
+        &self.payload_sha256
+    }
+
+    pub fn kind(&self) -> GrantTerminalKind {
+        self.kind
+    }
+
+    pub fn occurred_at_unix_s(&self) -> u64 {
+        self.occurred_at_unix_s
     }
 }
 
@@ -93,6 +182,7 @@ impl Clock {
 #[derive(Debug)]
 pub struct GrantLedger {
     path: PathBuf,
+    ledger_binding: [u8; 32],
     connection: Connection,
     verifier: GrantVerifier,
     limits: GrantLedgerLimits,
@@ -133,6 +223,7 @@ impl GrantLedger {
     ) -> Result<Self, GrantLedgerError> {
         validate_limits(limits)?;
         let path = path.to_path_buf();
+        let ledger_binding = sha256(path.as_os_str().as_encoded_bytes());
         let existed = prepare_path(&path)?;
         let mut connection = Connection::open_with_flags(
             &path,
@@ -165,6 +256,7 @@ impl GrantLedger {
         validate_integrity(&connection, &verifier, limits)?;
         Ok(Self {
             path,
+            ledger_binding,
             connection,
             verifier,
             limits,
@@ -311,6 +403,101 @@ impl GrantLedger {
         Ok(ActiveGrant {
             grant,
             payload_sha256,
+            ledger_binding: self.ledger_binding,
+        })
+    }
+
+    pub fn complete(
+        &mut self,
+        active: ActiveGrant,
+    ) -> Result<GrantTerminalReceipt, GrantLedgerError> {
+        self.terminate(active, GrantTerminalKind::Completed)
+    }
+
+    pub fn revoke(
+        &mut self,
+        active: ActiveGrant,
+    ) -> Result<GrantTerminalReceipt, GrantLedgerError> {
+        self.terminate(active, GrantTerminalKind::Revoked)
+    }
+
+    pub fn flag(&mut self, active: ActiveGrant) -> Result<GrantTerminalReceipt, GrantLedgerError> {
+        self.terminate(active, GrantTerminalKind::Flagged)
+    }
+
+    pub fn terminal_receipt(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<GrantTerminalReceipt>, GrantLedgerError> {
+        load_terminal_receipt(&self.connection, grant_id)
+    }
+
+    fn terminate(
+        &mut self,
+        active: ActiveGrant,
+        kind: GrantTerminalKind,
+    ) -> Result<GrantTerminalReceipt, GrantLedgerError> {
+        let ActiveGrant {
+            grant,
+            payload_sha256,
+            ledger_binding,
+        } = active;
+        if ledger_binding != self.ledger_binding {
+            return Err(GrantLedgerError::WrongLedger);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.clock.now_unix_s()?;
+        let stored_hash = transaction
+            .query_row(
+                "SELECT payload_sha256 FROM grants WHERE grant_id = ?1",
+                params![grant.grant_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .ok_or(GrantLedgerError::UnknownActiveGrant)?;
+        if stored_hash.as_slice() != payload_sha256 {
+            return Err(GrantLedgerError::ActiveGrantMismatch);
+        }
+        if load_terminal_receipt(&transaction, &grant.grant_id)?.is_some() {
+            return Err(GrantLedgerError::AlreadyTerminal);
+        }
+        let (count, last): (i64, Option<i64>) = transaction.query_row(
+            "SELECT COUNT(*), MAX(event_seq) FROM grant_terminal_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let next = match (count, last) {
+            (0, None) => 1_i64,
+            (count, Some(last)) if count > 0 && count == last => last
+                .checked_add(1)
+                .ok_or(GrantLedgerError::TerminalSequenceExhausted)?,
+            _ => {
+                return Err(GrantLedgerError::Corrupt(
+                    "terminal event sequence is not gap-free".into(),
+                ));
+            }
+        };
+        transaction.execute(
+            "INSERT INTO grant_terminal_events (
+                event_seq, grant_id, payload_sha256, kind, occurred_at_unix_s
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                next,
+                grant.grant_id,
+                payload_sha256.as_slice(),
+                kind.as_db(),
+                u64_blob(now).as_slice(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(GrantTerminalReceipt {
+            event_seq: next as u64,
+            grant_id: grant.grant_id,
+            payload_sha256,
+            kind,
+            occurred_at_unix_s: now,
         })
     }
 }
@@ -349,6 +536,16 @@ pub enum GrantLedgerError {
     StorageLimit,
     #[error("grant ledger row changed concurrently")]
     ConcurrentChange,
+    #[error("active grant belongs to another ledger")]
+    WrongLedger,
+    #[error("active grant is not present in this ledger")]
+    UnknownActiveGrant,
+    #[error("active grant payload does not match its durable admission")]
+    ActiveGrantMismatch,
+    #[error("grant already has a terminal receipt")]
+    AlreadyTerminal,
+    #[error("terminal receipt sequence is exhausted")]
+    TerminalSequenceExhausted,
 }
 
 fn validate_limits(limits: GrantLedgerLimits) -> Result<(), GrantLedgerError> {
@@ -379,6 +576,60 @@ fn decode_u64(bytes: Vec<u8>, field: &str) -> Result<u64, GrantLedgerError> {
 
 fn to_i64(value: u64) -> Result<i64, GrantLedgerError> {
     i64::try_from(value).map_err(|_| GrantLedgerError::InvalidLimits)
+}
+
+fn decode_hash(bytes: Vec<u8>, field: &str) -> Result<[u8; 32], GrantLedgerError> {
+    bytes
+        .try_into()
+        .map_err(|_| GrantLedgerError::Corrupt(format!("{field} is not a SHA-256 digest")))
+}
+
+fn load_terminal_receipt(
+    connection: &Connection,
+    grant_id: &str,
+) -> Result<Option<GrantTerminalReceipt>, GrantLedgerError> {
+    let raw = connection
+        .query_row(
+            "SELECT event.event_seq, event.grant_id, event.payload_sha256, event.kind,
+                    event.occurred_at_unix_s, grant.payload_sha256
+             FROM grant_terminal_events AS event
+             LEFT JOIN grants AS grant ON grant.grant_id = event.grant_id
+             WHERE event.grant_id = ?1",
+            params![grant_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((event_seq, grant_id, payload_sha256, kind, occurred_at, grant_hash)) = raw else {
+        return Ok(None);
+    };
+    let event_seq = u64::try_from(event_seq)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| GrantLedgerError::Corrupt("terminal event sequence is invalid".into()))?;
+    let payload_sha256 = decode_hash(payload_sha256, "terminal payload hash")?;
+    let grant_hash = grant_hash
+        .ok_or_else(|| GrantLedgerError::Corrupt("terminal admission is missing".into()))?;
+    if payload_sha256 != decode_hash(grant_hash, "grant payload hash")? {
+        return Err(GrantLedgerError::Corrupt(
+            "terminal receipt does not match its admission".into(),
+        ));
+    }
+    Ok(Some(GrantTerminalReceipt {
+        event_seq,
+        grant_id,
+        payload_sha256,
+        kind: GrantTerminalKind::from_db(&kind)?,
+        occurred_at_unix_s: decode_u64(occurred_at, "terminal occurrence time")?,
+    }))
 }
 
 fn accounted_bytes(
@@ -569,7 +820,7 @@ fn run_quick_check(connection: &Connection) -> Result<(), GrantLedgerError> {
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != 0 && version != SCHEMA_VERSION {
+    if !matches!(version, 0 | 1 | SCHEMA_VERSION) {
         return Err(GrantLedgerError::Corrupt(format!(
             "unsupported schema version {version}"
         )));
@@ -654,6 +905,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
              )
              BEGIN SELECT RAISE(ABORT, 'issuer sequence must advance'); END;",
         )?;
+        transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
         transaction.execute(
             "INSERT INTO grant_state (
                 singleton, issuer_id, last_issuer_seq, grant_count, total_bytes
@@ -664,20 +916,34 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), GrantLedgerError
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
     }
+    if version == 1 {
+        require_application_id(connection)?;
+        require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(TERMINAL_SCHEMA_SQL)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
+    }
 
+    require_application_id(connection)?;
+    require_schema_objects(connection, ADMISSION_SCHEMA_OBJECTS)?;
+    require_schema_objects(connection, TERMINAL_SCHEMA_OBJECTS)
+}
+
+fn require_application_id(connection: &Connection) -> Result<(), GrantLedgerError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     if application_id != APPLICATION_ID {
         return Err(GrantLedgerError::Corrupt("wrong application id".into()));
     }
-    for (kind, name) in [
-        ("table", "grant_state"),
-        ("table", "grants"),
-        ("trigger", "grant_rows_immutable"),
-        ("trigger", "grant_rows_no_delete"),
-        ("trigger", "grant_state_no_delete"),
-        ("trigger", "grant_state_sequence_monotonic"),
-    ] {
+    Ok(())
+}
+
+fn require_schema_objects(
+    connection: &Connection,
+    objects: &[(&str, &str)],
+) -> Result<(), GrantLedgerError> {
+    for (kind, name) in objects {
         let present: i64 = connection.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
             params![kind, name],
@@ -811,6 +1077,61 @@ fn validate_integrity(
             "grant state counters do not match stored rows".into(),
         ));
     }
+    validate_terminal_integrity(connection, state.grant_count)
+}
+
+fn validate_terminal_integrity(
+    connection: &Connection,
+    grant_count: u64,
+) -> Result<(), GrantLedgerError> {
+    let mut statement = connection.prepare(
+        "SELECT event.event_seq, event.grant_id, event.payload_sha256, event.kind,
+                event.occurred_at_unix_s, grant.payload_sha256
+         FROM grant_terminal_events AS event
+         JOIN grants AS grant ON grant.grant_id = event.grant_id
+         ORDER BY event.event_seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut expected = 1_u64;
+    let mut seen_grants = std::collections::HashSet::new();
+    while let Some(row) = rows.next()? {
+        let event_seq: i64 = row.get(0)?;
+        let event_seq = u64::try_from(event_seq)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                GrantLedgerError::Corrupt("terminal event sequence is invalid".into())
+            })?;
+        if event_seq != expected {
+            return Err(GrantLedgerError::Corrupt(
+                "terminal event sequence is not gap-free".into(),
+            ));
+        }
+        let grant_id: String = row.get(1)?;
+        if !seen_grants.insert(grant_id) {
+            return Err(GrantLedgerError::Corrupt(
+                "grant has more than one terminal receipt".into(),
+            ));
+        }
+        let event_hash = decode_hash(row.get(2)?, "terminal payload hash")?;
+        let kind: String = row.get(3)?;
+        GrantTerminalKind::from_db(&kind)?;
+        decode_u64(row.get(4)?, "terminal occurrence time")?;
+        let grant_hash = decode_hash(row.get(5)?, "grant payload hash")?;
+        if event_hash != grant_hash {
+            return Err(GrantLedgerError::Corrupt(
+                "terminal receipt does not match its admission".into(),
+            ));
+        }
+        expected = expected
+            .checked_add(1)
+            .ok_or(GrantLedgerError::TerminalSequenceExhausted)?;
+    }
+    if expected.saturating_sub(1) > grant_count {
+        return Err(GrantLedgerError::Corrupt(
+            "terminal receipt count exceeds grant count".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -907,6 +1228,19 @@ mod tests {
 
     fn default_test_ledger() -> TestLedger {
         test_ledger(GrantLedgerLimits::default())
+    }
+
+    fn admit(ledger: &mut GrantLedger, id: &str, sequence: u64) -> ActiveGrant {
+        let (payload, signature) = signed(&grant(id, sequence));
+        ledger.admit(&payload, &signature, &binding()).unwrap()
+    }
+
+    fn duplicate_active(active: &ActiveGrant) -> ActiveGrant {
+        ActiveGrant {
+            grant: active.grant.clone(),
+            payload_sha256: active.payload_sha256,
+            ledger_binding: active.ledger_binding,
+        }
     }
 
     #[test]
@@ -1172,6 +1506,293 @@ mod tests {
             GrantLedger::open_with_clock(
                 &test.path,
                 verifier_with_seed(9),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn terminal_receipts_are_gap_free_append_only_and_queryable() {
+        let mut test = default_test_ledger();
+        let complete = admit(&mut test.ledger, "grant-complete", 1);
+        let revoke = admit(&mut test.ledger, "grant-revoke", 2);
+        let flag = admit(&mut test.ledger, "grant-flag", 3);
+
+        let receipts = [
+            test.ledger.complete(complete).unwrap(),
+            test.ledger.revoke(revoke).unwrap(),
+            test.ledger.flag(flag).unwrap(),
+        ];
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| (receipt.event_seq(), receipt.kind()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, GrantTerminalKind::Completed),
+                (2, GrantTerminalKind::Revoked),
+                (3, GrantTerminalKind::Flagged),
+            ]
+        );
+        for receipt in &receipts {
+            assert_eq!(receipt.occurred_at_unix_s(), NOW);
+            assert_eq!(
+                test.ledger.terminal_receipt(receipt.grant_id()).unwrap(),
+                Some(receipt.clone())
+            );
+        }
+        let connection = Connection::open(&test.path).unwrap();
+        assert!(
+            connection
+                .execute("DELETE FROM grant_terminal_events", [])
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE grant_terminal_events SET kind = 'flagged' WHERE event_seq = 1",
+                    [],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_tokens_reject_wrong_ledger_mismatch_and_duplicate_settlement() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-complete", 1);
+        let duplicate = duplicate_active(&active);
+        test.ledger.complete(active).unwrap();
+        assert!(matches!(
+            test.ledger.revoke(duplicate),
+            Err(GrantLedgerError::AlreadyTerminal)
+        ));
+
+        let active = admit(&mut test.ledger, "grant-wrong-ledger", 2);
+        let mut other = default_test_ledger();
+        assert!(matches!(
+            other.ledger.complete(active),
+            Err(GrantLedgerError::WrongLedger)
+        ));
+
+        let active = admit(&mut test.ledger, "grant-mismatch", 3);
+        let forged = ActiveGrant {
+            grant: active.grant.clone(),
+            payload_sha256: [0x55; 32],
+            ledger_binding: active.ledger_binding,
+        };
+        assert!(matches!(
+            test.ledger.complete(forged),
+            Err(GrantLedgerError::ActiveGrantMismatch)
+        ));
+    }
+
+    #[test]
+    fn concurrent_duplicate_terminal_tokens_settle_exactly_once() {
+        use std::sync::{Arc, Barrier};
+
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-race", 1);
+        let duplicate = duplicate_active(&active);
+        let mut other = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            match test.ledger.complete(active) {
+                Ok(receipt) => Some(receipt.kind()),
+                Err(GrantLedgerError::AlreadyTerminal) => None,
+                Err(error) => panic!("unexpected first terminal result: {error}"),
+            }
+        });
+        let second = std::thread::spawn(move || {
+            barrier.wait();
+            match other.revoke(duplicate) {
+                Ok(receipt) => Some(receipt.kind()),
+                Err(GrantLedgerError::AlreadyTerminal) => None,
+                Err(error) => panic!("unexpected second terminal result: {error}"),
+            }
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_some()).count(), 1);
+        assert!(results.contains(&None));
+    }
+
+    #[test]
+    fn terminal_persistence_failure_rolls_back_event_and_consumes_call_token() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-failure", 1);
+        test.ledger
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_terminal_insert
+                 BEFORE INSERT ON grant_terminal_events
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal failure'); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            test.ledger.complete(active),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        assert_eq!(test.ledger.terminal_receipt("grant-failure").unwrap(), None);
+        test.ledger
+            .connection
+            .execute_batch("DROP TRIGGER fail_terminal_insert")
+            .unwrap();
+        let next = admit(&mut test.ledger, "grant-next", 2);
+        assert_eq!(test.ledger.complete(next).unwrap().event_seq(), 1);
+    }
+
+    #[test]
+    fn schema_v1_migrates_transactionally_without_weakening_admission_rows() {
+        let mut test = default_test_ledger();
+        let active = admit(&mut test.ledger, "grant-v1", 1);
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER grant_terminal_events_immutable;
+                 DROP TRIGGER grant_terminal_events_no_delete;
+                 DROP TABLE grant_terminal_events;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut migrated = GrantLedger::open_with_clock(
+            &test.path,
+            verifier(),
+            GrantLedgerLimits::default(),
+            Clock::Fixed(NOW),
+        )
+        .unwrap();
+        assert_eq!(migrated.complete(active).unwrap().event_seq(), 1);
+        let version: i64 = migrated
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            migrated
+                .connection
+                .execute(
+                    "UPDATE grants SET issuer_id = 'other' WHERE grant_id = 'grant-v1'",
+                    [],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn schema_v1_migration_failure_rolls_back_table_and_version() {
+        let test = default_test_ledger();
+        let path = test.path.clone();
+        drop(test.ledger);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER grant_terminal_events_immutable;
+                 DROP TRIGGER grant_terminal_events_no_delete;
+                 DROP TABLE grant_terminal_events;
+                 CREATE TABLE migration_collision (id INTEGER);
+                 CREATE TRIGGER grant_terminal_events_immutable
+                 BEFORE INSERT ON migration_collision BEGIN SELECT 1; END;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Sql(_))
+        ));
+        let connection = Connection::open(&path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let terminal_table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'grant_terminal_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((version, terminal_table), (1, 0));
+    }
+
+    #[test]
+    fn schema_v1_wrong_application_is_rejected_before_migration() {
+        let test = default_test_ledger();
+        let path = test.path.clone();
+        drop(test.ledger);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER grant_terminal_events_immutable;
+                 DROP TRIGGER grant_terminal_events_no_delete;
+                 DROP TABLE grant_terminal_events;
+                 PRAGMA user_version = 1;
+                 PRAGMA application_id = 0;",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &path,
+                verifier(),
+                GrantLedgerLimits::default(),
+                Clock::Fixed(NOW),
+            ),
+            Err(GrantLedgerError::Corrupt(_))
+        ));
+        let connection = Connection::open(&path).unwrap();
+        let terminal_objects: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'grant_terminal_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_objects, 0);
+    }
+
+    #[test]
+    fn reopen_rejects_a_forged_terminal_sequence_gap() {
+        let mut test = default_test_ledger();
+        let first = admit(&mut test.ledger, "grant-first", 1);
+        let second = admit(&mut test.ledger, "grant-second", 2);
+        test.ledger.complete(first).unwrap();
+        test.ledger.complete(second).unwrap();
+        drop(test.ledger);
+        let connection = Connection::open(&test.path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER grant_terminal_events_no_delete;
+                 DELETE FROM grant_terminal_events WHERE event_seq = 1;
+                 CREATE TRIGGER grant_terminal_events_no_delete
+                 BEFORE DELETE ON grant_terminal_events
+                 BEGIN SELECT RAISE(ABORT, 'grant terminal events are append-only'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            GrantLedger::open_with_clock(
+                &test.path,
+                verifier(),
                 GrantLedgerLimits::default(),
                 Clock::Fixed(NOW),
             ),
