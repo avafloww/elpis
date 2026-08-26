@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    KubernetesResource, SensitiveProfileRef, sha256_hex, validate_id, validate_lower_hex_64,
+    KubernetesResource, NetworkMethod, SensitiveProfileRef, sha256_hex, validate_id,
+    validate_lower_hex_64,
 };
 
 pub const SENSITIVE_LOCAL_PROFILE_VERSION: u32 = 1;
@@ -30,6 +31,13 @@ const MAX_KUBERNETES_LABELS: usize = 32;
 const MAX_CONFIG_MAP_DATA_ENTRIES: usize = 64;
 const MAX_CONFIG_MAP_DATA_BYTES: usize = 8 * 1024;
 const MAX_SERVICE_PORTS: usize = 16;
+const MAX_NETWORK_ADDRESSES: usize = 16;
+const MAX_NETWORK_TLS_PINS: usize = 8;
+const MAX_NETWORK_ROUTES: usize = 32;
+const MAX_NETWORK_CONTENT_TYPES: usize = 3;
+const MAX_NETWORK_PATH_BYTES: usize = 256;
+const MAX_NETWORK_REQUEST_BYTES: u64 = 1024 * 1024;
+const MAX_NETWORK_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +151,17 @@ pub enum SensitiveLocalProfileKindV1 {
         cluster_profile: SensitiveProfileRef,
         templates: Vec<KubernetesWriteTemplate>,
     },
+    NetworkEndpoint {
+        origin: NetworkHttpsOrigin,
+        address_policy: NetworkAddressPolicy,
+        tls: NetworkTlsPolicy,
+        routes: Vec<NetworkRouteRule>,
+        request_headers: NetworkRequestHeaderPolicy,
+        response_encoding: NetworkResponseEncodingPolicy,
+        redirects: NetworkRedirectPolicy,
+        max_request_bytes: u64,
+        max_response_bytes: u64,
+    },
 }
 
 impl SensitiveLocalProfileKindV1 {
@@ -243,6 +262,38 @@ impl SensitiveLocalProfileKindV1 {
                     .validate()
                     .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
                 validate_kubernetes_write_templates(templates)
+            }
+            Self::NetworkEndpoint {
+                origin,
+                address_policy,
+                tls,
+                routes,
+                max_request_bytes,
+                max_response_bytes,
+                ..
+            } => {
+                origin.validate()?;
+                address_policy.validate()?;
+                tls.validate()?;
+                if tls.server_name != origin.host
+                    || origin
+                        .host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| {
+                            !address_policy.addresses.contains(&address.to_string())
+                        })
+                {
+                    return Err(SensitiveLocalProfileError::InvalidField);
+                }
+                validate_network_routes(routes)?;
+                if *max_request_bytes == 0
+                    || *max_request_bytes > MAX_NETWORK_REQUEST_BYTES
+                    || *max_response_bytes == 0
+                    || *max_response_bytes > MAX_NETWORK_RESPONSE_BYTES
+                {
+                    return Err(SensitiveLocalProfileError::InvalidField);
+                }
+                Ok(())
             }
         }
     }
@@ -598,6 +649,182 @@ pub enum KubernetesServiceProtocol {
     Tcp,
 }
 
+/// One exact HTTPS origin; paths, queries, userinfo, and credentials cannot be encoded here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkHttpsOrigin {
+    pub protocol: NetworkProtocol,
+    pub host: String,
+    pub port: u16,
+}
+
+impl NetworkHttpsOrigin {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_network_host(&self.host)?;
+        if self.port == 0 {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProtocol {
+    Https,
+}
+
+/// DNS may discover addresses, but only a direct no-proxy connection to this exact set is valid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAddressPolicy {
+    pub mode: NetworkAddressMode,
+    pub addresses: Vec<String>,
+}
+
+impl NetworkAddressPolicy {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        if self.addresses.is_empty()
+            || self.addresses.len() > MAX_NETWORK_ADDRESSES
+            || self.addresses.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(SensitiveLocalProfileError::NonCanonicalList);
+        }
+        for value in &self.addresses {
+            let address = value
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+            if address.to_string() != *value {
+                return Err(SensitiveLocalProfileError::InvalidField);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAddressMode {
+    DirectConnectOnlyPinnedNoProxy,
+}
+
+/// TLS must satisfy hostname/validity checks and both exact pin families, without fallback trust.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkTlsPolicy {
+    pub server_name: String,
+    pub minimum_version: NetworkTlsVersion,
+    pub verification: NetworkTlsVerification,
+    /// Exact accepted trust-anchor certificate DER hashes; no other trust store is consulted.
+    pub ca_certificate_sha256: Vec<String>,
+    /// Exact accepted leaf SubjectPublicKeyInfo hashes.
+    pub leaf_spki_sha256: Vec<String>,
+}
+
+impl NetworkTlsPolicy {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_network_host(&self.server_name)?;
+        validate_network_hashes(&self.ca_certificate_sha256)?;
+        validate_network_hashes(&self.leaf_spki_sha256)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkTlsVersion {
+    Tls13,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkTlsVerification {
+    PinnedCaAndLeafSpkiWithHostnameAndValidity,
+}
+
+/// One method at one canonical segment-prefix, with exact request/response body grammar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRouteRule {
+    pub path_prefix: String,
+    pub method: NetworkMethod,
+    pub query: NetworkQueryPolicy,
+    pub request_body: NetworkRequestBodyPolicy,
+    pub response_content_types: Vec<NetworkContentType>,
+}
+
+impl NetworkRouteRule {
+    fn key(&self) -> String {
+        format!("{}:{}", self.path_prefix, network_method_name(self.method))
+    }
+
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        validate_network_path_prefix(&self.path_prefix)?;
+        self.request_body.validate()?;
+        validate_network_content_types(&self.response_content_types)?;
+        if matches!(self.method, NetworkMethod::Get | NetworkMethod::Head)
+            && !matches!(self.request_body, NetworkRequestBodyPolicy::Forbidden)
+        {
+            return Err(SensitiveLocalProfileError::InvalidField);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NetworkRequestBodyPolicy {
+    Forbidden,
+    Allowed {
+        content_types: Vec<NetworkContentType>,
+    },
+}
+
+impl NetworkRequestBodyPolicy {
+    fn validate(&self) -> Result<(), SensitiveLocalProfileError> {
+        match self {
+            Self::Forbidden => Ok(()),
+            Self::Allowed { content_types } => validate_network_content_types(content_types),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NetworkContentType {
+    #[serde(rename = "application/json")]
+    ApplicationJson,
+    #[serde(rename = "application/octet-stream")]
+    ApplicationOctetStream,
+    #[serde(rename = "text/plain;charset=utf-8")]
+    TextPlainUtf8,
+}
+
+/// A future evaluator generates `Host` from the origin and may add only a validated Content-Type.
+/// Caller-supplied authorization, cookie, proxy, forwarding, override, and custom headers are absent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRequestHeaderPolicy {
+    GeneratedHostAndAllowedContentTypeOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkQueryPolicy {
+    Forbidden,
+}
+
+/// Reject compressed content so the response cap applies to the exact received body bytes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkResponseEncodingPolicy {
+    IdentityOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRedirectPolicy {
+    Deny,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SensitiveLocalProfileError {
     #[error("sensitive local profile version is unsupported")]
@@ -612,6 +839,108 @@ pub enum SensitiveLocalProfileError {
     InvalidField,
     #[error("sensitive local profile lists must be nonempty, sorted, and unique")]
     NonCanonicalList,
+}
+
+fn validate_network_routes(routes: &[NetworkRouteRule]) -> Result<(), SensitiveLocalProfileError> {
+    if routes.is_empty() || routes.len() > MAX_NETWORK_ROUTES {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    let mut previous_key = None;
+    let mut prefixes = Vec::new();
+    for route in routes {
+        route.validate()?;
+        let key = route.key();
+        if previous_key
+            .as_ref()
+            .is_some_and(|value: &String| value >= &key)
+        {
+            return Err(SensitiveLocalProfileError::NonCanonicalList);
+        }
+        previous_key = Some(key);
+        if !prefixes.contains(&route.path_prefix) {
+            for prefix in &prefixes {
+                if network_path_contains(prefix, &route.path_prefix)
+                    || network_path_contains(&route.path_prefix, prefix)
+                {
+                    return Err(SensitiveLocalProfileError::InvalidField);
+                }
+            }
+            prefixes.push(route.path_prefix.clone());
+        }
+    }
+    Ok(())
+}
+
+fn validate_network_hashes(values: &[String]) -> Result<(), SensitiveLocalProfileError> {
+    if values.is_empty()
+        || values.len() > MAX_NETWORK_TLS_PINS
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    for value in values {
+        validate_lower_hex_64(value).map_err(|_| SensitiveLocalProfileError::InvalidField)?;
+    }
+    Ok(())
+}
+
+fn validate_network_content_types(
+    values: &[NetworkContentType],
+) -> Result<(), SensitiveLocalProfileError> {
+    if values.is_empty()
+        || values.len() > MAX_NETWORK_CONTENT_TYPES
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SensitiveLocalProfileError::NonCanonicalList);
+    }
+    Ok(())
+}
+
+fn validate_network_host(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if let Ok(address) = value.parse::<std::net::IpAddr>() {
+        if address.to_string() == value {
+            return Ok(());
+        }
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    validate_kubernetes_dns_name(value)
+}
+
+fn validate_network_path_prefix(value: &str) -> Result<(), SensitiveLocalProfileError> {
+    if value.len() < 2
+        || value.len() > MAX_NETWORK_PATH_BYTES
+        || !value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("//")
+        || value.contains(['\\', '?', '#', '%'])
+        || value.split('/').skip(1).any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+        })
+    {
+        return Err(SensitiveLocalProfileError::InvalidField);
+    }
+    Ok(())
+}
+
+fn network_path_contains(prefix: &str, path: &str) -> bool {
+    path.len() > prefix.len()
+        && path.starts_with(prefix)
+        && path.as_bytes().get(prefix.len()) == Some(&b'/')
+}
+
+fn network_method_name(method: NetworkMethod) -> &'static str {
+    match method {
+        NetworkMethod::Delete => "delete",
+        NetworkMethod::Get => "get",
+        NetworkMethod::Head => "head",
+        NetworkMethod::Post => "post",
+        NetworkMethod::Put => "put",
+    }
 }
 
 fn validate_path_limits(
@@ -1816,6 +2145,435 @@ mod tests {
                     value["profile"]["templates"][0]["ports"][0]["protocol"] =
                         serde_json::json!("udp")
                 }
+            }
+            assert_eq!(
+                CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
+                Err(SensitiveLocalProfileError::InvalidEncoding)
+            );
+        }
+    }
+
+    fn network_profile() -> SensitiveLocalProfileV1 {
+        SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "package-index-endpoint".into(),
+            profile: SensitiveLocalProfileKindV1::NetworkEndpoint {
+                origin: NetworkHttpsOrigin {
+                    protocol: NetworkProtocol::Https,
+                    host: "api.example.test".into(),
+                    port: 443,
+                },
+                address_policy: NetworkAddressPolicy {
+                    mode: NetworkAddressMode::DirectConnectOnlyPinnedNoProxy,
+                    addresses: vec!["198.51.100.10".into(), "2001:db8::10".into()],
+                },
+                tls: NetworkTlsPolicy {
+                    server_name: "api.example.test".into(),
+                    minimum_version: NetworkTlsVersion::Tls13,
+                    verification:
+                        NetworkTlsVerification::PinnedCaAndLeafSpkiWithHostnameAndValidity,
+                    ca_certificate_sha256: vec!["a".repeat(64), "b".repeat(64)],
+                    leaf_spki_sha256: vec!["c".repeat(64)],
+                },
+                routes: vec![
+                    NetworkRouteRule {
+                        path_prefix: "/v1/artifacts".into(),
+                        method: NetworkMethod::Get,
+                        query: NetworkQueryPolicy::Forbidden,
+                        request_body: NetworkRequestBodyPolicy::Forbidden,
+                        response_content_types: vec![NetworkContentType::ApplicationOctetStream],
+                    },
+                    NetworkRouteRule {
+                        path_prefix: "/v1/artifacts".into(),
+                        method: NetworkMethod::Post,
+                        query: NetworkQueryPolicy::Forbidden,
+                        request_body: NetworkRequestBodyPolicy::Allowed {
+                            content_types: vec![NetworkContentType::ApplicationJson],
+                        },
+                        response_content_types: vec![NetworkContentType::ApplicationJson],
+                    },
+                    NetworkRouteRule {
+                        path_prefix: "/v1/status".into(),
+                        method: NetworkMethod::Get,
+                        query: NetworkQueryPolicy::Forbidden,
+                        request_body: NetworkRequestBodyPolicy::Forbidden,
+                        response_content_types: vec![NetworkContentType::ApplicationJson],
+                    },
+                ],
+                request_headers: NetworkRequestHeaderPolicy::GeneratedHostAndAllowedContentTypeOnly,
+                response_encoding: NetworkResponseEncodingPolicy::IdentityOnly,
+                redirects: NetworkRedirectPolicy::Deny,
+                max_request_bytes: 64 * 1024,
+                max_response_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn network_endpoint_canonical_bytes_and_hash_are_frozen() {
+        const GOLDEN: &str = r#"{"version":1,"id":"package-index-endpoint","profile":{"kind":"network_endpoint","origin":{"protocol":"https","host":"api.example.test","port":443},"address_policy":{"mode":"direct_connect_only_pinned_no_proxy","addresses":["198.51.100.10","2001:db8::10"]},"tls":{"server_name":"api.example.test","minimum_version":"tls13","verification":"pinned_ca_and_leaf_spki_with_hostname_and_validity","ca_certificate_sha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"leaf_spki_sha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]},"routes":[{"path_prefix":"/v1/artifacts","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/octet-stream"]},{"path_prefix":"/v1/artifacts","method":"post","query":"forbidden","request_body":{"mode":"allowed","content_types":["application/json"]},"response_content_types":["application/json"]},{"path_prefix":"/v1/status","method":"get","query":"forbidden","request_body":{"mode":"forbidden"},"response_content_types":["application/json"]}],"request_headers":"generated_host_and_allowed_content_type_only","response_encoding":"identity_only","redirects":"deny","max_request_bytes":65536,"max_response_bytes":1048576}}"#;
+        const GOLDEN_SHA256: &str =
+            "7bb0a6bb5d1cdf3955aabbe00172c8166db4fc28f70b616dd68221c25e16d460";
+
+        let bytes = network_profile().canonical_bytes().unwrap();
+        assert_eq!(bytes, GOLDEN.as_bytes());
+        let parsed = CanonicalSensitiveLocalProfile::parse(&bytes).unwrap();
+        assert_eq!(parsed.profile(), &network_profile());
+        assert_eq!(parsed.profile_sha256(), GOLDEN_SHA256);
+        assert_eq!(parsed.profile_sha256(), hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn network_origin_and_connect_addresses_are_exact_and_canonical() {
+        for host in [
+            "https://api.example.test",
+            "user@api.example.test",
+            "*.example.test",
+            "API.example.test",
+            "api.example.test.",
+            "2001:0db8::10",
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { origin, .. } = &mut value.profile
+            {
+                origin.host = host.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { origin, .. } = &mut value.profile {
+            origin.port = 0;
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { tls, .. } = &mut value.profile {
+            tls.server_name = "other.example.test".into();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        for addresses in [
+            vec![],
+            vec!["2001:db8::10".into(), "198.51.100.10".into()],
+            vec!["198.51.100.10".into(), "198.51.100.10".into()],
+            vec!["not-an-ip".into()],
+            vec!["2001:0db8::10".into()],
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { address_policy, .. } =
+                &mut value.profile
+            {
+                address_policy.addresses = addresses;
+            }
+            assert!(matches!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+                    | Err(SensitiveLocalProfileError::InvalidField)
+            ));
+        }
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint {
+            origin,
+            address_policy,
+            tls,
+            ..
+        } = &mut value.profile
+        {
+            origin.host = "192.0.2.1".into();
+            tls.server_name = "192.0.2.1".into();
+            address_policy.addresses = vec!["198.51.100.10".into()];
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { address_policy, .. } =
+            &mut value.profile
+        {
+            address_policy.addresses = (0..=MAX_NETWORK_ADDRESSES)
+                .map(|index| format!("192.0.2.{index}"))
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+    }
+
+    #[test]
+    fn network_tls_requires_exact_dual_pins_and_no_fallback() {
+        for target in ["ca", "spki"] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { tls, .. } = &mut value.profile {
+                if target == "ca" {
+                    tls.ca_certificate_sha256.clear();
+                } else {
+                    tls.leaf_spki_sha256.clear();
+                }
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        for pins in [
+            vec!["b".repeat(64), "a".repeat(64)],
+            vec!["a".repeat(64), "a".repeat(64)],
+            vec!["A".repeat(64)],
+            vec!["a".repeat(63)],
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { tls, .. } = &mut value.profile {
+                tls.ca_certificate_sha256 = pins;
+            }
+            assert!(matches!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+                    | Err(SensitiveLocalProfileError::InvalidField)
+            ));
+        }
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { tls, .. } = &mut value.profile {
+            tls.ca_certificate_sha256 = (0..=MAX_NETWORK_TLS_PINS)
+                .map(|index| format!("{index:064x}"))
+                .collect();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+    }
+
+    #[test]
+    fn network_routes_are_exact_sorted_nonoverlapping_and_bounded() {
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile {
+            routes.reverse();
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile {
+            routes.push(routes.last().unwrap().clone());
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::NonCanonicalList)
+        );
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile {
+            *routes = vec![
+                NetworkRouteRule {
+                    path_prefix: "/v1/admin".into(),
+                    method: NetworkMethod::Get,
+                    query: NetworkQueryPolicy::Forbidden,
+                    request_body: NetworkRequestBodyPolicy::Forbidden,
+                    response_content_types: vec![NetworkContentType::ApplicationJson],
+                },
+                NetworkRouteRule {
+                    path_prefix: "/v1".into(),
+                    method: NetworkMethod::Get,
+                    query: NetworkQueryPolicy::Forbidden,
+                    request_body: NetworkRequestBodyPolicy::Forbidden,
+                    response_content_types: vec![NetworkContentType::ApplicationJson],
+                },
+            ];
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        for count in [0, MAX_NETWORK_ROUTES + 1] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile
+            {
+                *routes = (0..count)
+                    .map(|index| NetworkRouteRule {
+                        path_prefix: format!("/route-{index:02}"),
+                        method: NetworkMethod::Get,
+                        query: NetworkQueryPolicy::Forbidden,
+                        request_body: NetworkRequestBodyPolicy::Forbidden,
+                        response_content_types: vec![NetworkContentType::ApplicationJson],
+                    })
+                    .collect();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+    }
+
+    #[test]
+    fn network_path_body_content_types_and_byte_caps_fail_closed() {
+        for path in [
+            "/",
+            "v1/status",
+            "/v1/status/",
+            "/v1//status",
+            "/v1/../status",
+            "/v1/%2e%2e/status",
+            "/v1/status?all=true",
+            "/v1/status#fragment",
+            "/v1\\status",
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile
+            {
+                routes[2].path_prefix = path.into();
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile {
+            routes[2].path_prefix = format!("/{}", "a".repeat(MAX_NETWORK_PATH_BYTES));
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        let mut value = network_profile();
+        if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile {
+            routes[0].request_body = NetworkRequestBodyPolicy::Allowed {
+                content_types: vec![NetworkContentType::ApplicationJson],
+            };
+        }
+        assert_eq!(
+            value.validate(),
+            Err(SensitiveLocalProfileError::InvalidField)
+        );
+
+        for target in ["request", "response"] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile
+            {
+                if target == "request" {
+                    routes[1].request_body = NetworkRequestBodyPolicy::Allowed {
+                        content_types: vec![],
+                    };
+                } else {
+                    routes[1].response_content_types.clear();
+                }
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        for content_types in [
+            vec![
+                NetworkContentType::ApplicationOctetStream,
+                NetworkContentType::ApplicationJson,
+            ],
+            vec![
+                NetworkContentType::ApplicationJson,
+                NetworkContentType::ApplicationJson,
+            ],
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint { routes, .. } = &mut value.profile
+            {
+                routes[1].response_content_types = content_types;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::NonCanonicalList)
+            );
+        }
+
+        for (request, response) in [
+            (0, 1024),
+            (MAX_NETWORK_REQUEST_BYTES + 1, 1024),
+            (1024, 0),
+            (1024, MAX_NETWORK_RESPONSE_BYTES + 1),
+        ] {
+            let mut value = network_profile();
+            if let SensitiveLocalProfileKindV1::NetworkEndpoint {
+                max_request_bytes,
+                max_response_bytes,
+                ..
+            } = &mut value.profile
+            {
+                *max_request_bytes = request;
+                *max_response_bytes = response;
+            }
+            assert_eq!(
+                value.validate(),
+                Err(SensitiveLocalProfileError::InvalidField)
+            );
+        }
+    }
+
+    #[test]
+    fn network_encoding_rejects_protocol_trust_redirect_query_header_and_credentials_widening() {
+        let bytes = network_profile().canonical_bytes().unwrap();
+        for mutation in [
+            "http",
+            "any_address",
+            "tls12",
+            "system_trust",
+            "follow_redirect",
+            "query",
+            "headers",
+            "gzip",
+            "patch",
+            "wildcard_content_type",
+            "userinfo",
+            "credential",
+            "url_path",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match mutation {
+                "http" => value["profile"]["origin"]["protocol"] = serde_json::json!("http"),
+                "any_address" => {
+                    value["profile"]["address_policy"]["mode"] = serde_json::json!("any")
+                }
+                "tls12" => value["profile"]["tls"]["minimum_version"] = serde_json::json!("tls12"),
+                "system_trust" => {
+                    value["profile"]["tls"]["verification"] = serde_json::json!("system_trust")
+                }
+                "follow_redirect" => value["profile"]["redirects"] = serde_json::json!("follow"),
+                "query" => value["profile"]["routes"][0]["query"] = serde_json::json!("allowed"),
+                "headers" => {
+                    value["profile"]["request_headers"] = serde_json::json!("caller_supplied")
+                }
+                "gzip" => value["profile"]["response_encoding"] = serde_json::json!("gzip"),
+                "patch" => value["profile"]["routes"][0]["method"] = serde_json::json!("patch"),
+                "wildcard_content_type" => {
+                    value["profile"]["routes"][0]["response_content_types"][0] =
+                        serde_json::json!("*/*")
+                }
+                "userinfo" => {
+                    value["profile"]["origin"]["userinfo"] = serde_json::json!("user:pass")
+                }
+                "credential" => value["profile"]["credential"] = serde_json::json!("secret"),
+                _ => value["profile"]["origin"]["path"] = serde_json::json!("/admin"),
             }
             assert_eq!(
                 CanonicalSensitiveLocalProfile::parse(&serde_json::to_vec(&value).unwrap()),
