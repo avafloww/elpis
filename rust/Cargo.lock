@@ -257,6 +257,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpis-confinement"
+version = "0.7.1"
+dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "elpis-coordinator"
 version = "0.7.1"
 dependencies = [

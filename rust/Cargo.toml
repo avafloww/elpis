@@ -13,6 +13,7 @@ members = [
   "crates/elpis-runtime",
   "crates/elpis-identity",
   "crates/elpis-link",
+  "crates/elpis-confinement",
   "xtask",
 ]
 resolver = "3"
