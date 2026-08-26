@@ -436,6 +436,15 @@ impl NextChildCustody {
     pub(super) fn child(&self) -> &RawChild {
         &self.child
     }
+
+    /// Called only after waitid(P_PIDFD) returned an exact terminal disposition.
+    /// This prevents RawChild::drop from attempting a second reap.
+    pub(super) fn disarm_after_exact_reap(&mut self) {
+        self.child.custody.take();
+        self.child.control.take();
+        self.child.receipt.take();
+        self.child.exec_status.take();
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AbortError {
@@ -602,9 +611,11 @@ fn abort_reap_pidfd(pidfd: RawFd) -> Result<(), AbortError> {
                 0,
             )
         };
-        if r >= 0 || syscall_errno(r) == libc::ECHILD {
+        if r >= 0 {
             return Ok(());
         }
+        // ECHILD is not terminal evidence without an earlier exact proof that
+        // SIGCHLD disposition auto-reaps; raw custody has no such proof.
         if syscall_errno(r) != libc::EINTR {
             return Err(AbortError {
                 errno: syscall_errno(r),
@@ -637,9 +648,10 @@ fn abort_reap_pid(pid: libc::pid_t) -> Result<(), AbortError> {
                 0,
             )
         };
-        if r == pid as i64 || syscall_errno(r) == libc::ECHILD {
+        if r == pid as i64 {
             return Ok(());
         }
+        // As with P_PIDFD, ECHILD alone cannot prove this exact start reaped.
         if r < 0 && syscall_errno(r) == libc::EINTR {
             continue;
         }

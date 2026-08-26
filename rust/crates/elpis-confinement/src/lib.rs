@@ -13,6 +13,8 @@ mod bootstrap_helper;
 mod filesystem;
 mod namespace_child;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod proc_child;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod raw_clone;
 
 #[doc(hidden)]
