@@ -3,7 +3,8 @@ use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use elpis_grants::{
-    CanonicalSensitivePolicy, CapabilityBudget, SensitiveCapabilityRule, SensitivePolicyV1,
+    AuthenticatedNarrowingPermit, CanonicalSensitivePolicy, CapabilityBudget, NarrowingOutcomeV1,
+    SensitiveCapabilityRule, SensitiveClassifierPolicy, SensitivePolicyV1,
 };
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
@@ -11,6 +12,7 @@ use thiserror::Error;
 use super::{
     ActiveGrant, Clock, GrantLedger, decode_hash, load_terminal_receipt, lower_hex_hash, sha256,
 };
+use crate::effect_authorization::DeterministicSensitiveEffectAuthorization;
 
 const SESSION_BINDING_DOMAIN: &[u8] = b"elpis-sensitive-session-v1\0";
 
@@ -28,6 +30,14 @@ pub enum SensitiveSessionDenied {
     #[error("sensitive session budget is denied")]
     BudgetDenied,
 }
+
+/// Deliberately generic closure returned for every classifier-admission failure.
+///
+/// Guest-facing code must not distinguish a malformed, stale, replayed, expired, revoked,
+/// flagged, unavailable, or over-budget classifier decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("sensitive authority is revoked")]
+pub struct SensitiveAuthorityRevoked;
 
 /// Maximum resources reserved permanently before one run can start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,21 +94,32 @@ impl SessionClock {
         }
     }
 
-    fn is_live(&self, wall_deadline_unix_s: u64) -> Result<bool, SensitiveSessionDenied> {
+    fn now_unix_s(&self) -> Result<u64, SensitiveSessionDenied> {
         match self {
+            Self::System { .. } => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| SensitiveSessionDenied::Unavailable)
+                .map(|duration| duration.as_secs()),
+            #[cfg(test)]
+            Self::Fixed(now) => Ok(*now),
+        }
+    }
+
+    fn live_now(&self, wall_deadline_unix_s: u64) -> Result<Option<u64>, SensitiveSessionDenied> {
+        let wall_now = self.now_unix_s()?;
+        let live = match self {
             Self::System {
                 started_at,
                 max_elapsed,
-            } => {
-                let wall_now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| SensitiveSessionDenied::Unavailable)?
-                    .as_secs();
-                Ok(started_at.elapsed() < *max_elapsed && wall_now < wall_deadline_unix_s)
-            }
+            } => started_at.elapsed() < *max_elapsed && wall_now < wall_deadline_unix_s,
             #[cfg(test)]
-            Self::Fixed(now) => Ok(*now < wall_deadline_unix_s),
-        }
+            Self::Fixed(_) => wall_now < wall_deadline_unix_s,
+        };
+        Ok(live.then_some(wall_now))
+    }
+
+    fn is_live(&self, wall_deadline_unix_s: u64) -> Result<bool, SensitiveSessionDenied> {
+        self.live_now(wall_deadline_unix_s).map(|now| now.is_some())
     }
 }
 
@@ -110,6 +131,8 @@ pub struct SensitiveSession {
     lease_deadline_unix_s: u64,
     clock: SessionClock,
     terminal_reason: Option<SensitiveSessionTerminalReason>,
+    last_narrowing_issuer_seq: u64,
+    classifier_flagged: bool,
     runs_used: u32,
     effects_used: u32,
     wall_ms_reserved: u64,
@@ -168,6 +191,16 @@ impl SensitiveSession {
 
     pub fn terminal_reason(&self) -> Option<SensitiveSessionTerminalReason> {
         self.terminal_reason
+    }
+
+    /// Host-only classifier sequence state for diagnostics and control handling.
+    pub fn last_narrowing_issuer_seq(&self) -> u64 {
+        self.last_narrowing_issuer_seq
+    }
+
+    /// Host-only disposition. Guest-facing closure remains SensitiveAuthorityRevoked.
+    pub fn classifier_flagged(&self) -> bool {
+        self.classifier_flagged
     }
 
     pub(super) fn ledger_binding(&self) -> [u8; 32] {
@@ -243,6 +276,103 @@ impl SensitiveSession {
             run_index,
             reservation,
         })
+    }
+
+    /// Consumes exact deterministic authorization and authenticated classifier evidence to mint
+    /// one live effect permit. Every failure terminalizes the session behind one generic error.
+    pub fn admit_classifier_narrowing(
+        &mut self,
+        run: &SensitiveRunPermit,
+        authorization: DeterministicSensitiveEffectAuthorization,
+        permit: AuthenticatedNarrowingPermit,
+    ) -> Result<SensitiveEffectPermit, SensitiveAuthorityRevoked> {
+        let admitted = self.admit_classifier_narrowing_inner(run, authorization, permit);
+        if admitted.is_err() && self.terminal_reason.is_none() {
+            self.terminal_reason = Some(SensitiveSessionTerminalReason::Unavailable);
+        }
+        admitted
+    }
+
+    fn admit_classifier_narrowing_inner(
+        &mut self,
+        run: &SensitiveRunPermit,
+        authorization: DeterministicSensitiveEffectAuthorization,
+        permit: AuthenticatedNarrowingPermit,
+    ) -> Result<SensitiveEffectPermit, SensitiveAuthorityRevoked> {
+        if self.terminal_reason.is_some() {
+            return Err(SensitiveAuthorityRevoked);
+        }
+        let now = self
+            .clock
+            .live_now(self.lease_deadline_unix_s)
+            .map_err(|_| SensitiveAuthorityRevoked)?
+            .ok_or(SensitiveAuthorityRevoked)?;
+        let claim = permit.permit();
+        let (classifier_model_ref, classifier_policy_sha256) =
+            match &self.policy.policy().classifier {
+                SensitiveClassifierPolicy::Required {
+                    model_ref,
+                    policy_sha256,
+                    ..
+                } => (model_ref.as_str(), policy_sha256.as_str()),
+                SensitiveClassifierPolicy::Disabled => return Err(SensitiveAuthorityRevoked),
+            };
+        let grant_payload_sha256 = encode_lower_hex(&self.active_grant.payload_sha256);
+        let session_binding_sha256 = encode_lower_hex(&self.binding);
+        let policy_sha256 = self.policy.policy_sha256();
+
+        // Authentication only proves the signature over caller-supplied expectations. Admission
+        // independently re-derives every mutable live-session and deterministic-proof binding.
+        if run.session_binding != self.binding
+            || claim.grant_id.as_str() != self.active_grant.grant.grant_id.as_str()
+            || claim.executor_id.as_str() != self.active_grant.grant.executor_id.as_str()
+            || claim.policy_epoch != self.active_grant.grant.policy_epoch
+            || claim.grant_payload_sha256.as_str() != grant_payload_sha256.as_str()
+            || claim.session_binding_sha256.as_str() != session_binding_sha256.as_str()
+            || claim.policy_sha256.as_str() != policy_sha256
+            || claim.effect_request_sha256.as_str() != authorization.request_sha256()
+            || claim.classifier_model_ref.as_str() != classifier_model_ref
+            || claim.classifier_policy_sha256.as_str() != classifier_policy_sha256
+            || authorization.policy_profile_id() != self.policy.policy().profile_id.as_str()
+            || authorization.policy_sha256() != policy_sha256
+            || claim.issued_at_unix_s > now
+            || now >= claim.expires_at_unix_s
+            || claim.issuer_seq <= self.last_narrowing_issuer_seq
+        {
+            return Err(SensitiveAuthorityRevoked);
+        }
+
+        // Burn a valid issuer sequence before interpreting its outcome. A cloned authenticated
+        // permit can therefore never authorize a second request in this live session.
+        self.last_narrowing_issuer_seq = claim.issuer_seq;
+        match claim.outcome {
+            NarrowingOutcomeV1::Allow => {
+                let dimensions = authorization.dimensions();
+                let reservation = SensitiveEffectReservation {
+                    capability_index: authorization.capability_index(),
+                    request_bytes: dimensions.request_bytes,
+                    max_result_bytes: dimensions.max_result_bytes,
+                    io_read_bytes: dimensions.io_read_bytes,
+                    io_write_bytes: dimensions.io_write_bytes,
+                    artifact_count: dimensions.artifact_count,
+                    artifact_bytes: dimensions.artifact_bytes,
+                };
+                self.mint_effect_permit(run, reservation)
+                    .map_err(|_| SensitiveAuthorityRevoked)
+            }
+            NarrowingOutcomeV1::Revoke => Err(SensitiveAuthorityRevoked),
+            NarrowingOutcomeV1::Flag => {
+                self.classifier_flagged = true;
+                Err(SensitiveAuthorityRevoked)
+            }
+        }
+    }
+
+    /// Terminalizes classifier timeout, provider failure, or malformed provider output without
+    /// recording a malicious classifier disposition.
+    pub fn classifier_unavailable<T>(&mut self) -> Result<T, SensitiveAuthorityRevoked> {
+        self.terminal_reason = Some(SensitiveSessionTerminalReason::Unavailable);
+        Err(SensitiveAuthorityRevoked)
     }
 
     pub fn mint_effect_permit(
@@ -467,6 +597,8 @@ impl GrantLedger {
             lease_deadline_unix_s,
             clock: SessionClock::from_ledger(&self.clock, lease_deadline_unix_s - now),
             terminal_reason: None,
+            last_narrowing_issuer_seq: 0,
+            classifier_flagged: false,
             runs_used: 0,
             effects_used: 0,
             wall_ms_reserved: 0,
@@ -570,6 +702,16 @@ fn validate_artifact_reservation(
     Ok(())
 }
 
+fn encode_lower_hex(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 fn session_binding(
     ledger_binding: [u8; 32],
     payload_sha256: [u8; 32],
@@ -586,16 +728,25 @@ fn session_binding(
 #[cfg(test)]
 mod tests {
     use elpis_grants::{
-        GRANT_VERSION, GrantBinding, GrantMode, GrantV1, GrantVerifier, GuestPersistence,
-        SENSITIVE_POLICY_VERSION, SensitiveBudgets, SensitiveClassifierPolicy,
-        SensitivePersistencePolicy, SensitiveProfileRef, TerminalControlActionV1,
-        TerminalControlV1, TerminalControlVerifier, signature_input,
+        ArtifactNamePolicy, ArtifactWriteMode, CanonicalSensitiveEffectRequest,
+        CanonicalSensitiveProfileRegistry, ClassifierTrustDomain, EntryOwnershipPolicy,
+        EntryWritePolicy, FilesystemRootBinding, GRANT_VERSION, GrantBinding, GrantMode, GrantV1,
+        GrantVerifier, GuestPersistence, HardLinkPolicy, MountCrossingPolicy,
+        NARROWING_PERMIT_VERSION, NarrowingOutcomeV1, NarrowingPermitBinding, NarrowingPermitV1,
+        NarrowingPermitVerifier, SENSITIVE_EFFECT_REQUEST_VERSION, SENSITIVE_LOCAL_PROFILE_VERSION,
+        SENSITIVE_POLICY_VERSION, SENSITIVE_PROFILE_REGISTRY_VERSION, SensitiveBudgets,
+        SensitiveClassifierPolicy, SensitiveEffectRequestV1, SensitiveEffectV1,
+        SensitiveLocalProfileKindV1, SensitiveLocalProfileV1, SensitivePersistencePolicy,
+        SensitiveProfileRef, SensitiveProfileRegistryEntryV1, SensitiveProfileRegistryV1,
+        SpecialFilePolicy, SymlinkPolicy, TerminalControlActionV1, TerminalControlV1,
+        TerminalControlVerifier, narrowing_permit_signature_input, signature_input,
         terminal_control_signature_input,
     };
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::effect_authorization::authorize_sensitive_effect;
     use crate::{GrantLedgerLimits, u64_blob};
 
     const NOW: u64 = 1_700_000_100;
@@ -841,6 +992,346 @@ mod tests {
             artifact_count: u32::from(artifact_bytes > 0),
             artifact_bytes,
         }
+    }
+
+    fn classified_inputs() -> (
+        CanonicalSensitivePolicy,
+        CanonicalSensitiveProfileRegistry,
+        CanonicalSensitiveEffectRequest,
+    ) {
+        let profile = SensitiveLocalProfileV1 {
+            version: SENSITIVE_LOCAL_PROFILE_VERSION,
+            id: "artifact-destination-v1".into(),
+            profile: SensitiveLocalProfileKindV1::ArtifactCustody {
+                root: FilesystemRootBinding {
+                    canonical_root: "/srv/elpis-classified-artifacts".into(),
+                    expected_mount_id: 7,
+                    expected_device: 8,
+                    expected_inode: 9,
+                    expected_owner_uid: 1000,
+                    expected_owner_gid: 1000,
+                    expected_permissions: 0o700,
+                    entry_ownership: EntryOwnershipPolicy::RootOwnerOnly,
+                    entry_writes: EntryWritePolicy::OwnerOnly,
+                    symlinks: SymlinkPolicy::Deny,
+                    hard_links: HardLinkPolicy::DenyMultipleLinks,
+                    mount_crossing: MountCrossingPolicy::Deny,
+                    special_files: SpecialFilePolicy::RegularFilesAndDirectoriesOnly,
+                },
+                write_mode: ArtifactWriteMode::CreateOnly,
+                name_policy: ArtifactNamePolicy::OpaqueUuid,
+                created_file_mode: 0o600,
+                max_files: 2,
+                max_single_file_bytes: 40,
+                max_total_bytes: 50,
+            },
+        };
+        let entry = SensitiveProfileRegistryEntryV1::from_profile(profile).unwrap();
+        let destination_profile = SensitiveProfileRef {
+            id: entry.profile.id.clone(),
+            sha256: entry.profile_sha256.clone(),
+        };
+        let registry_value = SensitiveProfileRegistryV1 {
+            version: SENSITIVE_PROFILE_REGISTRY_VERSION,
+            profiles: vec![entry],
+        };
+        let registry =
+            CanonicalSensitiveProfileRegistry::parse(&registry_value.canonical_bytes().unwrap())
+                .unwrap();
+        let policy_value = SensitivePolicyV1 {
+            version: SENSITIVE_POLICY_VERSION,
+            profile_id: "sensitive-v1".into(),
+            capabilities: vec![SensitiveCapabilityRule::ArtifactExport {
+                destination_profile,
+                max_artifact_bytes: 40,
+                budget: CapabilityBudget {
+                    max_calls: 2,
+                    max_request_bytes: 16_384,
+                    max_result_bytes: 40,
+                },
+            }],
+            budgets: SensitiveBudgets {
+                max_runs: 2,
+                max_effects: 2,
+                max_lease_s: 30,
+                max_wall_ms: 1_000,
+                max_cpu_ms: 800,
+                max_rss_bytes: 1_048_576,
+                max_io_read_bytes: 100,
+                max_io_write_bytes: 100,
+                max_scratch_bytes: 2_048,
+            },
+            classifier: SensitiveClassifierPolicy::Required {
+                trust_domain: ClassifierTrustDomain::ApprovedProvider,
+                profile_id: "classifier-profile-v1".into(),
+                model_ref: "provider/model-v1".into(),
+                policy_sha256: HASH_A.into(),
+                timeout_ms: 1_000,
+                max_source_bytes: 4_096,
+                max_effect_bytes: 4_096,
+            },
+            persistence: SensitivePersistencePolicy {
+                guest_persistence: GuestPersistence::Disabled,
+                max_artifacts: 2,
+                max_total_artifact_bytes: 50,
+            },
+        };
+        let policy =
+            CanonicalSensitivePolicy::parse(&policy_value.canonical_bytes().unwrap()).unwrap();
+        let request_value = SensitiveEffectRequestV1 {
+            version: SENSITIVE_EFFECT_REQUEST_VERSION,
+            effect: SensitiveEffectV1::ArtifactExport {
+                destination_profile_id: "artifact-destination-v1".into(),
+                artifact_name: "123e4567-e89b-12d3-a456-426614174000".into(),
+                content_sha256: HASH_B.into(),
+                content_bytes: 20,
+                max_result_bytes: 30,
+            },
+        };
+        let request =
+            CanonicalSensitiveEffectRequest::parse(&request_value.canonical_bytes().unwrap())
+                .unwrap();
+        (policy, registry, request)
+    }
+
+    fn classified_session(
+        fixture: &mut Fixture,
+        grant_id: &str,
+    ) -> (
+        SensitiveSession,
+        CanonicalSensitiveProfileRegistry,
+        CanonicalSensitiveEffectRequest,
+    ) {
+        let (policy, registry, request) = classified_inputs();
+        let policy_sha256 = policy.policy_sha256().to_owned();
+        let (_, active) = admit(&mut fixture.ledger, grant_id, 1, &policy_sha256, NOW + 60);
+        let session = fixture
+            .ledger
+            .begin_sensitive_session(active, policy)
+            .unwrap();
+        (session, registry, request)
+    }
+
+    fn narrowing_evidence(
+        session: &SensitiveSession,
+        effect_request_sha256: &str,
+        issuer_seq: u64,
+        outcome: NarrowingOutcomeV1,
+        issued_at_unix_s: u64,
+        expires_at_unix_s: u64,
+        session_binding_override: Option<&str>,
+    ) -> AuthenticatedNarrowingPermit {
+        let session_binding_sha256 = session_binding_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| encode_lower_hex(&session.binding));
+        let binding = NarrowingPermitBinding {
+            grant_id: session.active_grant.grant.grant_id.clone(),
+            grant_payload_sha256: encode_lower_hex(&session.active_grant.payload_sha256),
+            session_binding_sha256,
+            effect_request_sha256: effect_request_sha256.into(),
+            policy_sha256: session.policy.policy_sha256().into(),
+            classifier_model_ref: "provider/model-v1".into(),
+            classifier_policy_sha256: HASH_A.into(),
+        };
+        let permit = NarrowingPermitV1 {
+            version: NARROWING_PERMIT_VERSION,
+            permit_id: format!("permit-{issuer_seq}"),
+            issuer_id: "operator-1".into(),
+            issuer_seq,
+            executor_id: "executor-1".into(),
+            policy_epoch: 3,
+            grant_id: binding.grant_id.clone(),
+            grant_payload_sha256: binding.grant_payload_sha256.clone(),
+            session_binding_sha256: binding.session_binding_sha256.clone(),
+            effect_request_sha256: binding.effect_request_sha256.clone(),
+            policy_sha256: binding.policy_sha256.clone(),
+            classifier_model_ref: binding.classifier_model_ref.clone(),
+            classifier_policy_sha256: binding.classifier_policy_sha256.clone(),
+            outcome,
+            issued_at_unix_s,
+            expires_at_unix_s,
+            nonce: NONCE.into(),
+        };
+        let payload = permit.canonical_payload().unwrap();
+        let signature = key().sign(&narrowing_permit_signature_input(&payload).unwrap());
+        NarrowingPermitVerifier::new(
+            "operator-1",
+            key().public_key().as_ref(),
+            "executor-1",
+            3,
+            900,
+        )
+        .unwrap()
+        .authenticate(&payload, signature.as_ref(), &binding)
+        .unwrap()
+    }
+
+    #[test]
+    fn classifier_allow_mints_exact_authorized_dimensions_and_replay_revokes() {
+        let mut fixture = fixture(true);
+        let (mut session, registry, request) =
+            classified_session(&mut fixture, "grant-classifier-allow");
+        let run = session.mint_run_permit(run_reservation()).unwrap();
+        let authorization =
+            authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+        let expected = authorization.dimensions();
+        let evidence = narrowing_evidence(
+            &session,
+            authorization.request_sha256(),
+            1,
+            NarrowingOutcomeV1::Allow,
+            NOW,
+            NOW + 10,
+            None,
+        );
+        let replay = evidence.clone();
+        let effect = session
+            .admit_classifier_narrowing(&run, authorization, evidence)
+            .unwrap();
+        assert_eq!(effect.reservation().capability_index, 0);
+        assert_eq!(effect.reservation().request_bytes, expected.request_bytes);
+        assert_eq!(effect.reservation().artifact_bytes, expected.artifact_bytes);
+        assert_eq!(session.last_narrowing_issuer_seq(), 1);
+        assert!(!session.classifier_flagged());
+
+        let replay_authorization =
+            authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+        assert_eq!(
+            session.admit_classifier_narrowing(&run, replay_authorization, replay),
+            Err(SensitiveAuthorityRevoked)
+        );
+        assert_eq!(session.last_narrowing_issuer_seq(), 1);
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::Unavailable)
+        );
+    }
+
+    #[test]
+    fn caller_authenticated_wrong_binding_is_rederived_and_terminal() {
+        let mut fixture = fixture(true);
+        let (mut session, registry, request) =
+            classified_session(&mut fixture, "grant-classifier-binding");
+        let run = session.mint_run_permit(run_reservation()).unwrap();
+        let authorization =
+            authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+        let evidence = narrowing_evidence(
+            &session,
+            authorization.request_sha256(),
+            1,
+            NarrowingOutcomeV1::Allow,
+            NOW,
+            NOW + 10,
+            Some(HASH_D),
+        );
+        assert_eq!(
+            session.admit_classifier_narrowing(&run, authorization, evidence),
+            Err(SensitiveAuthorityRevoked)
+        );
+        assert_eq!(session.last_narrowing_issuer_seq(), 0);
+        assert!(!session.classifier_flagged());
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::Unavailable)
+        );
+    }
+
+    #[test]
+    fn higher_sequence_permit_for_another_request_cannot_cross_authorization() {
+        let mut fixture = fixture(true);
+        let (mut session, registry, request) =
+            classified_session(&mut fixture, "grant-classifier-request");
+        let run = session.mint_run_permit(run_reservation()).unwrap();
+        let authorization =
+            authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+        let evidence = narrowing_evidence(
+            &session,
+            HASH_D,
+            99,
+            NarrowingOutcomeV1::Allow,
+            NOW,
+            NOW + 10,
+            None,
+        );
+        assert_eq!(
+            session.admit_classifier_narrowing(&run, authorization, evidence),
+            Err(SensitiveAuthorityRevoked)
+        );
+        assert_eq!(session.last_narrowing_issuer_seq(), 0);
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::Unavailable)
+        );
+    }
+
+    #[test]
+    fn flag_and_revoke_advance_sequence_before_generic_closure() {
+        for (grant_id, outcome, flagged) in [
+            ("grant-classifier-revoke", NarrowingOutcomeV1::Revoke, false),
+            ("grant-classifier-flag", NarrowingOutcomeV1::Flag, true),
+        ] {
+            let mut fixture = fixture(true);
+            let (mut session, registry, request) = classified_session(&mut fixture, grant_id);
+            let run = session.mint_run_permit(run_reservation()).unwrap();
+            let authorization =
+                authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+            let evidence = narrowing_evidence(
+                &session,
+                authorization.request_sha256(),
+                7,
+                outcome,
+                NOW,
+                NOW + 10,
+                None,
+            );
+            assert_eq!(
+                session.admit_classifier_narrowing(&run, authorization, evidence),
+                Err(SensitiveAuthorityRevoked)
+            );
+            assert_eq!(session.last_narrowing_issuer_seq(), 7);
+            assert_eq!(session.classifier_flagged(), flagged);
+            assert_eq!(
+                session.terminal_reason(),
+                Some(SensitiveSessionTerminalReason::Unavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn expired_and_unavailable_classifier_paths_are_generic_and_unflagged() {
+        let mut expired_fixture = fixture(true);
+        let (mut session, registry, request) =
+            classified_session(&mut expired_fixture, "grant-classifier-expired");
+        let run = session.mint_run_permit(run_reservation()).unwrap();
+        let authorization =
+            authorize_sensitive_effect(&session.policy, &registry, &request).unwrap();
+        let evidence = narrowing_evidence(
+            &session,
+            authorization.request_sha256(),
+            1,
+            NarrowingOutcomeV1::Allow,
+            NOW - 10,
+            NOW,
+            None,
+        );
+        assert_eq!(
+            session.admit_classifier_narrowing(&run, authorization, evidence),
+            Err(SensitiveAuthorityRevoked)
+        );
+        assert!(!session.classifier_flagged());
+
+        let mut unavailable_fixture = fixture(true);
+        let (mut session, _, _) =
+            classified_session(&mut unavailable_fixture, "grant-classifier-unavailable");
+        assert_eq!(
+            session.classifier_unavailable::<()>(),
+            Err(SensitiveAuthorityRevoked)
+        );
+        assert!(!session.classifier_flagged());
+        assert_eq!(
+            session.terminal_reason(),
+            Some(SensitiveSessionTerminalReason::Unavailable)
+        );
     }
 
     #[test]
