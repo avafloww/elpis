@@ -114,7 +114,7 @@ export function buildPersonMemoryContent(
   const content = file
     ? `[person-memory — first appearance of ${person.author} in the current context]\n--- people/${file.slug}.md ---\n${file.raw.trim()}`
     : sameSlug
-      ? `[person-memory — first appearance of ${person.author} in the current context]\n(people/${slug}.md exists but is not linked to discord:${person.authorId}; profile withheld. Verify the identity before adding that id to its frontmatter.)`
+      ? `[person-memory — first appearance of ${person.author} in the current context]\n(people/${slug}.md exists but is not linked to discord:${person.authorId}; profile withheld. Do not add the id merely to silence this notice: person files are not world-scoped yet, so linking it can expose the whole profile wherever this Discord identity appears. Verify both identity and intended cross-world visibility first.)`
       : `[person-memory — first appearance of ${person.author} in the current context]\n(no people/ file yet for ${slug} — use elpis.memory.person('${slug}', '...') to start one)`;
   if (content.length <= PERSON_MEMORY_CONTENT_CAP) return content;
   const suffix = '\n[person-memory truncated to bound context growth]';

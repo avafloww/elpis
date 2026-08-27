@@ -82,6 +82,9 @@ test('person-memory renderer requires exact Discord id and withholds colliding n
   assert.doesNotMatch(collision, /PRIVATE_CLOVER_FACT/);
   assert.match(collision, /profile withheld/);
   assert.match(collision, /not linked to discord:999/);
+  assert.match(collision, /Do not add the id merely to silence this notice/);
+  assert.match(collision, /not world-scoped yet/);
+  assert.match(collision, /intended cross-world visibility/);
   assert.match(
     buildPersonMemoryContent(files, { authorId: '222', author: 'Clover' }),
     /PRIVATE_CLOVER_FACT/,
