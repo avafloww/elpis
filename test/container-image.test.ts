@@ -78,3 +78,52 @@ test('unified workflow publishes the current repository while PRs only build', (
   assert.match(workflow, /if: github\.event_name == 'pull_request'/);
   assert.match(workflow, /docker push "\$target"/);
 });
+
+test('resident image owns exactly the protocol workspace dependency', () => {
+  const docker = read('Dockerfile');
+  const dockerignore = read('.dockerignore');
+  const rootPackage = JSON.parse(read('package.json'));
+  const gatewayPackage = JSON.parse(read('packages/gateway/package.json'));
+  const lock = JSON.parse(read('package-lock.json'));
+
+  assert.equal(rootPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
+  assert.equal(
+    gatewayPackage.dependencies['@elpis/gateway-protocol'],
+    '1.0.0',
+  );
+  assert.equal(
+    gatewayPackage.scripts.pretest,
+    'npm run build --workspace @elpis/gateway-protocol',
+  );
+  assert.equal(
+    JSON.parse(read('packages/gateway-protocol/package.json')).engines.node,
+    rootPackage.engines.node,
+  );
+  assert.equal(
+    lock.packages['packages/gateway-protocol'].version,
+    '1.0.0',
+  );
+  assert.deepEqual(lock.packages['node_modules/@elpis/gateway-protocol'], {
+    resolved: 'packages/gateway-protocol',
+    link: true,
+  });
+  assert.match(
+    docker,
+    /COPY packages\/gateway-protocol\/package\.json \.\/packages\/gateway-protocol\/package\.json/,
+  );
+  assert.match(
+    docker,
+    /npm ci --legacy-peer-deps --workspace @elpis\/gateway-protocol --include-workspace-root/,
+  );
+  assert.match(
+    docker,
+    /npm prune --omit=dev --legacy-peer-deps --workspace @elpis\/gateway-protocol --include-workspace-root/,
+  );
+  assert.match(
+    docker,
+    /COPY --from=build[^\n]+packages\/gateway-protocol\/dist \.\/packages\/gateway-protocol\/dist/,
+  );
+  assert.doesNotMatch(docker, /COPY (?:--from=build[^\n]+ )?packages\/gateway(?:\s|\/)/);
+  assert.match(dockerignore, /^!packages\/gateway-protocol\/src\/\*\*$/m);
+  assert.doesNotMatch(dockerignore, /^!packages\/gateway\//m);
+});

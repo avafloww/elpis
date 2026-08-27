@@ -252,6 +252,12 @@ test('release planner derives patch and minor plans, preserves order, and deep-c
   versions['package-json'] = '9.9.9';
   assert.equal(patch.versionState['package-json'], '1.2.3');
   assert.ok(Object.isFrozen(RELEASE_OWNED_PATHS));
+  assert.equal(
+    RELEASE_OWNED_PATHS.includes(
+      'packages/gateway-protocol/package.json' as (typeof RELEASE_OWNED_PATHS)[number],
+    ),
+    false,
+  );
   assert.ok(Object.isFrozen(RELEASE_VERSION_SOURCES));
 
   const minor = planRelease('1.2.3', versionState('1.2.3'), [

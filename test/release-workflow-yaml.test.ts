@@ -120,6 +120,8 @@ test('workflow publishes one exact TypeScript image after guarded release refs',
   assert.match(text, /ELPIS_BUILD_DIRTY=false/);
   assert.match(text, /docker image inspect/);
   assert.match(text, /docker run --rm --entrypoint node/);
+  assert.match(text, /await import\('@elpis\/gateway-protocol'\)/);
+  assert.match(text, /existsSync\('\/opt\/elpis\/packages\/gateway'\)/);
   assert.match(text, /sha-\$\{\{ steps\.prep\.outputs\.short_sha \}\}/);
   assert.match(text, /docker push "\$target"/);
   assert.match(text, /imagetools inspect --raw/);

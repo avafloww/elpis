@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "rm -rf dist && tsc && npm run copy-assets && npm run build:console",
+    "build": "rm -rf dist && npm run build:gateway-protocol && tsc && npm run copy-assets && npm run build:console",
     "build:console": "tsc -p tsconfig.console.json && node scripts/build-console.mjs",
     "build:gateway": "npm run build:gateway-protocol && npm run build --workspace @elpis/gateway",
     "copy-assets": "rm -rf dist/console/public && mkdir -p dist/console/public && cp -r src/console/public/. dist/console/public/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js",
@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.5",
+    "@elpis/gateway-protocol": "1.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/cli": "^0.1.18",
     "acorn": "^8.15.0",

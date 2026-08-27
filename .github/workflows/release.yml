@@ -153,6 +153,9 @@ jobs:
             '${{ steps.prep.outputs.release_sha }}'
           test "$(docker run --rm --entrypoint node "$image" -e 'process.stdout.write(process.env.ELPIS_BUILD_TAG || "")')" = \
             '${{ steps.prep.outputs.tag }}'
+          docker run --rm --workdir /opt/elpis --entrypoint node "$image" \
+            --input-type=module -e \
+            "await import('@elpis/gateway-protocol'); const fs = await import('node:fs'); if (fs.existsSync('/opt/elpis/packages/gateway')) process.exit(1)"
       - name: Refetch and atomically publish release refs
         if: steps.prep.outputs.mode != 'none'
         run: |

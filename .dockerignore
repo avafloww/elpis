@@ -3,6 +3,12 @@
 !package-lock.json
 !tsconfig.json
 !tsconfig.console.json
+!packages/
+!packages/gateway-protocol/
+!packages/gateway-protocol/package.json
+!packages/gateway-protocol/tsconfig.json
+!packages/gateway-protocol/src/
+!packages/gateway-protocol/src/**
 !src/
 !src/**
 !bench/
