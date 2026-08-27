@@ -27,6 +27,8 @@ export interface BrowserApiMutationRoute {
   readonly policy: 'mutation';
   /** Optional exact verb for concrete routes; omitted adapters accept any mutation. */
   readonly method?: BrowserApiMutationMethod;
+  /** Reject before Origin/CSRF authorization when no public URL is configured. */
+  readonly requiresSetup?: true;
   handle(body: JsonObject, publicUrl: string | null): GatewayApiResult;
 }
 

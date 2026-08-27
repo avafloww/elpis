@@ -743,6 +743,8 @@ export class GatewayHttpService {
       )
         throw new HttpBoundaryError(405, 'method_not_allowed');
       publicUrl = this.#apiPublicUrl();
+      if (route.requiresSetup === true && publicUrl === null)
+        throw apiCallbackFailure(new GatewayApiError(409, 'setup_required'));
       // Configured mutation authorization deliberately precedes body handling.
       assertBrowserMutation(request, { publicUrl });
       body = await this.#readApiBody(request);

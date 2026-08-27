@@ -10,6 +10,7 @@ import {
   createNodeCredential,
   CSRF_COOKIE_NAME,
   CSRF_HEADER_NAME,
+  GatewayCredentialError,
   newGatewayInstanceId,
   openGatewayStore,
   type GatewayStore,
@@ -114,6 +115,25 @@ function json(response: { body: Buffer }): unknown {
   return JSON.parse(response.body.toString('utf8'));
 }
 
+function grantRequest(
+  port: number,
+  method: string,
+  requestPath = '/api/v1/enrollment-grants',
+  body = '{}',
+  headers: Record<string, string> = setupHeaders(FIRST),
+) {
+  return request(
+    port,
+    method,
+    requestPath,
+    {
+      ...headers,
+      'content-length': String(Buffer.byteLength(body)),
+    },
+    body,
+  );
+}
+
 test('state exposes the exact pre-setup wire and HEAD representation', async (t) => {
   const { port } = await fixture(t);
   const get = await request(port, 'GET', '/api/v1/state');
@@ -210,6 +230,188 @@ test('canonical setup succeeds and replacement authorizes against old origin', a
     revision: 2,
   });
   assert.equal(store.audit().length, 2);
+});
+
+test('enrollment grant creation requires completed setup before all other policy', async (t) => {
+  const { store, port } = await fixture(t);
+  const response = await grantRequest(
+    port,
+    'POST',
+    '/api/v1/enrollment-grants',
+    '{',
+    { 'content-type': 'application/json' },
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(json(response), { error: 'setup_required' });
+  assert.deepEqual(store.audit(), []);
+});
+
+test('enrollment grant bootstrap is bounded, exact, and useful only once', async (t) => {
+  const { store, port } = await fixture(t);
+  assert.equal(
+    (await putSetup(port, JSON.stringify({ publicUrl: FIRST }))).status,
+    200,
+  );
+  const setupAudit = JSON.stringify(store.audit());
+
+  for (const body of ['', '{', '[]', '{"ttlMs":600000}', '{"extra":false}']) {
+    const response = await grantRequest(port, 'POST', undefined, body);
+    assert.equal(response.status, 400, body);
+    assert.equal(JSON.stringify(store.audit()), setupAudit);
+  }
+  const deniedHeaders = [
+    setupHeaders('https://wrong.example', 'gateway.example'),
+    { ...setupHeaders(FIRST), [CSRF_HEADER_NAME]: 'B'.repeat(43) },
+  ];
+  for (const headers of deniedHeaders) {
+    const response = await grantRequest(
+      port,
+      'POST',
+      '/api/v1/enrollment-grants',
+      '{}',
+      headers,
+    );
+    assert.equal(response.status, 403);
+    assert.equal(JSON.stringify(store.audit()), setupAudit);
+  }
+
+  const response = await grantRequest(port, 'POST');
+  assert.equal(response.status, 201);
+  const serialized = response.body.toString('utf8');
+  const body = json(response) as {
+    format: string;
+    grant: { id: string; expiresAt: number };
+    bootstrapYaml: string;
+  };
+  assert.deepEqual(Object.keys(body), ['format', 'grant', 'bootstrapYaml']);
+  assert.deepEqual(Object.keys(body.grant), ['id', 'expiresAt']);
+  assert.equal(body.format, 'elpis-gateway-enrollment-v1');
+  assert.match(body.grant.id, /^[A-Za-z0-9_-]{22}$/);
+  const tokens = body.bootstrapYaml.match(
+    /ege1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/g,
+  );
+  assert.equal(tokens?.length, 1);
+  const token = tokens![0]!;
+  assert.equal(token.split('.')[1], body.grant.id);
+  assert.equal(serialized.split(token).length - 1, 1);
+  assert.equal(
+    body.bootstrapYaml,
+    `gateway:\n  url: ${JSON.stringify(FIRST)}\n  enrollment_token: ${JSON.stringify(token)}\n`,
+  );
+  assert.equal(body.bootstrapYaml.endsWith('\n'), true);
+  assert.ok(Buffer.byteLength(body.bootstrapYaml, 'utf8') <= 4096);
+
+  const createAudit = store
+    .audit()
+    .find((event) => event.action === 'gateway.enrollment-grant.create');
+  assert.ok(createAudit);
+  assert.equal(body.grant.expiresAt, createAudit.at + 600_000);
+  assert.deepEqual(createAudit.detail, { expiresAt: body.grant.expiresAt });
+  const secret = token.split('.')[2]!;
+  for (const value of [token, secret]) {
+    assert.equal(JSON.stringify(store.audit()).includes(value), false);
+    assert.equal(
+      (await request(port, 'GET', '/api/v1/state')).body
+        .toString('utf8')
+        .includes(value),
+      false,
+    );
+  }
+
+  const node = createNodeCredential();
+  const firstInstance = newGatewayInstanceId();
+  assert.deepEqual(
+    store.credentials.enroll({
+      grantToken: token,
+      instanceId: firstInstance,
+      displayName: 'Aster',
+      credentialId: node.id,
+      credentialVerifier: node.verifier,
+    }),
+    { instanceId: firstInstance, credentialId: node.id, replayed: false },
+  );
+  const otherNode = createNodeCredential();
+  assert.throws(
+    () =>
+      store.credentials.enroll({
+        grantToken: token,
+        instanceId: newGatewayInstanceId(),
+        displayName: 'Other',
+        credentialId: otherNode.id,
+        credentialVerifier: otherNode.verifier,
+      }),
+    (error: unknown) =>
+      error instanceof GatewayCredentialError && error.code === 'conflict',
+  );
+});
+
+test('enrollment grants revoke idempotently without token readback', async (t) => {
+  const { store, port } = await fixture(t);
+  assert.equal(
+    (await putSetup(port, JSON.stringify({ publicUrl: FIRST }))).status,
+    200,
+  );
+  const created = await grantRequest(port, 'POST');
+  const createdBody = json(created) as {
+    grant: { id: string };
+    bootstrapYaml: string;
+  };
+  const token = createdBody.bootstrapYaml.match(
+    /ege1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/,
+  )![0];
+  const route = `/api/v1/enrollment-grants/${createdBody.grant.id}`;
+  const auditBeforeInvalidBodies = store.audit().length;
+  for (const body of ['', '{', '{"extra":true}']) {
+    const response = await grantRequest(port, 'DELETE', route, body);
+    assert.equal(response.status, 400, body);
+    assert.equal(store.audit().length, auditBeforeInvalidBodies);
+  }
+
+  const revoked = await grantRequest(port, 'DELETE', route);
+  assert.equal(revoked.status, 200);
+  assert.deepEqual(json(revoked), {
+    format: 'elpis-gateway-enrollment-revoke-v1',
+    grant: { id: createdBody.grant.id, replayed: false },
+  });
+  const replay = await grantRequest(port, 'DELETE', route);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(json(replay), {
+    format: 'elpis-gateway-enrollment-revoke-v1',
+    grant: { id: createdBody.grant.id, replayed: true },
+  });
+  assert.throws(
+    () =>
+      store.credentials.enroll({
+        grantToken: token,
+        instanceId: newGatewayInstanceId(),
+        displayName: 'Revoked',
+        credentialId: createNodeCredential().id,
+        credentialVerifier: Buffer.alloc(32),
+      }),
+    (error: unknown) =>
+      error instanceof GatewayCredentialError && error.code === 'revoked',
+  );
+
+  const unknownId =
+    createdBody.grant.id === 'Z'.repeat(22) ? 'Y'.repeat(22) : 'Z'.repeat(22);
+  for (const id of ['short', unknownId]) {
+    const response = await grantRequest(
+      port,
+      'DELETE',
+      '/api/v1/enrollment-grants/' + id,
+    );
+    assert.equal(response.status, 404);
+    assert.equal(response.body.toString(), '{"error":"not_found"}');
+    assert.equal(response.body.toString().includes(id), false);
+  }
+  for (const method of ['GET', 'POST', 'PUT', 'PATCH'])
+    assert.equal((await request(port, method, route)).status, 405, method);
+  for (const method of ['GET', 'PUT', 'PATCH', 'DELETE'])
+    assert.equal(
+      (await request(port, method, '/api/v1/enrollment-grants')).status,
+      405,
+      method,
+    );
 });
 
 test('known paths yield core 405s while unknown API paths yield 404', async (t) => {

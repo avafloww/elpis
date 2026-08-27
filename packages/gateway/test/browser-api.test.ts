@@ -118,6 +118,36 @@ test('ordinary mutations authorize before body handling', async (t) => {
   assert.equal(handled, false);
 });
 
+test('setup-required mutations reject before Origin and body handling', async (t) => {
+  let handled = false;
+  const { port } = await start(
+    t,
+    {
+      match: () => ({
+        policy: 'mutation',
+        requiresSetup: true,
+        handle: () => {
+          handled = true;
+          return { status: 200, body: { ok: true } };
+        },
+      }),
+    },
+    () => null,
+  );
+  const response = await request(
+    port,
+    {
+      method: 'POST',
+      path: '/api/v1/write',
+      headers: { 'content-length': '1' },
+    },
+    '{',
+  );
+  assert.equal(response.status, 409);
+  assert.equal(response.body.toString(), '{"error":"setup_required"}');
+  assert.equal(handled, false);
+});
+
 test('setup parses and freezes an owned body before its candidate guard', async (t) => {
   const calls: string[] = [];
   let received: unknown;
