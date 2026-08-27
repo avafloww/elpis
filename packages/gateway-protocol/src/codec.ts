@@ -437,6 +437,9 @@ export const newConnectionId = (): ConnectionId =>
   randomId('egx1') as ConnectionId;
 export const newViewerId = (): ViewerId => randomId('egv1') as ViewerId;
 export const newRequestId = (): RequestId => randomId('egr1') as RequestId;
+export function isRequestId(value: unknown): value is RequestId {
+  return typeof value === 'string' && ID_PATTERNS.request.test(value);
+}
 
 export function isProtocolError(value: unknown): value is GatewayProtocolError {
   return value instanceof GatewayProtocolError;
