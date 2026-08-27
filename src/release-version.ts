@@ -182,13 +182,16 @@ function formatVersion(version: readonly bigint[]): string {
 export const RELEASE_VERSION_SOURCES = Object.freeze([
   'VERSION',
   'package-json',
+  'gateway-package-json',
   'package-lock-root',
   'package-lock-workspace',
+  'package-lock-gateway-workspace',
 ] as const);
 
 export const RELEASE_OWNED_PATHS = Object.freeze([
   'VERSION',
   'package.json',
+  'packages/gateway/package.json',
   'package-lock.json',
 ] as const);
 
@@ -453,8 +456,11 @@ function cloneVersionState(versions: ReleaseVersionState): ReleaseVersionState {
   return {
     VERSION: versions.VERSION,
     'package-json': versions['package-json'],
+    'gateway-package-json': versions['gateway-package-json'],
     'package-lock-root': versions['package-lock-root'],
     'package-lock-workspace': versions['package-lock-workspace'],
+    'package-lock-gateway-workspace':
+      versions['package-lock-gateway-workspace'],
   };
 }
 

@@ -49,7 +49,17 @@ const fixture = async (withTag: boolean): Promise<string> => {
   await fs.writeFile(path.join(root, 'VERSION'), '0.1.0\n');
   await fs.writeFile(
     path.join(root, 'package.json'),
-    canonical({ name: 'elpis', version: '0.1.0', private: true }),
+    canonical({
+      name: 'elpis',
+      version: '0.1.0',
+      private: true,
+      workspaces: ['packages/*'],
+    }),
+  );
+  await fs.mkdir(path.join(root, 'packages/gateway'), { recursive: true });
+  await fs.writeFile(
+    path.join(root, 'packages/gateway/package.json'),
+    canonical({ name: '@elpis/gateway', version: '0.1.0', private: true }),
   );
   await fs.writeFile(
     path.join(root, 'package-lock.json'),
@@ -58,7 +68,17 @@ const fixture = async (withTag: boolean): Promise<string> => {
       version: '0.1.0',
       lockfileVersion: 3,
       requires: true,
-      packages: { '': { name: 'elpis', version: '0.1.0' } },
+      packages: {
+        '': {
+          name: 'elpis',
+          version: '0.1.0',
+          workspaces: ['packages/*'],
+        },
+        'packages/gateway': {
+          name: '@elpis/gateway',
+          version: '0.1.0',
+        },
+      },
     }),
   );
   await git(root, ['init', '--initial-branch=main']);
@@ -329,7 +349,12 @@ test('release preparation creates and validates exact deterministic bot commit a
     )
       .split('\n')
       .sort(),
-    ['VERSION', 'package-lock.json', 'package.json'].sort(),
+    [
+      'VERSION',
+      'package-lock.json',
+      'package.json',
+      'packages/gateway/package.json',
+    ].sort(),
   );
   const freshNotes = await releaseNotesForResult(root, value);
   assert.equal(

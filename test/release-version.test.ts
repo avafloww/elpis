@@ -140,8 +140,10 @@ test('invalid versions, empty ranges, invalid shas, and overflow fail closed', (
 const versionState = (version: string): ReleaseVersionState => ({
   VERSION: version,
   'package-json': version,
+  'gateway-package-json': version,
   'package-lock-root': version,
   'package-lock-workspace': version,
+  'package-lock-gateway-workspace': version,
 });
 
 const releaseOwner: ReleaseOwner = {

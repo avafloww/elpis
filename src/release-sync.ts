@@ -35,9 +35,11 @@ export interface ReleaseSyncReceipt {
 }
 
 interface Snapshot {
+  root: string;
   files: Map<string, Buffer>;
   modes: Map<string, number>;
   packageJson: Record<string, unknown>;
+  gatewayPackageJson: Record<string, unknown>;
   packageLock: Record<string, unknown>;
   state: ReleaseVersionState;
 }
@@ -91,7 +93,11 @@ export async function applyReleaseSync(
   const candidates = prepareCandidates(snapshot, plan.nextVersion);
   const candidateSnapshot = parseCandidateSnapshot(snapshot, candidates);
   validateReleaseVersionState(plan.nextVersion, candidateSnapshot.state);
-  await commitCandidates(root, candidates, dependencies.rename ?? fs.rename);
+  await commitCandidates(
+    snapshot.root,
+    candidates,
+    dependencies.rename ?? fs.rename,
+  );
   return planReceipt('apply', plan, candidateSnapshot.state);
 }
 
@@ -173,12 +179,13 @@ async function readSnapshot(inputRoot: string): Promise<Snapshot> {
   const paths = [
     ['VERSION', MAX_SMALL_FILE],
     ['package.json', MAX_SMALL_FILE],
+    ['packages/gateway/package.json', MAX_SMALL_FILE],
     ['package-lock.json', MAX_LARGE_FILE],
   ] as const;
   const files = new Map<string, Buffer>();
   const modes = new Map<string, number>();
   for (const [relative, limit] of paths) {
-    const absolute = path.join(root, relative);
+    const absolute = await canonicalContainedPath(root, relative);
     const stat = await regularStat(absolute, relative);
     if (stat.size > limit) {
       throw new ReleaseSyncError(`${relative} exceeds the bounded size`);
@@ -191,6 +198,10 @@ async function readSnapshot(inputRoot: string): Promise<Snapshot> {
     modes.set(relative, stat.mode & 0o777);
   }
   const packageJson = canonicalJson(files.get('package.json')!, 'package.json');
+  const gatewayPackageJson = canonicalJson(
+    files.get('packages/gateway/package.json')!,
+    'packages/gateway/package.json',
+  );
   const packageLock = canonicalJson(
     files.get('package-lock.json')!,
     'package-lock.json',
@@ -198,20 +209,34 @@ async function readSnapshot(inputRoot: string): Promise<Snapshot> {
   const state = parseVersionState(
     files.get('VERSION')!,
     packageJson,
+    gatewayPackageJson,
     packageLock,
   );
-  return { files, modes, packageJson, packageLock, state };
+  return {
+    root,
+    files,
+    modes,
+    packageJson,
+    gatewayPackageJson,
+    packageLock,
+    state,
+  };
 }
 
 function parseVersionState(
   versionFile: Buffer,
   packageJson: Record<string, unknown>,
+  gatewayPackageJson: Record<string, unknown>,
   packageLock: Record<string, unknown>,
 ): ReleaseVersionState {
   const version = exactVersionFile(versionFile);
   const packageVersion = exactString(
     packageJson.version,
     'package.json version',
+  );
+  const gatewayPackageVersion = exactString(
+    gatewayPackageJson.version,
+    'packages/gateway/package.json version',
   );
   const lockRoot = exactString(
     packageLock.version,
@@ -222,11 +247,18 @@ function parseVersionState(
     exactObject(packages[''], 'package-lock workspace').version,
     'package-lock workspace version',
   );
+  const lockGatewayWorkspace = exactString(
+    exactObject(packages['packages/gateway'], 'package-lock gateway workspace')
+      .version,
+    'package-lock gateway workspace version',
+  );
   const state: ReleaseVersionState = {
     VERSION: version,
     'package-json': packageVersion,
+    'gateway-package-json': gatewayPackageVersion,
     'package-lock-root': lockRoot,
     'package-lock-workspace': lockWorkspace,
+    'package-lock-gateway-workspace': lockGatewayWorkspace,
   };
   validateReleaseVersionState(version, state);
   return state;
@@ -239,13 +271,23 @@ function prepareCandidates(
   exactVersion(nextVersion, 'next version');
   const packageJson = structuredClone(snapshot.packageJson);
   packageJson.version = nextVersion;
+  const gatewayPackageJson = structuredClone(snapshot.gatewayPackageJson);
+  gatewayPackageJson.version = nextVersion;
   const packageLock = structuredClone(snapshot.packageLock);
   packageLock.version = nextVersion;
   const packages = exactObject(packageLock.packages, 'package-lock packages');
   exactObject(packages[''], 'package-lock workspace').version = nextVersion;
+  exactObject(
+    packages['packages/gateway'],
+    'package-lock gateway workspace',
+  ).version = nextVersion;
   const bytes = new Map<string, Buffer>([
     ['VERSION', Buffer.from(`${nextVersion}\n`)],
     ['package.json', Buffer.from(canonicalJsonText(packageJson))],
+    [
+      'packages/gateway/package.json',
+      Buffer.from(canonicalJsonText(gatewayPackageJson)),
+    ],
     ['package-lock.json', Buffer.from(canonicalJsonText(packageLock))],
   ]);
   return RELEASE_OWNED_PATHS.map((relativePath) => {
@@ -271,6 +313,10 @@ function parseCandidateSnapshot(
   for (const candidate of candidates)
     files.set(candidate.relativePath, candidate.bytes);
   const packageJson = canonicalJson(files.get('package.json')!, 'package.json');
+  const gatewayPackageJson = canonicalJson(
+    files.get('packages/gateway/package.json')!,
+    'packages/gateway/package.json',
+  );
   const packageLock = canonicalJson(
     files.get('package-lock.json')!,
     'package-lock.json',
@@ -278,9 +324,17 @@ function parseCandidateSnapshot(
   const state = parseVersionState(
     files.get('VERSION')!,
     packageJson,
+    gatewayPackageJson,
     packageLock,
   );
-  return { ...snapshot, files, packageJson, packageLock, state };
+  return {
+    ...snapshot,
+    files,
+    packageJson,
+    gatewayPackageJson,
+    packageLock,
+    state,
+  };
 }
 
 async function commitCandidates(
@@ -293,7 +347,10 @@ async function commitCandidates(
   const replaced: Array<Candidate & { absolute: string }> = [];
   try {
     for (const candidate of candidates) {
-      const absolute = path.join(root, candidate.relativePath);
+      const absolute = await canonicalContainedPath(
+        root,
+        candidate.relativePath,
+      );
       const temporary = path.join(
         path.dirname(absolute),
         `.release-sync-${process.pid}-${randomBytes(8).toString('hex')}`,
@@ -462,6 +519,39 @@ function requireAbsolute(input: string, label: string): string {
     throw new ReleaseSyncError(`${label} must be a safe absolute path`);
   }
   return input;
+}
+
+async function canonicalContainedPath(
+  root: string,
+  relative: string,
+): Promise<string> {
+  const absolute = path.join(root, relative);
+  const repositoryRelative = path.relative(root, absolute);
+  if (
+    repositoryRelative !== relative ||
+    repositoryRelative.startsWith('..') ||
+    path.isAbsolute(repositoryRelative)
+  ) {
+    throw new ReleaseSyncError(`${relative} escapes the repository root`);
+  }
+  const parent = path.dirname(absolute);
+  let canonicalParent: string;
+  try {
+    canonicalParent = await fs.realpath(parent);
+  } catch {
+    throw new ReleaseSyncError(`${relative} parent is unavailable`);
+  }
+  const parentRelative = path.relative(root, canonicalParent);
+  if (
+    canonicalParent !== parent ||
+    parentRelative.startsWith('..') ||
+    path.isAbsolute(parentRelative)
+  ) {
+    throw new ReleaseSyncError(
+      `${relative} parent must be canonical and contained`,
+    );
+  }
+  return absolute;
 }
 
 async function readRegularFile(

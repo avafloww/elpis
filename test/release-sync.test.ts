@@ -14,7 +14,12 @@ import {
 import type { ReleaseCommit } from '../src/release-version.js';
 
 const commits: ReleaseCommit[] = [{ sha: 'abcdef1', subject: 'fix: repair' }];
-const ownedPaths = ['VERSION', 'package.json', 'package-lock.json'] as const;
+const ownedPaths = [
+  'VERSION',
+  'package.json',
+  'packages/gateway/package.json',
+  'package-lock.json',
+] as const;
 const canonical = (value: unknown): string =>
   `${JSON.stringify(value, null, 2)}\n`;
 
@@ -25,7 +30,17 @@ const fixture = async (): Promise<string> => {
   await fs.writeFile(path.join(root, 'VERSION'), '0.1.0\n');
   await fs.writeFile(
     path.join(root, 'package.json'),
-    canonical({ name: 'elpis', version: '0.1.0', private: true }),
+    canonical({
+      name: 'elpis',
+      version: '0.1.0',
+      private: true,
+      workspaces: ['packages/*'],
+    }),
+  );
+  await fs.mkdir(path.join(root, 'packages/gateway'), { recursive: true });
+  await fs.writeFile(
+    path.join(root, 'packages/gateway/package.json'),
+    canonical({ name: '@elpis/gateway', version: '0.1.0', private: true }),
   );
   await fs.writeFile(
     path.join(root, 'package-lock.json'),
@@ -34,7 +49,17 @@ const fixture = async (): Promise<string> => {
       version: '0.1.0',
       lockfileVersion: 3,
       requires: true,
-      packages: { '': { name: 'elpis', version: '0.1.0' } },
+      packages: {
+        '': {
+          name: 'elpis',
+          version: '0.1.0',
+          workspaces: ['packages/*'],
+        },
+        'packages/gateway': {
+          name: '@elpis/gateway',
+          version: '0.1.0',
+        },
+      },
     }),
   );
   return root;
@@ -68,13 +93,51 @@ test('verify and plan read every canonical TypeScript version source without mut
   assert.deepEqual(verified.versionState, {
     VERSION: '0.1.0',
     'package-json': '0.1.0',
+    'gateway-package-json': '0.1.0',
     'package-lock-root': '0.1.0',
     'package-lock-workspace': '0.1.0',
+    'package-lock-gateway-workspace': '0.1.0',
   });
   const planned = await planReleaseSync(root, 'v0.1.0', commits);
   assert.equal(planned.nextVersion, '0.1.1');
   assert.deepEqual(planned.changedPaths, ownedPaths);
   await unchanged(root, before);
+});
+
+test('checked-in repository release sources are synchronized', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const version = (
+    await fs.readFile(path.join(root, 'VERSION'), 'utf8')
+  ).trim();
+  const verified = await verifyReleaseSync(root, version);
+  assert.equal(verified.nextVersion, version);
+  assert.deepEqual(verified.changedPaths, []);
+});
+
+test('owned file parents must be canonical and contained', async (t) => {
+  const root = await fixture();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const packages = path.join(root, 'packages');
+  const target = path.join(root, 'packages-target');
+  await fs.rename(packages, target);
+  await fs.symlink(target, packages);
+  await assert.rejects(
+    verifyReleaseSync(root, '0.1.0'),
+    /parent must be canonical and contained/,
+  );
+});
+
+test('Gateway workspace parent must be canonical and contained', async (t) => {
+  const root = await fixture();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const gateway = path.join(root, 'packages/gateway');
+  const target = path.join(root, 'gateway-target');
+  await fs.rename(gateway, target);
+  await fs.symlink(target, gateway);
+  await assert.rejects(
+    verifyReleaseSync(root, '0.1.0'),
+    /parent must be canonical and contained/,
+  );
 });
 
 test('validation mismatch fails before any repository file changes', async (t) => {
@@ -89,7 +152,7 @@ test('validation mismatch fails before any repository file changes', async (t) =
   await unchanged(root, before);
 });
 
-test('apply changes exactly three owned files and preserves modes', async (t) => {
+test('apply changes exactly four owned files and preserves modes', async (t) => {
   const root = await fixture();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const beforeModes = new Map<string, number>();
@@ -111,11 +174,21 @@ test('apply changes exactly three owned files and preserves modes', async (t) =>
       .version,
     '0.1.1',
   );
+  assert.equal(
+    JSON.parse(
+      await fs.readFile(
+        path.join(root, 'packages/gateway/package.json'),
+        'utf8',
+      ),
+    ).version,
+    '0.1.1',
+  );
   const lock = JSON.parse(
     await fs.readFile(path.join(root, 'package-lock.json'), 'utf8'),
   );
   assert.equal(lock.version, '0.1.1');
   assert.equal(lock.packages[''].version, '0.1.1');
+  assert.equal(lock.packages['packages/gateway'].version, '0.1.1');
   for (const [relative, mode] of beforeModes)
     assert.equal((await fs.stat(path.join(root, relative))).mode & 0o777, mode);
   assert.deepEqual(
