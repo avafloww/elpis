@@ -1,5 +1,24 @@
 {
   "name": "@elpis/gateway",
   "version": "0.8.4",
-  "private": true
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "test": "TEST_NO_NETWORK=1 node --test --test-timeout=30000 --import tsx/esm test/*.test.ts"
+  }
 }
