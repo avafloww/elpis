@@ -1,0 +1,115 @@
+/*
+ * Small adapted subset of the resident console palette: app/panel/card
+ * backgrounds, foreground/muted text, gold accent, and subtle line tokens.
+ * Kept local so the Gateway browser does not depend on resident UI runtime.
+ */
+:root {
+  color-scheme: dark;
+  --bg-app: #141320;
+  --bg-panel: #181724;
+  --bg-card: #1c1b28;
+  --fg: #ece7da;
+  --muted: #767a70;
+  --gold: #d8b877;
+  --green: #8fb89a;
+  --line: rgba(255, 255, 255, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+body,
+button {
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--fg);
+}
+
+.gateway-shell {
+  width: min(720px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: clamp(32px, 8vh, 80px) 0;
+}
+
+.gateway-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.gateway-header h1,
+.status-card h2,
+.eyebrow,
+.status-card p {
+  margin: 0;
+}
+
+.gateway-header h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.brand-mark {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--gold);
+  box-shadow: 0 0 0 5px rgba(216, 184, 119, 0.12);
+}
+
+.eyebrow {
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.status-card {
+  padding: clamp(24px, 5vw, 40px);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.status-card h2 {
+  margin-top: 10px;
+  font-size: clamp(24px, 5vw, 36px);
+  font-weight: 550;
+  letter-spacing: -0.025em;
+}
+
+.muted,
+.retry-limit {
+  margin-top: 12px !important;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+button {
+  margin-top: 24px;
+  padding: 9px 16px;
+  border: 1px solid rgba(216, 184, 119, 0.28);
+  border-radius: 7px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:hover,
+button:focus-visible {
+  border-color: var(--gold);
+  outline: none;
+}
