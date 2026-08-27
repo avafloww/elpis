@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
 import type { RandomBytes } from './credentials.js';
 import {
@@ -285,6 +286,10 @@ export class GatewayStore {
         .prepare('SELECT * FROM gateway_audit_events ORDER BY seq DESC LIMIT ?')
         .all(limit) as unknown as Record<string, unknown>[]
     ).map((row) => this.auditFromRow(row));
+  }
+
+  async backup(destination: string): Promise<GatewayBackupReceipt> {
+    return backupGatewayDatabase(this.#database, destination);
   }
 
   close(): void {

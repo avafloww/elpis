@@ -182,6 +182,32 @@ function ensureLedger(database: DatabaseSync): void {
   `);
 }
 
+export function verifyGatewayMigrationHistory(
+  database: DatabaseSync,
+  migrations: readonly GatewayMigration[] = GATEWAY_MIGRATIONS,
+): readonly string[] {
+  const declared = migrations.map((migration) => ({
+    name: migration.name,
+    checksum: checksum(migration.sql),
+  }));
+  const existing = database
+    .prepare('SELECT name, checksum FROM gateway_migrations ORDER BY name')
+    .all() as unknown as Array<{ name: string; checksum: string }>;
+  if (existing.length !== declared.length)
+    throw new Error('gateway migration history is incomplete');
+  for (let index = 0; index < existing.length; index += 1) {
+    if (existing[index].name !== declared[index].name)
+      throw new Error(
+        `gateway migration history is not exact at ${existing[index].name}`,
+      );
+    if (existing[index].checksum !== declared[index].checksum)
+      throw new Error(
+        `gateway migration checksum drift at ${existing[index].name}`,
+      );
+  }
+  return Object.freeze(existing.map((receipt) => receipt.name));
+}
+
 export function runGatewayMigrations(
   database: DatabaseSync,
   migrations: readonly GatewayMigration[] = GATEWAY_MIGRATIONS,
