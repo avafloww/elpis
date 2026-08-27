@@ -9,14 +9,23 @@ import {
   HttpBoundaryError,
   isBrowserMutation,
   readBoundedRequestBody,
+  singleRequestHeader,
   validateRequestBodyFraming,
   type BrowserOriginGuard,
 } from './http-guards.js';
+import {
+  GatewayApiError,
+  type BrowserApi,
+  type GatewayApiResponse,
+  type BrowserApiRoute,
+  type JsonObject,
+} from './browser-api.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8790;
 const DEFAULT_MAX_STATIC_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_TARGET_BYTES = 8192;
+export const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.css': 'text/css; charset=utf-8',
@@ -55,6 +64,8 @@ export interface GatewayHttpServiceOptions {
   getPublicUrl?: () => string | null;
   /** Overrides the store probe only as the readiness source. */
   checkReady?: () => boolean | Promise<boolean>;
+  /** A typed browser route adapter; HTTP policy remains owned by this service. */
+  api?: BrowserApi;
   maxBodyBytes?: number;
   maxStaticBytes?: number;
   bodyTimeoutMs?: number;
@@ -108,6 +119,201 @@ function sendJson(
     'application/json; charset=utf-8',
     head,
   );
+}
+
+function apiNamespaceTarget(rawUrl: string): boolean {
+  const query = rawUrl.search(/[?#]/);
+  const pathname = query < 0 ? rawUrl : rawUrl.slice(0, query);
+  return pathname === '/api/v1' || pathname.startsWith('/api/v1/');
+}
+
+function exactApiPathname(rawUrl: string): string | null {
+  if (rawUrl.includes('?') || rawUrl.includes('#') || rawUrl.includes('%'))
+    return null;
+  for (let index = 0; index < rawUrl.length; index += 1) {
+    const code = rawUrl.charCodeAt(index);
+    if (code < 0x21 || code > 0x7e || code === 0x5c) return null;
+  }
+  return rawUrl;
+}
+
+function requireJsonContentType(request: http.IncomingMessage): void {
+  const value = singleRequestHeader(request, 'content-type');
+  if (
+    value === null ||
+    !/^application\/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*utf-8)?$/i.test(
+      value,
+    )
+  )
+    throw new HttpBoundaryError(415, 'unsupported_media_type');
+}
+
+function deepFreezeJsonObject(value: Record<string, unknown>): JsonObject {
+  const pending: object[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const child of Object.values(current)) {
+      if (typeof child === 'number' && !Number.isFinite(child))
+        throw new HttpBoundaryError(400, 'invalid_request_body');
+      if (child !== null && typeof child === 'object') {
+        const prototype = Object.getPrototypeOf(child);
+        if (
+          (Array.isArray(child) && prototype !== Array.prototype) ||
+          (!Array.isArray(child) && prototype !== Object.prototype)
+        )
+          throw new HttpBoundaryError(400, 'invalid_request_body');
+        pending.push(child);
+      }
+    }
+    Object.freeze(current);
+  }
+  return value as JsonObject;
+}
+
+function decodeJsonObject(bytes: Buffer): JsonObject {
+  let text: string;
+  try {
+    // Keeping a BOM in the decoded text makes JSON.parse reject it as non-JSON.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch {
+    throw new HttpBoundaryError(400, 'invalid_request_body');
+  }
+  if (text.length === 0)
+    throw new HttpBoundaryError(400, 'invalid_request_body');
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new HttpBoundaryError(400, 'invalid_request_body');
+  }
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    throw new HttpBoundaryError(400, 'invalid_request_body');
+  return deepFreezeJsonObject(value as Record<string, unknown>);
+}
+
+function apiCallbackFailure(error: unknown): HttpBoundaryError {
+  if (
+    error instanceof GatewayApiError &&
+    Number.isSafeInteger(error.status) &&
+    error.status >= 400 &&
+    error.status <= 599 &&
+    /^[a-z][a-z0-9_]{0,63}$/.test(error.stableCode)
+  )
+    return new HttpBoundaryError(error.status, error.stableCode);
+  return new HttpBoundaryError(500, 'internal_error');
+}
+
+function apiResponseBytes(response: GatewayApiResponse): {
+  status: 200 | 201;
+  bytes: Buffer;
+} {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    (Object.getPrototypeOf(response) !== Object.prototype &&
+      Object.getPrototypeOf(response) !== null)
+  )
+    throw new HttpBoundaryError(500, 'internal_error');
+  const responseKeys = Reflect.ownKeys(response);
+  const statusDescriptor = Object.getOwnPropertyDescriptor(response, 'status');
+  const bodyDescriptor = Object.getOwnPropertyDescriptor(response, 'body');
+  if (
+    responseKeys.length !== 2 ||
+    !responseKeys.includes('status') ||
+    !responseKeys.includes('body') ||
+    !statusDescriptor?.enumerable ||
+    !bodyDescriptor?.enumerable ||
+    !('value' in statusDescriptor) ||
+    !('value' in bodyDescriptor)
+  )
+    throw new HttpBoundaryError(500, 'internal_error');
+  const status = statusDescriptor.value as unknown;
+  if (status !== 200 && status !== 201)
+    throw new HttpBoundaryError(500, 'internal_error');
+  const root: unknown = bodyDescriptor.value;
+  if (
+    root === null ||
+    typeof root !== 'object' ||
+    Array.isArray(root) ||
+    (Object.getPrototypeOf(root) !== Object.prototype &&
+      Object.getPrototypeOf(root) !== null)
+  )
+    throw new HttpBoundaryError(500, 'internal_error');
+
+  const active = new WeakSet<object>();
+  const stack: Array<{ value: unknown; exit?: boolean }> = [{ value: root }];
+  let minimumBytes = 0;
+  try {
+    while (stack.length > 0) {
+      const frame = stack.pop()!;
+      const value = frame.value;
+      if (frame.exit) {
+        active.delete(value as object);
+        continue;
+      }
+      if (value === null || typeof value === 'boolean') {
+        minimumBytes += value === null ? 4 : value ? 4 : 5;
+      } else if (typeof value === 'number') {
+        if (!Number.isFinite(value)) throw new Error('non-finite JSON number');
+        minimumBytes += 1;
+      } else if (typeof value === 'string') {
+        minimumBytes += Buffer.byteLength(value) + 2;
+      } else if (typeof value === 'object') {
+        minimumBytes += 2;
+        if (active.has(value)) throw new Error('cyclic JSON value');
+        active.add(value);
+        stack.push({ value, exit: true });
+        if (Array.isArray(value)) {
+          if (Object.getPrototypeOf(value) !== Array.prototype)
+            throw new Error('non-plain JSON array');
+          const keys = Reflect.ownKeys(value);
+          if (keys.length !== value.length + 1 || !keys.includes('length'))
+            throw new Error('non-JSON array properties');
+          for (let index = value.length - 1; index >= 0; index -= 1) {
+            const descriptor = Object.getOwnPropertyDescriptor(
+              value,
+              String(index),
+            );
+            if (!descriptor?.enumerable || !('value' in descriptor))
+              throw new Error('sparse or accessor JSON array');
+            stack.push({ value: descriptor.value });
+            minimumBytes += 1;
+          }
+        } else {
+          const prototype = Object.getPrototypeOf(value);
+          if (prototype !== Object.prototype && prototype !== null)
+            throw new Error('non-plain JSON object');
+          for (const key of Reflect.ownKeys(value)) {
+            if (typeof key !== 'string')
+              throw new Error('symbol JSON property');
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (!descriptor?.enumerable || !('value' in descriptor))
+              throw new Error('non-data JSON property');
+            minimumBytes += Buffer.byteLength(key) + 3;
+            stack.push({ value: descriptor.value });
+          }
+        }
+      } else {
+        throw new Error('non-JSON value');
+      }
+      if (minimumBytes > MAX_API_RESPONSE_BYTES)
+        throw new Error('oversized JSON response');
+    }
+    const json = JSON.stringify(root);
+    const bytes = Buffer.from(json);
+    if (bytes.length > MAX_API_RESPONSE_BYTES)
+      throw new Error('oversized JSON response');
+    return { status, bytes };
+  } catch {
+    throw new HttpBoundaryError(500, 'internal_error');
+  }
 }
 
 function sendError(
@@ -416,12 +622,23 @@ export class GatewayHttpService {
         );
         return;
       }
-      if (pathname === '/api/csrf') {
+      if (rawUrl === '/api/csrf') {
         if (method !== 'GET')
           throw new HttpBoundaryError(405, 'method_not_allowed');
         const token = createCsrfToken();
         response.setHeader('Set-Cookie', csrfCookie(token));
         sendJson(response, 200, { csrfToken: token });
+        return;
+      }
+
+      if (apiNamespaceTarget(rawUrl)) {
+        if (!this.#options.api) throw new HttpBoundaryError(404, 'not_found');
+        try {
+          await this.#handleBrowserApi(request, response, rawUrl, method);
+        } catch (error) {
+          if (error instanceof HttpBoundaryError) throw error;
+          throw new HttpBoundaryError(500, 'internal_error');
+        }
         return;
       }
 
@@ -464,6 +681,108 @@ export class GatewayHttpService {
       }
       sendError(request, response, 404, 'not_found');
     }
+  }
+
+  #apiPublicUrl(): string | null {
+    try {
+      return this.#publicUrl();
+    } catch {
+      throw new HttpBoundaryError(503, 'service_unavailable');
+    }
+  }
+
+  async #readApiBody(request: http.IncomingMessage): Promise<JsonObject> {
+    requireJsonContentType(request);
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      this.#options.bodyTimeoutMs ?? 10_000,
+    );
+    timer.unref();
+    try {
+      const bytes = await readBoundedRequestBody(request, {
+        maxBytes: this.#options.maxBodyBytes,
+        signal: controller.signal,
+      });
+      return decodeJsonObject(bytes);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async #handleBrowserApi(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    rawUrl: string,
+    method: string,
+  ): Promise<void> {
+    const pathname = exactApiPathname(rawUrl);
+    if (pathname === null) throw new HttpBoundaryError(404, 'not_found');
+
+    let route: BrowserApiRoute | null;
+    try {
+      route = this.#options.api!.match(method, pathname);
+    } catch {
+      throw new HttpBoundaryError(500, 'internal_error');
+    }
+    if (route === null) throw new HttpBoundaryError(404, 'not_found');
+    if (route === undefined || typeof route !== 'object')
+      throw new HttpBoundaryError(500, 'internal_error');
+
+    let body: JsonObject | null;
+    let publicUrl: string | null;
+    if (route.policy === 'read') {
+      if (method !== 'GET' && method !== 'HEAD')
+        throw new HttpBoundaryError(405, 'method_not_allowed');
+      body = null;
+      publicUrl = this.#apiPublicUrl();
+    } else if (route.policy === 'mutation') {
+      if (!isBrowserMutation(method))
+        throw new HttpBoundaryError(405, 'method_not_allowed');
+      publicUrl = this.#apiPublicUrl();
+      // Configured mutation authorization deliberately precedes body handling.
+      assertBrowserMutation(request, { publicUrl });
+      body = await this.#readApiBody(request);
+    } else if (route.policy === 'setup-mutation') {
+      if (!isBrowserMutation(method))
+        throw new HttpBoundaryError(405, 'method_not_allowed');
+      body = await this.#readApiBody(request);
+      let candidate: string;
+      try {
+        candidate = route.candidatePublicUrl(body);
+      } catch (error) {
+        throw apiCallbackFailure(error);
+      }
+      publicUrl = this.#apiPublicUrl();
+      const guard: BrowserOriginGuard = {
+        publicUrl,
+        setupCandidatePublicUrl: candidate,
+      };
+      assertBrowserMutation(request, guard);
+    } else {
+      throw new HttpBoundaryError(500, 'internal_error');
+    }
+
+    let descriptor: GatewayApiResponse;
+    try {
+      descriptor = await route.handle(body as never, publicUrl);
+    } catch (error) {
+      throw apiCallbackFailure(error);
+    }
+    let result: ReturnType<typeof apiResponseBytes>;
+    try {
+      result = apiResponseBytes(descriptor);
+    } catch (error) {
+      if (error instanceof HttpBoundaryError) throw error;
+      throw new HttpBoundaryError(500, 'internal_error');
+    }
+    send(
+      response,
+      result.status,
+      result.bytes,
+      'application/json; charset=utf-8',
+      method === 'HEAD',
+    );
   }
 
   async #serveStatic(

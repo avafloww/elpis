@@ -246,6 +246,11 @@ test('service health, readiness, static safety, HEAD, bind, and stop', async (t)
   const csrf = await rawGet(address.port, '/api/csrf');
   assert.equal(csrf.status, 200);
   assert.match(String(csrf.headers['set-cookie']), /Secure/);
+  assert.equal((await rawGet(address.port, '/api/csrf?alias=1')).status, 404);
+  assert.equal(
+    (await rawGet(address.port, '/api/v1/unconfigured')).status,
+    404,
+  );
   const noOrigin = await fetch(`http://127.0.0.1:${address.port}/api/future`, {
     method: 'POST',
     body: '',
