@@ -21,13 +21,19 @@ export interface BrowserApiReadRoute {
   handle(body: null, publicUrl: string | null): GatewayApiResult;
 }
 
+export type BrowserApiMutationMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
 export interface BrowserApiMutationRoute {
   readonly policy: 'mutation';
+  /** Optional exact verb for concrete routes; omitted adapters accept any mutation. */
+  readonly method?: BrowserApiMutationMethod;
   handle(body: JsonObject, publicUrl: string | null): GatewayApiResult;
 }
 
 export interface BrowserApiSetupMutationRoute {
   readonly policy: 'setup-mutation';
+  /** Optional exact verb for concrete routes; omitted adapters accept any mutation. */
+  readonly method?: BrowserApiMutationMethod;
   /** Extract the origin proposed by the one pre-setup mutation. */
   candidatePublicUrl(body: JsonObject): string;
   handle(body: JsonObject, publicUrl: string | null): GatewayApiResult;

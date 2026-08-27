@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createGatewayBrowserApi } from './gateway-browser-api.js';
 import { createGatewayHttpService } from './http-service.js';
 import { openGatewayStore } from './store.js';
 
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
   service = createGatewayHttpService({
     publicRoot,
     store,
+    api: createGatewayBrowserApi(store),
     listen: {
       host: process.env.ELPIS_GATEWAY_LISTEN_HOST ?? '127.0.0.1',
       port: envPort(process.env.ELPIS_GATEWAY_LISTEN_PORT),

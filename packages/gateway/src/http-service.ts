@@ -737,14 +737,20 @@ export class GatewayHttpService {
       body = null;
       publicUrl = this.#apiPublicUrl();
     } else if (route.policy === 'mutation') {
-      if (!isBrowserMutation(method))
+      if (
+        !isBrowserMutation(method) ||
+        (route.method !== undefined && route.method !== method)
+      )
         throw new HttpBoundaryError(405, 'method_not_allowed');
       publicUrl = this.#apiPublicUrl();
       // Configured mutation authorization deliberately precedes body handling.
       assertBrowserMutation(request, { publicUrl });
       body = await this.#readApiBody(request);
     } else if (route.policy === 'setup-mutation') {
-      if (!isBrowserMutation(method))
+      if (
+        !isBrowserMutation(method) ||
+        (route.method !== undefined && route.method !== method)
+      )
         throw new HttpBoundaryError(405, 'method_not_allowed');
       body = await this.#readApiBody(request);
       let candidate: string;
