@@ -20,6 +20,12 @@ import {
   gatewayErrorMessage,
   setupDefaultOrigin,
 } from '../client/presentation.ts';
+import {
+  ALL_INSTANCES_SELECTION,
+  gatewayIdentityState,
+  gatewayInstanceStatus,
+  reconcileGatewaySelection,
+} from '../client/selection.ts';
 
 const ID = 'Abcdefghijklmnopqrstu_';
 const INSTANCE_ID = 'egi1.Abcdefghijklmnopqrstu_';
@@ -434,4 +440,92 @@ test('bootstrap response is confined to validator and dedicated dialog workflow'
     /setAttribute\(\s*['"]aria-label/,
   ])
     assert.doesNotMatch(production, forbidden);
+});
+
+test('Gateway selection reconciles only an absent enrolled resident', () => {
+  const resident = { id: INSTANCE_ID };
+  const selected = { kind: 'resident', instanceId: INSTANCE_ID } as const;
+  assert.equal(reconcileGatewaySelection(selected, [resident]), selected);
+  assert.equal(
+    reconcileGatewaySelection(selected, []),
+    ALL_INSTANCES_SELECTION,
+  );
+  assert.equal(
+    reconcileGatewaySelection(ALL_INSTANCES_SELECTION, [resident]),
+    ALL_INSTANCES_SELECTION,
+  );
+});
+
+test('Gateway instance labels report revocation and null active credential truthfully', () => {
+  assert.deepEqual(
+    gatewayInstanceStatus({ revokedAt: null, activeCredentialId: null }),
+    { tone: 'inactive', label: 'Credential inactive' },
+  );
+  assert.deepEqual(
+    gatewayInstanceStatus({ revokedAt: null, activeCredentialId: ID }),
+    { tone: 'active', label: 'Credential active' },
+  );
+  assert.deepEqual(
+    gatewayInstanceStatus({ revokedAt: 20, activeCredentialId: ID }),
+    { tone: 'revoked', label: 'Revoked' },
+  );
+});
+
+test('identity projection carries only bounded picker fields', () => {
+  const wire = state() as ReturnType<typeof state> & { instances: unknown[] };
+  wire.instances = [
+    {
+      id: INSTANCE_ID,
+      displayName: 'Aster',
+      createdAt: 10,
+      updatedAt: 12,
+      revokedAt: null,
+      activeCredentialId: null,
+      activeSince: null,
+      lastUsedAt: null,
+    },
+  ];
+  const projected = gatewayIdentityState(validateGatewayState(wire));
+  assert.deepEqual(projected, {
+    setupComplete: true,
+    publicUrl: 'https://gateway.example',
+    residents: [
+      {
+        instanceId: INSTANCE_ID,
+        displayName: 'Aster',
+        status: { tone: 'inactive', label: 'Credential inactive' },
+      },
+    ],
+  });
+  assert.deepEqual(Object.keys(projected.residents[0]).sort(), [
+    'displayName',
+    'instanceId',
+    'status',
+  ]);
+});
+
+test('identity shell has no resident console, relay, or persistence surface', () => {
+  const root = path.resolve(import.meta.dirname, '../client');
+  const source = ['identity-dock.tsx', 'selection.ts', 'main.tsx']
+    .map((name) => fs.readFileSync(path.join(root, name), 'utf8'))
+    .join('\n');
+  for (const forbidden of [
+    /use-console/,
+    /console\/client/,
+    /WebSocket/i,
+    /iframe/i,
+    /gateway-protocol/,
+    /localStorage/,
+    /sessionStorage/,
+    /indexedDB/,
+    /serviceWorker/,
+    /document\.(?:cookie|title)/,
+    /location\.(?:hash|search)/,
+    /history\./,
+  ])
+    assert.doesNotMatch(source, forbidden);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(root, 'identity-dock.tsx'), 'utf8'),
+    /bootstrap|verifier|grant|token/i,
+  );
 });

@@ -7,11 +7,22 @@ import {
 } from './api.js';
 import { AddInstanceDialog } from './enrollment-modal.js';
 import {
+  GatewayIdentityDock,
+  type GatewayIdentityView,
+} from './identity-dock.js';
+import {
   formatTimestamp,
   gatewayErrorMessage,
   setupDefaultOrigin,
   shortenPublicId,
 } from './presentation.js';
+import {
+  ALL_INSTANCES_SELECTION,
+  gatewayIdentityState,
+  gatewayInstanceStatus,
+  reconcileGatewaySelection,
+  type GatewaySelection,
+} from './selection.js';
 import './styles.css';
 
 const client = createGatewayClient();
@@ -153,12 +164,7 @@ function Fleet({ state, onAdd, addButtonRef }: FleetProps) {
         ) : (
           <ul class='instance-list'>
             {state.instances.map((instance) => {
-              const credentialStatus =
-                instance.revokedAt !== null
-                  ? { tone: 'revoked', label: 'Revoked' }
-                  : instance.activeCredentialId === null
-                    ? { tone: 'inactive', label: 'Credential inactive' }
-                    : { tone: 'active', label: 'Credential active' };
+              const credentialStatus = gatewayInstanceStatus(instance);
               return (
                 <li class='instance-card' key={instance.id}>
                   <div class='instance-heading'>
@@ -205,9 +211,24 @@ export function GatewayApp({
   gatewayClient?: GatewayClient;
 }) {
   const [view, setView] = useState<LoadView>({ phase: 'loading' });
+  const [selection, setSelection] = useState<GatewaySelection>(
+    ALL_INSTANCES_SELECTION,
+  );
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const addButton = useRef<HTMLButtonElement | null>(null);
+  const dockButton = useRef<HTMLButtonElement | null>(null);
+  const dialogReturnTarget = useRef<'dock' | 'fleet'>('fleet');
   const loadPending = useRef(false);
+
+  const replaceState = (state: GatewayState): void => {
+    setSelection((current) =>
+      state.setup.complete
+        ? reconcileGatewaySelection(current, state.instances)
+        : ALL_INSTANCES_SELECTION,
+    );
+    setView({ phase: 'ready', state });
+  };
 
   const load = (): void => {
     if (loadPending.current) return;
@@ -216,7 +237,7 @@ export function GatewayApp({
     void gatewayClient.getState().then(
       (state) => {
         loadPending.current = false;
-        setView({ phase: 'ready', state });
+        replaceState(state);
       },
       (error: unknown) => {
         loadPending.current = false;
@@ -229,14 +250,25 @@ export function GatewayApp({
     load();
   }, []);
 
-  const openDialog = (): void => {
+  const openDialog = (source: 'dock' | 'fleet'): void => {
     if (view.phase !== 'ready' || !view.state.setup.complete) return;
+    setPickerOpen(false);
+    dialogReturnTarget.current = source;
     setDialogOpen(true);
   };
 
   const closeDialog = (): void => {
     setDialogOpen(false);
-    window.setTimeout(() => addButton.current?.focus(), 0);
+    const target = dialogReturnTarget.current;
+    window.setTimeout(() => {
+      if (target === 'dock') dockButton.current?.focus();
+      else addButton.current?.focus();
+    }, 0);
+  };
+
+  const closePicker = (restoreFocus = true): void => {
+    setPickerOpen(false);
+    if (restoreFocus) window.setTimeout(() => dockButton.current?.focus(), 0);
   };
 
   let content;
@@ -268,16 +300,60 @@ export function GatewayApp({
     );
   } else if (!view.state.setup.complete) {
     content = (
-      <SetupCard
-        gatewayClient={gatewayClient}
-        onComplete={(state) => setView({ phase: 'ready', state })}
-      />
+      <SetupCard gatewayClient={gatewayClient} onComplete={replaceState} />
     );
   } else {
-    content = (
-      <Fleet state={view.state} onAdd={openDialog} addButtonRef={addButton} />
-    );
+    const resident =
+      selection.kind === 'resident'
+        ? view.state.instances.find(
+            (instance) => instance.id === selection.instanceId,
+          )
+        : undefined;
+    if (resident) {
+      const residentStatus = gatewayInstanceStatus(resident);
+      content = (
+        <section
+          class='panel-card resident-placeholder'
+          aria-labelledby='resident-placeholder-title'
+        >
+          <p class='eyebrow'>Enrolled resident</p>
+          <div class='resident-placeholder-heading'>
+            <div>
+              <h2 id='resident-placeholder-title'>{resident.displayName}</h2>
+              <code title={resident.id}>{resident.id}</code>
+            </div>
+            <span class={'status-badge ' + residentStatus.tone}>
+              <span aria-hidden='true' />
+              {residentStatus.label}
+            </span>
+          </div>
+          <div class='resident-connection-notice'>
+            <span class='brand-mark' aria-hidden='true' />
+            <div>
+              <h3>Resident dashboard connection is not available yet</h3>
+              <p>
+                Choose All Instances to return to the Gateway overview and
+                enrolled fleet.
+              </p>
+            </div>
+          </div>
+        </section>
+      );
+    } else {
+      content = (
+        <Fleet
+          state={view.state}
+          onAdd={() => openDialog('fleet')}
+          addButtonRef={addButton}
+        />
+      );
+    }
   }
+
+  const identityView: GatewayIdentityView =
+    view.phase === 'ready'
+      ? { phase: 'ready', state: gatewayIdentityState(view.state) }
+      : { phase: view.phase };
 
   return (
     <main class='gateway-shell'>
@@ -289,6 +365,18 @@ export function GatewayApp({
             <h1>Gateway</h1>
           </div>
         </div>
+        <GatewayIdentityDock
+          view={identityView}
+          selection={selection}
+          open={pickerOpen}
+          dockRef={dockButton}
+          onOpen={() => {
+            if (!dialogOpen) setPickerOpen(true);
+          }}
+          onClose={closePicker}
+          onSelect={setSelection}
+          onAdd={() => openDialog('dock')}
+        />
         {view.phase === 'ready' && view.state.setup.complete && (
           <button
             class='quiet-button refresh-button'
