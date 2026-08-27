@@ -1,6 +1,6 @@
 {
   "name": "elpis",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "A durable, self-hosted runtime for one persistent AI agent",
   "type": "module",
   "private": true,
