@@ -103,6 +103,8 @@ test('workflow publishes one exact TypeScript image after guarded release refs',
   );
 
   assert.equal((text.match(/npm run tools:check/g) ?? []).length, 2);
+  assert.equal((text.match(/npm run test:gateway/g) ?? []).length, 2);
+  assert.equal((text.match(/npm run build:gateway/g) ?? []).length, 2);
   assert.equal((text.match(/docker buildx build/g) ?? []).length, 2);
   assert.equal((text.match(/git push --atomic/g) ?? []).length, 2);
   assert.equal(
