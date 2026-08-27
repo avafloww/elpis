@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 export const GATEWAY_APPLICATION_ID = 0x454c5047;
-export const GATEWAY_SCHEMA_VERSION = 1;
+export const GATEWAY_SCHEMA_VERSION = 2;
 
 export interface GatewayMigration {
   readonly name: string;
@@ -18,7 +18,7 @@ const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const INITIAL_SCHEMA = `
   PRAGMA application_id = ${GATEWAY_APPLICATION_ID};
-  PRAGMA user_version = ${GATEWAY_SCHEMA_VERSION};
+  PRAGMA user_version = 1;
 
   CREATE TABLE gateway_config (
     singleton_id       INTEGER PRIMARY KEY CHECK (singleton_id = 1),
@@ -65,8 +65,99 @@ const INITIAL_SCHEMA = `
     END;
 `;
 
+const CREDENTIAL_SCHEMA = `
+  PRAGMA user_version = 2;
+
+  CREATE TABLE gateway_enrollment_grants (
+    id                           TEXT PRIMARY KEY CHECK (length(id) = 22),
+    verifier                     BLOB NOT NULL CHECK (typeof(verifier) = 'blob' AND length(verifier) = 32),
+    created_at                   INTEGER NOT NULL,
+    expires_at                   INTEGER NOT NULL CHECK (expires_at > created_at),
+    revoked_at                   INTEGER,
+    consumed_at                  INTEGER,
+    consumed_instance_id         TEXT,
+    consumed_credential_id       TEXT,
+    consumed_credential_verifier BLOB,
+    FOREIGN KEY (consumed_instance_id) REFERENCES gateway_instances(id),
+    FOREIGN KEY (consumed_credential_id) REFERENCES gateway_node_credentials(id),
+    CHECK (
+      (consumed_at IS NULL AND consumed_instance_id IS NULL AND consumed_credential_id IS NULL AND consumed_credential_verifier IS NULL)
+      OR
+      (consumed_at IS NOT NULL AND consumed_instance_id IS NOT NULL AND consumed_credential_id IS NOT NULL
+        AND typeof(consumed_credential_verifier) = 'blob' AND length(consumed_credential_verifier) = 32)
+    )
+  );
+
+  CREATE TABLE gateway_node_credentials (
+    id                         TEXT PRIMARY KEY CHECK (length(id) = 22),
+    instance_id                TEXT NOT NULL REFERENCES gateway_instances(id),
+    verifier                   BLOB NOT NULL CHECK (typeof(verifier) = 'blob' AND length(verifier) = 32),
+    state                      TEXT NOT NULL CHECK (state IN ('pending', 'active', 'revoked')),
+    rotates_credential_id      TEXT REFERENCES gateway_node_credentials(id),
+    replaced_by_credential_id  TEXT REFERENCES gateway_node_credentials(id),
+    created_at                 INTEGER NOT NULL,
+    activated_at               INTEGER,
+    last_used_at               INTEGER,
+    revoked_at                 INTEGER,
+    CHECK (
+      (state = 'pending' AND rotates_credential_id IS NOT NULL AND activated_at IS NULL AND revoked_at IS NULL)
+      OR
+      (state = 'active' AND activated_at IS NOT NULL AND revoked_at IS NULL)
+      OR
+      (state = 'revoked' AND revoked_at IS NOT NULL)
+    )
+  );
+
+  CREATE UNIQUE INDEX gateway_one_pending_rotation
+    ON gateway_node_credentials(rotates_credential_id)
+    WHERE state = 'pending';
+
+  CREATE UNIQUE INDEX gateway_one_active_credential
+    ON gateway_node_credentials(instance_id)
+    WHERE state = 'active';
+
+  CREATE TRIGGER gateway_enrollment_grants_no_delete
+    BEFORE DELETE ON gateway_enrollment_grants BEGIN
+      SELECT RAISE(ABORT, 'gateway enrollment grants are retained');
+    END;
+
+  CREATE TRIGGER gateway_enrollment_grants_identity_immutable
+    BEFORE UPDATE OF id, verifier, created_at, expires_at
+    ON gateway_enrollment_grants BEGIN
+      SELECT RAISE(ABORT, 'gateway enrollment grant identity is immutable');
+    END;
+
+  CREATE TRIGGER gateway_enrollment_grants_consumed_once
+    BEFORE UPDATE OF consumed_at, consumed_instance_id, consumed_credential_id, consumed_credential_verifier
+    ON gateway_enrollment_grants
+    WHEN OLD.consumed_at IS NOT NULL BEGIN
+      SELECT RAISE(ABORT, 'gateway enrollment grant binding is immutable');
+    END;
+
+  CREATE TRIGGER gateway_node_credentials_no_delete
+    BEFORE DELETE ON gateway_node_credentials BEGIN
+      SELECT RAISE(ABORT, 'gateway node credentials are retained');
+    END;
+
+  CREATE TRIGGER gateway_node_credentials_identity_immutable
+    BEFORE UPDATE OF id, instance_id, verifier, rotates_credential_id, created_at
+    ON gateway_node_credentials BEGIN
+      SELECT RAISE(ABORT, 'gateway credential identity is immutable');
+    END;
+
+  CREATE TRIGGER gateway_node_credentials_state_monotonic
+    BEFORE UPDATE OF state ON gateway_node_credentials
+    WHEN NOT (
+      (OLD.state = 'pending' AND NEW.state IN ('active', 'revoked'))
+      OR (OLD.state = 'active' AND NEW.state = 'revoked')
+    ) BEGIN
+      SELECT RAISE(ABORT, 'gateway credential state cannot move backward');
+    END;
+`;
+
 export const GATEWAY_MIGRATIONS: readonly GatewayMigration[] = Object.freeze([
   Object.freeze({ name: '001-initial', sql: INITIAL_SCHEMA }),
+  Object.freeze({ name: '002-credentials', sql: CREDENTIAL_SCHEMA }),
 ]);
 
 function checksum(sql: string): string {

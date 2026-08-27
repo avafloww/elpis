@@ -100,15 +100,22 @@ test('audit and migration receipts are append-only', (t) => {
 test('migration history is an exact immutable prefix', () => {
   const database = new DatabaseSync(':memory:');
   const first = runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 10);
-  assert.deepEqual(first.applied, ['001-initial']);
+  assert.deepEqual(
+    first.applied,
+    GATEWAY_MIGRATIONS.map((migration) => migration.name),
+  );
   assert.deepEqual(
     runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 20),
-    { existing: ['001-initial'], applied: [] },
+    {
+      existing: GATEWAY_MIGRATIONS.map((migration) => migration.name),
+      applied: [],
+    },
   );
   assert.throws(
     () =>
       runGatewayMigrations(database, [
         { name: '001-initial', sql: `${GATEWAY_MIGRATIONS[0].sql}\nSELECT 1;` },
+        GATEWAY_MIGRATIONS[1],
       ]),
     /checksum drift/,
   );
@@ -119,6 +126,27 @@ test('migration history is an exact immutable prefix', () => {
         GATEWAY_MIGRATIONS[0],
       ]),
     /not an exact prefix/,
+  );
+  database.close();
+});
+
+test('a v1 database advances by exact prefix without rewriting migration 001', () => {
+  const database = new DatabaseSync(':memory:');
+  assert.deepEqual(
+    runGatewayMigrations(database, [GATEWAY_MIGRATIONS[0]], () => 10).applied,
+    ['001-initial'],
+  );
+  assert.deepEqual(
+    runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 20),
+    {
+      existing: ['001-initial'],
+      applied: ['002-credentials'],
+    },
+  );
+  assert.equal(
+    (database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    2,
   );
   database.close();
 });

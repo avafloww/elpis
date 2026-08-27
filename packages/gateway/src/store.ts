@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { GatewayCredentialStore } from './credential-store.js';
+import type { RandomBytes } from './credentials.js';
 import {
   GATEWAY_APPLICATION_ID,
   GATEWAY_MIGRATIONS,
@@ -41,6 +43,7 @@ export interface GatewayAuditEvent extends GatewayAuditInput {
 
 export interface OpenGatewayStoreOptions {
   now?: () => number;
+  randomBytes?: RandomBytes;
 }
 
 function exactInteger(value: unknown, label: string): number {
@@ -194,6 +197,7 @@ function configFromRow(row: Record<string, unknown>): GatewayConfig {
 export class GatewayStore {
   readonly dataDirectory: string;
   readonly databasePath: string;
+  readonly credentials: GatewayCredentialStore;
   readonly #database: DatabaseSync;
   readonly #now: () => number;
   #closed = false;
@@ -203,11 +207,19 @@ export class GatewayStore {
     databasePath: string,
     database: DatabaseSync,
     now: () => number,
+    randomBytes?: RandomBytes,
   ) {
     this.dataDirectory = dataDirectory;
     this.databasePath = databasePath;
     this.#database = database;
     this.#now = now;
+    this.credentials = new GatewayCredentialStore(
+      database,
+      now,
+      (input, at) => this.insertAudit(input, at),
+      () => hardenDatabaseFiles(this.databasePath),
+      randomBytes,
+    );
   }
 
   config(): GatewayConfig {
@@ -365,6 +377,7 @@ export function openGatewayStore(
       databasePath,
       database,
       options.now ?? Date.now,
+      options.randomBytes,
     );
   } catch (error) {
     try {
