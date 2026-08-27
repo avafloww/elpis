@@ -3,7 +3,11 @@ import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
-import type { RandomBytes } from './credentials.js';
+import {
+  isCredentialId,
+  isGatewayInstanceId,
+  type RandomBytes,
+} from './credentials.js';
 import { parseCanonicalPublicOrigin } from './http-guards.js';
 import {
   GATEWAY_APPLICATION_ID,
@@ -21,6 +25,17 @@ export interface GatewayConfig {
   revision: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface GatewayInstanceSummary {
+  readonly id: string;
+  readonly displayName: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly revokedAt: number | null;
+  readonly activeCredentialId: string | null;
+  readonly activeSince: number | null;
+  readonly lastUsedAt: number | null;
 }
 
 export interface GatewayAuditInput {
@@ -53,6 +68,36 @@ function exactInteger(value: unknown, label: string): number {
   if (!Number.isSafeInteger(number))
     throw new Error(`${label} is not a safe integer`);
   return number;
+}
+
+function exactIntegerOrNull(value: unknown, label: string): number | null {
+  return value === null ? null : exactInteger(value, label);
+}
+
+function gatewayInstanceId(value: unknown): string {
+  if (!isGatewayInstanceId(value))
+    throw new Error('instance id has invalid syntax');
+  return value;
+}
+
+function gatewayCredentialIdOrNull(value: unknown): string | null {
+  if (value === null) return null;
+  if (!isCredentialId(value))
+    throw new Error('active credential id has invalid syntax');
+  return value;
+}
+
+function gatewayDisplayName(value: unknown): string {
+  if (typeof value !== 'string')
+    throw new Error('instance display name must be text');
+  const result = value.trim();
+  if (result.length < 1 || result.length > 256)
+    throw new Error('instance display name must contain 1 to 256 characters');
+  if (/\p{Cc}/u.test(result))
+    throw new Error(
+      'instance display name must not contain control characters',
+    );
+  return result;
 }
 
 function boundedText(value: unknown, label: string, max: number): string {
@@ -213,6 +258,60 @@ export class GatewayStore {
       .get() as Record<string, unknown> | undefined;
     if (!row) throw new Error('gateway config singleton is missing');
     return configFromRow(row);
+  }
+
+  instances(limit = 100): readonly GatewayInstanceSummary[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new Error('instance limit must be an integer from 1 to 1000');
+    const rows = this.#database
+      .prepare(
+        `SELECT
+           i.id AS instance_id,
+           i.display_name AS display_name,
+           i.created_at AS instance_created_at,
+           i.updated_at AS instance_updated_at,
+           i.revoked_at AS instance_revoked_at,
+           c.id AS active_credential_id,
+           c.activated_at AS active_since,
+           c.last_used_at AS last_used_at
+         FROM gateway_instances AS i
+         LEFT JOIN gateway_node_credentials AS c
+           ON c.instance_id = i.id AND c.state = 'active'
+         ORDER BY i.created_at ASC, i.id ASC
+         LIMIT ?`,
+      )
+      .all(limit) as unknown as Record<string, unknown>[];
+    return Object.freeze(
+      rows.map((row) =>
+        Object.freeze({
+          id: gatewayInstanceId(row.instance_id),
+          displayName: gatewayDisplayName(row.display_name),
+          createdAt: exactInteger(
+            row.instance_created_at,
+            'instance created timestamp',
+          ),
+          updatedAt: exactInteger(
+            row.instance_updated_at,
+            'instance updated timestamp',
+          ),
+          revokedAt: exactIntegerOrNull(
+            row.instance_revoked_at,
+            'instance revoked timestamp',
+          ),
+          activeCredentialId: gatewayCredentialIdOrNull(
+            row.active_credential_id,
+          ),
+          activeSince: exactIntegerOrNull(
+            row.active_since,
+            'active credential activation timestamp',
+          ),
+          lastUsedAt: exactIntegerOrNull(
+            row.last_used_at,
+            'active credential last-used timestamp',
+          ),
+        }),
+      ),
+    );
   }
 
   setPublicUrl(value: string, requestId: string | null = null): GatewayConfig {

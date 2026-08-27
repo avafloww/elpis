@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   GATEWAY_APPLICATION_ID,
   GATEWAY_MIGRATIONS,
+  createNodeCredential,
+  newGatewayInstanceId,
   openGatewayStore,
   runGatewayMigrations,
 } from '../src/index.js';
@@ -61,6 +63,108 @@ test('secure open creates one healthy Gateway database with hardened files', (t)
       ['gateway.configure', 2000, { publicUrl: 'https://gateway.example.com' }],
     ],
   );
+  store.close();
+});
+
+test('instance summaries are bounded, deterministic, immutable, and verifier-free', (t) => {
+  const directory = fixture();
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let now = 100;
+  const store = openGatewayStore(directory, { now: () => now });
+
+  const instanceB = newGatewayInstanceId((size) => Buffer.alloc(size, 2));
+  const nodeB = createNodeCredential((size) => Buffer.alloc(size, 3));
+  const grantB = store.credentials.createEnrollmentGrant();
+  store.credentials.enroll({
+    grantToken: grantB.token,
+    instanceId: instanceB,
+    displayName: 'Resident B',
+    credentialId: nodeB.id,
+    credentialVerifier: nodeB.verifier,
+  });
+
+  const instanceA = newGatewayInstanceId((size) => Buffer.alloc(size, 1));
+  const nodeA = createNodeCredential((size) => Buffer.alloc(size, 4));
+  const grantA = store.credentials.createEnrollmentGrant();
+  store.credentials.enroll({
+    grantToken: grantA.token,
+    instanceId: instanceA,
+    displayName: 'Resident A',
+    credentialId: nodeA.id,
+    credentialVerifier: nodeA.verifier,
+  });
+
+  now = 250;
+  assert.deepEqual(store.credentials.authenticateNode(nodeB.token), {
+    instanceId: instanceB,
+    credentialId: nodeB.id,
+  });
+
+  const summaries = store.instances();
+  assert.deepEqual(summaries, [
+    {
+      id: instanceA,
+      displayName: 'Resident A',
+      createdAt: 100,
+      updatedAt: 100,
+      revokedAt: null,
+      activeCredentialId: nodeA.id,
+      activeSince: 100,
+      lastUsedAt: null,
+    },
+    {
+      id: instanceB,
+      displayName: 'Resident B',
+      createdAt: 100,
+      updatedAt: 100,
+      revokedAt: null,
+      activeCredentialId: nodeB.id,
+      activeSince: 100,
+      lastUsedAt: 250,
+    },
+  ]);
+  assert.deepEqual(store.instances(1), [summaries[0]]);
+  assert.equal(Object.isFrozen(summaries), true);
+  assert.equal(summaries.every(Object.isFrozen), true);
+  assert.throws(() => (summaries as unknown as unknown[]).push({}), TypeError);
+  assert.throws(
+    () =>
+      ((summaries[0] as unknown as { displayName: string }).displayName =
+        'Changed'),
+    TypeError,
+  );
+
+  for (const invalid of [0, 1001, 1.5, NaN, Infinity, '1'])
+    assert.throws(
+      () => store.instances(invalid as unknown as number),
+      /instance limit/,
+    );
+
+  const json = JSON.stringify(summaries);
+  assert.deepEqual(Object.keys(JSON.parse(json)[0]), [
+    'id',
+    'displayName',
+    'createdAt',
+    'updatedAt',
+    'revokedAt',
+    'activeCredentialId',
+    'activeSince',
+    'lastUsedAt',
+  ]);
+  for (const forbidden of [
+    grantA.token,
+    grantB.token,
+    nodeA.token,
+    nodeB.token,
+    grantA.token.split('.')[2],
+    grantB.token.split('.')[2],
+    nodeA.token.split('.')[2],
+    nodeB.token.split('.')[2],
+    nodeA.verifier.toString('hex'),
+    nodeB.verifier.toString('hex'),
+    'verifier',
+  ])
+    assert.equal(json.includes(forbidden), false);
   store.close();
 });
 
