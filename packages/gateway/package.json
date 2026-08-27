@@ -18,7 +18,10 @@
     }
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json && mkdir -p dist/public && cp -R public/. dist/public/",
     "test": "TEST_NO_NETWORK=1 node --test --test-timeout=30000 --import tsx/esm test/*.test.ts"
+  },
+  "bin": {
+    "elpis-gateway": "./dist/main.js"
   }
 }

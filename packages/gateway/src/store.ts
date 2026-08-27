@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
 import type { RandomBytes } from './credentials.js';
+import { parseCanonicalPublicOrigin } from './http-guards.js';
 import {
   GATEWAY_APPLICATION_ID,
   GATEWAY_MIGRATIONS,
@@ -70,24 +71,7 @@ function optionalText(
 }
 
 function canonicalPublicUrl(value: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error('publicUrl must be an absolute URL');
-  }
-  const localHttp =
-    parsed.protocol === 'http:' &&
-    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
-  if (parsed.protocol !== 'https:' && !localHttp)
-    throw new Error('publicUrl must use HTTPS except on localhost');
-  if (parsed.username || parsed.password || parsed.search || parsed.hash)
-    throw new Error(
-      'publicUrl must not contain credentials, query, or fragment',
-    );
-  if (parsed.pathname !== '/' && parsed.pathname !== '')
-    throw new Error('publicUrl must be an origin without a path');
-  return parsed.origin;
+  return parseCanonicalPublicOrigin(value, { allowLocalHttp: true });
 }
 
 function assertPlainDetail(value: unknown): Record<string, unknown> {
