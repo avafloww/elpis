@@ -9,6 +9,17 @@ import {
   validateEnrollmentRevoke,
   validateGatewayState,
 } from '../client/api.ts';
+import {
+  copyBootstrapOnRequest,
+  createMutationGuard,
+  downloadBootstrapOnRequest,
+  enrollmentReducer,
+} from '../client/enrollment-modal.tsx';
+import {
+  formatExpiryCountdown,
+  gatewayErrorMessage,
+  setupDefaultOrigin,
+} from '../client/presentation.ts';
 
 const ID = 'Abcdefghijklmnopqrstu_';
 const INSTANCE_ID = 'egi1.Abcdefghijklmnopqrstu_';
@@ -261,4 +272,166 @@ test('browser source has no persistence, logging, or configurable base surface',
   ].map((parts) => parts.join(''));
   for (const item of forbidden)
     assert.equal(source.includes(item), false, item);
+});
+
+test('setup defaults to the exact browser origin and submits canonical input', async () => {
+  assert.equal(
+    setupDefaultOrigin('https://gateway.example:8443'),
+    'https://gateway.example:8443',
+  );
+  const requests: string[] = [];
+  const responses = [csrf('A'), json(state())];
+  const fake = (async (
+    input: string | URL | Request,
+    options?: RequestInit,
+  ) => {
+    requests.push(String(input) + ':' + String(options?.body ?? ''));
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  }) as typeof fetch;
+  const result = await createGatewayClient(fake).setup(
+    'https://gateway.example',
+  );
+  assert.equal(result.setup.complete, true);
+  assert.deepEqual(requests, [
+    '/api/csrf:',
+    '/api/v1/setup:{"publicUrl":"https://gateway.example"}',
+  ]);
+});
+
+test('enrollment reducer requires explicit generate and clears held response on close', () => {
+  const response = validateEnrollmentGrant(grant());
+  const idle = { phase: 'idle' } as const;
+  assert.equal(enrollmentReducer(idle, { type: 'generated', response }), idle);
+
+  const generating = enrollmentReducer(idle, { type: 'generate' });
+  assert.equal(generating.phase, 'generating');
+  const ready = enrollmentReducer(generating, { type: 'generated', response });
+  assert.equal(ready.phase, 'ready');
+  assert.equal('response' in ready, true);
+
+  const closed = enrollmentReducer(ready, { type: 'close' });
+  assert.deepEqual(closed, { phase: 'idle' });
+  assert.equal('response' in closed, false);
+});
+
+test('mutation admission suppresses duplicates while pending', () => {
+  const guard = createMutationGuard();
+  assert.equal(guard.begin(), true);
+  assert.equal(guard.begin(), false);
+  guard.finish();
+  assert.equal(guard.begin(), true);
+});
+
+test('explicit revoke transition clears the response exactly once', () => {
+  const response = validateEnrollmentGrant(grant());
+  let view = enrollmentReducer({ phase: 'idle' }, { type: 'generate' });
+  view = enrollmentReducer(view, { type: 'generated', response });
+  view = enrollmentReducer(view, { type: 'revoke' });
+  assert.equal(view.phase, 'revoking');
+  view = enrollmentReducer(view, { type: 'revoked', replayed: false });
+  assert.deepEqual(view, { phase: 'revoked', replayed: false });
+  assert.equal('response' in view, false);
+  assert.equal(
+    enrollmentReducer(view, { type: 'revoked', replayed: false }),
+    view,
+  );
+});
+
+test('copy and download expose contents only on direct invocation and revoke object URL', async () => {
+  const value = grant().bootstrapYaml;
+  const copied: string[] = [];
+  await copyBootstrapOnRequest(value, {
+    async writeText(input) {
+      copied.push(input);
+    },
+  });
+  assert.deepEqual(copied, [value]);
+
+  const actions: string[] = [];
+  let downloadedBlob: Blob | undefined;
+  downloadBootstrapOnRequest(value, {
+    createObjectURL(blob) {
+      downloadedBlob = blob;
+      actions.push('create');
+      return 'blob:safe-object';
+    },
+    click(objectUrl, filename) {
+      assert.equal(objectUrl, 'blob:safe-object');
+      assert.equal(filename, 'elpis-gateway-enrollment.yaml');
+      actions.push('click');
+    },
+    revokeObjectURL(objectUrl) {
+      assert.equal(objectUrl, 'blob:safe-object');
+      actions.push('revoke');
+    },
+  });
+  assert.deepEqual(actions, ['create', 'click', 'revoke']);
+  assert.equal(await downloadedBlob?.text(), value);
+});
+
+test('download revokes its object URL when the click fails', () => {
+  const actions: string[] = [];
+  assert.throws(() =>
+    downloadBootstrapOnRequest('safe', {
+      createObjectURL() {
+        actions.push('create');
+        return 'blob:safe-object';
+      },
+      click() {
+        actions.push('click');
+        throw new Error('blocked');
+      },
+      revokeObjectURL() {
+        actions.push('revoke');
+      },
+    }),
+  );
+  assert.deepEqual(actions, ['create', 'click', 'revoke']);
+});
+
+test('presentation errors and countdowns are bounded and body-free', () => {
+  const secretBody = 'raw body with credential';
+  assert.equal(
+    gatewayErrorMessage(new Error(secretBody)).includes(secretBody),
+    false,
+  );
+  assert.equal(
+    gatewayErrorMessage(new GatewayClientError(418, 'unknown_code')).includes(
+      'unknown_code',
+    ),
+    false,
+  );
+  assert.equal(formatExpiryCountdown(1000, 1000), 'Expired');
+  assert.equal(
+    formatExpiryCountdown(Number.MAX_SAFE_INTEGER, 0),
+    'Expires in more than 24h',
+  );
+});
+
+test('bootstrap response is confined to validator and dedicated dialog workflow', () => {
+  const root = path.resolve(import.meta.dirname, '../client');
+  const referringFiles = fs
+    .readdirSync(root)
+    .filter((name) => /\.tsx?$/.test(name))
+    .filter((name) =>
+      fs.readFileSync(path.join(root, name), 'utf8').includes('bootstrapYaml'),
+    )
+    .sort();
+  assert.deepEqual(referringFiles, ['api.ts', 'enrollment-modal.tsx']);
+
+  const production = fs
+    .readdirSync(root)
+    .filter((name) => /\.tsx?$/.test(name))
+    .map((name) => fs.readFileSync(path.join(root, name), 'utf8'))
+    .join('\n');
+  for (const forbidden of [
+    /document\.title/,
+    /location\.(?:hash|search)/,
+    /URLSearchParams/,
+    /setAttribute\(\s*['"]data-/,
+    /setAttribute\(\s*['"]aria-label/,
+  ])
+    assert.doesNotMatch(production, forbidden);
 });
