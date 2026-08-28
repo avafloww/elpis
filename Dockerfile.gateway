@@ -1,0 +1,41 @@
+FROM node:24-trixie-slim AS build
+WORKDIR /opt/elpis
+COPY package.json package-lock.json tsconfig.json ./
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/gateway-protocol/package.json packages/gateway-protocol/package.json
+RUN npm ci --legacy-peer-deps --workspace @elpis/gateway --workspace @elpis/gateway-protocol
+COPY packages/gateway/tsconfig.json packages/gateway/build-client.mjs packages/gateway/
+COPY packages/gateway/client packages/gateway/client
+COPY packages/gateway/public packages/gateway/public
+COPY packages/gateway/src packages/gateway/src
+COPY packages/gateway-protocol/tsconfig.json packages/gateway-protocol/tsconfig.json
+COPY packages/gateway-protocol/src packages/gateway-protocol/src
+RUN npm run build:gateway \
+  && mkdir -p /opt/artifacts \
+  && npm pack --silent --workspace @elpis/gateway-protocol --pack-destination /opt/artifacts \
+  && npm pack --silent --workspace @elpis/gateway --pack-destination /opt/artifacts \
+  && mv /opt/artifacts/elpis-gateway-protocol-*.tgz /opt/artifacts/protocol.tgz \
+  && mv /opt/artifacts/elpis-gateway-[0-9]*.tgz /opt/artifacts/gateway.tgz
+
+FROM node:24-trixie-slim AS production-dependencies
+WORKDIR /opt/runtime
+COPY --from=build /opt/artifacts/protocol.tgz /opt/artifacts/gateway.tgz ./
+RUN printf '{"private":true,"type":"module"}\n' > package.json \
+  && npm install --omit=dev --ignore-scripts --package-lock=false ./protocol.tgz ./gateway.tgz \
+  && rm protocol.tgz gateway.tgz
+
+FROM node:24-trixie-slim AS runtime
+RUN groupadd --gid 10001 elpis-gateway \
+  && useradd --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin elpis-gateway \
+  && mkdir -p /opt/gateway /data \
+  && chown 10001:10001 /data
+WORKDIR /opt/gateway
+COPY --from=production-dependencies --chown=root:root /opt/runtime/node_modules ./node_modules
+ENV NODE_ENV=production \
+    ELPIS_GATEWAY_DATA_DIR=/data \
+    ELPIS_GATEWAY_LISTEN_HOST=0.0.0.0 \
+    ELPIS_GATEWAY_LISTEN_PORT=8790
+EXPOSE 8790
+USER 10001:10001
+WORKDIR /data
+CMD ["node", "/opt/gateway/node_modules/@elpis/gateway/dist/main.js"]

@@ -9,6 +9,16 @@
 !packages/gateway-protocol/tsconfig.json
 !packages/gateway-protocol/src/
 !packages/gateway-protocol/src/**
+!packages/gateway/
+!packages/gateway/package.json
+!packages/gateway/tsconfig.json
+!packages/gateway/build-client.mjs
+!packages/gateway/client/
+!packages/gateway/client/**
+!packages/gateway/public/
+!packages/gateway/public/**
+!packages/gateway/src/
+!packages/gateway/src/**
 !src/
 !src/**
 !bench/
