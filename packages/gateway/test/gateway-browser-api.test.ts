@@ -94,6 +94,16 @@ function setupHeaders(
   };
 }
 
+function nullOriginHeaders(): Record<string, string> {
+  return {
+    ...setupHeaders(FIRST),
+    origin: 'null',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'same-origin',
+    'sec-fetch-dest': 'empty',
+  };
+}
+
 function putSetup(
   port: number,
   body: string,
@@ -244,6 +254,41 @@ test('enrollment grant creation requires completed setup before all other policy
   assert.equal(response.status, 409);
   assert.deepEqual(json(response), { error: 'setup_required' });
   assert.deepEqual(store.audit(), []);
+});
+
+test('null Origin same-origin Fetch Metadata authorizes one enrollment grant', async (t) => {
+  const { store, port } = await fixture(t);
+  assert.equal(
+    (await putSetup(port, JSON.stringify({ publicUrl: FIRST }))).status,
+    200,
+  );
+  const setupAudit = JSON.stringify(store.audit());
+  const denied = await grantRequest(port, 'POST', undefined, '{}', {
+    ...nullOriginHeaders(),
+    'sec-fetch-site': 'cross-site',
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(JSON.stringify(store.audit()), setupAudit);
+
+  const accepted = await grantRequest(
+    port,
+    'POST',
+    undefined,
+    '{}',
+    nullOriginHeaders(),
+  );
+  assert.equal(accepted.status, 201);
+  assert.equal(
+    (json(accepted) as { format: string }).format,
+    'elpis-gateway-enrollment-v1',
+  );
+  assert.equal(
+    store
+      .audit()
+      .filter((event) => event.action === 'gateway.enrollment-grant.create')
+      .length,
+    1,
+  );
 });
 
 test('enrollment grant bootstrap is bounded, exact, and useful only once', async (t) => {

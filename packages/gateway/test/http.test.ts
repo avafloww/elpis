@@ -95,6 +95,49 @@ test('configured and designated pre-setup Origin rules fail closed', () => {
   );
 });
 
+test('null Origin accepts only canonical same-origin Fetch Metadata', () => {
+  const headers = (overrides: Array<[string, string]> = []): IncomingMessage =>
+    requestHeaders([
+      ['Origin', 'null'],
+      ['Host', 'gateway.example'],
+      ['Sec-Fetch-Site', 'same-origin'],
+      ['Sec-Fetch-Mode', 'same-origin'],
+      ['Sec-Fetch-Dest', 'empty'],
+      ...overrides,
+    ]);
+  assert.doesNotThrow(() =>
+    assertBrowserOrigin(headers(), { publicUrl: 'https://gateway.example' }),
+  );
+  assert.doesNotThrow(() =>
+    assertBrowserOrigin(headers(), {
+      publicUrl: null,
+      setupCandidatePublicUrl: 'https://gateway.example',
+    }),
+  );
+
+  for (const malformed of [
+    requestHeaders([['Origin', 'null']]),
+    headers([['Host', 'wrong.example']]),
+    headers([['Sec-Fetch-Site', 'cross-site']]),
+    headers([['Sec-Fetch-Mode', 'cors']]),
+    headers([['Sec-Fetch-Dest', 'document']]),
+    headers([['Sec-Fetch-Dest', '']]),
+    headers([['Sec-Fetch-Site', 'same-origin']]),
+    requestHeaders([
+      ['Origin', 'https://wrong.example'],
+      ['Host', 'gateway.example'],
+      ['Sec-Fetch-Site', 'same-origin'],
+      ['Sec-Fetch-Mode', 'same-origin'],
+      ['Sec-Fetch-Dest', 'empty'],
+    ]),
+  ])
+    denied(() =>
+      assertBrowserOrigin(malformed, {
+        publicUrl: 'https://gateway.example',
+      }),
+    );
+});
+
 test('CSRF uses exact cookie/header grammar and comparison', () => {
   const token = createCsrfToken(() => Buffer.alloc(32, 7));
   assert.equal(token.length, 43);

@@ -2,16 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
     <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#141320" />
+    <meta name="apple-mobile-web-app-title" content="Elpis Gateway" />
     <title>Elpis Gateway</title>
+    <link rel="icon" type="image/svg+xml" href="/elpis-icon-dark.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/assets/app.css" />
   </head>
   <body>
     <div id="app">
-      <main aria-live="polite" aria-busy="true">
-        <h1>Elpis Gateway</h1>
-        <p>Loading gateway state…</p>
+      <main class="gateway-boot" aria-live="polite" aria-busy="true" hidden>
+        <img class="gateway-boot-logo" src="/elpis-logo-dark.svg" alt="Elpis" />
+        <p class="gateway-boot-product">Gateway</p>
+        <p class="gateway-boot-status">
+          <span class="spinner" aria-hidden="true"></span>
+          Loading gateway state…
+        </p>
       </main>
     </div>
     <script type="module" src="/assets/app.js"></script>

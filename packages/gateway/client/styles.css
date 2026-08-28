@@ -61,6 +61,43 @@ body {
   color: var(--fg);
 }
 
+.gateway-boot[hidden] {
+  display: flex;
+}
+
+.gateway-boot {
+  width: min(420px, calc(100% - 32px));
+  min-height: 100dvh;
+  margin: 0 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.gateway-boot-logo {
+  display: block;
+  width: min(196px, 54vw);
+  height: auto;
+}
+
+.gateway-boot-product {
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.gateway-boot-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 button,
 input,
 textarea {
@@ -186,13 +223,18 @@ h3 {
   font-weight: 600;
 }
 
-.brand-mark {
-  width: 11px;
-  height: 11px;
+.brand-logo {
+  display: block;
+  width: 104px;
+  height: auto;
   flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--gold);
-  box-shadow: 0 0 0 6px rgba(216, 184, 119, 0.12);
+}
+
+.brand-divider {
+  width: 1px;
+  height: 28px;
+  flex: 0 0 auto;
+  background: var(--line-strong);
 }
 
 .eyebrow {
@@ -1012,8 +1054,13 @@ input {
     gap: 8px;
   }
 
-  .gateway-header .brand-lockup h1 {
+  .gateway-header .brand-lockup h1,
+  .gateway-header .brand-divider {
     display: none;
+  }
+
+  .gateway-header .brand-logo {
+    width: 88px;
   }
 
   .identity-dock-button {

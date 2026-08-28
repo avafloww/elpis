@@ -81,15 +81,35 @@ export interface BrowserOriginGuard {
   setupCandidatePublicUrl?: string;
 }
 
-/**
- * Enforce the browser Origin boundary without consulting Host or forwarded
- * identity headers. The setup exception is deliberately opt-in per call.
- */
+function assertExpectedBrowserOrigin(
+  request: IncomingMessage,
+  canonical: string,
+  requireHost: boolean,
+): void {
+  const origin = requiredSingleHeader(request, 'origin');
+  if (origin === canonical) {
+    if (
+      requireHost &&
+      requiredSingleHeader(request, 'host') !== new URL(canonical).host
+    )
+      throw new HttpBoundaryError(403, 'request_denied');
+    return;
+  }
+  if (
+    origin !== 'null' ||
+    singleRequestHeader(request, 'sec-fetch-site') !== 'same-origin' ||
+    singleRequestHeader(request, 'sec-fetch-mode') !== 'same-origin' ||
+    singleRequestHeader(request, 'sec-fetch-dest') !== 'empty' ||
+    requiredSingleHeader(request, 'host') !== new URL(canonical).host
+  )
+    throw new HttpBoundaryError(403, 'request_denied');
+}
+
+/** Enforce exact Origin, with a narrow browser-owned null-Origin fallback. */
 export function assertBrowserOrigin(
   request: IncomingMessage,
   guard: BrowserOriginGuard,
 ): void {
-  const origin = requiredSingleHeader(request, 'origin');
   if (guard.publicUrl !== null) {
     let canonical: string;
     try {
@@ -99,8 +119,7 @@ export function assertBrowserOrigin(
     } catch {
       throw new HttpBoundaryError(503, 'service_unavailable');
     }
-    if (origin !== canonical)
-      throw new HttpBoundaryError(403, 'request_denied');
+    assertExpectedBrowserOrigin(request, canonical, false);
     return;
   }
 
@@ -113,11 +132,9 @@ export function assertBrowserOrigin(
   } catch {
     throw new HttpBoundaryError(403, 'request_denied');
   }
-  if (candidate !== canonical || origin !== canonical)
+  if (candidate !== canonical)
     throw new HttpBoundaryError(403, 'request_denied');
-  const host = requiredSingleHeader(request, 'host');
-  if (host !== new URL(canonical).host)
-    throw new HttpBoundaryError(403, 'request_denied');
+  assertExpectedBrowserOrigin(request, canonical, true);
 }
 
 export function createCsrfToken(

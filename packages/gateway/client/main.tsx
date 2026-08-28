@@ -338,11 +338,9 @@ export function GatewayApp({
     >
       <header class='gateway-header'>
         <div class='brand-lockup'>
-          <span class='brand-mark' aria-hidden='true' />
-          <div>
-            <p class='eyebrow'>Elpis</p>
-            <h1>Gateway</h1>
-          </div>
+          <img class='brand-logo' src='/elpis-logo-dark.svg' alt='Elpis' />
+          <span class='brand-divider' aria-hidden='true' />
+          <h1>Gateway</h1>
         </div>
         <GatewayIdentityDock
           view={identityView}

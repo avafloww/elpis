@@ -567,12 +567,41 @@ test('identity shell delegates one keyed resident dashboard without gaining tran
     /localStorage|sessionStorage|indexedDB/,
   );
 });
-test('Gateway build copies the canonical shared Console logo bytes', () => {
+test('Gateway uses and ships the canonical shared Elpis branding', () => {
   const packageRoot = path.resolve(import.meta.dirname, '..');
   const build = fs.readFileSync(
     path.join(packageRoot, 'build-client.mjs'),
     'utf8',
   );
-  assert.match(build, /\.\.\/\.\.\/src\/console\/public\/elpis-logo-dark\.svg/);
-  assert.match(build, /dist\/public\/elpis-logo-dark\.svg/);
+  const main = fs.readFileSync(
+    path.join(packageRoot, 'client/main.tsx'),
+    'utf8',
+  );
+  const index = fs.readFileSync(
+    path.join(packageRoot, 'public/index.html'),
+    'utf8',
+  );
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(packageRoot, 'public/manifest.webmanifest'),
+      'utf8',
+    ),
+  ) as { name: string; short_name: string };
+  for (const asset of [
+    'elpis-logo-dark.svg',
+    'elpis-icon-dark.svg',
+    'apple-touch-icon.png',
+    'elpis-icon-192.png',
+    'elpis-icon-512.png',
+    'elpis-icon-maskable-512.png',
+  ])
+    assert.match(build, new RegExp(asset.replace('.', '\\.')));
+  assert.match(main, /class='brand-logo' src='\/elpis-logo-dark\.svg'/);
+  assert.doesNotMatch(main, /class='brand-mark'/);
+  assert.match(index, /rel="icon"[^>]+href="\/elpis-icon-dark\.svg"/);
+  assert.match(index, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(index, /class="gateway-boot"[^>]+hidden/);
+  assert.match(index, /class="gateway-boot-logo"/);
+  assert.equal(manifest.name, 'Elpis Gateway');
+  assert.equal(manifest.short_name, 'Gateway');
 });

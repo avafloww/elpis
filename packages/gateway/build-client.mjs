@@ -17,7 +17,20 @@ await esbuild.build({
   logLevel: 'info',
 });
 
-await copyFile(
-  new URL('../../src/console/public/elpis-logo-dark.svg', import.meta.url),
-  new URL('dist/public/elpis-logo-dark.svg', import.meta.url),
+const sharedAssets = [
+  'elpis-logo-dark.svg',
+  'elpis-icon-dark.svg',
+  'apple-touch-icon.png',
+  'elpis-icon-192.png',
+  'elpis-icon-512.png',
+  'elpis-icon-maskable-512.png',
+];
+
+await Promise.all(
+  sharedAssets.map((name) =>
+    copyFile(
+      new URL(`../../src/console/public/${name}`, import.meta.url),
+      new URL(`dist/public/${name}`, import.meta.url),
+    ),
+  ),
 );
