@@ -46,6 +46,12 @@ import {
   type GatewayEnrollmentFetch,
 } from './gateway-enrollment.js';
 import {
+  startGatewayLinkRuntime,
+  stopGatewayControlPlane,
+  type GatewayLinkControllerFactory,
+  type GatewayLinkRuntime,
+} from './gateway-link-runtime.js';
+import {
   createTranscriptStore,
   loadMostRecentMain,
   MAIN_TRANSCRIPT_ID,
@@ -123,6 +129,7 @@ export interface ElpisRuntimeAdapters {
   loadExtensions?: typeof loadExtensions;
   resolveBuildIdentity?: typeof resolveBuildIdentity;
   gatewayEnrollmentFetch?: GatewayEnrollmentFetch;
+  createGatewayLinkController?: GatewayLinkControllerFactory;
 }
 
 export interface ElpisRuntime {
@@ -139,6 +146,7 @@ export interface ElpisRuntime {
   secretary: SecretarySupervisorRuntime | null;
   workerServer: ScopedWorkerServerRuntime | null;
   gatewayEnrollment: GatewayEnrollmentController;
+  gatewayLink: GatewayLinkRuntime | null;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -240,12 +248,28 @@ export async function createElpisRuntime(
   ]);
 
   const log = (...a: unknown[]) => config.logger.info(...a);
+  const agentName = readAgentName(config.paths.soulPath);
   const gatewayEnrollment = createGatewayEnrollmentController({
     store: gatewayResidentStore,
     secrets: secretRegistry,
     remote: config.dashboard.remote,
-    displayName: readAgentName(config.paths.soulPath),
+    displayName: agentName,
     fetch: adapters.gatewayEnrollmentFetch ?? fetch,
+  });
+  const gatewayLink = startGatewayLinkRuntime({
+    remote: config.dashboard.remote,
+    store: gatewayResidentStore,
+    identity: { name: agentName },
+    build: {
+      version: buildIdentity.version,
+      ...(buildIdentity.revision === null
+        ? {}
+        : { revision: buildIdentity.revision }),
+      state: buildIdentity.state,
+    },
+    factory: adapters.createGatewayLinkController,
+    onStatus: ({ state, failures }) =>
+      log(`gateway link: ${state} failures=${failures}`),
   });
   launchGatewayEnrollment(gatewayEnrollment, (code) => {
     if (code !== 'not_configured') log(`gateway enrollment: ${code}`);
@@ -825,11 +849,7 @@ export async function createElpisRuntime(
   // captured every pushed message).
   const shutdown = (sig: string) => {
     log(`received ${sig} — flushing transcripts and shutting down`);
-    try {
-      gatewayEnrollment.stop();
-    } catch {
-      /* non-fatal */
-    }
+    stopGatewayControlPlane(gatewayEnrollment, gatewayLink);
     try {
       consoleServer?.stop();
     } catch {
@@ -907,6 +927,7 @@ export async function createElpisRuntime(
     secretary: secretaryRuntime,
     workerServer,
     gatewayEnrollment,
+    gatewayLink,
   };
 }
 
