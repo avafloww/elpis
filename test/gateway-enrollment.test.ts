@@ -14,6 +14,7 @@ import {
 } from '@elpis/gateway-protocol';
 import {
   GatewayEnrollmentController,
+  launchGatewayEnrollment,
   type GatewayEnrollmentFetch,
 } from '../src/gateway-enrollment.js';
 import { SecretRegistry } from '../src/lib/secrets.js';
@@ -386,4 +387,37 @@ test('disabled, tokenless, conflict, and active states perform no fetch', async 
     );
     f.db.close();
   });
+});
+
+test('launcher never blocks startup and reports only bounded status codes', async () => {
+  let resolve!: (value: { readonly code: 'active' }) => void;
+  const pending = new Promise<{ readonly code: 'active' }>((done) => {
+    resolve = done;
+  });
+  const seen: string[] = [];
+  const returned = launchGatewayEnrollment(
+    { start: () => pending },
+    (code) => seen.push(code),
+  );
+  assert.equal(returned, undefined);
+  assert.deepEqual(seen, []);
+  resolve(Object.freeze({ code: 'active' }));
+  await pending;
+  await new Promise<void>((done) => setImmediate(done));
+  assert.deepEqual(seen, ['active']);
+
+  launchGatewayEnrollment(
+    { start: async () => Promise.reject(new Error('must not escape')) },
+    (code) => seen.push(code),
+  );
+  await new Promise<void>((done) => setImmediate(done));
+  launchGatewayEnrollment(
+    {
+      start() {
+        throw new Error('must not escape synchronously');
+      },
+    },
+    (code) => seen.push(code),
+  );
+  assert.deepEqual(seen, ['active', 'state_error', 'state_error']);
 });

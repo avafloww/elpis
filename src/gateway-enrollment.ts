@@ -391,6 +391,32 @@ export class GatewayEnrollmentController {
   }
 }
 
+export interface GatewayEnrollmentStartable {
+  start(): Promise<GatewayEnrollmentStatus>;
+}
+
+export function launchGatewayEnrollment(
+  controller: GatewayEnrollmentStartable,
+  onStatus: (code: GatewayEnrollmentStatusCode) => void,
+): void {
+  const report = (code: GatewayEnrollmentStatusCode): void => {
+    try {
+      onStatus(code);
+    } catch {}
+  };
+  let attempt: Promise<GatewayEnrollmentStatus>;
+  try {
+    attempt = controller.start();
+  } catch {
+    report('state_error');
+    return;
+  }
+  void attempt.then(
+    (result) => report(result.code),
+    () => report('state_error'),
+  );
+}
+
 export function createGatewayEnrollmentController(
   options: GatewayEnrollmentControllerOptions,
 ): GatewayEnrollmentController {

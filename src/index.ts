@@ -40,6 +40,12 @@ import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
 import { createSecretRegistry } from './lib/secrets.js';
 import {
+  createGatewayEnrollmentController,
+  launchGatewayEnrollment,
+  type GatewayEnrollmentController,
+  type GatewayEnrollmentFetch,
+} from './gateway-enrollment.js';
+import {
   createTranscriptStore,
   loadMostRecentMain,
   MAIN_TRANSCRIPT_ID,
@@ -74,6 +80,7 @@ import {
 import { createChannelDirectory } from './store/channels.js';
 import { createMuteStore } from './store/mutes.js';
 import { openDatabase } from './store/db.js';
+import { createGatewayResidentStore } from './store/gateway-resident.js';
 import { Scheduler } from './store/scheduler.js';
 import { MindService } from './store/mind.js';
 import { createFeedbackStore } from './store/feedback.js';
@@ -115,6 +122,7 @@ export interface ElpisRuntimeAdapters {
   createSandbox?: typeof createSandbox;
   loadExtensions?: typeof loadExtensions;
   resolveBuildIdentity?: typeof resolveBuildIdentity;
+  gatewayEnrollmentFetch?: GatewayEnrollmentFetch;
 }
 
 export interface ElpisRuntime {
@@ -130,6 +138,7 @@ export interface ElpisRuntime {
   llms: LlmRoleClients;
   secretary: SecretarySupervisorRuntime | null;
   workerServer: ScopedWorkerServerRuntime | null;
+  gatewayEnrollment: GatewayEnrollmentController;
 }
 
 /** True when boot resumed a non-empty transcript but no resume marker was
@@ -210,6 +219,10 @@ export async function createElpisRuntime(
   // and shared; a failure here is a boot problem (channels depend on it), so it
   // is intentionally NOT swallowed. See docs/persistence.md.
   const db = openDatabase(dataLayout.root);
+  const secretRegistry = createSecretRegistry(config);
+  const gatewayResidentStore = createGatewayResidentStore(db);
+  for (const value of gatewayResidentStore.secretValues())
+    secretRegistry.register(value);
 
   // Ensure SOUL.md and MEMORY.md exist with defaults if the agent hasn't
   // written them yet. Existing files are left untouched. The seeded SOUL.md
@@ -227,6 +240,16 @@ export async function createElpisRuntime(
   ]);
 
   const log = (...a: unknown[]) => config.logger.info(...a);
+  const gatewayEnrollment = createGatewayEnrollmentController({
+    store: gatewayResidentStore,
+    secrets: secretRegistry,
+    remote: config.dashboard.remote,
+    displayName: readAgentName(config.paths.soulPath),
+    fetch: adapters.gatewayEnrollmentFetch ?? fetch,
+  });
+  launchGatewayEnrollment(gatewayEnrollment, (code) => {
+    if (code !== 'not_configured') log(`gateway enrollment: ${code}`);
+  });
   log(`build identity: ${buildIdentity.display} (${buildIdentity.source})`);
   log(
     `runtime profile: ${profile.restricted ? `restricted (${profile.source})` : 'normal'}`,
@@ -578,7 +601,6 @@ export async function createElpisRuntime(
     transcript.adopt(MAIN_TRANSCRIPT_ID, initialTranscript.path);
   }
 
-  const secretRegistry = createSecretRegistry(config);
   const agent = new Agent({
     config,
     secretRegistry,
@@ -804,6 +826,11 @@ export async function createElpisRuntime(
   const shutdown = (sig: string) => {
     log(`received ${sig} — flushing transcripts and shutting down`);
     try {
+      gatewayEnrollment.stop();
+    } catch {
+      /* non-fatal */
+    }
+    try {
       consoleServer?.stop();
     } catch {
       /* non-fatal */
@@ -879,6 +906,7 @@ export async function createElpisRuntime(
     llms,
     secretary: secretaryRuntime,
     workerServer,
+    gatewayEnrollment,
   };
 }
 
