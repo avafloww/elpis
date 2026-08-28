@@ -7,3 +7,4 @@ export * from './migrations.js';
 export * from './store.js';
 export * from './http-guards.js';
 export * from './http-service.js';
+export * from './resident-control-api.js';

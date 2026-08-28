@@ -3,6 +3,17 @@ import { open, lstat, realpath } from 'node:fs/promises';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import {
+  RESIDENT_CONTROL_FORMATS,
+  RESIDENT_CONTROL_LIMITS,
+  RESIDENT_CONTROL_PATHS,
+  decodeResidentEnrollmentResult,
+  decodeResidentRotationResult,
+  serializeResidentControlError,
+  serializeResidentEnrollmentResult,
+  serializeResidentRotationResult,
+  type ResidentControlErrorCode,
+} from '@elpis/gateway-protocol';
+import {
   assertBrowserMutation,
   createCsrfToken,
   csrfCookie,
@@ -13,6 +24,13 @@ import {
   validateRequestBodyFraming,
   type BrowserOriginGuard,
 } from './http-guards.js';
+import {
+  BoundedResidentControlRateLimiter,
+  ResidentControlApiError,
+  type ResidentControlApi,
+  type ResidentControlRateLimiter,
+  type ResidentControlRoute,
+} from './resident-control-api.js';
 import {
   GatewayApiError,
   type BrowserApi,
@@ -66,6 +84,12 @@ export interface GatewayHttpServiceOptions {
   checkReady?: () => boolean | Promise<boolean>;
   /** A typed browser route adapter; HTTP policy remains owned by this service. */
   api?: BrowserApi;
+  /** Non-browser resident enrollment and credential-rotation adapter. */
+  residentControl?: ResidentControlApi;
+  /** Optional bounded limiter seam; defaults to direct-peer fixed windows. */
+  residentRateLimiter?: ResidentControlRateLimiter;
+  /** Deterministic time source for resident rate limiting. */
+  residentNow?: () => number;
   maxBodyBytes?: number;
   maxStaticBytes?: number;
   bodyTimeoutMs?: number;
@@ -119,6 +143,70 @@ function sendJson(
     'application/json; charset=utf-8',
     head,
   );
+}
+
+function residentNamespaceTarget(rawUrl: string): boolean {
+  const query = rawUrl.search(/[?#]/);
+  const pathname = query < 0 ? rawUrl : rawUrl.slice(0, query);
+  return (
+    pathname === '/api/v1/resident' || pathname.startsWith('/api/v1/resident/')
+  );
+}
+
+function exactResidentRoute(rawUrl: string): ResidentControlRoute | null {
+  if (rawUrl === RESIDENT_CONTROL_PATHS.enrollment) return 'enrollment';
+  if (rawUrl === RESIDENT_CONTROL_PATHS.rotation) return 'rotation';
+  if (rawUrl === RESIDENT_CONTROL_PATHS.rotationActivation)
+    return 'rotationActivation';
+  return null;
+}
+
+function residentSuccessBody(
+  route: ResidentControlRoute,
+  result: unknown,
+): { status: 200 | 201; body: string } {
+  if (
+    result === null ||
+    typeof result !== 'object' ||
+    (Object.getPrototypeOf(result) !== Object.prototype &&
+      Object.getPrototypeOf(result) !== null)
+  )
+    throw new Error('invalid resident adapter result');
+  const value = result as Record<string, unknown>;
+  const keys = Reflect.ownKeys(value);
+  const statusDescriptor = Object.getOwnPropertyDescriptor(value, 'status');
+  const bodyDescriptor = Object.getOwnPropertyDescriptor(value, 'body');
+  if (
+    keys.length !== 2 ||
+    !keys.includes('status') ||
+    !keys.includes('body') ||
+    !statusDescriptor?.enumerable ||
+    !bodyDescriptor?.enumerable ||
+    !('value' in statusDescriptor) ||
+    !('value' in bodyDescriptor) ||
+    typeof bodyDescriptor.value !== 'string' ||
+    (statusDescriptor.value !== 200 && statusDescriptor.value !== 201)
+  )
+    throw new Error('invalid resident adapter result');
+  const status = statusDescriptor.value;
+  const body = bodyDescriptor.value;
+  const decoded =
+    route === 'enrollment'
+      ? decodeResidentEnrollmentResult(body)
+      : decodeResidentRotationResult(body);
+  const canonical =
+    route === 'enrollment'
+      ? serializeResidentEnrollmentResult(
+          decoded as ReturnType<typeof decodeResidentEnrollmentResult>,
+        )
+      : serializeResidentRotationResult(
+          decoded as ReturnType<typeof decodeResidentRotationResult>,
+        );
+  const expectedStatus =
+    route === 'rotationActivation' || decoded.replayed ? 200 : 201;
+  if (body !== canonical || status !== expectedStatus)
+    throw new Error('invalid resident adapter result');
+  return { status, body: canonical };
 }
 
 function apiNamespaceTarget(rawUrl: string): boolean {
@@ -329,6 +417,65 @@ function sendError(
   sendJson(response, status, { error: code }, request.method === 'HEAD');
 }
 
+function residentErrorStatusMatches(
+  status: number,
+  code: ResidentControlErrorCode,
+): boolean {
+  switch (code) {
+    case 'invalid_request':
+      return [400, 404, 405, 408, 413, 415].includes(status);
+    case 'unauthorized':
+      return status === 401;
+    case 'expired':
+      return status === 410;
+    case 'revoked':
+      return status === 403;
+    case 'conflict':
+      return status === 409;
+    case 'rate_limited':
+      return status === 429;
+    case 'internal_error':
+      return status === 500;
+  }
+}
+
+function sendResidentError(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  status: number,
+  code: ResidentControlErrorCode,
+  requestId?: string,
+): void {
+  if (!residentErrorStatusMatches(status, code)) {
+    status = 500;
+    code = 'internal_error';
+    requestId = undefined;
+  }
+  if (!request.complete) {
+    response.setHeader('Connection', 'close');
+    request.resume();
+  }
+  let body: string;
+  try {
+    const value =
+      requestId === undefined
+        ? { format: RESIDENT_CONTROL_FORMATS.error, code }
+        : { format: RESIDENT_CONTROL_FORMATS.error, code, requestId };
+    // Normal request IDs reach here only after the shared decoder accepts them.
+    body = serializeResidentControlError(
+      value as Parameters<typeof serializeResidentControlError>[0],
+    );
+  } catch {
+    // A malformed injected adapter error cannot break the response boundary.
+    status = 500;
+    body = serializeResidentControlError({
+      format: RESIDENT_CONTROL_FORMATS.error,
+      code: 'internal_error',
+    });
+  }
+  send(response, status, body, 'application/json; charset=utf-8');
+}
+
 interface SafeTarget {
   segments: string[];
   extensionless: boolean;
@@ -460,6 +607,7 @@ export class GatewayHttpService {
   readonly #options: GatewayHttpServiceOptions;
   readonly #root: string;
   readonly #server: http.Server;
+  readonly #residentRateLimiter: ResidentControlRateLimiter;
   #initialized = false;
   #starting: Promise<GatewayListenAddress> | null = null;
 
@@ -471,6 +619,19 @@ export class GatewayHttpService {
       throw new Error('publicRoot must be a real directory');
     this.#root = fs.realpathSync(options.publicRoot);
     this.#options = options;
+    this.#residentRateLimiter =
+      options.residentRateLimiter ?? new BoundedResidentControlRateLimiter();
+    if (
+      options.residentNow !== undefined &&
+      typeof options.residentNow !== 'function'
+    )
+      throw new Error('residentNow must be a function');
+    if (
+      options.residentRateLimiter !== undefined &&
+      (!options.residentRateLimiter ||
+        typeof options.residentRateLimiter.allow !== 'function')
+    )
+      throw new Error('residentRateLimiter must provide allow');
     for (const [label, value] of [
       ['maxBodyBytes', options.maxBodyBytes],
       ['maxStaticBytes', options.maxStaticBytes],
@@ -591,10 +752,19 @@ export class GatewayHttpService {
     securityHeaders(response);
     try {
       const rawUrl = request.url;
-      if (!rawUrl || Buffer.byteLength(rawUrl) > MAX_REQUEST_TARGET_BYTES)
+      if (!rawUrl) throw new HttpBoundaryError(400, 'invalid_request');
+      const method = request.method ?? '';
+
+      // Resident control is a separate non-browser boundary. Dispatch it
+      // before generic API/body policy so every failure uses its wire codec.
+      if (residentNamespaceTarget(rawUrl)) {
+        await this.#handleResidentControl(request, response, rawUrl, method);
+        return;
+      }
+      if (Buffer.byteLength(rawUrl) > MAX_REQUEST_TARGET_BYTES)
         throw new HttpBoundaryError(400, 'invalid_request');
       const pathname = rawUrl.split('?', 1)[0];
-      const method = request.method ?? '';
+
       if (!isBrowserMutation(method)) {
         const length = validateRequestBodyFraming(
           request,
@@ -680,6 +850,111 @@ export class GatewayHttpService {
         return;
       }
       sendError(request, response, 404, 'not_found');
+    }
+  }
+
+  async #readResidentBody(request: http.IncomingMessage): Promise<Buffer> {
+    requireJsonContentType(request);
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      this.#options.bodyTimeoutMs ?? 10_000,
+    );
+    timer.unref();
+    try {
+      return await readBoundedRequestBody(request, {
+        maxBytes: RESIDENT_CONTROL_LIMITS.bodyBytes,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async #handleResidentControl(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    rawUrl: string,
+    method: string,
+  ): Promise<void> {
+    try {
+      if (Buffer.byteLength(rawUrl) > MAX_REQUEST_TARGET_BYTES)
+        throw new ResidentControlApiError(400, 'invalid_request');
+      const route = exactResidentRoute(rawUrl);
+      if (route === null || !this.#options.residentControl)
+        throw new ResidentControlApiError(404, 'invalid_request');
+      if (method !== 'POST')
+        throw new ResidentControlApiError(405, 'invalid_request');
+
+      let now: number;
+      try {
+        now = (this.#options.residentNow ?? Date.now)();
+      } catch {
+        throw new ResidentControlApiError(500, 'internal_error');
+      }
+      if (!Number.isSafeInteger(now))
+        throw new ResidentControlApiError(500, 'internal_error');
+      const admitted = this.#residentRateLimiter.allow({
+        peerAddress: request.socket.remoteAddress ?? '<unknown>',
+        route,
+        now,
+      });
+      if (admitted !== true)
+        throw new ResidentControlApiError(429, 'rate_limited');
+
+      const api = this.#options.residentControl;
+      const authorization = singleRequestHeader(request, 'authorization');
+      let proposalProof: ReturnType<typeof api.authorizeProposal> | undefined;
+      let activationToken: string | undefined;
+      if (route === 'rotation') {
+        // Current-node authentication intentionally precedes content type,
+        // framing, timeout setup, and all body I/O.
+        proposalProof = api.authorizeProposal(authorization);
+      } else if (route === 'rotationActivation') {
+        // This checks syntax only. The pending verifier is authenticated by
+        // GatewayCredentialStore.activateRotation after request decoding.
+        activationToken = api.activationAuthorization(authorization);
+      }
+
+      const body = await this.#readResidentBody(request);
+      const adapterResult =
+        route === 'enrollment'
+          ? api.enroll(body)
+          : route === 'rotation'
+            ? api.proposeRotation(proposalProof!, body)
+            : api.activateRotation(activationToken!, body);
+      const result = residentSuccessBody(route, adapterResult);
+      send(
+        response,
+        result.status,
+        result.body,
+        'application/json; charset=utf-8',
+      );
+    } catch (error) {
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
+      if (error instanceof ResidentControlApiError) {
+        sendResidentError(
+          request,
+          response,
+          error.status,
+          error.code,
+          error.requestId,
+        );
+        return;
+      }
+      if (error instanceof HttpBoundaryError) {
+        sendResidentError(
+          request,
+          response,
+          error.statusCode,
+          'invalid_request',
+        );
+        return;
+      }
+      sendResidentError(request, response, 500, 'internal_error');
     }
   }
 

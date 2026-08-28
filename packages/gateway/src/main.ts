@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGatewayBrowserApi } from './gateway-browser-api.js';
 import { createGatewayHttpService } from './http-service.js';
+import { createGatewayResidentControlApi } from './resident-control-api.js';
 import { openGatewayStore } from './store.js';
 
 function envPort(value: string | undefined): number {
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
     publicRoot,
     store,
     api: createGatewayBrowserApi(store),
+    residentControl: createGatewayResidentControlApi(store.credentials),
     listen: {
       host: process.env.ELPIS_GATEWAY_LISTEN_HOST ?? '127.0.0.1',
       port: envPort(process.env.ELPIS_GATEWAY_LISTEN_PORT),
