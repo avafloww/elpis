@@ -63,10 +63,11 @@ function requireEmptyBody(body: JsonObject): void {
 
 function bootstrapYaml(publicUrl: string, token: string): string {
   const yaml =
-    `gateway:
-  url: ${JSON.stringify(publicUrl)}
+    `dashboard:
+  remote:
+    url: ${JSON.stringify(publicUrl)}
 ` +
-    `  enrollment_token: ${JSON.stringify(token)}
+    `    enrollment_token: ${JSON.stringify(token)}
 `;
   if (Buffer.byteLength(yaml, 'utf8') > MAX_BOOTSTRAP_YAML_BYTES)
     throw new Error('bootstrap YAML exceeds its wire bound');

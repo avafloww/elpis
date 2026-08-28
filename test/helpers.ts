@@ -58,6 +58,13 @@ export const EMPTY_WAKE: CompleteResult = {
  * case's temp dir). Override any field via `overrides`. */
 export function makeConfig(overrides: Partial<Config> = {}): Config {
   const dataDirectory = overrides.paths?.dataDirectory ?? '/tmp/harness-test';
+  const dashboardLocal = overrides.dashboard?.local ??
+    overrides.console ?? {
+      enabled: false,
+      mcpEnabled: false,
+      port: 8787,
+      host: '127.0.0.1',
+    };
   return {
     llm: {
       providerType: 'openai-compatible',
@@ -129,12 +136,6 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       logMaxBytes: 2048,
     },
     modules: { enabled: null, disabled: [] },
-    console: {
-      enabled: false,
-      mcpEnabled: false,
-      port: 8787,
-      host: '127.0.0.1',
-    },
     kagi: { apiKey: null },
     bluesky: null,
     secretary: {
@@ -172,6 +173,11 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     logger: noopLogger,
     logLevel: 'info',
     ...overrides,
+    dashboard: {
+      local: dashboardLocal,
+      remote: overrides.dashboard?.remote ?? null,
+    },
+    console: dashboardLocal,
     memory: {
       consolidationThresholdTokens: 32000,
       consolidationTargetTokens: 24000,

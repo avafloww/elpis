@@ -1,3 +1,4 @@
+import { createEnrollmentCredential } from '@elpis/gateway-protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectSecretValues, redactSecrets } from '../src/lib/secrets.js';
@@ -5,16 +6,24 @@ import { makeConfig } from './helpers.js';
 
 test('collectSecretValues reads configured credentials and ignores short or absent values', () => {
   const base = makeConfig();
+  const enrollmentToken = createEnrollmentCredential((size) =>
+    Buffer.alloc(size, 9),
+  ).token;
   const config = makeConfig({
     llm: { ...base.llm, apiKey: 'sk-llm-key-abcdefgh' },
     discord: { ...base.discord, botToken: 'bot-token-ijklmnop' },
     kagi: { apiKey: 'kagi-key-qrstuvwx' },
+    dashboard: {
+      local: base.dashboard.local,
+      remote: { url: 'https://gateway.example', enrollmentToken },
+    },
   });
   assert.deepEqual(collectSecretValues(config).sort(), [
     'bot-token-ijklmnop',
+    enrollmentToken,
     'kagi-key-qrstuvwx',
     'sk-llm-key-abcdefgh',
-  ]);
+  ].sort());
   assert.deepEqual(
     collectSecretValues(makeConfig({ kagi: { apiKey: null } })),
     [],

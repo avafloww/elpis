@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as url from 'node:url';
 import * as fs from 'node:fs';
+import { parseEnrollmentCredential } from '@elpis/gateway-protocol';
 import { parse as parseYaml, YAMLParseError } from 'yaml';
 import {
   createLogger,
@@ -54,6 +55,22 @@ export interface LlmConfig extends LegacyLlmDefinition {
   completionReserveTokens: number;
   registry: LlmModelRegistry;
   registrySource: 'canonical' | 'legacy';
+}
+
+export interface DashboardLocalConfig {
+  enabled: boolean;
+  mcpEnabled: boolean;
+  port: number;
+  /** Loopback-only by default — the dashboard exposes full reasoning, every
+   * conversation, and the journal. */
+  host: string;
+}
+
+export interface DashboardRemoteConfig {
+  /** Exact canonical credential-free HTTPS origin of one Gateway. */
+  url: string;
+  /** One-use setup grant. Null after enrollment or when provisioned separately. */
+  enrollmentToken: string | null;
 }
 
 export interface Config {
@@ -134,14 +151,12 @@ export interface Config {
     /** Denylist mode when enabled is null: every built-in except these is requested. */
     disabled: BuiltinModuleId[];
   };
-  console: {
-    enabled: boolean;
-    mcpEnabled: boolean;
-    port: number;
-    /** Loopback-only by default — the console exposes full reasoning, every
-     * conversation, and the journal. */
-    host: string;
+  dashboard: {
+    local: DashboardLocalConfig;
+    remote: DashboardRemoteConfig | null;
   };
+  /** Deprecated runtime alias. This is object-identical to dashboard.local. */
+  console: DashboardLocalConfig;
   kagi: {
     /** Required by the search()/extract() sandbox globals. */
     apiKey: string | null;
@@ -283,6 +298,108 @@ function at(tree: YamlTree, dotted: string): unknown {
     cur = (cur as Record<string, unknown>)[part];
   }
   return cur;
+}
+
+function exactMapping(
+  tree: YamlTree,
+  dotted: string,
+  allowed: readonly string[],
+  file: string,
+  allowNull = false,
+): YamlTree | null {
+  const value = at(tree, dotted);
+  if (value === undefined || (allowNull && value === null)) return null;
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`${file}: key \`${dotted}\` must be a mapping${allowNull ? ' or null' : ''}`);
+  const mapping = value as YamlTree;
+  for (const key of Object.keys(mapping))
+    if (!allowed.includes(key))
+      throw new Error(`${file}: key \`${dotted}\` contains unknown key \`${key}\``);
+  return mapping;
+}
+
+function canonicalDashboardOrigin(value: unknown, key: string, file: string): string {
+  if (typeof value !== 'string' || value.length === 0)
+    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.origin !== value
+  )
+    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+  return value;
+}
+
+function parseDashboardConfig(
+  tree: YamlTree,
+  file: string,
+): {
+  dashboard: Config['dashboard'];
+  console: DashboardLocalConfig;
+} {
+  const dashboardPresent = Object.prototype.hasOwnProperty.call(tree, 'dashboard');
+  const consolePresent = Object.prototype.hasOwnProperty.call(tree, 'console');
+  if (dashboardPresent && consolePresent)
+    throw new Error(`${file}: \`dashboard\` and legacy \`console\` are mutually exclusive`);
+
+  if (dashboardPresent) {
+    exactMapping(tree, 'dashboard', ['local', 'remote'], file);
+    exactMapping(tree, 'dashboard.local', ['enabled', 'mcp_enabled', 'port', 'host'], file);
+    const remoteMapping = exactMapping(
+      tree,
+      'dashboard.remote',
+      ['url', 'enrollment_token'],
+      file,
+      true,
+    );
+    const local: DashboardLocalConfig = {
+      enabled: boolOr(tree, 'dashboard.local.enabled', true, file),
+      mcpEnabled: boolOr(tree, 'dashboard.local.mcp_enabled', false, file),
+      port: numOr(tree, 'dashboard.local.port', 8787, file),
+      host: optStr(tree, 'dashboard.local.host', file) ?? '127.0.0.1',
+    };
+    let remote: DashboardRemoteConfig | null = null;
+    if (remoteMapping !== null) {
+      const url = canonicalDashboardOrigin(
+        at(tree, 'dashboard.remote.url'),
+        'dashboard.remote.url',
+        file,
+      );
+      const enrollmentToken = optStr(
+        tree,
+        'dashboard.remote.enrollment_token',
+        file,
+      );
+      if (
+        enrollmentToken !== null &&
+        parseEnrollmentCredential(enrollmentToken) === null
+      )
+        throw new Error(
+          `${file}: key \`dashboard.remote.enrollment_token\` must be an exact ege1 enrollment token or null`,
+        );
+      remote = { url, enrollmentToken };
+    }
+    return { dashboard: { local, remote }, console: local };
+  }
+
+  exactMapping(tree, 'console', ['enabled', 'mcp_enabled', 'port', 'host'], file, true);
+  const local: DashboardLocalConfig = {
+    enabled: boolOr(tree, 'console.enabled', true, file),
+    mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, file),
+    port: numOr(tree, 'console.port', 8787, file),
+    host: optStr(tree, 'console.host', file) ?? '127.0.0.1',
+  };
+  return { dashboard: { local, remote: null }, console: local };
 }
 
 /** A required string. Absent and wrongly-typed are DISTINCT diagnoses: telling
@@ -1139,6 +1256,7 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
   }
 
   const llm = parseLlmConfig(tree, f, logger);
+  const dashboardConfig = parseDashboardConfig(tree, f);
   return {
     llm,
     operator: (() => {
@@ -1318,12 +1436,8 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
             disabled: disabledPresent ? validate('disabled') : [],
           };
     })(),
-    console: {
-      enabled: boolOr(tree, 'console.enabled', true, f),
-      mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, f),
-      port: numOr(tree, 'console.port', 8787, f),
-      host: optStr(tree, 'console.host', f) ?? '127.0.0.1',
-    },
+    dashboard: dashboardConfig.dashboard,
+    console: dashboardConfig.console,
     kagi: { apiKey: optStr(tree, 'kagi.api_key', f) },
     bluesky: (() => {
       const id = optStr(tree, 'bluesky.identifier', f);

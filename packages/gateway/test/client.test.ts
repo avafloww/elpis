@@ -63,9 +63,10 @@ function grant(id = ID, tokenId = id) {
     format: 'elpis-gateway-enrollment-v1',
     grant: { id, expiresAt: 1234 },
     bootstrapYaml:
-      'gateway:\n' +
-      '  url: "https://gateway.example"\n' +
-      '  enrollment_token: "ege1.' +
+      'dashboard:\n' +
+      '  remote:\n' +
+      '    url: "https://gateway.example"\n' +
+      '    enrollment_token: "ege1.' +
       tokenId +
       '.' +
       SECRET +

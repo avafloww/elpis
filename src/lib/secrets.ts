@@ -17,6 +17,7 @@ export function collectSecretValues(config: Config): string[] {
     config.discord.botToken,
     config.kagi.apiKey,
     config.bluesky?.appPassword,
+    config.dashboard.remote?.enrollmentToken,
   ];
   const out: string[] = [];
   for (const v of candidates) {

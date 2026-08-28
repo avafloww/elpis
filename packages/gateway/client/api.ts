@@ -8,9 +8,9 @@ const STABLE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const JSON_SCALAR =
   '("(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\\u0000-\u001f])*")';
 const BOOTSTRAP = new RegExp(
-  '^gateway:\n  url: ' +
+  '^dashboard:\n  remote:\n    url: ' +
     JSON_SCALAR +
-    '\n  enrollment_token: ' +
+    '\n    enrollment_token: ' +
     JSON_SCALAR +
     '\n$',
 );

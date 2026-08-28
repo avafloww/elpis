@@ -13,6 +13,7 @@ import {
   loadConfigFile,
   parseDuration,
 } from '../src/config.js';
+import { createEnrollmentCredential } from '@elpis/gateway-protocol';
 import { noopLogger } from '../src/lib/log.js';
 
 // A bot token whose first segment base64-decodes to a digit string, so the
@@ -308,6 +309,8 @@ test('configFile: defaults are applied when optionals are absent', () => {
   assert.equal(c.console.mcpEnabled, false);
   assert.equal(c.console.port, 8787);
   assert.equal(c.console.host, '127.0.0.1');
+  assert.strictEqual(c.console, c.dashboard.local);
+  assert.equal(c.dashboard.remote, null);
 });
 
 test('configFile: memory consolidation threshold is configurable and validated', () => {
@@ -350,11 +353,98 @@ test('configFile: memory consolidation threshold is configurable and validated',
   );
 });
 
-test('configFile: MCP is an explicit console opt-in', () => {
+test('configFile: legacy console maps to the object-identical local dashboard', () => {
   const c = loadConfigFile(
     fixture(MINIMAL_OK + '\nconsole:\n  enabled: true\n  mcp_enabled: true\n'),
   );
   assert.equal(c.console.mcpEnabled, true);
+  assert.strictEqual(c.console, c.dashboard.local);
+  assert.equal(c.dashboard.remote, null);
+});
+
+test('configFile: canonical dashboard local and remote parse without a second authority', () => {
+  const token = createEnrollmentCredential((size) => Buffer.alloc(size, 7)).token;
+  const c = loadConfigFile(
+    fixture(
+      MINIMAL_OK +
+        `\ndashboard:\n  local:\n    enabled: false\n    mcp_enabled: true\n    port: 9000\n    host: 0.0.0.0\n  remote:\n    url: https://gateway.example\n    enrollment_token: ${JSON.stringify(token)}\n`,
+    ),
+  );
+  assert.deepEqual(c.dashboard.local, {
+    enabled: false,
+    mcpEnabled: true,
+    port: 9000,
+    host: '0.0.0.0',
+  });
+  assert.strictEqual(c.console, c.dashboard.local);
+  assert.deepEqual(c.dashboard.remote, {
+    url: 'https://gateway.example',
+    enrollmentToken: token,
+  });
+});
+
+test('configFile: dashboard and legacy console are mutually exclusive exact mappings', () => {
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(MINIMAL_OK + '\nconsole:\n  enabled: true\ndashboard:\n  local: {}\n'),
+      ),
+    /dashboard.*legacy `console`.*mutually exclusive/,
+  );
+  for (const body of [
+    '\ndashboard: nope\n',
+    '\ndashboard:\n  wrong: true\n',
+    '\ndashboard:\n  local: nope\n',
+    '\ndashboard:\n  local:\n    wrong: true\n',
+    '\ndashboard:\n  remote: []\n',
+    '\ndashboard:\n  remote:\n    url: https://gateway.example\n    wrong: true\n',
+    '\nconsole:\n  wrong: true\n',
+  ])
+    assert.throws(() => loadConfigFile(fixture(MINIMAL_OK + body)), /(mapping|unknown key)/);
+});
+
+test('configFile: remote endpoint and enrollment token are canonical and non-echoing', () => {
+  for (const url of [
+    'http://gateway.example',
+    'https://gateway.example/',
+    'https://gateway.example/path',
+    'https://user@gateway.example',
+    'https://gateway.example?query=1',
+    'https://gateway.example:443',
+  ])
+    assert.throws(
+      () =>
+        loadConfigFile(
+          fixture(MINIMAL_OK + `\ndashboard:\n  remote:\n    url: ${url}\n`),
+        ),
+      /canonical credential-free HTTPS origin/,
+    );
+  const malformed = `ege1.${'A'.repeat(22)}.${'secret-material-that-must-never-echo'.repeat(2)}`;
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(
+          MINIMAL_OK +
+            `\ndashboard:\n  remote:\n    url: https://gateway.example\n    enrollment_token: ${JSON.stringify(malformed)}\n`,
+        ),
+      ),
+    (error) =>
+      error instanceof Error &&
+      /exact ege1 enrollment token/.test(error.message) &&
+      !error.message.includes(malformed),
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(MINIMAL_OK + '\ndashboard:\n  local: null\n  remote: null\n'),
+      ),
+    /dashboard\.local.*must be a mapping/,
+  );
+  const c = loadConfigFile(
+    fixture(MINIMAL_OK + '\ndashboard:\n  remote: null\n'),
+  );
+  assert.strictEqual(c.console, c.dashboard.local);
+  assert.equal(c.dashboard.remote, null);
 });
 
 test('configFile: codex-oauth needs no api key/base URL and pins the canonical backend', () => {

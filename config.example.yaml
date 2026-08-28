@@ -190,16 +190,21 @@ sandbox:
 modules:
   disabled: []
 
-console:
-  enabled: true
-  # Exposes the canonical Mind graph to authenticated external MCP clients at
-  # /mcp. Keep false unless the console is loopback-bound or behind TLS + auth.
-  mcp_enabled: false
-  port: 8787
-  # Loopback-only by default: the console exposes full reasoning, every
-  # conversation, and the journal. Set 0.0.0.0 to expose on all interfaces —
-  # do that deliberately, or reach it over an SSH tunnel instead.
-  host: 127.0.0.1
+dashboard:
+  local:
+    enabled: true
+    # Exposes the canonical Mind graph to authenticated external MCP clients at
+    # /mcp. Keep false unless the dashboard is loopback-bound or behind TLS + auth.
+    mcp_enabled: false
+    port: 8787
+    # Loopback-only by default: the dashboard exposes full reasoning, every
+    # conversation, and the journal. Set 0.0.0.0 to expose on all interfaces —
+    # do that deliberately, or reach it over an SSH tunnel instead.
+    host: 127.0.0.1
+  # Gateway's Add Instance flow emits this exact block with a one-use token.
+  # remote:
+  #   url: https://gateway.example
+  #   enrollment_token: ege1.<id>.<secret>
 
 kagi:
   # Enables the search()/extract() sandbox globals. null = those globals throw.

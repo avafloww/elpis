@@ -296,7 +296,7 @@ test('enrollment grant bootstrap is bounded, exact, and useful only once', async
   assert.equal(serialized.split(token).length - 1, 1);
   assert.equal(
     body.bootstrapYaml,
-    `gateway:\n  url: ${JSON.stringify(FIRST)}\n  enrollment_token: ${JSON.stringify(token)}\n`,
+    `dashboard:\n  remote:\n    url: ${JSON.stringify(FIRST)}\n    enrollment_token: ${JSON.stringify(token)}\n`,
   );
   assert.equal(body.bootstrapYaml.endsWith('\n'), true);
   assert.ok(Buffer.byteLength(body.bootstrapYaml, 'utf8') <= 4096);
