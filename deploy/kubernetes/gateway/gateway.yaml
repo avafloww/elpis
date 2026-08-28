@@ -59,7 +59,7 @@ spec:
               protocol: TCP
           env:
             - name: ELPIS_GATEWAY_DATA_DIR
-              value: /data
+              value: /data/state
             - name: ELPIS_GATEWAY_LISTEN_HOST
               value: 0.0.0.0
             - name: ELPIS_GATEWAY_LISTEN_PORT
