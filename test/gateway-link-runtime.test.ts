@@ -118,9 +118,15 @@ describe('Gateway link runtime lifecycle', () => {
     assert.equal(JSON.stringify(statuses).includes(secret), false);
   });
 
-  it('stops enrollment then link and contains either shutdown failure', () => {
+  it('stops rotation before enrollment and link and contains shutdown failures', () => {
     const order: string[] = [];
     stopGatewayControlPlane(
+      {
+        stop: () => {
+          order.push('rotation');
+          throw new Error('contained');
+        },
+      },
       {
         stop: () => {
           order.push('enrollment');
@@ -135,7 +141,7 @@ describe('Gateway link runtime lifecycle', () => {
         },
       },
     );
-    assert.deepEqual(order, ['enrollment', 'link']);
+    assert.deepEqual(order, ['rotation', 'enrollment', 'link']);
   });
 
   it('sanitizes hostile controller status and status callbacks', () => {

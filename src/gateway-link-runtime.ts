@@ -106,9 +106,13 @@ class FaultedGatewayLinkRuntime implements GatewayLinkRuntime {
 }
 
 export function stopGatewayControlPlane(
+  rotation: GatewayControlStoppable | null,
   enrollment: GatewayControlStoppable,
   link: GatewayLinkRuntime | null,
 ): void {
+  try {
+    rotation?.stop();
+  } catch {}
   try {
     enrollment.stop();
   } catch {}

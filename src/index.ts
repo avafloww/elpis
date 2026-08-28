@@ -52,6 +52,12 @@ import {
   type GatewayLinkRuntime,
 } from './gateway-link-runtime.js';
 import {
+  startGatewayRotationRuntime,
+  type GatewayRotationControllerFactory,
+  type GatewayRotationRuntime,
+} from './gateway-rotation-runtime.js';
+import type { GatewayRotationFetch } from './gateway-rotation.js';
+import {
   createTranscriptStore,
   loadMostRecentMain,
   MAIN_TRANSCRIPT_ID,
@@ -129,6 +135,8 @@ export interface ElpisRuntimeAdapters {
   loadExtensions?: typeof loadExtensions;
   resolveBuildIdentity?: typeof resolveBuildIdentity;
   gatewayEnrollmentFetch?: GatewayEnrollmentFetch;
+  gatewayRotationFetch?: GatewayRotationFetch;
+  createGatewayRotationController?: GatewayRotationControllerFactory;
   createGatewayLinkController?: GatewayLinkControllerFactory;
 }
 
@@ -146,6 +154,7 @@ export interface ElpisRuntime {
   secretary: SecretarySupervisorRuntime | null;
   workerServer: ScopedWorkerServerRuntime | null;
   gatewayEnrollment: GatewayEnrollmentController;
+  gatewayRotation: GatewayRotationRuntime | null;
   gatewayLink: GatewayLinkRuntime | null;
 }
 
@@ -249,6 +258,13 @@ export async function createElpisRuntime(
 
   const log = (...a: unknown[]) => config.logger.info(...a);
   const agentName = readAgentName(config.paths.soulPath);
+  const gatewayRotation = startGatewayRotationRuntime({
+    remote: config.dashboard.remote,
+    store: gatewayResidentStore,
+    secrets: secretRegistry,
+    fetch: adapters.gatewayRotationFetch,
+    factory: adapters.createGatewayRotationController,
+  });
   const gatewayEnrollment = createGatewayEnrollmentController({
     store: gatewayResidentStore,
     secrets: secretRegistry,
@@ -849,7 +865,7 @@ export async function createElpisRuntime(
   // captured every pushed message).
   const shutdown = (sig: string) => {
     log(`received ${sig} — flushing transcripts and shutting down`);
-    stopGatewayControlPlane(gatewayEnrollment, gatewayLink);
+    stopGatewayControlPlane(gatewayRotation, gatewayEnrollment, gatewayLink);
     try {
       consoleServer?.stop();
     } catch {
@@ -927,6 +943,7 @@ export async function createElpisRuntime(
     secretary: secretaryRuntime,
     workerServer,
     gatewayEnrollment,
+    gatewayRotation,
     gatewayLink,
   };
 }
