@@ -82,6 +82,21 @@ const UPGRADE_STATUS_TEXT: Readonly<Record<number, string>> = Object.freeze({
   503: 'Service Unavailable',
 });
 
+/** Own raw-socket errors until ws accepts the peer or rejection closes it. */
+function ownPendingUpgradeSocket(socket: Duplex): () => void {
+  let owned = true;
+  const onError = (): void => undefined;
+  const release = (): void => {
+    if (!owned) return;
+    owned = false;
+    socket.off('error', onError);
+    socket.off('close', release);
+  };
+  socket.on('error', onError);
+  socket.once('close', release);
+  return release;
+}
+
 /** Write a bounded, credential-independent HTTP response and end the peer. */
 function rejectUpgrade(socket: Duplex, status: number): void {
   const boundedStatus =
@@ -1003,8 +1018,14 @@ export class GatewayHttpService {
     socket: Duplex,
     head: Buffer,
   ): void {
+    const releasePendingSocket = ownPendingUpgradeSocket(socket);
     if (request.url === GATEWAY_BROWSER_RELAY_PATH) {
-      this.#handleBrowserRelayUpgrade(request, socket, head);
+      this.#handleBrowserRelayUpgrade(
+        request,
+        socket,
+        head,
+        releasePendingSocket,
+      );
       return;
     }
     // Query, percent, wrong path/method, browser-origin, and protocol selection
@@ -1093,6 +1114,7 @@ export class GatewayHttpService {
           // teardown detaches its adapter listener while ws may still report a
           // terminal parser error such as maxPayload.
           webSocket.on('error', () => undefined);
+          releasePendingSocket();
           // admit repeats all publication checks as a defense.
           const adapter = new WsResidentSocketAdapter(webSocket);
           try {
@@ -1111,6 +1133,7 @@ export class GatewayHttpService {
     request: http.IncomingMessage,
     socket: Duplex,
     head: Buffer,
+    releasePendingSocket: () => void,
   ): void {
     // The exact target check happened before this method. Browser authority is
     // ambient only at the authenticating proxy, so Gateway requires Origin but
@@ -1153,6 +1176,7 @@ export class GatewayHttpService {
           // This listener outlives the adapter listener and absorbs terminal ws
           // parser errors (including maxPayload) after relay cleanup.
           webSocket.on('error', () => undefined);
+          releasePendingSocket();
           const adapter = new WsBrowserRelaySocketAdapter(webSocket);
           let relay: GatewayBrowserRelayConnection | undefined;
           let released = false;
