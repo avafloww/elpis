@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CAPABILITIES, newConnectionId } from '@elpis/gateway-protocol';
 import { createGatewayBrowserApi } from './gateway-browser-api.js';
 import { createGatewayHttpService } from './http-service.js';
 import { createGatewayResidentControlApi } from './resident-control-api.js';
+import { createGatewayResidentLinkAuditWriter } from './resident-link-audit.js';
+import { GatewayResidentLinkRegistry } from './resident-link-registry.js';
 import { openGatewayStore } from './store.js';
 
 function envPort(value: string | undefined): number {
@@ -43,11 +46,24 @@ async function shutdown(exitCode: number): Promise<void> {
 
 async function main(): Promise<void> {
   store = openGatewayStore(dataDirectory);
+  const linkRegistry = new GatewayResidentLinkRegistry({
+    createConnectionId: newConnectionId,
+    clock: {
+      now: Date.now,
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (handle) =>
+        clearTimeout(handle as ReturnType<typeof setTimeout>),
+    },
+    supportedCapabilities: CAPABILITIES,
+    audit: createGatewayResidentLinkAuditWriter(store),
+  });
   service = createGatewayHttpService({
     publicRoot,
     store,
     api: createGatewayBrowserApi(store),
     residentControl: createGatewayResidentControlApi(store.credentials),
+    residentCredentialStore: store.credentials,
+    residentLinkRegistry: linkRegistry,
     listen: {
       host: process.env.ELPIS_GATEWAY_LISTEN_HOST ?? '127.0.0.1',
       port: envPort(process.env.ELPIS_GATEWAY_LISTEN_PORT),

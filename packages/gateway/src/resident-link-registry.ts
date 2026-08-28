@@ -77,15 +77,13 @@ export interface GatewayResidentLinkSummary {
   readonly state: 'awaiting-hello' | 'ready';
   readonly capabilities: readonly Capability[];
 }
+export type GatewayResidentAdmissionRejection =
+  'duplicate' | 'capacity' | 'stopped';
 export type GatewayResidentAdmission =
   | { readonly accepted: true; readonly link: GatewayResidentLinkSummary }
   | {
       readonly accepted: false;
-      readonly reason:
-        | 'duplicate'
-        | 'capacity'
-        | 'stopped'
-        | 'transport-error';
+      readonly reason: GatewayResidentAdmissionRejection | 'transport-error';
     };
 export interface GatewayResidentLinkRegistryOptions {
   readonly createConnectionId: () => ConnectionId;
@@ -201,56 +199,32 @@ export class GatewayResidentLinkRegistry {
       : undefined;
   }
 
+  /**
+   * Synchronous upgrade preflight. Rejections are audited here so HTTP can
+   * fail before WebSocket bytes are written; admit repeats the checks as the
+   * final publication defense.
+   */
+  preflight(
+    binding: AuthenticatedNode,
+  ): GatewayResidentAdmissionRejection | null {
+    return this.#admissionRejection(binding, true);
+  }
+
   /** First admission for an authenticated instance wins until removal. */
   admit(
     binding: AuthenticatedNode,
     socket: GatewayResidentSocketAdapter,
   ): GatewayResidentAdmission {
-    if (this.#stopped) {
-      this.#audit({
-        action: 'stopped-rejected',
-        at: this.#now(),
-        instanceId: binding.instanceId,
-        credentialId: binding.credentialId,
-      });
-      this.#safeClose(
-        socket,
-        GATEWAY_RESIDENT_CLOSE.stopping,
-        'registry_stopped',
-      );
-      return Object.freeze({ accepted: false, reason: 'stopped' });
-    }
-    // Duplicate rejection does not consume injected ids or generations.
-    if (this.#links.has(binding.instanceId)) {
-      this.#audit({
-        action: 'duplicate-rejected',
-        at: this.#now(),
-        instanceId: binding.instanceId,
-        credentialId: binding.credentialId,
-      });
-      this.#safeClose(
-        socket,
-        GATEWAY_RESIDENT_CLOSE.duplicate,
-        'duplicate_instance',
-      );
-      return Object.freeze({ accepted: false, reason: 'duplicate' });
-    }
-    if (
-      this.#links.size >= this.#maxLinks ||
-      this.#nextGeneration >= Number.MAX_SAFE_INTEGER
-    ) {
-      this.#audit({
-        action: 'capacity-rejected',
-        at: this.#now(),
-        instanceId: binding.instanceId,
-        credentialId: binding.credentialId,
-      });
-      this.#safeClose(
-        socket,
-        GATEWAY_RESIDENT_CLOSE.unavailable,
-        'registry_capacity',
-      );
-      return Object.freeze({ accepted: false, reason: 'capacity' });
+    const rejection = this.#admissionRejection(binding, true);
+    if (rejection !== null) {
+      const [code, reason] =
+        rejection === 'stopped'
+          ? [GATEWAY_RESIDENT_CLOSE.stopping, 'registry_stopped']
+          : rejection === 'duplicate'
+            ? [GATEWAY_RESIDENT_CLOSE.duplicate, 'duplicate_instance']
+            : [GATEWAY_RESIDENT_CLOSE.unavailable, 'registry_capacity'];
+      this.#safeClose(socket, code, reason);
+      return Object.freeze({ accepted: false, reason: rejection });
     }
     let connectionId: ConnectionId;
     let session: GatewayInboundSession;
@@ -407,6 +381,34 @@ export class GatewayResidentLinkRegistry {
         'registry_stopped',
       );
     this.#audit({ action: 'stop', at: this.#now() });
+  }
+
+  #admissionRejection(
+    binding: AuthenticatedNode,
+    audit: boolean,
+  ): GatewayResidentAdmissionRejection | null {
+    let reason: GatewayResidentAdmissionRejection | null = null;
+    if (this.#stopped) reason = 'stopped';
+    else if (this.#links.has(binding.instanceId)) reason = 'duplicate';
+    else if (
+      this.#links.size >= this.#maxLinks ||
+      this.#nextGeneration >= Number.MAX_SAFE_INTEGER
+    )
+      reason = 'capacity';
+    if (reason !== null && audit) {
+      this.#audit({
+        action:
+          reason === 'stopped'
+            ? 'stopped-rejected'
+            : reason === 'duplicate'
+              ? 'duplicate-rejected'
+              : 'capacity-rejected',
+        at: this.#now(),
+        instanceId: binding.instanceId,
+        credentialId: binding.credentialId,
+      });
+    }
+    return reason;
   }
 
   #receiveText(link: LiveLink, text: string): void {

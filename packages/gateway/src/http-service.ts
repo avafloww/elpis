@@ -2,10 +2,14 @@ import * as fs from 'node:fs';
 import { open, lstat, realpath } from 'node:fs/promises';
 import * as http from 'node:http';
 import * as path from 'node:path';
+import type { Duplex } from 'node:stream';
+import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import {
   RESIDENT_CONTROL_FORMATS,
   RESIDENT_CONTROL_LIMITS,
   RESIDENT_CONTROL_PATHS,
+  LIMITS,
+  parseNodeBearerAuthorization,
   decodeResidentEnrollmentResult,
   decodeResidentRotationResult,
   serializeResidentControlError,
@@ -31,6 +35,16 @@ import {
   type ResidentControlRateLimiter,
   type ResidentControlRoute,
 } from './resident-control-api.js';
+import type {
+  AuthenticatedNode,
+  GatewayCredentialStore,
+} from './credential-store.js';
+import {
+  GatewayResidentLinkRegistry,
+  type GatewayResidentSocketAdapter,
+  type GatewayResidentSocketHandlers,
+} from './resident-link-registry.js';
+
 import {
   GatewayApiError,
   type BrowserApi,
@@ -44,6 +58,133 @@ const DEFAULT_PORT = 8790;
 const DEFAULT_MAX_STATIC_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_TARGET_BYTES = 8192;
 export const MAX_API_RESPONSE_BYTES = 1024 * 1024;
+
+const UPGRADE_FAILURE_BODY = 'WebSocket upgrade rejected\n';
+const UPGRADE_STATUS_TEXT: Readonly<Record<number, string>> = Object.freeze({
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  404: 'Not Found',
+  409: 'Conflict',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  503: 'Service Unavailable',
+});
+
+/** Write a bounded, credential-independent HTTP response and end the peer. */
+function rejectUpgrade(socket: Duplex, status: number): void {
+  const boundedStatus =
+    UPGRADE_STATUS_TEXT[status] === undefined ? 500 : status;
+  const reason = UPGRADE_STATUS_TEXT[boundedStatus]!;
+  const bytes = Buffer.byteLength(UPGRADE_FAILURE_BODY);
+  if (!socket.writable) {
+    socket.destroy();
+    return;
+  }
+  socket.end(
+    'HTTP/1.1 ' +
+      boundedStatus +
+      ' ' +
+      reason +
+      '\r\n' +
+      'Connection: close\r\n' +
+      'Content-Type: text/plain; charset=utf-8\r\n' +
+      'Content-Length: ' +
+      bytes +
+      '\r\n' +
+      'Cache-Control: no-store\r\n' +
+      'X-Content-Type-Options: nosniff\r\n\r\n' +
+      UPGRADE_FAILURE_BODY,
+  );
+}
+
+function hasRequestHeader(
+  request: http.IncomingMessage,
+  name: string,
+): boolean {
+  const lower = name.toLowerCase();
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === lower) return true;
+  }
+  return false;
+}
+
+function validWebSocketHandshake(request: http.IncomingMessage): boolean {
+  const upgrade = singleRequestHeader(request, 'upgrade');
+  const version = singleRequestHeader(request, 'sec-websocket-version');
+  const key = singleRequestHeader(request, 'sec-websocket-key');
+  if (
+    request.method !== 'GET' ||
+    upgrade?.toLowerCase() !== 'websocket' ||
+    version !== '13' ||
+    key === null ||
+    !/^[A-Za-z0-9+/]{22}==$/.test(key)
+  )
+    return false;
+  return Buffer.from(key, 'base64').length === 16;
+}
+
+function rawDataBytes(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data);
+}
+
+/** Complete-message ws adapter with fatal UTF-8 and text-only semantics. */
+class WsResidentSocketAdapter implements GatewayResidentSocketAdapter {
+  readonly #socket: WebSocket;
+  constructor(socket: WebSocket) {
+    this.#socket = socket;
+  }
+  get bufferedAmount(): number {
+    return this.#socket.bufferedAmount;
+  }
+  sendText(text: string): void {
+    if (this.#socket.readyState !== WebSocket.OPEN)
+      throw new Error('resident transport is not open');
+    this.#socket.send(text, { binary: false, compress: false });
+  }
+  close(code: number, reason: string): void {
+    if (this.#socket.readyState === WebSocket.OPEN)
+      this.#socket.close(code, reason);
+    else if (this.#socket.readyState === WebSocket.CONNECTING)
+      this.#socket.terminate();
+  }
+  attach(handlers: GatewayResidentSocketHandlers): () => void {
+    const onMessage = (data: RawData, binary: boolean): void => {
+      if (binary) {
+        handlers.binary();
+        return;
+      }
+      try {
+        handlers.text(
+          new TextDecoder('utf-8', {
+            fatal: true,
+            ignoreBOM: true,
+          }).decode(rawDataBytes(data)),
+        );
+      } catch {
+        if (this.#socket.readyState === WebSocket.OPEN)
+          this.#socket.close(1007, 'invalid_utf8');
+      }
+    };
+    const onError = (): void => handlers.error();
+    const onClose = (): void => handlers.close();
+    this.#socket.on('message', onMessage);
+    this.#socket.on('error', onError);
+    this.#socket.on('close', onClose);
+    return () => {
+      this.#socket.off('message', onMessage);
+      this.#socket.off('error', onError);
+      this.#socket.off('close', onClose);
+    };
+  }
+}
+
+export interface ResidentLinkCredentialStore {
+  authenticateNode(
+    token: unknown,
+  ): ReturnType<GatewayCredentialStore['authenticateNode']>;
+}
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.css': 'text/css; charset=utf-8',
@@ -86,6 +227,10 @@ export interface GatewayHttpServiceOptions {
   api?: BrowserApi;
   /** Non-browser resident enrollment and credential-rotation adapter. */
   residentControl?: ResidentControlApi;
+  /** Active-node authentication for the resident WebSocket boundary. */
+  residentCredentialStore?: ResidentLinkCredentialStore;
+  /** Registry which owns authenticated resident WebSocket sessions. */
+  residentLinkRegistry?: GatewayResidentLinkRegistry;
   /** Optional bounded limiter seam; defaults to direct-peer fixed windows. */
   residentRateLimiter?: ResidentControlRateLimiter;
   /** Deterministic time source for resident rate limiting. */
@@ -608,6 +753,8 @@ export class GatewayHttpService {
   readonly #root: string;
   readonly #server: http.Server;
   readonly #residentRateLimiter: ResidentControlRateLimiter;
+  readonly #webSocketServer: WebSocketServer;
+  #stopping: Promise<void> | null = null;
   #initialized = false;
   #starting: Promise<GatewayListenAddress> | null = null;
 
@@ -621,6 +768,18 @@ export class GatewayHttpService {
     this.#options = options;
     this.#residentRateLimiter =
       options.residentRateLimiter ?? new BoundedResidentControlRateLimiter();
+    const hasResidentCredentials = options.residentCredentialStore !== undefined;
+    const hasResidentRegistry = options.residentLinkRegistry !== undefined;
+    if (hasResidentCredentials !== hasResidentRegistry)
+      throw new Error(
+        'residentCredentialStore and residentLinkRegistry must be configured together',
+      );
+    if (
+      options.residentCredentialStore !== undefined &&
+      (!options.residentCredentialStore ||
+        typeof options.residentCredentialStore.authenticateNode !== 'function')
+    )
+      throw new Error('residentCredentialStore must provide authenticateNode');
     if (
       options.residentNow !== undefined &&
       typeof options.residentNow !== 'function'
@@ -659,7 +818,16 @@ export class GatewayHttpService {
           'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
         );
     });
-    // This release has no resident link, WebSocket, or CONNECT relay.
+    this.#webSocketServer = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: false,
+      maxPayload: LIMITS.frameBytes,
+    });
+    // Final non-logging EventEmitter error boundary.
+    this.#webSocketServer.on('error', () => undefined);
+    this.#server.on('upgrade', (request, socket, head) =>
+      this.#handleUpgrade(request, socket, head),
+    );
     this.#server.on('connect', (_request, socket) => socket.destroy());
   }
 
@@ -703,17 +871,33 @@ export class GatewayHttpService {
     return this.#starting;
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.#stopping !== null) return this.#stopping;
+    this.#stopping = this.#stop();
+    return this.#stopping;
+  }
+
+  async #stop(): Promise<void> {
     this.#initialized = false;
+    // Empty and permanently stop the registry before closing the listener.
+    this.#options.residentLinkRegistry?.stop();
     if (!this.#server.listening) {
       if (this.#starting !== null) await this.#starting.catch(() => undefined);
-      if (!this.#server.listening) return;
+      if (!this.#server.listening) {
+        for (const socket of this.#webSocketServer.clients) socket.terminate();
+        this.#webSocketServer.close();
+        return;
+      }
     }
+    const webSocketsClosed = new Promise<void>((resolve) =>
+      this.#webSocketServer.close(() => resolve()),
+    );
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => this.#server.closeAllConnections(),
-        this.#options.shutdownGraceMs ?? 5_000,
-      );
+      const timer = setTimeout(() => {
+        // Node's HTTP closeAllConnections deliberately excludes upgraded peers.
+        for (const socket of this.#webSocketServer.clients) socket.terminate();
+        this.#server.closeAllConnections();
+      }, this.#options.shutdownGraceMs ?? 5_000);
       timer.unref();
       this.#server.close((error) => {
         clearTimeout(timer);
@@ -722,6 +906,104 @@ export class GatewayHttpService {
       });
       this.#server.closeIdleConnections();
     });
+    await webSocketsClosed;
+  }
+
+  #handleUpgrade(
+    request: http.IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): void {
+    // Query, percent, wrong path/method, browser-origin, and protocol selection
+    // confusion all fail before credential parsing.
+    if (
+      request.url !== RESIDENT_CONTROL_PATHS.link ||
+      !validWebSocketHandshake(request) ||
+      hasRequestHeader(request, 'origin') ||
+      hasRequestHeader(request, 'sec-websocket-protocol')
+    ) {
+      rejectUpgrade(socket, 404);
+      return;
+    }
+
+    let now: number;
+    try {
+      now = (this.#options.residentNow ?? Date.now)();
+    } catch {
+      rejectUpgrade(socket, 500);
+      return;
+    }
+    let allowed = false;
+    try {
+      allowed =
+        Number.isSafeInteger(now) &&
+        this.#residentRateLimiter.allow({
+          peerAddress: request.socket.remoteAddress ?? '<unknown>',
+          route: 'link',
+          now,
+        }) === true;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) {
+      rejectUpgrade(socket, 429);
+      return;
+    }
+
+    // rawHeaders-backed exact-single extraction plus the shared codec rejects
+    // comma joins, alternate schemes, whitespace variants, and malformed tokens.
+    const authorization = singleRequestHeader(request, 'authorization');
+    const token = parseNodeBearerAuthorization(authorization);
+    const credentials = this.#options.residentCredentialStore;
+    const registry = this.#options.residentLinkRegistry;
+    let binding: AuthenticatedNode | null = null;
+    try {
+      if (token !== null && credentials)
+        binding = credentials.authenticateNode(token);
+    } catch {
+      rejectUpgrade(socket, 500);
+      return;
+    }
+    if (binding === null || !registry) {
+      rejectUpgrade(socket, 401);
+      return;
+    }
+    let rejection: ReturnType<GatewayResidentLinkRegistry['preflight']>;
+    try {
+      rejection = registry.preflight(binding);
+    } catch {
+      rejectUpgrade(socket, 500);
+      return;
+    }
+    if (rejection !== null) {
+      rejectUpgrade(socket, rejection === 'duplicate' ? 409 : 503);
+      return;
+    }
+
+    try {
+      // Passing the exact head buffer is required when a peer pipelines its
+      // first WebSocket frame with the HTTP upgrade request.
+      this.#webSocketServer.handleUpgrade(
+        request,
+        socket,
+        head,
+        (webSocket) => {
+          // Keep one inert listener for the whole transport lifetime; registry
+          // teardown detaches its adapter listener while ws may still report a
+          // terminal parser error such as maxPayload.
+          webSocket.on('error', () => undefined);
+          // admit repeats all publication checks as a defense.
+          const adapter = new WsResidentSocketAdapter(webSocket);
+          try {
+            registry.admit(binding!, adapter);
+          } catch {
+            adapter.close(1011, 'admission_failed');
+          }
+        },
+      );
+    } catch {
+      rejectUpgrade(socket, 400);
+    }
   }
 
   #publicUrl(): string | null {

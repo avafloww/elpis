@@ -21,7 +21,7 @@ import {
 } from './credential-store.js';
 
 export type ResidentControlRoute =
-  'enrollment' | 'rotation' | 'rotationActivation';
+  'enrollment' | 'rotation' | 'rotationActivation' | 'link';
 
 export interface ResidentControlSuccess {
   readonly status: 200 | 201;
@@ -271,7 +271,7 @@ type RateBucket = { count: number; resetAt: number };
 
 /**
  * Fixed-memory limiter. Keys contain only the direct socket peer and one of
- * three fixed route names; forwarded headers and credentials are never read.
+ * four fixed route names; forwarded headers and credentials are never read.
  */
 export class BoundedResidentControlRateLimiter implements ResidentControlRateLimiter {
   readonly #maxEntries: number;
@@ -300,7 +300,9 @@ export class BoundedResidentControlRateLimiter implements ResidentControlRateLim
       input.peerAddress.length < 1 ||
       input.peerAddress.length > 128 ||
       input.peerAddress.includes('\0') ||
-      !['enrollment', 'rotation', 'rotationActivation'].includes(input.route) ||
+      !['enrollment', 'rotation', 'rotationActivation', 'link'].includes(
+        input.route,
+      ) ||
       !Number.isSafeInteger(input.now) ||
       input.now < 0 ||
       input.now > Number.MAX_SAFE_INTEGER - this.#windowMs

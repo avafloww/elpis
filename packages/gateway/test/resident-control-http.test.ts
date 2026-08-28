@@ -514,4 +514,18 @@ test('default resident limiter has fixed peer bounds and deterministic reset', (
     limiter.allow({ peerAddress: '127.0.0.1', route: 'enrollment', now: -1 }),
     false,
   );
+
+  const linkLimiter = new BoundedResidentControlRateLimiter({
+    maxEntries: 1,
+    windowMs: 10,
+    requestsPerWindow: 1,
+  });
+  assert.equal(
+    linkLimiter.allow({ peerAddress: '127.0.0.1', route: 'link', now: 0 }),
+    true,
+  );
+  assert.equal(
+    linkLimiter.allow({ peerAddress: '127.0.0.1', route: 'link', now: 1 }),
+    false,
+  );
 });

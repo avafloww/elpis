@@ -327,6 +327,34 @@ test('capacity, reentrant adapters, timers, and id sources fail closed', () => {
   assert.equal(idSocket.closes[0]?.reason, 'transport_error');
 });
 
+test('preflight mirrors admission bounds and emits one secret-free rejection', () => {
+  const { registry, audit, allocated } = setup({ maxLinks: 1 });
+  const first = new FakeSocket();
+  admit(registry, first, INSTANCE);
+  const binding = {
+    instanceId: OTHER_INSTANCE,
+    credentialId: 'egc1.other-public-id',
+  };
+  assert.equal(
+    registry.preflight({
+      instanceId: INSTANCE,
+      credentialId: 'egc1.public-id-only',
+    }),
+    'duplicate',
+  );
+  assert.equal(registry.preflight(binding), 'capacity');
+  assert.equal(registry.size, 1);
+  assert.equal(allocated(), 1);
+  assert.deepEqual(
+    audit.slice(-2).map((event) => event.action),
+    ['duplicate-rejected', 'capacity-rejected'],
+  );
+  first.peerClose();
+  registry.stop();
+  assert.equal(registry.preflight(binding), 'stopped');
+  assert.equal(audit.at(-1)?.action, 'stopped-rejected');
+});
+
 test('handshake timeout sends fatal error, closes, and permits replacement', () => {
   const { registry, clock, audit } = setup();
   const socket = new FakeSocket();
