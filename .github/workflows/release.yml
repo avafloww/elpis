@@ -50,7 +50,7 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           version: v0.36.1
-      - name: Build pull-request container without push
+      - name: Build pull-request containers without push
         if: github.event_name == 'pull_request'
         run: |
           docker buildx build \
@@ -60,6 +60,16 @@ jobs:
             --build-arg ELPIS_BUILD_TAG= \
             --build-arg ELPIS_BUILD_DIRTY=false \
             .
+          gateway_image="elpis-gateway-pr:${GITHUB_SHA}"
+          docker buildx build \
+            --load \
+            --file Dockerfile.gateway \
+            --tag "$gateway_image" \
+            --build-arg "ELPIS_BUILD_REVISION=${GITHUB_SHA}" \
+            --build-arg ELPIS_BUILD_TAG= \
+            --build-arg ELPIS_BUILD_DIRTY=false \
+            .
+          deploy/test-gateway-container.sh "$gateway_image"
 
   release:
     name: release
@@ -130,7 +140,7 @@ jobs:
         if: steps.prep.outputs.mode != 'none'
         with:
           version: v0.36.1
-      - name: Build exact release container once
+      - name: Build exact release containers once
         if: steps.prep.outputs.mode != 'none'
         run: |
           image="elpis-release:${{ steps.prep.outputs.release_sha }}"
@@ -170,6 +180,31 @@ jobs:
             node -e 'const fs = require("node:fs"); for (const name of ["HOME", "TMPDIR"]) { const value = process.env[name]; if (!value || value === "/tmp" || !value.startsWith("/tmp/.elpis-")) process.exit(1); if ((fs.statSync(value).mode & 0o777) !== 0o700) process.exit(1); fs.accessSync(value, fs.constants.W_OK); }'
           rm -f "$config"
           trap - EXIT
+
+          gateway_image="elpis-gateway-release:${{ steps.prep.outputs.release_sha }}"
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --file Dockerfile.gateway \
+            --tag "$gateway_image" \
+            --build-arg 'ELPIS_BUILD_REVISION=${{ steps.prep.outputs.release_sha }}' \
+            --build-arg 'ELPIS_BUILD_TAG=${{ steps.prep.outputs.tag }}' \
+            --build-arg ELPIS_BUILD_DIRTY=false \
+            --label 'org.opencontainers.image.revision=${{ steps.prep.outputs.release_sha }}' \
+            --label 'org.opencontainers.image.version=${{ steps.prep.outputs.version }}' \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --cache-from type=gha,scope=release-gateway-container \
+            --cache-to type=gha,mode=max,scope=release-gateway-container \
+            .
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$gateway_image")" = \
+            '${{ steps.prep.outputs.release_sha }}'
+          test "$(docker run --rm --entrypoint node "$gateway_image" -e 'process.stdout.write(process.env.ELPIS_BUILD_REVISION || "")')" = \
+            '${{ steps.prep.outputs.release_sha }}'
+          test "$(docker run --rm --entrypoint node "$gateway_image" -e 'process.stdout.write(process.env.ELPIS_BUILD_TAG || "")')" = \
+            '${{ steps.prep.outputs.tag }}'
+          test "$(docker run --rm --entrypoint node "$gateway_image" -e 'process.stdout.write(require("/opt/gateway/node_modules/@elpis/gateway/package.json").version)')" = \
+            '${{ steps.prep.outputs.version }}'
+          deploy/test-gateway-container.sh "$gateway_image"
       - name: Refetch and atomically publish release refs
         if: steps.prep.outputs.mode != 'none'
         run: |
@@ -232,27 +267,47 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Publish one built image under every release tag
+      - name: Publish both built images under every release tag
         if: steps.prep.outputs.mode != 'none'
         run: |
-          local_image="elpis-release:${{ steps.prep.outputs.release_sha }}"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          tags=(
-            "$image:${{ steps.prep.outputs.tag }}"
-            "$image:${{ steps.prep.outputs.minor_tag }}"
-            "$image:sha-${{ steps.prep.outputs.short_sha }}"
-            "$image:latest"
-          )
-          for target in "${tags[@]}"; do
-            docker tag "$local_image" "$target"
-            docker push "$target"
-          done
-          expected=
-          for target in "${tags[@]}"; do
-            digest=$(docker buildx imagetools inspect --raw "$target" | sha256sum | cut -d' ' -f1)
-            if [ -z "$expected" ]; then expected=$digest; fi
-            test "$digest" = "$expected"
-          done
+          publish_family() {
+            local local_image=$1
+            local image=$2
+            local expected=
+            local tags=(
+              "$image:${{ steps.prep.outputs.tag }}"
+              "$image:${{ steps.prep.outputs.minor_tag }}"
+              "$image:sha-${{ steps.prep.outputs.short_sha }}"
+              "$image:latest"
+            )
+            for target in "${tags[@]}"; do
+              docker tag "$local_image" "$target"
+              docker push "$target"
+            done
+            for target in "${tags[@]}"; do
+              digest=$(docker buildx imagetools inspect --raw "$target" | sha256sum | cut -d' ' -f1)
+              if [ -z "$expected" ]; then expected=$digest; fi
+              test "$digest" = "$expected"
+            done
+          }
+          publish_family \
+            "elpis-release:${{ steps.prep.outputs.release_sha }}" \
+            "ghcr.io/${GITHUB_REPOSITORY,,}"
+          publish_family \
+            "elpis-gateway-release:${{ steps.prep.outputs.release_sha }}" \
+            "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/elpis-gateway"
+      - name: Verify anonymous Gateway image pull
+        if: steps.prep.outputs.mode != 'none'
+        run: |
+          repository="${GITHUB_REPOSITORY_OWNER,,}/elpis-gateway"
+          token=$(curl --fail --silent --show-error \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" | \
+            jq --exit-status --raw-output '.token')
+          test -n "$token"
+          curl --fail --silent --show-error --output /dev/null \
+            --header "Authorization: Bearer $token" \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${{ steps.prep.outputs.tag }}"
       - name: Publish GitHub release notes without binary assets
         if: steps.prep.outputs.mode != 'none'
         env:

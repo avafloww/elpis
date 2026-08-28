@@ -27,6 +27,9 @@ RUN printf '{"private":true,"type":"module"}\n' > package.json \
   && rm protocol.tgz gateway.tgz
 
 FROM node:24-trixie-slim AS runtime
+ARG ELPIS_BUILD_REVISION
+ARG ELPIS_BUILD_TAG
+ARG ELPIS_BUILD_DIRTY=false
 RUN groupadd --gid 10001 elpis-gateway \
   && useradd --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin elpis-gateway \
   && mkdir -p /opt/gateway /data \
@@ -34,6 +37,9 @@ RUN groupadd --gid 10001 elpis-gateway \
 WORKDIR /opt/gateway
 COPY --from=production-dependencies --chown=root:root /opt/runtime/node_modules ./node_modules
 ENV NODE_ENV=production \
+    ELPIS_BUILD_REVISION=${ELPIS_BUILD_REVISION} \
+    ELPIS_BUILD_TAG=${ELPIS_BUILD_TAG} \
+    ELPIS_BUILD_DIRTY=${ELPIS_BUILD_DIRTY} \
     ELPIS_GATEWAY_DATA_DIR=/data \
     ELPIS_GATEWAY_LISTEN_HOST=0.0.0.0 \
     ELPIS_GATEWAY_LISTEN_PORT=8790

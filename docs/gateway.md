@@ -6,17 +6,25 @@ Each resident remains independently operable through its local Console. Resident
 
 ## Build and Kubernetes deployment
 
-Gateway has a separate image target:
+Gateway has a separate published image at `ghcr.io/avafloww/elpis-gateway`. Release CI builds and boots it independently from the resident image, then publishes the release, minor, source-SHA, and `latest` tags and verifies that the release manifest is anonymously readable. Prefer a release tag or manifest digest; `latest` is convenient but not immutable. The similarly named `ghcr.io/avafloww/elpis` image is a resident and must not be deployed as Gateway.
+
+GitHub makes a newly created GHCR package private even when it is linked to a public repository. On the first release only, a package owner must change `elpis-gateway` to **Public** in GitHub's package settings and rerun the failed workflow. Release CI deliberately remains red until its anonymous manifest fetch succeeds. Once public, GitHub does not allow the package to become private again.
+
+To build locally instead:
 
 ```bash
 docker build -f Dockerfile.gateway -t elpis-gateway:local .
 ```
 
-`deploy/kubernetes/gateway/gateway.yaml` installs a restricted single-replica StatefulSet, Service, PVC, and default-deny NetworkPolicy. The checked-in manifest uses `elpis-gateway:local` with `imagePullPolicy: Never` for an image imported into the node runtime. For a registry deployment, replace both fields with an immutable operator-owned image reference and appropriate pull policy before applying it.
+`deploy/kubernetes/gateway/gateway.yaml` installs a restricted single-replica StatefulSet, Service, PVC, and default-deny NetworkPolicy. The checked-in manifest uses `elpis-gateway:local` with `imagePullPolicy: Never` for an image imported into the node runtime. For a registry deployment, render those two fields with an immutable Gateway image before applying it:
 
 ```bash
-kubectl apply -f deploy/kubernetes/gateway/gateway.yaml
-kubectl -n elpis-gateway wait --for=condition=Ready pod/elpis-gateway-0 --timeout=120s
+gateway_image='ghcr.io/avafloww/elpis-gateway@sha256:<manifest-digest>'
+sed \
+  -e "s#image: elpis-gateway:local#image: $gateway_image#" \
+  -e 's#imagePullPolicy: Never#imagePullPolicy: IfNotPresent#' \
+  deploy/kubernetes/gateway/gateway.yaml | kubectl apply -f -
+kubectl -n elpis-gateway wait --for=condition=Ready pod/elpis-gateway-0 --timeout=180s
 ```
 
 The container runs as uid/gid `10001`, has a read-only root filesystem, receives no ServiceAccount token, and writes only `/data` and bounded tmpfs `/tmp`. `ELPIS_GATEWAY_DATA_DIR`, `ELPIS_GATEWAY_LISTEN_HOST`, and `ELPIS_GATEWAY_LISTEN_PORT` select the data directory and listener. The defaults are `./gateway-data`, `127.0.0.1`, and `8790`; the Kubernetes manifest uses `/data/state`, `0.0.0.0`, and `8790`.

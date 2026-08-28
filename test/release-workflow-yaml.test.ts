@@ -71,7 +71,7 @@ test('unified workflow has exact triggers concurrency and least job permissions'
   assert.ok(buildxSteps.every((step: any) => step.with.version === 'v0.36.1'));
 });
 
-test('workflow publishes one exact TypeScript image after guarded release refs', async () => {
+test('workflow publishes exact resident and Gateway images after guarded release refs', async () => {
   const text = await fs.readFile(workflowPath, 'utf8');
   const workflow = await readWorkflow();
   const releaseSteps = workflow.jobs.release.steps as any[];
@@ -82,30 +82,34 @@ test('workflow publishes one exact TypeScript image after guarded release refs',
     index('Exact release commit gates') > index('Prepare or resume release'),
   );
   assert.ok(
-    index('Build exact release container once') >
+    index('Build exact release containers once') >
       index('Exact release commit gates'),
   );
   assert.ok(
     index('Refetch and atomically publish release refs') >
-      index('Build exact release container once'),
+      index('Build exact release containers once'),
   );
   assert.ok(
     index('Validate pushed bot-associated commit') >
       index('Refetch and atomically publish release refs'),
   );
   assert.ok(
-    index('Publish one built image under every release tag') >
+    index('Publish both built images under every release tag') >
       index('Validate pushed bot-associated commit'),
   );
   assert.ok(
+    index('Verify anonymous Gateway image pull') >
+      index('Publish both built images under every release tag'),
+  );
+  assert.ok(
     index('Publish GitHub release notes without binary assets') >
-      index('Publish one built image under every release tag'),
+      index('Verify anonymous Gateway image pull'),
   );
 
   assert.equal((text.match(/npm run tools:check/g) ?? []).length, 2);
   assert.equal((text.match(/npm run test:gateway/g) ?? []).length, 2);
   assert.equal((text.match(/npm run build:gateway/g) ?? []).length, 2);
-  assert.equal((text.match(/docker buildx build/g) ?? []).length, 2);
+  assert.equal((text.match(/docker buildx build/g) ?? []).length, 4);
   assert.equal((text.match(/git push --atomic/g) ?? []).length, 2);
   assert.equal(
     (text.match(/npm run release:workflow -- prepare/g) ?? []).length,
@@ -125,6 +129,18 @@ test('workflow publishes one exact TypeScript image after guarded release refs',
   assert.match(text, /sha-\$\{\{ steps\.prep\.outputs\.short_sha \}\}/);
   assert.match(text, /docker push "\$target"/);
   assert.match(text, /imagetools inspect --raw/);
+  assert.match(text, /--file Dockerfile\.gateway/);
+  assert.match(text, /elpis-gateway-release:/);
+  assert.match(
+    text,
+    /ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}\/elpis-gateway/,
+  );
+  assert.match(text, /deploy\/test-gateway-container\.sh "\$gateway_image"/);
+  assert.match(text, /publish_family[\s\S]*publish_family/);
+  assert.match(text, /https:\/\/ghcr\.io\/token\?service=ghcr\.io/);
+  assert.match(text, /repository:\$\{repository\}:pull/);
+  assert.match(text, /ghcr\.io\/v2\/\$\{repository\}\/manifests/);
+  assert.match(text, /Verify anonymous Gateway image pull/);
   assert.match(text, /gh release create/);
   assert.match(text, /gh release edit/);
   assert.doesNotMatch(text, /gh release upload/);

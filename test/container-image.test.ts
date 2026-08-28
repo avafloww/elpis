@@ -67,6 +67,16 @@ test('container embeds immutable build identity inputs', () => {
   );
   assert.match(docker, /ELPIS_BUILD_TAG=\$\{ELPIS_BUILD_TAG\}/);
   assert.match(docker, /ELPIS_BUILD_DIRTY=\$\{ELPIS_BUILD_DIRTY\}/);
+  const gatewayDocker = read('Dockerfile.gateway');
+  assert.match(gatewayDocker, /ARG ELPIS_BUILD_REVISION/);
+  assert.match(gatewayDocker, /ARG ELPIS_BUILD_TAG/);
+  assert.match(gatewayDocker, /ARG ELPIS_BUILD_DIRTY=false/);
+  assert.match(
+    gatewayDocker,
+    /ELPIS_BUILD_REVISION=\$\{ELPIS_BUILD_REVISION\}/,
+  );
+  assert.match(gatewayDocker, /ELPIS_BUILD_TAG=\$\{ELPIS_BUILD_TAG\}/);
+  assert.match(gatewayDocker, /ELPIS_BUILD_DIRTY=\$\{ELPIS_BUILD_DIRTY\}/);
   assert.match(workflow, /ELPIS_BUILD_REVISION=\$\{GITHUB_SHA\}/);
   assert.match(
     workflow,
@@ -79,16 +89,32 @@ test('container embeds immutable build identity inputs', () => {
   assert.match(workflow, /ELPIS_BUILD_DIRTY=false/);
 });
 
-test('unified workflow publishes the current repository while PRs only build', () => {
+test('unified workflow publishes both images while pull requests only build', () => {
   const workflow = read('.github/workflows/release.yml');
-  assert.match(workflow, /image="ghcr\.io\/\$\{GITHUB_REPOSITORY,,\}"/);
-  assert.match(workflow, /Build pull-request container without push/);
+  assert.match(workflow, /"ghcr\.io\/\$\{GITHUB_REPOSITORY,,\}"/);
+  assert.match(
+    workflow,
+    /"ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}\/elpis-gateway"/,
+  );
+  assert.match(workflow, /Build pull-request containers without push/);
   assert.match(workflow, /if: github\.event_name == 'pull_request'/);
   assert.match(workflow, /docker push "\$target"/);
   assert.match(workflow, /--tmpfs \/tmp:rw,noexec,nosuid,size=16m/);
   assert.match(workflow, /--env HOME=\/tmp/);
   assert.match(workflow, /--env TMPDIR=\/tmp/);
   assert.match(workflow, /value\.startsWith\("\/tmp\/\.elpis-"\)/);
+  assert.match(
+    workflow,
+    /ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}\/elpis-gateway/,
+  );
+  assert.match(workflow, /deploy\/test-gateway-container\.sh/);
+  const smoke = read('deploy/test-gateway-container.sh');
+  assert.match(smoke, /--read-only/);
+  assert.match(smoke, /--tmpfs \/data:rw,noexec,nosuid/);
+  assert.match(smoke, /process\.getuid\(\) !== 10001/);
+  assert.match(smoke, /\/data\/gateway\.db/);
+  assert.match(smoke, /\/healthz/);
+  assert.match(smoke, /\/readyz/);
 });
 
 test('resident image owns exactly the protocol workspace dependency', () => {
