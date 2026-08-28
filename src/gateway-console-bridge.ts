@@ -4,7 +4,10 @@ import type {
   ViewerOperationFrame,
 } from '@elpis/gateway-protocol';
 import type { ConsoleHub, HubClient } from './console/hub.js';
-import type { ConsoleMediaFailure, ConsoleMediaReader } from './console/media.js';
+import type {
+  ConsoleMediaFailure,
+  ConsoleMediaReader,
+} from './console/media.js';
 import type { GatewayLinkEffectSink } from './gateway-link.js';
 
 /** The ConsoleHub surface used by a remote resident viewer. */
@@ -19,7 +22,10 @@ export interface GatewayConsoleBridgeOptions {
 }
 
 const MEDIA_ERRORS: Readonly<
-  Record<ConsoleMediaFailure, { readonly code: string; readonly message: string }>
+  Record<
+    ConsoleMediaFailure,
+    { readonly code: string; readonly message: string }
+  >
 > = Object.freeze({
   invalid_route: Object.freeze({
     code: 'invalid_route',
@@ -164,10 +170,7 @@ export class GatewayConsoleBridge {
     this.#detachAll();
   }
 
-  #open(
-    frame: ViewerOperationFrame,
-    effects: GatewayLinkEffectSink,
-  ): void {
+  #open(frame: ViewerOperationFrame, effects: GatewayLinkEffectSink): void {
     if (this.#viewers.has(frame.viewerId)) {
       this.#operation(effects, frame, false, UNAVAILABLE);
       return;
@@ -176,7 +179,7 @@ export class GatewayConsoleBridge {
     const client = new RemoteHubClient(frame.viewerId, effects, (failed) => {
       if (this.#viewers.get(frame.viewerId) !== failed) return;
       this.#viewers.delete(frame.viewerId);
-      this.#hub.removeClient(failed);
+      this.#detachHub(failed);
     });
     this.#viewers.set(frame.viewerId, client);
 
@@ -195,16 +198,30 @@ export class GatewayConsoleBridge {
       this.#viewers.get(frame.viewerId) !== client
     )
       return;
-    void this.#hub.addClient(client).catch(() => {
-      if (!this.#isCurrent(generation)) return;
+    let attaching: Promise<void>;
+    try {
+      attaching = Promise.resolve(this.#hub.addClient(client));
+    } catch {
       this.#remove(frame.viewerId, client);
-    });
+      return;
+    }
+    void attaching.then(
+      () => {
+        // ConsoleHub attaches synchronously, but retain the fence at this
+        // structural seam too: a deferred hub must not add a ghost client after
+        // disconnect or a same-id reconnect.
+        if (
+          !this.#isCurrent(generation) ||
+          this.#viewers.get(frame.viewerId) !== client ||
+          client.closed
+        )
+          this.#remove(frame.viewerId, client);
+      },
+      () => this.#remove(frame.viewerId, client),
+    );
   }
 
-  #close(
-    frame: ViewerOperationFrame,
-    effects: GatewayLinkEffectSink,
-  ): void {
+  #close(frame: ViewerOperationFrame, effects: GatewayLinkEffectSink): void {
     const client = this.#viewers.get(frame.viewerId);
     if (!client) {
       this.#operation(effects, frame, false, UNAVAILABLE);
@@ -214,10 +231,7 @@ export class GatewayConsoleBridge {
     this.#operation(effects, frame, true);
   }
 
-  #snapshot(
-    frame: ViewerOperationFrame,
-    effects: GatewayLinkEffectSink,
-  ): void {
+  #snapshot(frame: ViewerOperationFrame, effects: GatewayLinkEffectSink): void {
     const client = this.#viewers.get(frame.viewerId);
     if (!client || client.closed) {
       this.#operation(effects, frame, false, UNAVAILABLE);
@@ -264,7 +278,10 @@ export class GatewayConsoleBridge {
   }
 
   #readMedia(
-    requestId: Extract<GatewayToResidentFrame, { type: 'media.get' }>['requestId'],
+    requestId: Extract<
+      GatewayToResidentFrame,
+      { type: 'media.get' }
+    >['requestId'],
     route: string,
     effects: GatewayLinkEffectSink,
   ): void {
@@ -314,7 +331,7 @@ export class GatewayConsoleBridge {
   ): void {
     if (this.#viewers.get(viewerId) === client) this.#viewers.delete(viewerId);
     client.close();
-    this.#hub.removeClient(client);
+    this.#detachHub(client);
   }
 
   #detachAll(): void {
@@ -323,7 +340,13 @@ export class GatewayConsoleBridge {
     // Mark all closed before invoking the hub so any in-flight snapshot observes
     // the fence even if a hostile dependency re-enters during removal.
     for (const client of clients) client.close();
-    for (const client of clients) this.#hub.removeClient(client);
+    for (const client of clients) this.#detachHub(client);
+  }
+
+  #detachHub(client: RemoteHubClient): void {
+    try {
+      this.#hub.removeClient(client);
+    } catch {}
   }
 
   #isCurrent(generation: number): boolean {

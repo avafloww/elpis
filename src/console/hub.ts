@@ -528,6 +528,9 @@ export class ConsoleHub {
 
   /** Handle a client→server frame on the one multiplexed console socket. */
   handleClientMessage(client: HubClient, raw: string): void {
+    // A transport may expose a client identity before addClient has attached it,
+    // or retain one after removal. Inbound authority follows actual attachment.
+    if (!this.clients.has(client) || client.closed) return;
     let m: any;
     try {
       m = JSON.parse(raw);
