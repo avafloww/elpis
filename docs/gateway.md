@@ -8,7 +8,7 @@ Each resident remains independently operable through its local Console. Resident
 
 Gateway has a separate published image at `ghcr.io/avafloww/elpis-gateway`. Release CI builds and boots it independently from the resident image, then publishes the release, minor, source-SHA, and `latest` tags and verifies that the release manifest is anonymously readable. Prefer a release tag or manifest digest; `latest` is convenient but not immutable. The similarly named `ghcr.io/avafloww/elpis` image is a resident and must not be deployed as Gateway.
 
-GitHub makes a newly created GHCR package private even when it is linked to a public repository. On the first release only, a package owner must change `elpis-gateway` to **Public** in GitHub's package settings and rerun the failed workflow. Release CI deliberately remains red until its anonymous manifest fetch succeeds. Once public, GitHub does not allow the package to become private again.
+GHCR package visibility is separate from repository access. Release CI deliberately remains red unless an anonymous manifest fetch succeeds. If a first publication remains private, a package owner must change `elpis-gateway` to **Public** in GitHub's package settings and rerun the failed workflow. Once public, GitHub does not allow the package to become private again.
 
 To build locally instead:
 
