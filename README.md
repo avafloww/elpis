@@ -20,16 +20,17 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 
 ## Surfaces
 
-| Surface | Purpose |
-| --- | --- |
-| Discord | Conversation, ambient rooms, attachments, slash commands, moderation, and outbound messages |
-| Elpis Console | Thread, live streaming, context inspection, logs, usage, chat ingress, and Mind UI |
-| JavaScript sandbox | Persistent programmable tool environment |
-| Data-directory extensions | Trusted local APIs and deterministic prompt additions under `elpis.ext.*` |
-| Mind | Dependency-aware projects, tasks, ideas, questions, comments, tags, and reminders |
-| Coding-agent MCP | Opt-in authenticated adapter over Mind plus task-bound correspondence with the resident agent |
-| Browser / computer | Stateful Playwright sessions and a persistent Linux desktop |
-| Workers | Mind-rooted bounded worker episodes |
+| Surface                   | Purpose                                                                                       |
+| ------------------------- | --------------------------------------------------------------------------------------------- |
+| Discord                   | Conversation, ambient rooms, attachments, slash commands, moderation, and outbound messages   |
+| Elpis Console             | Thread, live streaming, context inspection, logs, usage, chat ingress, and Mind UI            |
+| Elpis Gateway             | Optional authenticated multi-resident control plane over the existing Console dashboard       |
+| JavaScript sandbox        | Persistent programmable tool environment                                                      |
+| Data-directory extensions | Trusted local APIs and deterministic prompt additions under `elpis.ext.*`                     |
+| Mind                      | Dependency-aware projects, tasks, ideas, questions, comments, tags, and reminders             |
+| Coding-agent MCP          | Opt-in authenticated adapter over Mind plus task-bound correspondence with the resident agent |
+| Browser / computer        | Stateful Playwright sessions and a persistent Linux desktop                                   |
+| Workers                   | Mind-rooted bounded worker episodes                                                           |
 
 ## Requirements
 
@@ -51,7 +52,7 @@ sudo ./deploy/install.sh
 
 The installer is intended for a new dedicated host. Read [`docs/install.md`](docs/install.md) before using it on an existing system.
 
-For a restricted container deployment, use `ghcr.io/avafloww/elpis:latest` and follow [`docs/container.md`](docs/container.md). For the namespaced Kubernetes lifecycle broker, see [`docs/kubernetes.md`](docs/kubernetes.md).
+For a restricted container deployment, use `ghcr.io/avafloww/elpis:latest` and follow [`docs/container.md`](docs/container.md). For the namespaced Kubernetes lifecycle broker, see [`docs/kubernetes.md`](docs/kubernetes.md). For the optional multi-resident control plane, see [`docs/gateway.md`](docs/gateway.md).
 
 For a manual development checkout:
 
@@ -79,11 +80,11 @@ llm:
 discord:
   bot_token: ${DISCORD_BOT_TOKEN}
   guilds:
-    - id: "111111111111111111"
+    - id: '111111111111111111'
       slug: home
       tier: home
       channels:
-        - id: "222222222222222222"
+        - id: '222222222222222222'
           name: general
           tier: direct
 
@@ -122,6 +123,7 @@ Read [`AGENTS.md`](AGENTS.md) before changing load-bearing loop, persistence, co
 - [`docs/architecture.md`](docs/architecture.md) — runtime and data flow
 - [`docs/container.md`](docs/container.md) — restricted non-root GHCR deployment
 - [`docs/kubernetes.md`](docs/kubernetes.md) — namespaced restricted restart broker and target three-Pod boundary
+- [`docs/gateway.md`](docs/gateway.md) — optional multi-resident Console control plane
 - [`docs/context.md`](docs/context.md) — monocontext and request assembly
 - [`docs/compaction.md`](docs/compaction.md) — background folding and quality gates
 - [`docs/persistence.md`](docs/persistence.md) — files, SQLite, transcripts, and custody

@@ -11,7 +11,7 @@ Elpis Console is the private Preact interface for observing and steering one run
 - **Secretary** — ephemeral runtime conversations with durable turn history and optional Mind prompt hints.
 - **Logs** — a persistent desktop rail and dedicated mobile view over the bounded log tail.
 
-The v2 visual and functional divergences are recorded in `docs/console-v2-adjustments.md`.
+The v2 visual and functional divergences are recorded in `docs/console-v2-adjustments.md`. The optional [Elpis Gateway](gateway.md) reuses this same dashboard and reducer over a bounded selected-resident transport; it does not maintain a copied Console implementation.
 
 ## Build
 

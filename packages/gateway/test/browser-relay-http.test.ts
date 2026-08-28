@@ -649,6 +649,30 @@ test('browser relay switches two real resident links behind a fresh snapshot bar
     data: freshBytes.toString('base64'),
   });
 
+  const replacementA = createNodeCredential();
+  const readyB = f.registry.summary(instanceB);
+  assert.equal(readyB?.state, 'ready');
+  f.store.credentials.proposeRotation(
+    f.token,
+    replacementA.id,
+    replacementA.verifier,
+    'egr1.CCCCCCCCCCCCCCCCCCCCCC',
+  );
+  f.store.credentials.activateRotation(
+    replacementA.token,
+    'egr1.DDDDDDDDDDDDDDDDDDDDDD',
+  );
+  assert.equal(f.store.credentials.authenticateNode(f.token), null);
+  assert.deepEqual(f.store.credentials.authenticateNode(replacementA.token), {
+    instanceId: f.instanceId,
+    credentialId: replacementA.id,
+  });
+  assert.deepEqual(f.store.credentials.authenticateNode(nodeB.token), {
+    instanceId: instanceB,
+    credentialId: nodeB.id,
+  });
+  assert.deepEqual(f.registry.summary(instanceB), readyB);
+
   const browserClosed = closed(browser.socket);
   browser.socket.close(1000, 'done');
   const closeB = await residentB.inbox.next();
@@ -678,7 +702,7 @@ test('browser relay switches two real resident links behind a fresh snapshot bar
     second: residentB.inbox.seen,
     summaries: f.registry.summaries(),
   });
-  for (const secret of [f.token, nodeB.token, grantB.token])
+  for (const secret of [f.token, nodeB.token, grantB.token, replacementA.token])
     assert.equal(publicEvidence.includes(secret), false);
   assert.equal(publicEvidence.includes(process.cwd()), false);
 });

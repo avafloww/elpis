@@ -1,6 +1,11 @@
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": { "rootDir": "..", "noEmit": true },
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
+  },
   "include": ["../bench/**/*.ts", "../src/**/*.ts", "../test/helpers.ts"],
   "exclude": ["../node_modules", "../dist"]
 }

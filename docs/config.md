@@ -11,17 +11,17 @@ The example file is the exhaustive annotated reference. This document explains t
 
 ## `llm`
 
-| Key | Purpose |
+| Key                         | Purpose                                                                 |
 | --------------------------- | ----------------------------------------------------------------------- |
-| `provider_type` | `openai-compatible`, `anthropic-oauth`, or `codex-oauth` |
-| `api_key` | required only for `openai-compatible` |
-| `base_url` | provider endpoint; defaults are provider-specific |
-| `model` | provider model identifier |
-| `context_size` | explicit context window; omit only when endpoint discovery is supported |
-| `reasoning_effort` | provider reasoning level |
-| `external_thinking` | optional visible think-tool mode for supported Codex paths |
-| `api` | `auto`, `responses`, or `chat` for OpenAI-compatible providers |
-| `completion_reserve_tokens` | output budget reserved below the model context limit |
+| `provider_type`             | `openai-compatible`, `anthropic-oauth`, or `codex-oauth`                |
+| `api_key`                   | required only for `openai-compatible`                                   |
+| `base_url`                  | provider endpoint; defaults are provider-specific                       |
+| `model`                     | provider model identifier                                               |
+| `context_size`              | explicit context window; omit only when endpoint discovery is supported |
+| `reasoning_effort`          | provider reasoning level                                                |
+| `external_thinking`         | optional visible think-tool mode for supported Codex paths              |
+| `api`                       | `auto`, `responses`, or `chat` for OpenAI-compatible providers          |
+| `completion_reserve_tokens` | output budget reserved below the model context limit                    |
 
 `anthropic-oauth` and `codex-oauth` use credentials stored in `elpis-data/elpis.db`; run `npm run oauth-login` after configuring the provider. See the provider-specific docs.
 
@@ -63,11 +63,15 @@ A listen-all digest agent can use `default_tier: social`, keep `default_allow_se
 
 The effective trigger is clamped below the provider context window by `llm.completion_reserve_tokens`.
 
-## `console`
+## `dashboard`
 
-- `enabled`: serves the loopback operator console;
+`dashboard.local` configures the independently sufficient resident Console:
+
+- `enabled`: serves the local operator Console;
 - `host` / `port`: bind address;
 - `mcp_enabled`: opt-in Streamable HTTP MCP endpoint at `/mcp` for the canonical Mind graph.
+
+`dashboard.remote` is optional. Its canonical `url` is the Gateway's external HTTPS origin. `enrollment_token` is the exact one-use `ege1` token emitted by Gateway's **Add Instance** flow; omit it after enrollment when no replay is needed. A configured but unavailable Gateway does not block resident boot or the local Console. See [Elpis Gateway](gateway.md).
 
 MCP has no built-in public-network authentication and rejects browser-Origin requests. Keep it loopback-bound or place it behind TLS and authentication. See [Coding-agent MCP](mcp.md).
 

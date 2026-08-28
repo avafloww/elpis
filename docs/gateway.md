@@ -1,0 +1,77 @@
+# Elpis Gateway
+
+Elpis Gateway is an optional control plane for several independent Elpis residents. It presents the existing Console dashboard for one selected resident at a time. Gateway is not a resident: it has no agent loop, provider access, SOUL, memory, transcripts, Mind database, worker runtime, scheduler, or access to resident data directories.
+
+Each resident remains independently operable through its local Console. Residents dial Gateway outbound over WSS; browsers never connect directly to residents. Selecting a resident opens one bounded remote viewer, requests a fresh ordinary Console snapshot, and withholds later deltas until that snapshot completes. Switching closes the old viewer before opening the new one. Media requests are scoped to the selected resident and checked for route, size, canonical base64, and SHA-256.
+
+## Build and Kubernetes deployment
+
+Gateway has a separate image target:
+
+```bash
+docker build -f Dockerfile.gateway -t elpis-gateway:local .
+```
+
+`deploy/kubernetes/gateway/gateway.yaml` installs a restricted single-replica StatefulSet, Service, PVC, and default-deny NetworkPolicy. The checked-in manifest uses `elpis-gateway:local` with `imagePullPolicy: Never` for an image imported into the node runtime. For a registry deployment, replace both fields with an immutable operator-owned image reference and appropriate pull policy before applying it.
+
+```bash
+kubectl apply -f deploy/kubernetes/gateway/gateway.yaml
+kubectl -n elpis-gateway wait --for=condition=Ready pod/elpis-gateway-0 --timeout=120s
+```
+
+The container runs as uid/gid `10001`, has a read-only root filesystem, receives no ServiceAccount token, and writes only `/data` and bounded tmpfs `/tmp`. `ELPIS_GATEWAY_DATA_DIR`, `ELPIS_GATEWAY_LISTEN_HOST`, and `ELPIS_GATEWAY_LISTEN_PORT` select the data directory and listener. The defaults are `./gateway-data`, `127.0.0.1`, and `8790`; the Kubernetes manifest uses `/data/state`, `0.0.0.0`, and `8790`.
+
+The shipped NetworkPolicy is defense in depth, not proof that host- or node-origin traffic is blocked: that behavior depends on the cluster CNI. Restrict the Service at the ingress, firewall, and network topology as well.
+
+## Reverse proxy and authentication
+
+Gateway serves plain HTTP and expects an authenticated TLS reverse proxy in front of it.
+
+The proxy owns human authentication for browser routes, including `/`, `/api/v1/*` browser APIs, and `/api/v1/browser/relay`. Gateway has no application users, passwords, sessions, passkeys, or RBAC. Do not expose those routes around the authenticated proxy. Preserve Gateway's exact Origin and CSRF checks.
+
+Four resident routes bypass human login because residents cannot answer a browser authentication challenge:
+
+- `POST /api/v1/resident/enrollment`
+- `POST /api/v1/resident/rotation`
+- `POST /api/v1/resident/rotation/activate`
+- `GET /api/v1/resident/link` (WebSocket upgrade)
+
+Expose those routes only through TLS. Preserve their request `Authorization` header without logging it; Gateway still requires the one-use enrollment grant or per-resident bearer credential. Clear the proxy's own browser-authentication header before forwarding ordinary browser routes.
+
+Set Gateway's canonical public URL to the exact external HTTPS origin. Browser Origin checks and the resident WSS target derive from that value; path, query, fragment, embedded credentials, and noncanonical forms are rejected.
+
+## Setup and resident enrollment
+
+Open Gateway through the authenticated proxy. The first setup screen records the canonical public HTTPS origin. **Add Instance** creates a ten-minute, one-use enrollment grant and shows its bootstrap YAML once. Copy it directly into the target resident's private `config.yaml`:
+
+```yaml
+dashboard:
+  local:
+    enabled: true
+    mcp_enabled: false
+    host: 127.0.0.1
+    port: 8787
+  remote:
+    url: https://gateway.example
+    enrollment_token: ege1.<id>.<secret>
+```
+
+The resident stores its installation identity and active node credential in its own `elpis-data/elpis.db`. Gateway stores only the public credential ID and a SHA-256 verifier bound to that instance. An exact lost enrollment response can be replayed; a used, expired, mismatched, or revoked grant cannot enroll another instance. After successful enrollment the resident no longer needs the one-use token, although removing it from `config.yaml` reduces secret copies.
+
+A configured but unavailable Gateway never blocks resident boot or the local Console. The resident reconnects with bounded backoff. Credential rotation keeps the old credential active until Gateway proves possession of the pending replacement, then revokes the old credential atomically.
+
+## State, backup, and restore
+
+Gateway keeps configuration, instance identity, credential verifiers, and audit receipts in `gateway.db` under its data directory. The live database, WAL, and SHM files are mode `0600`; the parent directory is mode `0700`.
+
+Back up a running Gateway with SQLite's online backup API and verify the resulting standalone database with `PRAGMA quick_check`, application ID, schema version, migration prefix, and foreign keys in a separate process. Do not copy a live database file and its sidecars and call that a backup. An offline copy is valid only after Gateway has stopped cleanly and the database has been reopened and verified. Keep backups private: credential verifiers and control-plane audit data are not public artifacts.
+
+A single restored `gateway.db` restores Gateway identity and control-plane state. Residents keep their own usable credentials; Gateway never stores resident bearer secrets.
+
+## Current limits
+
+- Gateway is single-replica and uses one RWO PVC. It does not provide active/active failover.
+- The instance picker shows bounded public identity and connection state. Inactive residents do not stream full Console state.
+- Gateway does not centralize resident databases, filesystems, transcripts, or secrets.
+- Human multi-user authorization and RBAC are not implemented; the reverse proxy's authenticated audience shares one operator surface.
+- TLS termination, browser authentication, DNS, certificates, firewall rules, image distribution, and backup scheduling remain operator responsibilities.
