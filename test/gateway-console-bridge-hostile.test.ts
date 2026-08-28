@@ -483,7 +483,17 @@ test('media effects preserve local bytes while remaining bounded and path-free',
     hub: new ConsoleHub(),
     media: mediaReader,
   });
-  const written = effectRecorder();
+  const expectedMedia = 3;
+  let resolveMedia!: () => void;
+  const allMedia = new Promise<void>((resolve) => {
+    resolveMedia = resolve;
+  });
+  const written = effectRecorder({
+    media: () => {
+      if (written.media.length === expectedMedia) resolveMedia();
+      return true;
+    },
+  });
   const routes = [
     '/attachments/message-1/image.png',
     '/attachments/message-1/large.bin',
@@ -494,10 +504,9 @@ test('media effects preserve local bytes while remaining bounded and path-free',
       frame({ type: 'media.get', requestId: request(), route }),
       written.sink,
     );
-  for (let turn = 0; written.media.length < 3 && turn < 100; turn++)
-    await new Promise<void>((resolve) => setImmediate(resolve));
+  await allMedia;
 
-  assert.equal(written.media.length, 3);
+  assert.equal(written.media.length, expectedMedia);
   const success = written.media.find((effect) => effect.ok);
   assert.ok(success?.ok);
   assert.deepEqual(Buffer.from(success.data, 'base64'), bytes);
