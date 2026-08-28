@@ -4,6 +4,7 @@ import {
   LIMITS,
   createGatewayHelloAck,
   createProtocolError,
+  isConnectionId,
   serializeGatewayFrame,
   validateCapabilities,
   type Capability,
@@ -86,7 +87,6 @@ export type GatewayResidentAdmission =
       readonly reason: GatewayResidentAdmissionRejection | 'transport-error';
     };
 export interface GatewayResidentLinkRegistryOptions {
-  readonly createConnectionId: () => ConnectionId;
   readonly clock: GatewayResidentLinkClock;
   readonly supportedCapabilities: readonly Capability[];
   readonly audit: GatewayResidentLinkAudit;
@@ -124,7 +124,6 @@ function inert(): void {}
 
 /** Owns authenticated resident links and performs no HTTP/upgrade work. */
 export class GatewayResidentLinkRegistry {
-  readonly #createConnectionId: () => ConnectionId;
   readonly #clock: GatewayResidentLinkClock;
   readonly #supportedCapabilities: readonly Capability[];
   readonly #auditSink: GatewayResidentLinkAudit;
@@ -139,7 +138,6 @@ export class GatewayResidentLinkRegistry {
   constructor(options: GatewayResidentLinkRegistryOptions) {
     if (
       !options ||
-      typeof options.createConnectionId !== 'function' ||
       !options.clock ||
       typeof options.clock.now !== 'function' ||
       typeof options.clock.setTimeout !== 'function' ||
@@ -148,7 +146,6 @@ export class GatewayResidentLinkRegistry {
       (options.onFrame !== undefined && typeof options.onFrame !== 'function')
     )
       throw new Error('resident link registry options are invalid');
-    this.#createConnectionId = options.createConnectionId;
     this.#clock = options.clock;
     this.#supportedCapabilities = validateCapabilities([
       ...options.supportedCapabilities,
@@ -214,6 +211,7 @@ export class GatewayResidentLinkRegistry {
   admit(
     binding: AuthenticatedNode,
     socket: GatewayResidentSocketAdapter,
+    connectionId: ConnectionId,
   ): GatewayResidentAdmission {
     const rejection = this.#admissionRejection(binding, true);
     if (rejection !== null) {
@@ -226,13 +224,13 @@ export class GatewayResidentLinkRegistry {
       this.#safeClose(socket, code, reason);
       return Object.freeze({ accepted: false, reason: rejection });
     }
-    let connectionId: ConnectionId;
     let session: GatewayInboundSession;
     let connectedAt: number;
     let generation: number;
     try {
-      connectionId = this.#createConnectionId();
-      // Construct exactly one stateful shared decoder against the auth binding.
+      if (!isConnectionId(connectionId))
+        throw new Error('connection id is invalid');
+      // Construct exactly one stateful shared decoder against the authenticated upgrade binding.
       session = new GatewayInboundSession({
         connectionId,
         instanceId: binding.instanceId as InstanceId,

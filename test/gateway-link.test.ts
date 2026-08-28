@@ -213,11 +213,12 @@ describe('GatewayLinkController', () => {
       'wss://gateway.example' + RESIDENT_CONTROL_PATHS.link,
     );
     const options = captured[1] as Record<string, unknown>;
+    assert.equal(options.connectionId, CONNECTION);
     assert.equal(options.maxPayload, LIMITS.frameBytes);
     assert.equal(options.perMessageDeflate, false);
     assert.equal(
       Object.keys(options).sort().join(','),
-      'authorization,maxPayload,perMessageDeflate',
+      'authorization,connectionId,maxPayload,perMessageDeflate',
     );
     assert.equal(
       JSON.stringify(fixture.controller.status).includes(credential.token),

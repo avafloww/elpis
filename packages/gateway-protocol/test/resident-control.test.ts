@@ -4,6 +4,7 @@ import {
   CREDENTIAL_VECTORS,
   RESIDENT_CONTROL_ERROR_CODES,
   RESIDENT_CONTROL_FORMATS,
+  RESIDENT_CONTROL_HEADERS,
   RESIDENT_CONTROL_LIMITS,
   RESIDENT_CONTROL_PATHS,
   ResidentControlCodecError,
@@ -16,6 +17,7 @@ import {
   decodeResidentRotationResult,
   encodeCredentialVerifier,
   formatNodeBearerAuthorization,
+  isConnectionId,
   parseNodeBearerAuthorization,
   serializeResidentControlError,
   serializeResidentEnrollmentRequest,
@@ -78,6 +80,17 @@ test('resident v1 control constants are exact and frozen', () => {
     rotationActivation: '/api/v1/resident/rotation/activate',
     link: '/api/v1/resident/link',
   });
+  assert.deepEqual(RESIDENT_CONTROL_HEADERS, {
+    connectionId: 'x-elpis-connection-id',
+  });
+  assert.equal(isConnectionId('egx1.AAAAAAAAAAAAAAAAAAAAAA'), true);
+  for (const invalid of [
+    'egx1.invalid',
+    'EGX1.AAAAAAAAAAAAAAAAAAAAAA',
+    'egx1.AAAAAAAAAAAAAAAAAAAAAA.extra',
+    null,
+  ])
+    assert.equal(isConnectionId(invalid), false);
   assert.equal(RESIDENT_CONTROL_LIMITS.bodyBytes, 4096);
   assert.equal(RESIDENT_CONTROL_LIMITS.displayNameBytes, 128);
   assert.deepEqual(RESIDENT_CONTROL_ERROR_CODES, [
@@ -91,6 +104,7 @@ test('resident v1 control constants are exact and frozen', () => {
   ]);
   for (const value of [
     RESIDENT_CONTROL_PATHS,
+    RESIDENT_CONTROL_HEADERS,
     RESIDENT_CONTROL_FORMATS,
     RESIDENT_CONTROL_LIMITS,
     RESIDENT_CONTROL_ERROR_CODES,

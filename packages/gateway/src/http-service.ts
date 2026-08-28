@@ -6,9 +6,11 @@ import type { Duplex } from 'node:stream';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import {
   RESIDENT_CONTROL_FORMATS,
+  RESIDENT_CONTROL_HEADERS,
   RESIDENT_CONTROL_LIMITS,
   RESIDENT_CONTROL_PATHS,
   LIMITS,
+  isConnectionId,
   parseNodeBearerAuthorization,
   decodeResidentEnrollmentResult,
   decodeResidentRotationResult,
@@ -768,7 +770,8 @@ export class GatewayHttpService {
     this.#options = options;
     this.#residentRateLimiter =
       options.residentRateLimiter ?? new BoundedResidentControlRateLimiter();
-    const hasResidentCredentials = options.residentCredentialStore !== undefined;
+    const hasResidentCredentials =
+      options.residentCredentialStore !== undefined;
     const hasResidentRegistry = options.residentLinkRegistry !== undefined;
     if (hasResidentCredentials !== hasResidentRegistry)
       throw new Error(
@@ -954,6 +957,10 @@ export class GatewayHttpService {
     // comma joins, alternate schemes, whitespace variants, and malformed tokens.
     const authorization = singleRequestHeader(request, 'authorization');
     const token = parseNodeBearerAuthorization(authorization);
+    const connectionId = singleRequestHeader(
+      request,
+      RESIDENT_CONTROL_HEADERS.connectionId,
+    );
     const credentials = this.#options.residentCredentialStore;
     const registry = this.#options.residentLinkRegistry;
     let binding: AuthenticatedNode | null = null;
@@ -966,6 +973,10 @@ export class GatewayHttpService {
     }
     if (binding === null || !registry) {
       rejectUpgrade(socket, 401);
+      return;
+    }
+    if (!isConnectionId(connectionId)) {
+      rejectUpgrade(socket, 400);
       return;
     }
     let rejection: ReturnType<GatewayResidentLinkRegistry['preflight']>;
@@ -995,7 +1006,7 @@ export class GatewayHttpService {
           // admit repeats all publication checks as a defense.
           const adapter = new WsResidentSocketAdapter(webSocket);
           try {
-            registry.admit(binding!, adapter);
+            registry.admit(binding!, adapter, connectionId);
           } catch {
             adapter.close(1011, 'admission_failed');
           }

@@ -90,6 +90,10 @@ function booleanValue(value: unknown, label: string): boolean {
     fail('invalid_frame', `${label} must be boolean`);
   return value;
 }
+export function isConnectionId(value: unknown): value is ConnectionId {
+  return typeof value === 'string' && ID_PATTERNS.connection.test(value);
+}
+
 function id(value: unknown, kind: keyof typeof ID_PATTERNS): string {
   if (typeof value !== 'string' || !ID_PATTERNS[kind].test(value))
     fail('invalid_frame', `invalid ${kind} id`);

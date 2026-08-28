@@ -9,6 +9,7 @@ import {
   CAPABILITIES,
   LIMITS,
   PROTOCOL_VERSION,
+  RESIDENT_CONTROL_HEADERS,
   RESIDENT_CONTROL_PATHS,
   createNodeCredential,
   formatNodeBearerAuthorization,
@@ -66,9 +67,7 @@ async function fixture(
     credentialId: node.id,
     credentialVerifier: node.verifier,
   });
-  let nextConnection = 0;
   const registry = new GatewayResidentLinkRegistry({
-    createConnectionId: () => CONNECTIONS[nextConnection++]!,
     clock: {
       now: Date.now,
       setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -106,10 +105,17 @@ async function fixture(
   };
 }
 
-function open(url: string, authorization: string): Promise<WebSocket> {
+function open(
+  url: string,
+  authorization: string,
+  connectionId: ConnectionId = CONNECTIONS[0]!,
+): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, {
-      headers: { Authorization: authorization },
+      headers: {
+        Authorization: authorization,
+        [RESIDENT_CONTROL_HEADERS.connectionId]: connectionId,
+      },
       perMessageDeflate: false,
     });
     socket.once('open', () => resolve(socket));
@@ -151,6 +157,7 @@ function maskedTextFrame(text: string): Buffer {
 function pipelinedHello(
   url: string,
   authorization: string,
+  connectionId: ConnectionId,
   wire: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -192,8 +199,7 @@ function pipelinedHello(
         return;
       }
       if (frame.length < offset) return;
-      const length =
-        shortLength === 126 ? frame.readUInt16BE(2) : shortLength;
+      const length = shortLength === 126 ? frame.readUInt16BE(2) : shortLength;
       if (frame.length < offset + length) return;
       finish(undefined, frame.subarray(offset, offset + length).toString());
     });
@@ -206,8 +212,11 @@ function pipelinedHello(
         'Connection: Upgrade\r\n' +
         `Sec-WebSocket-Key: ${key}\r\n` +
         'Sec-WebSocket-Version: 13\r\n' +
-        `Authorization: ${authorization}\r\n\r\n`;
-      socket.write(Buffer.concat([Buffer.from(request), maskedTextFrame(wire)]));
+        `Authorization: ${authorization}\r\n` +
+        `${RESIDENT_CONTROL_HEADERS.connectionId}: ${connectionId}\r\n\r\n`;
+      socket.write(
+        Buffer.concat([Buffer.from(request), maskedTextFrame(wire)]),
+      );
     });
   });
 }
@@ -228,9 +237,20 @@ function hello(instanceId: string, connectionId: ConnectionId): string {
 function rejected(
   url: string,
   headers: Record<string, string | string[]>,
+  connectionId: string | string[] | null = CONNECTIONS[0]!,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, { headers, perMessageDeflate: false });
+    const requestHeaders =
+      connectionId === null
+        ? headers
+        : {
+            ...headers,
+            [RESIDENT_CONTROL_HEADERS.connectionId]: connectionId,
+          };
+    const socket = new WebSocket(url, {
+      headers: requestHeaders,
+      perMessageDeflate: false,
+    });
     socket.once('open', () =>
       reject(new Error('unexpected WebSocket upgrade')),
     );
@@ -272,6 +292,7 @@ test('upgrade head preserves a pipelined first resident frame', async (t) => {
   const response = await pipelinedHello(
     f.url + RESIDENT_CONTROL_PATHS.link,
     bearer,
+    CONNECTIONS[0]!,
     hello(f.instanceId, CONNECTIONS[0]!),
   );
   assert.equal(JSON.parse(response).type, 'hello.ack');
@@ -302,7 +323,9 @@ test('network resident link authenticates, preserves fragments, and acknowledges
   socket.close(1000, 'done');
   assert.equal((await ended).code, 1000);
   const audit = f.store.audit();
-  assert(audit.some((event) => event.action === 'gateway.resident.link.admitted'));
+  assert(
+    audit.some((event) => event.action === 'gateway.resident.link.admitted'),
+  );
   assert(audit.some((event) => event.action === 'gateway.resident.link.ready'));
   const serialized = JSON.stringify(audit);
   assert(!serialized.includes(f.token));
@@ -338,6 +361,27 @@ test('wrong, revoked, malformed, duplicate auth and wrong targets fail without c
       Authorization: [bearer, bearer],
     }),
   ];
+  const connectionFailures = [
+    await rejected(
+      f.url + RESIDENT_CONTROL_PATHS.link,
+      { Authorization: bearer },
+      null,
+    ),
+    await rejected(
+      f.url + RESIDENT_CONTROL_PATHS.link,
+      { Authorization: bearer },
+      'egx1.invalid',
+    ),
+    await rejected(
+      f.url + RESIDENT_CONTROL_PATHS.link,
+      { Authorization: bearer },
+      [CONNECTIONS[0]!, CONNECTIONS[0]!],
+    ),
+  ];
+  assert.deepEqual(
+    connectionFailures.map((failure) => failure.status),
+    [400, 400, 400],
+  );
   f.store.credentials.revokeCredential(f.credentialId);
   failures.push(
     await rejected(f.url + RESIDENT_CONTROL_PATHS.link, {

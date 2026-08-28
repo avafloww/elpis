@@ -15,6 +15,10 @@ export const RESIDENT_CONTROL_PATHS = Object.freeze({
   link: '/api/v1/resident/link',
 } as const);
 
+export const RESIDENT_CONTROL_HEADERS = Object.freeze({
+  connectionId: 'x-elpis-connection-id',
+} as const);
+
 export const RESIDENT_CONTROL_FORMATS = Object.freeze({
   enrollmentRequest: 'elpis-gateway-resident-enrollment-request-v1',
   enrollmentResult: 'elpis-gateway-resident-enrollment-result-v1',

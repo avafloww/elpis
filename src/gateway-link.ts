@@ -2,6 +2,7 @@ import { randomBytes as systemRandomBytes } from 'node:crypto';
 import WebSocket, { type RawData } from 'ws';
 import {
   LIMITS,
+  RESIDENT_CONTROL_HEADERS,
   RESIDENT_CONTROL_PATHS,
   ResidentInboundSession as GatewayOutboundSession,
   createResidentHello,
@@ -83,6 +84,7 @@ export interface GatewayLinkSocket {
 export interface GatewayLinkSocketOptions {
   /** Exact shared-codec bearer value. It must never be retained by observers. */
   readonly authorization: string;
+  readonly connectionId: ConnectionId;
   readonly maxPayload: number;
   readonly perMessageDeflate: false;
 }
@@ -220,7 +222,10 @@ export class WsGatewayLinkSocket implements GatewayLinkSocket {
 
   constructor(url: string, options: GatewayLinkSocketOptions) {
     this.#socket = new WebSocket(url, {
-      headers: { authorization: options.authorization },
+      headers: {
+        authorization: options.authorization,
+        [RESIDENT_CONTROL_HEADERS.connectionId]: options.connectionId,
+      },
       followRedirects: false,
       maxPayload: options.maxPayload,
       perMessageDeflate: false,
@@ -487,6 +492,7 @@ export class GatewayLinkController {
       );
       socket = this.#socketFactory(linkTarget(origin), {
         authorization,
+        connectionId: id,
         maxPayload: LIMITS.frameBytes,
         perMessageDeflate: false,
       });

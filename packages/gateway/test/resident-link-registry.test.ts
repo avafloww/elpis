@@ -98,9 +98,7 @@ function setup(
 ) {
   const clock = new FakeClock();
   const audit: GatewayResidentLinkAuditEvent[] = [];
-  let nextConnection = 0;
   const registry = new GatewayResidentLinkRegistry({
-    createConnectionId: () => CONNECTIONS[nextConnection++]!,
     clock,
     supportedCapabilities: ['console.v1', 'identity.v1', 'media.v1'],
     audit: (event) => audit.push(event),
@@ -113,16 +111,18 @@ function setup(
       ? {}
       : { onFrame: (_link, frame) => options.onFrame?.(frame) }),
   });
-  return { registry, clock, audit, allocated: () => nextConnection };
+  return { registry, clock, audit };
 }
 function admit(
   registry: GatewayResidentLinkRegistry,
   socket: FakeSocket,
   instanceId = INSTANCE,
+  connectionId = CONNECTIONS[0]!,
 ) {
   return registry.admit(
     { instanceId, credentialId: 'egc1.public-id-only' },
     socket,
+    connectionId,
   );
 }
 function lastFrame(socket: FakeSocket): Record<string, any> {
@@ -176,6 +176,7 @@ test('hello reaches the internal frame sink and sink failure closes the link', (
 test('wrong instance and non-hello receive fatal error then close', () => {
   for (const input of [
     hello(CONNECTIONS[0], OTHER_INSTANCE),
+    hello(CONNECTIONS[1], INSTANCE),
     JSON.stringify({
       version: 1,
       connectionId: CONNECTIONS[0],
@@ -238,8 +239,8 @@ test('binary, oversize, malformed, sequence, and capability violations are fatal
   });
 });
 
-test('first live link wins without consuming an id and stale close cannot delete replacement', () => {
-  const { registry, allocated } = setup();
+test('first live link wins and stale close cannot delete replacement', () => {
+  const { registry } = setup();
   const first = new FakeSocket();
   const duplicate = new FakeSocket();
   assert.equal(admit(registry, first).accepted, true);
@@ -248,20 +249,18 @@ test('first live link wins without consuming an id and stale close cannot delete
     accepted: false,
     reason: 'duplicate',
   });
-  assert.equal(allocated(), 1);
   assert.equal(duplicate.closes[0]?.reason, 'duplicate_instance');
   first.peerClose();
   assert.equal(registry.size, 0);
   const replacement = new FakeSocket();
-  const accepted = admit(registry, replacement);
+  const accepted = admit(registry, replacement, INSTANCE, CONNECTIONS[1]);
   assert.equal(accepted.accepted, true);
-  assert.equal(allocated(), 2);
   staleClose();
   assert.equal(registry.size, 1);
   assert.equal(registry.summary(INSTANCE)?.connectionId, CONNECTIONS[1]);
 });
 
-test('capacity, reentrant adapters, timers, and id sources fail closed', () => {
+test('capacity, reentrant adapters, timers, and connection IDs fail closed', () => {
   const limited = setup({ maxLinks: 1 });
   const first = new FakeSocket();
   const second = new FakeSocket();
@@ -292,7 +291,6 @@ test('capacity, reentrant adapters, timers, and id sources fail closed', () => {
 
   const immediateSocket = new FakeSocket();
   const immediate = new GatewayResidentLinkRegistry({
-    createConnectionId: () => CONNECTIONS[0]!,
     clock: {
       now: () => 1_000,
       setTimeout(callback) {
@@ -312,23 +310,20 @@ test('capacity, reentrant adapters, timers, and id sources fail closed', () => {
   assert.equal(immediateSocket.closes[0]?.reason, 'protocol_error');
 
   const idSocket = new FakeSocket();
-  const badId = new GatewayResidentLinkRegistry({
-    createConnectionId: () => {
-      throw new Error('entropy unavailable');
-    },
-    clock: new FakeClock(),
-    supportedCapabilities: ['console.v1'],
-    audit: () => {},
-  });
-  assert.deepEqual(admit(badId, idSocket), {
-    accepted: false,
-    reason: 'transport-error',
-  });
+  const badId = setup().registry;
+  assert.deepEqual(
+    badId.admit(
+      { instanceId: INSTANCE, credentialId: 'egc1.public-id-only' },
+      idSocket,
+      'egx1.invalid' as ConnectionId,
+    ),
+    { accepted: false, reason: 'transport-error' },
+  );
   assert.equal(idSocket.closes[0]?.reason, 'transport_error');
 });
 
 test('preflight mirrors admission bounds and emits one secret-free rejection', () => {
-  const { registry, audit, allocated } = setup({ maxLinks: 1 });
+  const { registry, audit } = setup({ maxLinks: 1 });
   const first = new FakeSocket();
   admit(registry, first, INSTANCE);
   const binding = {
@@ -344,7 +339,6 @@ test('preflight mirrors admission bounds and emits one secret-free rejection', (
   );
   assert.equal(registry.preflight(binding), 'capacity');
   assert.equal(registry.size, 1);
-  assert.equal(allocated(), 1);
   assert.deepEqual(
     audit.slice(-2).map((event) => event.action),
     ['duplicate-rejected', 'capacity-rejected'],

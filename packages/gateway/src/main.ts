@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CAPABILITIES, newConnectionId } from '@elpis/gateway-protocol';
+import { CAPABILITIES } from '@elpis/gateway-protocol';
 import { createGatewayBrowserApi } from './gateway-browser-api.js';
 import { createGatewayHttpService } from './http-service.js';
 import { createGatewayResidentControlApi } from './resident-control-api.js';
@@ -47,7 +47,6 @@ async function shutdown(exitCode: number): Promise<void> {
 async function main(): Promise<void> {
   store = openGatewayStore(dataDirectory);
   const linkRegistry = new GatewayResidentLinkRegistry({
-    createConnectionId: newConnectionId,
     clock: {
       now: Date.now,
       setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
