@@ -125,5 +125,13 @@ test('resident image owns exactly the protocol workspace dependency', () => {
   );
   assert.doesNotMatch(docker, /COPY (?:--from=build[^\n]+ )?packages\/gateway(?:\s|\/)/);
   assert.match(dockerignore, /^!packages\/gateway-protocol\/src\/\*\*$/m);
-  assert.doesNotMatch(dockerignore, /^!packages\/gateway\//m);
+  assert.match(dockerignore, /^!packages\/gateway\/src\/\*\*$/m);
+  const gatewayDocker = read('Dockerfile.gateway');
+  assert.match(gatewayDocker, /COPY packages\/gateway\/src packages\/gateway\/src/);
+  assert.match(
+    gatewayDocker,
+    /COPY packages\/gateway-protocol\/src packages\/gateway-protocol\/src/,
+  );
+  assert.doesNotMatch(gatewayDocker, /COPY (?:--from=[^\n]+ )?src(?:\s|\/)/);
+  assert.doesNotMatch(gatewayDocker, /node_modules\/elpis|\/opt\/gateway\/dist/);
 });
