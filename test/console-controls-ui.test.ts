@@ -31,15 +31,17 @@ test('console exports one five-view dashboard over a bounded transport', () => {
   assert.match(main, /export function ConsoleDashboard/);
   assert.match(
     main,
-    /export function ConsoleDashboard\(\{\s*state,\s*actions,\s*mediaResolver,\s*\}: ConsoleDashboardProps\)/,
+    /export function ConsoleDashboard\(\{\s*state,\s*actions,\s*mediaResolver,\s*preferences,\s*\}: ConsoleDashboardProps\)/,
   );
   assert.match(
     main,
     /<ConsoleMediaResolverContext\.Provider value=\{mediaResolver\}>/,
   );
 
-  assert.match(standalone, /useConsole\(transport\)/);
-  assert.doesNotMatch(hook, /WebSocket|location\.host|\/ws/);
+  assert.match(standalone, /useConsole\(transport, preferences\)/);
+  assert.doesNotMatch(hook, /WebSocket|location\.host|\/ws|localStorage/);
+  assert.match(standalone, /localStorage\.getItem\(VIEW_KEY\)/);
+  assert.match(standalone, /localStorage\.setItem\(VIEW_KEY, view\)/);
   assert.match(hook, /transport\.subscribe/);
   assert.match(hook, /transport\.send/);
   assert.match(transport, /interface ConsoleTransport/);
@@ -47,7 +49,7 @@ test('console exports one five-view dashboard over a bounded transport', () => {
   assert.match(websocket, /location\.host}\/ws/);
   assert.match(
     standalone,
-    /<ConsoleDashboard state=\{state\} actions=\{actions\}/,
+    /<ConsoleDashboard\s+state=\{state\}\s+actions=\{actions\}\s+preferences=\{preferences\}/,
   );
   assert.match(hook, /t: 'control'/);
   assert.match(hook, /t: 'mind'/);
@@ -84,8 +86,10 @@ test('desktop log rail restores bounded persisted resize and fixed timestamps', 
   assert.equal(clampLogRailHeight(208, 800), 208);
   assert.equal(clampLogRailHeight(9999, 800), 560);
   const main = read('src/console/client/main.tsx');
+  const standalone = read('src/console/client/standalone.tsx');
   const styles = read('src/console/client/styles.css');
-  assert.match(main, /LOG_RAIL_KEY = 'ep-logdock-h'/);
+  assert.doesNotMatch(main, /localStorage|LOG_RAIL_KEY/);
+  assert.match(standalone, /LOG_RAIL_KEY = 'ep-logdock-h'/);
   assert.match(main, /role='separator'/);
   assert.match(main, /setPointerCapture/);
   assert.match(main, /ArrowUp/);

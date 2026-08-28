@@ -505,11 +505,16 @@ test('identity projection carries only bounded picker fields', () => {
   ]);
 });
 
-test('identity shell has no resident console, relay, or persistence surface', () => {
+test('identity shell delegates one keyed resident dashboard without gaining transport authority', () => {
   const root = path.resolve(import.meta.dirname, '../client');
-  const source = ['identity-dock.tsx', 'selection.ts', 'main.tsx']
+  const identity = ['identity-dock.tsx', 'selection.ts']
     .map((name) => fs.readFileSync(path.join(root, name), 'utf8'))
     .join('\n');
+  const main = fs.readFileSync(path.join(root, 'main.tsx'), 'utf8');
+  const resident = fs.readFileSync(
+    path.join(root, 'resident-dashboard.tsx'),
+    'utf8',
+  );
   for (const forbidden of [
     /use-console/,
     /console\/client/,
@@ -524,9 +529,50 @@ test('identity shell has no resident console, relay, or persistence surface', ()
     /location\.(?:hash|search)/,
     /history\./,
   ])
-    assert.doesNotMatch(source, forbidden);
+    assert.doesNotMatch(identity, forbidden);
   assert.doesNotMatch(
     fs.readFileSync(path.join(root, 'identity-dock.tsx'), 'utf8'),
     /bootstrap|verifier|grant|token/i,
   );
+  assert.equal(main.match(/<GatewayResidentDashboard/g)?.length, 1);
+  assert.match(main, /key=\{resident\.id\}/);
+  assert.match(main, /instanceId=\{resident\.id\}/);
+  assert.doesNotMatch(
+    main,
+    /useConsole|createGatewayConsoleTransport|WebSocket/,
+  );
+  assert.equal(resident.match(/<ConsoleDashboard/g)?.length, 1);
+  assert.equal(resident.match(/useConsole\(transport\)/g)?.length, 1);
+  assert.equal(
+    resident.match(/createGatewayConsoleTransport\(instanceId\)/g)?.length,
+    1,
+  );
+  assert.match(resident, /mediaResolver=\{transport\}/);
+  assert.doesNotMatch(
+    resident,
+    /render\(|localStorage|sessionStorage|indexedDB/,
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(
+      path.resolve(root, '../../../src/console/client/use-console.ts'),
+      'utf8',
+    ),
+    /localStorage|sessionStorage|indexedDB/,
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(
+      path.resolve(root, '../../../src/console/client/main.tsx'),
+      'utf8',
+    ),
+    /localStorage|sessionStorage|indexedDB/,
+  );
+});
+test('Gateway build copies the canonical shared Console logo bytes', () => {
+  const packageRoot = path.resolve(import.meta.dirname, '..');
+  const build = fs.readFileSync(
+    path.join(packageRoot, 'build-client.mjs'),
+    'utf8',
+  );
+  assert.match(build, /\.\.\/\.\.\/src\/console\/public\/elpis-logo-dark\.svg/);
+  assert.match(build, /dist\/public\/elpis-logo-dark\.svg/);
 });

@@ -16,6 +16,7 @@ import {
   setupDefaultOrigin,
   shortenPublicId,
 } from './presentation.js';
+import { GatewayResidentDashboard } from './resident-dashboard.js';
 import {
   ALL_INSTANCES_SELECTION,
   gatewayIdentityState,
@@ -272,6 +273,7 @@ export function GatewayApp({
   };
 
   let content;
+  let residentMode = false;
   if (view.phase === 'loading') {
     content = (
       <section
@@ -310,34 +312,9 @@ export function GatewayApp({
           )
         : undefined;
     if (resident) {
-      const residentStatus = gatewayInstanceStatus(resident);
+      residentMode = true;
       content = (
-        <section
-          class='panel-card resident-placeholder'
-          aria-labelledby='resident-placeholder-title'
-        >
-          <p class='eyebrow'>Enrolled resident</p>
-          <div class='resident-placeholder-heading'>
-            <div>
-              <h2 id='resident-placeholder-title'>{resident.displayName}</h2>
-              <code title={resident.id}>{resident.id}</code>
-            </div>
-            <span class={'status-badge ' + residentStatus.tone}>
-              <span aria-hidden='true' />
-              {residentStatus.label}
-            </span>
-          </div>
-          <div class='resident-connection-notice'>
-            <span class='brand-mark' aria-hidden='true' />
-            <div>
-              <h3>Resident dashboard connection is not available yet</h3>
-              <p>
-                Choose All Instances to return to the Gateway overview and
-                enrolled fleet.
-              </p>
-            </div>
-          </div>
-        </section>
+        <GatewayResidentDashboard key={resident.id} instanceId={resident.id} />
       );
     } else {
       content = (
@@ -356,7 +333,9 @@ export function GatewayApp({
       : { phase: view.phase };
 
   return (
-    <main class='gateway-shell'>
+    <main
+      class={`gateway-shell${residentMode ? ' gateway-shell-resident' : ''}`}
+    >
       <header class='gateway-header'>
         <div class='brand-lockup'>
           <span class='brand-mark' aria-hidden='true' />

@@ -1,3 +1,4 @@
+import { copyFile } from 'node:fs/promises';
 import * as esbuild from 'esbuild';
 
 await esbuild.build({
@@ -15,3 +16,8 @@ await esbuild.build({
   legalComments: 'none',
   logLevel: 'info',
 });
+
+await copyFile(
+  new URL('../../src/console/public/elpis-logo-dark.svg', import.meta.url),
+  new URL('dist/public/elpis-logo-dark.svg', import.meta.url),
+);

@@ -30,8 +30,11 @@
 html,
 body,
 #app {
+  width: 100%;
   min-height: 100%;
+  height: auto;
   margin: 0;
+  overflow: visible;
 }
 
 html,
@@ -95,6 +98,44 @@ button:disabled {
   width: min(1040px, calc(100% - 40px));
   margin: 0 auto;
   padding: clamp(24px, 6vh, 64px) 0 72px;
+}
+
+.gateway-shell-resident {
+  width: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.gateway-shell-resident .gateway-header {
+  z-index: 12;
+  flex: 0 0 auto;
+  min-height: 58px;
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(20, 19, 32, 0.98);
+}
+
+.gateway-shell-resident .gateway-identity-dock {
+  position: static;
+  max-width: min(280px, 38vw);
+  margin-left: auto;
+}
+
+.gateway-shell-resident .identity-dock-button {
+  min-height: 40px;
+  box-shadow: none;
+}
+
+.gateway-resident-dashboard {
+  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .gateway-header,
@@ -919,53 +960,6 @@ input {
   color: var(--gold);
 }
 
-.resident-placeholder {
-  max-width: 780px;
-}
-
-.resident-placeholder-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-}
-
-.resident-placeholder-heading > div {
-  min-width: 0;
-}
-
-.resident-placeholder-heading code {
-  display: block;
-  max-width: 100%;
-  margin-top: 9px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.resident-connection-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 17px;
-  margin-top: 32px;
-  padding: 22px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-}
-
-.resident-connection-notice .brand-mark {
-  margin-top: 5px;
-}
-
-.resident-connection-notice p {
-  margin-top: 8px;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
 @media (max-width: 720px) {
   .gateway-header {
     display: grid;
@@ -1045,13 +1039,5 @@ input {
 
   .gateway-status-card {
     grid-template-columns: 1fr;
-  }
-
-  .resident-placeholder-heading {
-    flex-direction: column;
-  }
-
-  .resident-connection-notice {
-    padding: 17px;
   }
 }

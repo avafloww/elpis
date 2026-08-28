@@ -17,19 +17,18 @@ import { array, number, object, text } from './types.js';
 
 const EMPTY_CONTROL: ControlSnapshot = { available: false, sessions: [] };
 
-function initialView(): ViewName {
-  if (typeof localStorage === 'undefined') return 'thread';
-  const stored = localStorage.getItem('elpis-view') ?? '';
-  return ['thread', 'context', 'mind', 'workers', 'secretary', 'logs'].includes(
-    stored,
-  )
-    ? (stored as ViewName)
-    : 'thread';
-}
+const VIEWS: readonly ViewName[] = [
+  'thread',
+  'context',
+  'mind',
+  'workers',
+  'secretary',
+  'logs',
+];
 
 const initialState: ConsoleState = {
   connection: 'connecting',
-  view: initialView(),
+  view: 'thread',
   room: 'all',
   rooms: [],
   participants: 0,
@@ -428,6 +427,11 @@ function reducer(state: ConsoleState, action: Action): ConsoleState {
   }
 }
 
+export interface ConsoleViewPreferences {
+  read(): string | null;
+  write(view: ViewName): void;
+}
+
 export interface ConsoleActions {
   setView(view: ViewName): void;
   setRoom(room: string): void;
@@ -446,8 +450,24 @@ export interface ConsoleActions {
 
 export function useConsole(
   transport: ConsoleTransport,
+  preferences?: ConsoleViewPreferences,
 ): [ConsoleState, ConsoleActions] {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, dispatch] = useReducer(
+    reducer,
+    initialState,
+    (base): ConsoleState => {
+      let stored: string | null = null;
+      try {
+        stored = preferences?.read() ?? null;
+      } catch {}
+      return {
+        ...base,
+        view: VIEWS.includes(stored as ViewName)
+          ? (stored as ViewName)
+          : 'thread',
+      };
+    },
+  );
   const requestId = useRef(0);
   const contextRefreshTimer = useRef<number | null>(null);
   const stateRef = useRef(state);
@@ -540,7 +560,9 @@ export function useConsole(
 
   const setView = useCallback(
     (view: ViewName) => {
-      localStorage.setItem('elpis-view', view);
+      try {
+        preferences?.write(view);
+      } catch {}
       dispatch({ type: 'view', value: view });
       if (view === 'context') {
         const reqId = ++requestId.current;
@@ -550,7 +572,7 @@ export function useConsole(
       if (view === 'mind')
         send({ t: 'mind', op: 'snapshot', reqId: ++requestId.current });
     },
-    [send],
+    [preferences, send],
   );
 
   const actions: ConsoleActions = {

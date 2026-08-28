@@ -350,14 +350,18 @@ function Sidebar({
   );
 }
 
-const LOG_RAIL_KEY = 'ep-logdock-h';
+export interface ConsoleDashboardPreferences {
+  readLogRailHeight?(): number | null;
+  writeLogRailHeight?(value: number): void;
+}
 
-function savedLogRailHeight(): number {
-  if (typeof window === 'undefined' || typeof localStorage === 'undefined')
-    return 208;
-  const stored = Number.parseInt(localStorage.getItem(LOG_RAIL_KEY) ?? '', 10);
+function savedLogRailHeight(preferences?: ConsoleDashboardPreferences): number {
+  let stored: number | null = null;
+  try {
+    stored = preferences?.readLogRailHeight?.() ?? null;
+  } catch {}
   return clampLogRailHeight(
-    Number.isFinite(stored) ? stored : 208,
+    stored !== null && Number.isFinite(stored) ? stored : 208,
     window.innerHeight,
   );
 }
@@ -367,14 +371,16 @@ function LogRail({
   open,
   setOpen,
   full = false,
+  preferences,
 }: {
   state: ConsoleState;
   open: boolean;
   setOpen(value: boolean): void;
   full?: boolean;
+  preferences?: ConsoleDashboardPreferences;
 }) {
   const latest = state.logs.at(-1);
-  const [height, setHeight] = useState(savedLogRailHeight);
+  const [height, setHeight] = useState(() => savedLogRailHeight(preferences));
   const heightRef = useRef(height);
   const drag = useRef<{
     pointerId: number;
@@ -389,10 +395,8 @@ function LogRail({
   };
   const persistHeight = (value: number): void => {
     try {
-      localStorage.setItem(LOG_RAIL_KEY, String(value));
-    } catch {
-      // Storage can be blocked without disabling the rail.
-    }
+      preferences?.writeLogRailHeight?.(value);
+    } catch {}
   };
   const stopResize = (target: HTMLDivElement, pointerId: number): void => {
     if (drag.current?.pointerId !== pointerId) return;
@@ -505,11 +509,13 @@ function ViewBody({
   actions,
   hintMindId,
   setHintMindId,
+  preferences,
 }: {
   state: ConsoleState;
   actions: ConsoleActions;
   hintMindId: string | null;
   setHintMindId(value: string | null): void;
+  preferences?: ConsoleDashboardPreferences;
 }) {
   const askSecretary = (item: MindItem): void => {
     setHintMindId(item.id);
@@ -534,7 +540,15 @@ function ViewBody({
         onClearHint={() => setHintMindId(null)}
       />
     );
-  return <LogRail state={state} open setOpen={() => undefined} full />;
+  return (
+    <LogRail
+      state={state}
+      open
+      setOpen={() => undefined}
+      full
+      preferences={preferences}
+    />
+  );
 }
 
 function DesktopApp({
@@ -543,12 +557,14 @@ function DesktopApp({
   proposals,
   hintMindId,
   setHintMindId,
+  preferences,
 }: {
   state: ConsoleState;
   actions: ConsoleActions;
   proposals: number;
   hintMindId: string | null;
   setHintMindId(value: string | null): void;
+  preferences?: ConsoleDashboardPreferences;
 }) {
   const [logsOpen, setLogsOpen] = useState(false);
   return (
@@ -561,6 +577,7 @@ function DesktopApp({
             actions={actions}
             hintMindId={hintMindId}
             setHintMindId={setHintMindId}
+            preferences={preferences}
           />
         </div>
         {state.view === 'thread' ? (
@@ -578,7 +595,12 @@ function DesktopApp({
             />
           </>
         ) : null}
-        <LogRail state={state} open={logsOpen} setOpen={setLogsOpen} />
+        <LogRail
+          state={state}
+          open={logsOpen}
+          setOpen={setLogsOpen}
+          preferences={preferences}
+        />
       </main>
     </div>
   );
@@ -636,12 +658,14 @@ function MobileApp({
   proposals,
   hintMindId,
   setHintMindId,
+  preferences,
 }: {
   state: ConsoleState;
   actions: ConsoleActions;
   proposals: number;
   hintMindId: string | null;
   setHintMindId(value: string | null): void;
+  preferences?: ConsoleDashboardPreferences;
 }) {
   const [drawer, setDrawer] = useState(false);
   return (
@@ -692,12 +716,15 @@ export interface ConsoleDashboardProps {
   actions: ConsoleActions;
   /** Optional transport-owned resolver for resident media routes. */
   mediaResolver?: ConsoleMediaResolver;
+  /** Optional host-owned, nonessential view preferences. */
+  preferences?: ConsoleDashboardPreferences;
 }
 
 export function ConsoleDashboard({
   state,
   actions,
   mediaResolver,
+  preferences,
 }: ConsoleDashboardProps) {
   const [hintMindId, setHintMindId] = useState<string | null>(null);
   const narrow = useNarrow();
@@ -712,6 +739,7 @@ export function ConsoleDashboard({
       proposals={proposals}
       hintMindId={hintMindId}
       setHintMindId={setHintMindId}
+      preferences={preferences}
     />
   ) : (
     <DesktopApp
@@ -720,6 +748,7 @@ export function ConsoleDashboard({
       proposals={proposals}
       hintMindId={hintMindId}
       setHintMindId={setHintMindId}
+      preferences={preferences}
     />
   );
   return (
