@@ -21,6 +21,7 @@ import {
 } from '@elpis/gateway-protocol';
 import {
   assertBrowserMutation,
+  assertBrowserUpgradeOrigin,
   createCsrfToken,
   csrfCookie,
   HttpBoundaryError,
@@ -37,6 +38,12 @@ import {
   type ResidentControlRateLimiter,
   type ResidentControlRoute,
 } from './resident-control-api.js';
+import {
+  GATEWAY_BROWSER_RELAY_PATH,
+  GatewayBrowserRelayConnection,
+  type GatewayBrowserRelaySocketAdapter,
+  type GatewayBrowserRelaySocketHandlers,
+} from './browser-relay.js';
 import type {
   AuthenticatedNode,
   GatewayCredentialStore,
@@ -62,9 +69,12 @@ const MAX_REQUEST_TARGET_BYTES = 8192;
 export const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 
 const UPGRADE_FAILURE_BODY = 'WebSocket upgrade rejected\n';
+const DEFAULT_MAX_BROWSER_RELAYS = 128;
+const MAX_BROWSER_RELAYS = 1024;
 const UPGRADE_STATUS_TEXT: Readonly<Record<number, string>> = Object.freeze({
   400: 'Bad Request',
   401: 'Unauthorized',
+  403: 'Forbidden',
   404: 'Not Found',
   409: 'Conflict',
   429: 'Too Many Requests',
@@ -182,6 +192,57 @@ class WsResidentSocketAdapter implements GatewayResidentSocketAdapter {
   }
 }
 
+/** Complete-message ws adapter for the same-origin browser relay. */
+class WsBrowserRelaySocketAdapter implements GatewayBrowserRelaySocketAdapter {
+  readonly #socket: WebSocket;
+  constructor(socket: WebSocket) {
+    this.#socket = socket;
+  }
+  get bufferedAmount(): number {
+    return this.#socket.bufferedAmount;
+  }
+  sendText(text: string): void {
+    if (this.#socket.readyState !== WebSocket.OPEN)
+      throw new Error('browser relay transport is not open');
+    this.#socket.send(text, { binary: false, compress: false });
+  }
+  close(code: number, reason: string): void {
+    if (this.#socket.readyState === WebSocket.OPEN)
+      this.#socket.close(code, reason);
+    else if (this.#socket.readyState === WebSocket.CONNECTING)
+      this.#socket.terminate();
+  }
+  attach(handlers: GatewayBrowserRelaySocketHandlers): () => void {
+    const onMessage = (data: RawData, binary: boolean): void => {
+      if (binary) {
+        handlers.binary();
+        return;
+      }
+      try {
+        handlers.text(
+          new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+            rawDataBytes(data),
+          ),
+        );
+      } catch {
+        handlers.error();
+        if (this.#socket.readyState === WebSocket.OPEN)
+          this.#socket.close(1007, 'invalid_utf8');
+      }
+    };
+    const onError = (): void => handlers.error();
+    const onClose = (): void => handlers.close();
+    this.#socket.on('message', onMessage);
+    this.#socket.on('error', onError);
+    this.#socket.on('close', onClose);
+    return () => {
+      this.#socket.off('message', onMessage);
+      this.#socket.off('error', onError);
+      this.#socket.off('close', onClose);
+    };
+  }
+}
+
 export interface ResidentLinkCredentialStore {
   authenticateNode(
     token: unknown,
@@ -241,6 +302,9 @@ export interface GatewayHttpServiceOptions {
   maxStaticBytes?: number;
   bodyTimeoutMs?: number;
   shutdownGraceMs?: number;
+  /** Browser relay queued-byte ceiling; protocol frameBytes is the hard maximum. */
+  browserRelayMaxBufferedAmount?: number;
+  browserRelayMaxConnections?: number;
 }
 
 export interface GatewayListenAddress {
@@ -756,6 +820,8 @@ export class GatewayHttpService {
   readonly #server: http.Server;
   readonly #residentRateLimiter: ResidentControlRateLimiter;
   readonly #webSocketServer: WebSocketServer;
+  readonly #browserRelays = new Set<GatewayBrowserRelayConnection>();
+  readonly #maxBrowserRelays: number;
   #stopping: Promise<void> | null = null;
   #initialized = false;
   #starting: Promise<GatewayListenAddress> | null = null;
@@ -768,6 +834,8 @@ export class GatewayHttpService {
       throw new Error('publicRoot must be a real directory');
     this.#root = fs.realpathSync(options.publicRoot);
     this.#options = options;
+    this.#maxBrowserRelays =
+      options.browserRelayMaxConnections ?? DEFAULT_MAX_BROWSER_RELAYS;
     this.#residentRateLimiter =
       options.residentRateLimiter ?? new BoundedResidentControlRateLimiter();
     const hasResidentCredentials =
@@ -799,9 +867,23 @@ export class GatewayHttpService {
       ['maxStaticBytes', options.maxStaticBytes],
       ['bodyTimeoutMs', options.bodyTimeoutMs],
       ['shutdownGraceMs', options.shutdownGraceMs],
+      ['browserRelayMaxBufferedAmount', options.browserRelayMaxBufferedAmount],
+      ['browserRelayMaxConnections', options.browserRelayMaxConnections],
     ] as const) {
       if (value !== undefined && (!Number.isSafeInteger(value) || value < 1))
         throw new Error(`${label} must be a positive safe integer`);
+      if (
+        label === 'browserRelayMaxBufferedAmount' &&
+        value !== undefined &&
+        value > LIMITS.frameBytes
+      )
+        throw new Error('browserRelayMaxBufferedAmount exceeds the wire bound');
+      if (
+        label === 'browserRelayMaxConnections' &&
+        value !== undefined &&
+        value > MAX_BROWSER_RELAYS
+      )
+        throw new Error('browserRelayMaxConnections exceeds the hard bound');
     }
     this.#server = http.createServer(
       {
@@ -882,6 +964,10 @@ export class GatewayHttpService {
 
   async #stop(): Promise<void> {
     this.#initialized = false;
+    // Browser brokers must close their exact remote viewers while the resident
+    // registry can still deliver viewer.close.
+    for (const relay of [...this.#browserRelays]) relay.stop();
+    this.#browserRelays.clear();
     // Empty and permanently stop the registry before closing the listener.
     this.#options.residentLinkRegistry?.stop();
     if (!this.#server.listening) {
@@ -917,6 +1003,10 @@ export class GatewayHttpService {
     socket: Duplex,
     head: Buffer,
   ): void {
+    if (request.url === GATEWAY_BROWSER_RELAY_PATH) {
+      this.#handleBrowserRelayUpgrade(request, socket, head);
+      return;
+    }
     // Query, percent, wrong path/method, browser-origin, and protocol selection
     // confusion all fail before credential parsing.
     if (
@@ -1009,6 +1099,82 @@ export class GatewayHttpService {
             registry.admit(binding!, adapter, connectionId);
           } catch {
             adapter.close(1011, 'admission_failed');
+          }
+        },
+      );
+    } catch {
+      rejectUpgrade(socket, 400);
+    }
+  }
+
+  #handleBrowserRelayUpgrade(
+    request: http.IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): void {
+    // The exact target check happened before this method. Browser authority is
+    // ambient only at the authenticating proxy, so Gateway requires Origin but
+    // deliberately has no browser bearer token, user, or application session.
+    if (
+      !validWebSocketHandshake(request) ||
+      hasRequestHeader(request, 'sec-websocket-protocol')
+    ) {
+      rejectUpgrade(socket, 404);
+      return;
+    }
+    const registry = this.#options.residentLinkRegistry;
+    if (!this.#initialized || !registry) {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+    let publicUrl: string | null;
+    try {
+      publicUrl = this.#publicUrl();
+      assertBrowserUpgradeOrigin(request, publicUrl);
+    } catch (error) {
+      rejectUpgrade(
+        socket,
+        error instanceof HttpBoundaryError && error.statusCode === 503
+          ? 503
+          : 403,
+      );
+      return;
+    }
+    if (this.#browserRelays.size >= this.#maxBrowserRelays) {
+      rejectUpgrade(socket, 429);
+      return;
+    }
+    try {
+      this.#webSocketServer.handleUpgrade(
+        request,
+        socket,
+        head,
+        (webSocket) => {
+          // This listener outlives the adapter listener and absorbs terminal ws
+          // parser errors (including maxPayload) after relay cleanup.
+          webSocket.on('error', () => undefined);
+          const adapter = new WsBrowserRelaySocketAdapter(webSocket);
+          let relay: GatewayBrowserRelayConnection | undefined;
+          let released = false;
+          try {
+            const created = new GatewayBrowserRelayConnection({
+              registry,
+              socket: adapter,
+              ...(this.#options.browserRelayMaxBufferedAmount === undefined
+                ? {}
+                : {
+                    maxBufferedAmount:
+                      this.#options.browserRelayMaxBufferedAmount,
+                  }),
+              onDisconnect: () => {
+                released = true;
+                if (relay) this.#browserRelays.delete(relay);
+              },
+            });
+            relay = created;
+            if (!released) this.#browserRelays.add(created);
+          } catch {
+            adapter.close(1011, 'relay_admission_failed');
           }
         },
       );

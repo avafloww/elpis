@@ -1,4 +1,5 @@
 export * from './browser-api.js';
+export * from './browser-relay.js';
 export * from './gateway-browser-api.js';
 export * from './backup.js';
 export * from './credential-store.js';
