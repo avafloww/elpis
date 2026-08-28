@@ -2,6 +2,7 @@ import {
   GatewayInboundSession,
   GatewayProtocolError,
   LIMITS,
+  PROTOCOL_VERSION,
   createGatewayHelloAck,
   createProtocolError,
   isConnectionId,
@@ -10,6 +11,9 @@ import {
   type Capability,
   type ConnectionId,
   type GatewayToResidentFrame,
+  type ConsoleInputFrame,
+  type MediaGetFrame,
+  type ViewerOperationFrame,
   type InstanceId,
   type ProtocolErrorCode,
   type ResidentToGatewayFrame,
@@ -86,6 +90,30 @@ export type GatewayResidentAdmission =
       readonly accepted: false;
       readonly reason: GatewayResidentAdmissionRejection | 'transport-error';
     };
+export type GatewayResidentOutboundEffect =
+  | Omit<ViewerOperationFrame, 'version' | 'connectionId' | 'seq'>
+  | Omit<ConsoleInputFrame, 'version' | 'connectionId' | 'seq'>
+  | Omit<MediaGetFrame, 'version' | 'connectionId' | 'seq'>;
+
+export type GatewayResidentLinkEvent =
+  | {
+      readonly type: 'ready';
+      readonly link: GatewayResidentLinkSummary;
+    }
+  | {
+      readonly type: 'frame';
+      readonly link: GatewayResidentLinkSummary;
+      readonly frame: ResidentToGatewayFrame;
+    }
+  | {
+      readonly type: 'removed';
+      readonly link: GatewayResidentLinkSummary;
+    };
+
+export type GatewayResidentLinkListener = (
+  event: Readonly<GatewayResidentLinkEvent>,
+) => void;
+
 export interface GatewayResidentLinkRegistryOptions {
   readonly clock: GatewayResidentLinkClock;
   readonly supportedCapabilities: readonly Capability[];
@@ -111,6 +139,7 @@ interface LiveLink {
   state: 'awaiting-hello' | 'ready';
   readyAt?: number;
   nextOutboundSeq: number;
+  sending: boolean;
 }
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_BUFFERED_AMOUNT = LIMITS.frameBytes;
@@ -132,6 +161,7 @@ export class GatewayResidentLinkRegistry {
   readonly #maxLinks: number;
   readonly #onFrame?: GatewayResidentLinkRegistryOptions['onFrame'];
   readonly #links = new Map<string, LiveLink>();
+  readonly #listeners = new Set<GatewayResidentLinkListener>();
   #nextGeneration = 1;
   #stopped = false;
 
@@ -194,6 +224,55 @@ export class GatewayResidentLinkRegistry {
     return link?.connectionId === connectionId
       ? this.#summary(link)
       : undefined;
+  }
+
+  /** Subscribe to decoded frames and link lifecycle without owning a transport. */
+  subscribe(listener: GatewayResidentLinkListener): () => void {
+    if (typeof listener !== 'function')
+      throw new TypeError('resident link listener must be a function');
+    if (this.#stopped) return inert;
+    this.#listeners.add(listener);
+    let attached = true;
+    return () => {
+      if (!attached) return;
+      attached = false;
+      this.#listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Build and send the next envelope for an exact ready link. Sequence ownership
+   * stays in the registry so higher-level brokers cannot race its inbound session.
+   */
+  sendEffect(
+    instanceId: string,
+    connectionId: ConnectionId,
+    effect: GatewayResidentOutboundEffect,
+  ): boolean {
+    const link = this.#links.get(instanceId);
+    if (!link || link.connectionId !== connectionId || link.state !== 'ready')
+      return false;
+    return this.send(instanceId, connectionId, {
+      ...effect,
+      version: PROTOCOL_VERSION,
+      connectionId,
+      seq: link.nextOutboundSeq,
+    } as GatewayToResidentFrame);
+  }
+
+  /** Fail closed when a broker cannot clean up a viewer over the live link. */
+  disconnect(
+    instanceId: string,
+    connectionId: ConnectionId,
+    reason = 'broker_cleanup',
+  ): boolean {
+    const link = this.#links.get(instanceId);
+    if (!link || link.connectionId !== connectionId) return false;
+    const safeReason = /^[a-z][a-z0-9_]{0,63}$/.test(reason)
+      ? reason
+      : 'broker_cleanup';
+    this.#terminate(link, GATEWAY_RESIDENT_CLOSE.unavailable, safeReason);
+    return true;
   }
 
   /**
@@ -260,6 +339,7 @@ export class GatewayResidentLinkRegistry {
       detach: inert,
       state: 'awaiting-hello',
       nextOutboundSeq: 1,
+      sending: false,
     };
     // Publication is the first-wins linearization point.
     this.#links.set(binding.instanceId, link);
@@ -327,43 +407,58 @@ export class GatewayResidentLinkRegistry {
     const link = this.#links.get(instanceId);
     if (!link || link.connectionId !== connectionId || link.state !== 'ready')
       return false;
-    if (frame.type === 'hello.ack')
-      throw new GatewayProtocolError(
-        'invalid_handshake',
-        'hello acknowledgement is owned by the registry',
+    if (link.sending) {
+      this.#terminate(
+        link,
+        GATEWAY_RESIDENT_CLOSE.unavailable,
+        'reentrant_send',
       );
-    if (frame.connectionId !== connectionId)
-      throw new GatewayProtocolError(
-        'connection_mismatch',
-        'outbound frame has wrong connection id',
-      );
-    if (frame.seq !== link.nextOutboundSeq)
-      throw new GatewayProtocolError(
-        'invalid_sequence',
-        'outbound sequence is not contiguous',
-      );
-    const encoded = serializeGatewayFrame(frame);
-    if (!this.#hasCapacity(link, encoded)) {
-      this.#auditLink('backpressure', link);
       return false;
     }
-    if (
-      frame.type === 'viewer.open' ||
-      frame.type === 'viewer.close' ||
-      frame.type === 'viewer.snapshot' ||
-      frame.type === 'media.get'
-    )
-      link.session.registerRequest(frame);
+    link.sending = true;
     try {
-      link.socket.sendText(encoded);
+      if (frame.type === 'hello.ack')
+        throw new GatewayProtocolError(
+          'invalid_handshake',
+          'hello acknowledgement is owned by the registry',
+        );
+      if (frame.connectionId !== connectionId)
+        throw new GatewayProtocolError(
+          'connection_mismatch',
+          'outbound frame has wrong connection id',
+        );
+      if (frame.seq !== link.nextOutboundSeq)
+        throw new GatewayProtocolError(
+          'invalid_sequence',
+          'outbound sequence is not contiguous',
+        );
+      const encoded = serializeGatewayFrame(frame);
+      if (!this.#hasCapacity(link, encoded)) {
+        if (this.#isCurrent(link)) this.#auditLink('backpressure', link);
+        return false;
+      }
+      if (!this.#isCurrent(link)) return false;
+      if (
+        frame.type === 'viewer.open' ||
+        frame.type === 'viewer.close' ||
+        frame.type === 'viewer.snapshot' ||
+        frame.type === 'media.get'
+      )
+        link.session.registerRequest(frame);
+      try {
+        link.socket.sendText(encoded);
+      } catch {
+        this.#transportError(link);
+        return false;
+      }
+      if (!this.#isCurrent(link)) return false;
       link.nextOutboundSeq += 1;
-    } catch {
-      this.#transportError(link);
-      return false;
+      if (frame.type === 'error' && frame.fatal)
+        this.#terminate(link, GATEWAY_RESIDENT_CLOSE.protocol, 'fatal_error');
+      return true;
+    } finally {
+      link.sending = false;
     }
-    if (frame.type === 'error' && frame.fatal)
-      this.#terminate(link, GATEWAY_RESIDENT_CLOSE.protocol, 'fatal_error');
-    return true;
   }
 
   /** Close all links, empty first, and permanently reject admission. */
@@ -372,6 +467,7 @@ export class GatewayResidentLinkRegistry {
     this.#stopped = true;
     const links = [...this.#links.values()];
     for (const link of links) this.#remove(link);
+    this.#listeners.clear();
     for (const link of links)
       this.#safeClose(
         link.socket,
@@ -482,7 +578,10 @@ export class GatewayResidentLinkRegistry {
       link.state = 'ready';
       link.readyAt = this.#now();
       this.#auditLink('ready', link);
-      this.#onFrame?.(this.#summary(link), frame);
+      const summary = this.#summary(link);
+      this.#notify(Object.freeze({ type: 'ready', link: summary }));
+      this.#onFrame?.(summary, frame);
+      this.#notify(Object.freeze({ type: 'frame', link: summary, frame }));
       return;
     }
     if (frame.type === 'error' && frame.fatal) {
@@ -493,7 +592,9 @@ export class GatewayResidentLinkRegistry {
       );
       return;
     }
-    this.#onFrame?.(this.#summary(link), frame);
+    const summary = this.#summary(link);
+    this.#onFrame?.(summary, frame);
+    this.#notify(Object.freeze({ type: 'frame', link: summary, frame }));
   }
 
   #dispatch(link: LiveLink, operation: () => void): void {
@@ -566,6 +667,7 @@ export class GatewayResidentLinkRegistry {
   }
   #remove(link: LiveLink): boolean {
     if (!this.#isCurrent(link)) return false;
+    const summary = this.#summary(link);
     this.#links.delete(link.binding.instanceId);
     this.#clearTimer(link);
     const detach = link.detach;
@@ -575,6 +677,7 @@ export class GatewayResidentLinkRegistry {
     } catch {
       /* removal remains authoritative */
     }
+    this.#notify(Object.freeze({ type: 'removed', link: summary }));
     return true;
   }
   #isCurrent(link: LiveLink): boolean {
@@ -636,6 +739,15 @@ export class GatewayResidentLinkRegistry {
       state: link.state,
       capabilities,
     });
+  }
+  #notify(event: Readonly<GatewayResidentLinkEvent>): void {
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener(event);
+      } catch {
+        /* one state consumer cannot alter link ownership or starve its peers */
+      }
+    }
   }
   #auditLink(action: GatewayResidentLinkAuditAction, link: LiveLink): void {
     this.#audit({

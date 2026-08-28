@@ -10,3 +10,4 @@ export * from './http-service.js';
 export * from './resident-control-api.js';
 export * from './resident-link-registry.js';
 export * from './resident-link-audit.js';
+export * from './selected-viewer-broker.js';
