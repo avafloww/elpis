@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,6 +14,7 @@ import {
   formatNodeBearerAuthorization,
   newGatewayInstanceId,
   type ConnectionId,
+  type GatewayInstanceId,
   type RequestId,
 } from '@elpis/gateway-protocol';
 import {
@@ -26,6 +28,7 @@ import {
 
 const ORIGIN = 'https://gateway.example';
 const CONNECTION = 'egx1.AAAAAAAAAAAAAAAAAAAAAA' as ConnectionId;
+const CONNECTION_B = 'egx1.BBBBBBBBBBBBBBBBBBBBBB' as ConnectionId;
 const CLIENT_A = 'egr1.AAAAAAAAAAAAAAAAAAAAAA' as RequestId;
 const CLIENT_B = 'egr1.BBBBBBBBBBBBBBBBBBBBBB' as RequestId;
 
@@ -70,6 +73,14 @@ function opened(socket: WebSocket): Promise<void> {
   return new Promise((resolve, reject) => {
     socket.once('open', resolve);
     socket.once('error', reject);
+  });
+}
+
+function pinged(socket: WebSocket): Promise<void> {
+  return new Promise((resolve, reject) => {
+    socket.once('pong', resolve);
+    socket.once('error', reject);
+    socket.ping();
   });
 }
 
@@ -155,6 +166,7 @@ async function fixture(
   });
   return {
     service,
+    store,
     registry,
     instanceId,
     token: node.token,
@@ -162,11 +174,23 @@ async function fixture(
   };
 }
 
-async function connectResident(f: Awaited<ReturnType<typeof fixture>>) {
+async function connectResident(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options: {
+    instanceId?: GatewayInstanceId;
+    token?: string;
+    connectionId?: ConnectionId;
+    name?: string;
+  } = {},
+) {
+  const instanceId = options.instanceId ?? f.instanceId;
+  const token = options.token ?? f.token;
+  const connectionId = options.connectionId ?? CONNECTION;
+  const name = options.name ?? 'relay resident';
   const socket = new WebSocket(f.url + RESIDENT_CONTROL_PATHS.link, {
     headers: {
-      Authorization: formatNodeBearerAuthorization(f.token),
-      [RESIDENT_CONTROL_HEADERS.connectionId]: CONNECTION,
+      Authorization: formatNodeBearerAuthorization(token),
+      [RESIDENT_CONTROL_HEADERS.connectionId]: connectionId,
     },
     perMessageDeflate: false,
   });
@@ -175,12 +199,12 @@ async function connectResident(f: Awaited<ReturnType<typeof fixture>>) {
   socket.send(
     JSON.stringify({
       version: PROTOCOL_VERSION,
-      connectionId: CONNECTION,
+      connectionId,
       seq: 1,
       type: 'hello',
-      instanceId: f.instanceId,
+      instanceId,
       capabilities: ['console.v1', 'identity.v1', 'media.v1'],
-      identity: { name: 'relay resident' },
+      identity: { name },
       build: { version: '1' },
     }),
   );
@@ -371,6 +395,292 @@ test('browser relay carries snapshot, input, reverse media correlation, and clos
   const residentClosed = closed(resident.socket);
   resident.socket.close(1000, 'done');
   await residentClosed;
+});
+
+test('browser relay switches two real resident links behind a fresh snapshot barrier', async (t) => {
+  const f = await fixture(t);
+  const nodeB = createNodeCredential();
+  const instanceB = newGatewayInstanceId();
+  const grantB = f.store.credentials.createEnrollmentGrant();
+  f.store.credentials.enroll({
+    grantToken: grantB.token,
+    instanceId: instanceB,
+    displayName: 'second relay resident',
+    credentialId: nodeB.id,
+    credentialVerifier: nodeB.verifier,
+  });
+
+  const residentA = await connectResident(f, { name: 'first relay resident' });
+  const residentB = await connectResident(f, {
+    instanceId: instanceB,
+    token: nodeB.token,
+    connectionId: CONNECTION_B,
+    name: 'second relay resident',
+  });
+  const browser = await connectBrowser(f.url);
+
+  browser.socket.send(
+    JSON.stringify({ type: 'viewer.select', instanceId: f.instanceId }),
+  );
+  assert.equal((await browser.inbox.next()).phase, 'opening');
+  const openA = await residentA.inbox.next();
+  assert.equal(openA.type, 'viewer.open');
+  assert.equal(
+    residentB.inbox.seen.some((frame) => frame.type !== 'hello.ack'),
+    false,
+  );
+  residentA.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION,
+      seq: 2,
+      type: 'operation.result',
+      requestId: openA.requestId,
+      viewerId: openA.viewerId,
+      operation: 'viewer.open',
+      ok: true,
+    }),
+  );
+  assert.equal((await browser.inbox.next()).reason, 'snapshot');
+  const snapshotA = await residentA.inbox.next();
+  residentA.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION,
+      seq: 3,
+      type: 'console.output',
+      viewerId: openA.viewerId,
+      payload: '{"type":"snapshot","resident":"first"}',
+    }),
+  );
+  residentA.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION,
+      seq: 4,
+      type: 'operation.result',
+      requestId: snapshotA.requestId,
+      viewerId: openA.viewerId,
+      operation: 'viewer.snapshot',
+      ok: true,
+    }),
+  );
+  assert.match((await browser.inbox.next()).payload, /"resident":"first"/);
+  assert.equal((await browser.inbox.next()).phase, 'ready');
+
+  browser.socket.send(
+    JSON.stringify({
+      type: 'media.get',
+      requestId: CLIENT_A,
+      route: '/identity/avatar',
+    }),
+  );
+  const pendingA = await residentA.inbox.next();
+  assert.equal(pendingA.type, 'media.get');
+
+  browser.socket.send(
+    JSON.stringify({ type: 'viewer.select', instanceId: instanceB }),
+  );
+  const deselectedA = await browser.inbox.next();
+  assert.deepEqual(
+    {
+      reason: deselectedA.reason,
+      generation: deselectedA.generation,
+      phase: deselectedA.phase,
+    },
+    { reason: 'deselected', generation: 1, phase: 'idle' },
+  );
+  const selectingB = await browser.inbox.next();
+  assert.deepEqual(
+    {
+      reason: selectingB.reason,
+      generation: selectingB.generation,
+      phase: selectingB.phase,
+      instanceId: selectingB.instanceId,
+    },
+    {
+      reason: 'selected',
+      generation: 2,
+      phase: 'opening',
+      instanceId: instanceB,
+    },
+  );
+  const closeA = await residentA.inbox.next();
+  const openB = await residentB.inbox.next();
+  assert.equal(closeA.type, 'viewer.close');
+  assert.equal(openB.type, 'viewer.open');
+  assert.notEqual(openA.viewerId, openB.viewerId);
+  residentA.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION,
+      seq: 5,
+      type: 'operation.result',
+      requestId: closeA.requestId,
+      viewerId: closeA.viewerId,
+      operation: 'viewer.close',
+      ok: true,
+    }),
+  );
+  const staleBytes = Buffer.from('stale-first');
+  residentA.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION,
+      seq: 6,
+      type: 'media.result',
+      requestId: pendingA.requestId,
+      ok: true,
+      mediaType: 'image/png',
+      byteLength: staleBytes.length,
+      sha256: createHash('sha256').update(staleBytes).digest('hex'),
+      data: staleBytes.toString('base64'),
+    }),
+  );
+
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 2,
+      type: 'operation.result',
+      requestId: openB.requestId,
+      viewerId: openB.viewerId,
+      operation: 'viewer.open',
+      ok: true,
+    }),
+  );
+  assert.equal((await browser.inbox.next()).reason, 'snapshot');
+  const snapshotB = await residentB.inbox.next();
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 3,
+      type: 'console.output',
+      viewerId: openB.viewerId,
+      payload: '{"type":"snapshot","resident":"second"}',
+    }),
+  );
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 4,
+      type: 'console.output',
+      viewerId: openB.viewerId,
+      payload: '{"type":"delta","resident":"second"}',
+    }),
+  );
+  await pinged(residentB.socket);
+  assert.equal(
+    browser.inbox.seen.some(
+      (frame) =>
+        typeof frame.payload === 'string' && frame.payload.includes('second'),
+    ),
+    false,
+  );
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 5,
+      type: 'operation.result',
+      requestId: snapshotB.requestId,
+      viewerId: openB.viewerId,
+      operation: 'viewer.snapshot',
+      ok: true,
+    }),
+  );
+  assert.match((await browser.inbox.next()).payload, /"type":"snapshot"/);
+  assert.match((await browser.inbox.next()).payload, /"type":"delta"/);
+  assert.equal((await browser.inbox.next()).phase, 'ready');
+  assert.equal(
+    browser.inbox.seen.some((frame) => frame.requestId === CLIENT_A),
+    false,
+  );
+
+  const aFramesBeforeInput = residentA.inbox.seen.length;
+  browser.socket.send(
+    JSON.stringify({ type: 'console.input', payload: 'selected-only' }),
+  );
+  const inputB = await residentB.inbox.next();
+  assert.deepEqual(
+    { type: inputB.type, viewerId: inputB.viewerId, payload: inputB.payload },
+    {
+      type: 'console.input',
+      viewerId: openB.viewerId,
+      payload: 'selected-only',
+    },
+  );
+  assert.equal(residentA.inbox.seen.length, aFramesBeforeInput);
+
+  browser.socket.send(
+    JSON.stringify({
+      type: 'media.get',
+      requestId: CLIENT_B,
+      route: '/identity/avatar',
+    }),
+  );
+  const mediaB = await residentB.inbox.next();
+  const freshBytes = Buffer.from('fresh-second');
+  const freshDigest = createHash('sha256').update(freshBytes).digest('hex');
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 6,
+      type: 'media.result',
+      requestId: mediaB.requestId,
+      ok: true,
+      mediaType: 'image/png',
+      byteLength: freshBytes.length,
+      sha256: freshDigest,
+      data: freshBytes.toString('base64'),
+    }),
+  );
+  assert.deepEqual(await browser.inbox.next(), {
+    type: 'media.result',
+    requestId: CLIENT_B,
+    ok: true,
+    mediaType: 'image/png',
+    byteLength: freshBytes.length,
+    sha256: freshDigest,
+    data: freshBytes.toString('base64'),
+  });
+
+  const browserClosed = closed(browser.socket);
+  browser.socket.close(1000, 'done');
+  const closeB = await residentB.inbox.next();
+  assert.equal(closeB.type, 'viewer.close');
+  assert.equal((await browserClosed).code, 1000);
+  residentB.socket.send(
+    JSON.stringify({
+      version: 1,
+      connectionId: CONNECTION_B,
+      seq: 7,
+      type: 'operation.result',
+      requestId: closeB.requestId,
+      viewerId: closeB.viewerId,
+      operation: 'viewer.close',
+      ok: true,
+    }),
+  );
+  for (const resident of [residentA, residentB]) {
+    const residentClosed = closed(resident.socket);
+    resident.socket.close(1000, 'done');
+    assert.equal((await residentClosed).code, 1000);
+  }
+
+  const publicEvidence = JSON.stringify({
+    browser: browser.inbox.seen,
+    first: residentA.inbox.seen,
+    second: residentB.inbox.seen,
+    summaries: f.registry.summaries(),
+  });
+  for (const secret of [f.token, nodeB.token, grantB.token])
+    assert.equal(publicEvidence.includes(secret), false);
+  assert.equal(publicEvidence.includes(process.cwd()), false);
 });
 
 test('browser relay rejects binary and malformed text with exact closes', async (t) => {
