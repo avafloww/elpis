@@ -215,6 +215,14 @@ export class Scheduler {
       >
     >,
   ): ScheduledTask | null {
+    const current = this.getById(id);
+    if (!current) return null;
+    if (Object.keys(patch).length === 0) return current;
+    if (current.doneAt != null) {
+      throw new Error(
+        `scheduled task ${id} is done; remove it and create a new task instead of updating it`,
+      );
+    }
     // Snooze cascades to nag children the same way snoozeByName does — a
     // parent-level snooze that leaves a pending nag unsnoozed fires at the
     // old time anyway ( midnight-nag papercut). Only the snooze
@@ -249,7 +257,7 @@ export class Scheduler {
       sets.push('snooze_until = ?');
       values.push(patch.snoozeUntil);
     }
-    if (sets.length === 0) return this.getById(id);
+    if (sets.length === 0) return current;
     values.push(id);
     const raw = this.deps.db
       .prepare(

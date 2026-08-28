@@ -256,6 +256,42 @@ test('update patches payload and nextRunAt on an existing task', () => {
   db.close();
 });
 
+test('update refuses to make a consumed one-shot look re-armed', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  const scheduler = new Scheduler({
+    db,
+    logger: noopLogger(),
+    onTaskWake: () => {},
+  });
+
+  const originalNextRunAt = Date.now() - 1;
+  const task = scheduler.create({
+    name: 'consumed',
+    payload: 'one shot',
+    nextRunAt: originalNextRunAt,
+  });
+  scheduler.poll();
+  const consumed = scheduler.getById(task.id);
+  assert.ok(consumed?.doneAt);
+
+  assert.throws(
+    () => scheduler.update(task.id, { nextRunAt: Date.now() + 86_400_000 }),
+    /task .* is done; remove it and create a new task/,
+  );
+  const unchanged = scheduler.getById(task.id);
+  assert.equal(unchanged?.nextRunAt, originalNextRunAt);
+  assert.equal(unchanged?.doneAt, consumed.doneAt);
+  assert.deepEqual(
+    scheduler.listDue(Date.now() + 2 * 86_400_000),
+    [],
+    'consumed row remains visibly terminal instead of masquerading as re-armed',
+  );
+
+  scheduler.stop();
+  db.close();
+});
+
 test('update with no patch fields returns the task unchanged', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
