@@ -87,10 +87,7 @@ test('resident image owns exactly the protocol workspace dependency', () => {
   const lock = JSON.parse(read('package-lock.json'));
 
   assert.equal(rootPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
-  assert.equal(
-    gatewayPackage.dependencies['@elpis/gateway-protocol'],
-    '1.0.0',
-  );
+  assert.equal(gatewayPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
   assert.equal(
     gatewayPackage.scripts.pretest,
     'npm run build --workspace @elpis/gateway-protocol',
@@ -99,10 +96,7 @@ test('resident image owns exactly the protocol workspace dependency', () => {
     JSON.parse(read('packages/gateway-protocol/package.json')).engines.node,
     rootPackage.engines.node,
   );
-  assert.equal(
-    lock.packages['packages/gateway-protocol'].version,
-    '1.0.0',
-  );
+  assert.equal(lock.packages['packages/gateway-protocol'].version, '1.0.0');
   assert.deepEqual(lock.packages['node_modules/@elpis/gateway-protocol'], {
     resolved: 'packages/gateway-protocol',
     link: true,
@@ -123,15 +117,28 @@ test('resident image owns exactly the protocol workspace dependency', () => {
     docker,
     /COPY --from=build[^\n]+packages\/gateway-protocol\/dist \.\/packages\/gateway-protocol\/dist/,
   );
-  assert.doesNotMatch(docker, /COPY (?:--from=build[^\n]+ )?packages\/gateway(?:\s|\/)/);
+  assert.doesNotMatch(
+    docker,
+    /COPY (?:--from=build[^\n]+ )?packages\/gateway(?:\s|\/)/,
+  );
   assert.match(dockerignore, /^!packages\/gateway-protocol\/src\/\*\*$/m);
   assert.match(dockerignore, /^!packages\/gateway\/src\/\*\*$/m);
   const gatewayDocker = read('Dockerfile.gateway');
-  assert.match(gatewayDocker, /COPY packages\/gateway\/src packages\/gateway\/src/);
+  assert.match(
+    gatewayDocker,
+    /COPY packages\/gateway\/src packages\/gateway\/src/,
+  );
   assert.match(
     gatewayDocker,
     /COPY packages\/gateway-protocol\/src packages\/gateway-protocol\/src/,
   );
-  assert.doesNotMatch(gatewayDocker, /COPY (?:--from=[^\n]+ )?src(?:\s|\/)/);
-  assert.doesNotMatch(gatewayDocker, /node_modules\/elpis|\/opt\/gateway\/dist/);
+  assert.deepEqual(gatewayDocker.match(/^COPY src\/[^\n]+$/gm), [
+    'COPY src/console/client src/console/client',
+    'COPY src/console/public/elpis-logo-dark.svg src/console/public/elpis-logo-dark.svg',
+  ]);
+  assert.doesNotMatch(gatewayDocker, /COPY src(?:\s|\/(?!console\/))/);
+  assert.doesNotMatch(
+    gatewayDocker,
+    /node_modules\/elpis|\/opt\/gateway\/dist/,
+  );
 });
