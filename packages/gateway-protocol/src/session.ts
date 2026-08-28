@@ -10,15 +10,19 @@ import {
   PROTOCOL_VERSION,
   type Capability,
   type ConnectionId,
+  type ConsoleOutputFrame,
+  type FailedMediaResultFrame,
   type GatewayHelloAckFrame,
   type GatewayToResidentFrame,
   type InstanceId,
   type MediaGetFrame,
+  type MediaResultFrame,
   type OperationResultFrame,
   type ProtocolErrorFrame,
   type RequestId,
   type ResidentHelloFrame,
   type ResidentToGatewayFrame,
+  type SuccessfulMediaResultFrame,
   type ViewerId,
   type ViewerOperationFrame,
 } from './types.js';
@@ -262,6 +266,21 @@ interface PendingViewerOperation {
   viewerId: ViewerId;
 }
 
+type ResidentEnvelopeFields = 'version' | 'connectionId' | 'seq' | 'type';
+
+/** Typed resident effect payloads. Envelope and sequence are session-owned. */
+export type ResidentOperationResultEffect = Omit<
+  OperationResultFrame,
+  ResidentEnvelopeFields
+>;
+export type ResidentConsoleOutputEffect = Omit<
+  ConsoleOutputFrame,
+  ResidentEnvelopeFields
+>;
+export type ResidentMediaResultEffect =
+  | Omit<SuccessfulMediaResultFrame, ResidentEnvelopeFields>
+  | Omit<FailedMediaResultFrame, ResidentEnvelopeFields>;
+
 /** Stateful decoder for Gateway frames arriving at one resident link. */
 export class ResidentInboundSession {
   readonly connectionId: ConnectionId;
@@ -275,6 +294,8 @@ export class ResidentInboundSession {
   private requestIds = new Set<RequestId>();
   private requestOrder: RequestId[] = [];
   private pendingOperations = new Map<RequestId, PendingViewerOperation>();
+  private pendingMedia = new Set<RequestId>();
+  private nextOutboundSeq = 2;
   private viewers = new Set<ViewerId>();
 
   constructor(
@@ -302,10 +323,82 @@ export class ResidentInboundSession {
     return this.gatewayAck;
   }
 
-  /** Apply the terminal result of one viewer effect before sending it. */
+  /**
+   * Build and apply one viewer effect result. The session, not the caller, owns
+   * the resident envelope and contiguous outbound sequence.
+   */
+  operationResult(effect: ResidentOperationResultEffect): OperationResultFrame {
+    this.assertOutboundReady();
+    const expected = this.pendingOperations.get(effect.requestId);
+    if (
+      !expected ||
+      expected.operation !== effect.operation ||
+      expected.viewerId !== effect.viewerId
+    )
+      protocolFailure(
+        'request_mismatch',
+        'operation result does not match a received request',
+      );
+    const frame = decodeResidentFrame({
+      ...effect,
+      version: PROTOCOL_VERSION,
+      connectionId: this.connectionId,
+      seq: this.nextOutboundSeq,
+      type: 'operation.result',
+    }) as OperationResultFrame;
+    this.pendingOperations.delete(frame.requestId);
+    if (frame.operation === 'viewer.open' && frame.ok)
+      this.viewers.add(frame.viewerId);
+    if (frame.operation === 'viewer.close' && frame.ok)
+      this.viewers.delete(frame.viewerId);
+    this.advanceOutboundSequence();
+    return frame;
+  }
+
+  /** Build console output for a viewer whose open effect succeeded. */
+  consoleOutput(effect: ResidentConsoleOutputEffect): ConsoleOutputFrame {
+    this.assertOutboundReady();
+    if (!this.viewers.has(effect.viewerId))
+      protocolFailure(
+        'request_mismatch',
+        'console output names a viewer that is not open',
+      );
+    const frame = decodeResidentFrame({
+      ...effect,
+      version: PROTOCOL_VERSION,
+      connectionId: this.connectionId,
+      seq: this.nextOutboundSeq,
+      type: 'console.output',
+    }) as ConsoleOutputFrame;
+    this.advanceOutboundSequence();
+    return frame;
+  }
+
+  /** Build a result only for one outstanding media.get request. */
+  mediaResult(effect: ResidentMediaResultEffect): MediaResultFrame {
+    this.assertOutboundReady();
+    if (!this.pendingMedia.has(effect.requestId))
+      protocolFailure(
+        'request_mismatch',
+        'media result does not match a received request',
+      );
+    const frame = decodeResidentFrame({
+      ...effect,
+      version: PROTOCOL_VERSION,
+      connectionId: this.connectionId,
+      seq: this.nextOutboundSeq,
+      type: 'media.result',
+    }) as MediaResultFrame;
+    this.pendingMedia.delete(frame.requestId);
+    this.advanceOutboundSequence();
+    return frame;
+  }
+
+  /**
+   * Compatibility entry point for callers that still hold a complete frame.
+   * Its envelope must exactly equal the session-owned next envelope.
+   */
   completeOperation(input: OperationResultFrame): OperationResultFrame {
-    if (this.terminal)
-      protocolFailure('invalid_handshake', 'session is terminal');
     const frame = decodeResidentFrame(input);
     if (frame.type !== 'operation.result')
       protocolFailure('request_mismatch', 'frame is not an operation result');
@@ -314,22 +407,36 @@ export class ResidentInboundSession {
         'connection_mismatch',
         'operation result has wrong connection',
       );
-    const expected = this.pendingOperations.get(frame.requestId);
-    if (
-      !expected ||
-      expected.operation !== frame.operation ||
-      expected.viewerId !== frame.viewerId
-    )
+    if (frame.seq !== this.nextOutboundSeq)
       protocolFailure(
-        'request_mismatch',
-        'operation result does not match a received request',
+        'invalid_sequence',
+        'resident outbound sequence is not contiguous',
       );
-    this.pendingOperations.delete(frame.requestId);
-    if (frame.operation === 'viewer.open' && frame.ok)
-      this.viewers.add(frame.viewerId);
-    if (frame.operation === 'viewer.close' && frame.ok)
-      this.viewers.delete(frame.viewerId);
-    return frame;
+    const { requestId, viewerId, operation, ok, ...rest } = frame;
+    return this.operationResult({
+      requestId,
+      viewerId,
+      operation,
+      ok,
+      ...('error' in rest && rest.error !== undefined
+        ? { error: rest.error }
+        : {}),
+    });
+  }
+
+  private assertOutboundReady(): void {
+    if (this.terminal)
+      protocolFailure('invalid_handshake', 'session is terminal');
+    if (!this.gatewayAck)
+      protocolFailure(
+        'invalid_handshake',
+        'gateway hello acknowledgement is not complete',
+      );
+  }
+
+  private advanceOutboundSequence(): void {
+    if (this.nextOutboundSeq === Number.MAX_SAFE_INTEGER) this.terminal = true;
+    else this.nextOutboundSeq += 1;
   }
 
   receive(input: string | unknown): GatewayToResidentFrame {
@@ -417,7 +524,10 @@ export class ResidentInboundSession {
     ) {
       if (this.requestIds.has(frame.requestId))
         protocolFailure('request_mismatch', 'request id was already used');
-      if (this.pendingOperations.size >= LIMITS.pendingRequestsPerConnection)
+      if (
+        this.pendingOperations.size + this.pendingMedia.size >=
+        LIMITS.pendingRequestsPerConnection
+      )
         protocolFailure('request_limit', 'too many requests are pending');
       if (
         [...this.pendingOperations.values()].some(
@@ -445,7 +555,11 @@ export class ResidentInboundSession {
         viewerId: frame.viewerId,
       });
     } else if (frame.type === 'media.get') {
-      rememberRequest(this.requestIds, this.requestOrder, frame.requestId);
+      if (
+        this.pendingOperations.size + this.pendingMedia.size >=
+        LIMITS.pendingRequestsPerConnection
+      )
+        protocolFailure('request_limit', 'too many requests are pending');
       if (
         frame.route === '/identity/avatar' &&
         !this.negotiated.includes('identity.v1')
@@ -454,6 +568,8 @@ export class ResidentInboundSession {
           'capability_required',
           'identity avatar media requires identity.v1',
         );
+      rememberRequest(this.requestIds, this.requestOrder, frame.requestId);
+      this.pendingMedia.add(frame.requestId);
     } else if (
       frame.type === 'console.input' &&
       !this.viewers.has(frame.viewerId)

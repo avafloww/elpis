@@ -12,6 +12,7 @@ import {
 import {
   GatewayLinkController,
   type GatewayLinkClock,
+  type GatewayLinkEffectSink,
   type GatewayLinkSocket,
   type GatewayLinkSocketHandlers,
   type GatewayLinkStatus,
@@ -73,6 +74,9 @@ class FakeClock implements GatewayLinkClock {
 }
 
 class FakeSocket extends EventEmitter implements GatewayLinkSocket {
+  bufferedAmount = 0;
+  onSend?: (text: string) => void;
+  throwOnSend = false;
   handlers?: GatewayLinkSocketHandlers;
   sent: string[] = [];
   closed: Array<[number, string]> = [];
@@ -91,6 +95,9 @@ class FakeSocket extends EventEmitter implements GatewayLinkSocket {
     };
   }
   sendText(text: string): void {
+    if (this.throwOnSend) throw new Error('send failed');
+    // Deliberately invoke before recording to model a hostile reentrant adapter.
+    this.onSend?.(text);
     this.sent.push(text);
   }
   close(code: number, reason: string): void {
@@ -426,5 +433,192 @@ describe('GatewayLinkController', () => {
       fixture.socket.emit('close-event');
       assert.equal(fixture.controller.status.state, 'stopped');
     }
+  });
+});
+
+describe('GatewayLinkController resident effect sink', () => {
+  const effectsCapabilities = [
+    'console.v1',
+    'identity.v1',
+    'media.v1',
+  ] as const;
+  const viewerId = 'egv1.AAAAAAAAAAAAAAAAAAAAAA' as const;
+  const requestId = 'egr1.AAAAAAAAAAAAAAAAAAAAAA' as const;
+
+  function effectsAck(capabilities = effectsCapabilities): string {
+    return serializeGatewayFrame(
+      createGatewayHelloAck({
+        connectionId: CONNECTION,
+        seq: 1,
+        instanceId: INSTANCE,
+        capabilities,
+      }),
+    );
+  }
+
+  function viewerOpen(seq = 2): string {
+    return serializeGatewayFrame({
+      version: 1,
+      connectionId: CONNECTION,
+      seq,
+      type: 'viewer.open',
+      requestId,
+      viewerId,
+    });
+  }
+
+  it('writes contiguous session-owned effects during transport reentrancy', () => {
+    const fixture = base({
+      offeredCapabilities: effectsCapabilities,
+      onFrame: (frame, effects) => {
+        if (frame.type === 'viewer.open') {
+          assert.equal(
+            effects.operationResult({
+              requestId: frame.requestId,
+              viewerId: frame.viewerId,
+              operation: frame.type,
+              ok: true,
+            }),
+            true,
+          );
+        } else if (frame.type === 'console.input') {
+          const output = {
+            viewerId: frame.viewerId,
+            payload: '{"echo":true}',
+          };
+          assert.equal(effects.consoleOutput(output), true);
+          output.payload = '{"mutated":true}';
+        }
+      },
+    });
+    fixture.controller.start();
+    fixture.socket.emit('open');
+    fixture.socket.message(effectsAck());
+
+    let reentered = false;
+    fixture.socket.onSend = (text) => {
+      const sent = JSON.parse(text) as { type?: string };
+      if (sent.type !== 'operation.result' || reentered) return;
+      reentered = true;
+      fixture.socket.message(
+        serializeGatewayFrame({
+          version: 1,
+          connectionId: CONNECTION,
+          seq: 3,
+          type: 'console.input',
+          viewerId,
+          payload: '{}',
+        }),
+      );
+    };
+    fixture.socket.message(viewerOpen());
+
+    const sent = fixture.socket.sent.map(
+      (text) => JSON.parse(text) as { type: string; seq: number; payload?: string },
+    );
+    assert.deepEqual(
+      sent.map((frame) => [frame.type, frame.seq]),
+      [
+        ['hello', 1],
+        ['operation.result', 2],
+        ['console.output', 3],
+      ],
+    );
+    assert.equal(sent[2]?.payload, '{"echo":true}');
+  });
+
+  it('closes on bounded backpressure and rejects a stale reconnect generation', () => {
+    let currentSink: GatewayLinkEffectSink | undefined;
+    const fixture = base({
+      offeredCapabilities: effectsCapabilities,
+      onFrame: (_frame, effects) => {
+        currentSink = effects;
+      },
+    });
+    fixture.controller.start();
+    fixture.socket.emit('open');
+    fixture.socket.message(effectsAck());
+    fixture.socket.message(viewerOpen());
+    const stale = currentSink;
+    assert.ok(stale);
+
+    fixture.socket.bufferedAmount = LIMITS.frameBytes;
+    assert.equal(
+      stale.operationResult({
+        requestId,
+        viewerId,
+        operation: 'viewer.open',
+        ok: true,
+      }),
+      false,
+    );
+    assert.deepEqual(fixture.socket.closed.at(-1), [1011, 'backpressure']);
+    assert.equal(fixture.controller.status.state, 'backoff');
+
+    fixture.socket.bufferedAmount = 0;
+    fixture.clock.fire();
+    fixture.socket.emit('open');
+    fixture.socket.message(effectsAck());
+    fixture.socket.message(viewerOpen());
+    const replacement = currentSink;
+    assert.ok(replacement);
+    assert.notEqual(replacement, stale);
+    assert.equal(
+      stale.operationResult({
+        requestId,
+        viewerId,
+        operation: 'viewer.open',
+        ok: true,
+      }),
+      false,
+    );
+    assert.equal(
+      replacement.operationResult({
+        requestId,
+        viewerId,
+        operation: 'viewer.open',
+        ok: true,
+      }),
+      true,
+    );
+    const last = JSON.parse(fixture.socket.sent.at(-1)!) as {
+      type: string;
+      seq: number;
+    };
+    assert.deepEqual(last, {
+      type: 'operation.result',
+      seq: 2,
+      version: 1,
+      connectionId: CONNECTION,
+      requestId,
+      viewerId,
+      operation: 'viewer.open',
+      ok: true,
+    });
+  });
+
+  it('closes the current attempt when an effect send throws', () => {
+    let sink: GatewayLinkEffectSink | undefined;
+    const fixture = base({
+      offeredCapabilities: effectsCapabilities,
+      onFrame: (_frame, effects) => {
+        sink = effects;
+      },
+    });
+    fixture.controller.start();
+    fixture.socket.emit('open');
+    fixture.socket.message(effectsAck());
+    fixture.socket.message(viewerOpen());
+    fixture.socket.throwOnSend = true;
+    assert.equal(
+      sink?.operationResult({
+        requestId,
+        viewerId,
+        operation: 'viewer.open',
+        ok: true,
+      }),
+      false,
+    );
+    assert.deepEqual(fixture.socket.closed.at(-1), [1011, 'transport_error']);
   });
 });

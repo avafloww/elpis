@@ -14,6 +14,9 @@ import {
   type GatewayToResidentFrame,
   type InstanceId,
   type ResidentIdentity,
+  type ResidentOperationResultEffect,
+  type ResidentConsoleOutputEffect,
+  type ResidentMediaResultEffect,
 } from '@elpis/gateway-protocol';
 import type { DashboardRemoteConfig } from './config.js';
 import type {
@@ -75,6 +78,8 @@ export interface GatewayLinkSocketHandlers {
 
 /** A complete-message, transport-neutral client socket. */
 export interface GatewayLinkSocket {
+  /** Queued transport bytes. Omission is treated as zero for legacy adapters. */
+  readonly bufferedAmount?: number;
   sendText(text: string): void;
   close(code: number, reason: string): void;
   terminate(): void;
@@ -98,6 +103,13 @@ export interface GatewayLinkEvents {
   status(status: GatewayLinkStatus): void;
 }
 
+/** Generation-bound resident effects; no socket, frame, envelope, or seq access. */
+export interface GatewayLinkEffectSink {
+  operationResult(effect: ResidentOperationResultEffect): boolean;
+  consoleOutput(effect: ResidentConsoleOutputEffect): boolean;
+  mediaResult(effect: ResidentMediaResultEffect): boolean;
+}
+
 export interface GatewayLinkControllerOptions {
   readonly remote: DashboardRemoteConfig | null;
   readonly store: GatewayLinkStoreView;
@@ -113,7 +125,12 @@ export interface GatewayLinkControllerOptions {
   readonly randomBytes?: (size: number) => Uint8Array;
   readonly events?: GatewayLinkEvents;
   /** Receives only post-ack frames accepted by the shared outbound session. */
-  readonly onFrame?: (frame: GatewayToResidentFrame) => void;
+  readonly onFrame?: (
+    frame: GatewayToResidentFrame,
+    effects: GatewayLinkEffectSink,
+  ) => void;
+  /** Maximum queued bytes, including the next serialized effect. */
+  readonly maxBufferedAmount?: number;
   readonly handshakeTimeoutMs?: number;
   readonly enrollmentPollMs?: number;
   readonly retryBaseMs?: number;
@@ -129,6 +146,12 @@ type LiveAttempt = {
   timer: unknown;
   opened: boolean;
   ready: boolean;
+  writingEffect: boolean;
+  effectQueue: EffectWrite[];
+};
+
+type EffectWrite = {
+  readonly encoded: string;
 };
 
 const MAX_FAILURES = 31;
@@ -235,6 +258,10 @@ export class WsGatewayLinkSocket implements GatewayLinkSocket {
     this.#socket.on('error', () => undefined);
   }
 
+  get bufferedAmount(): number {
+    return this.#socket.bufferedAmount;
+  }
+
   sendText(text: string): void {
     if (this.#socket.readyState !== WebSocket.OPEN)
       throw new Error('gateway link transport is not open');
@@ -303,7 +330,8 @@ export class GatewayLinkController {
   readonly #random: () => number;
   readonly #randomBytes: (size: number) => Uint8Array;
   readonly #events?: GatewayLinkEvents;
-  readonly #onFrame?: (frame: GatewayToResidentFrame) => void;
+  readonly #onFrame?: GatewayLinkControllerOptions['onFrame'];
+  readonly #maxBufferedAmount: number;
   readonly #handshakeTimeoutMs: number;
   readonly #enrollmentPollMs: number;
   readonly #retryBaseMs: number;
@@ -330,6 +358,9 @@ export class GatewayLinkController {
         typeof options.randomBytes !== 'function') ||
       (options.onFrame !== undefined &&
         typeof options.onFrame !== 'function') ||
+      (options.maxBufferedAmount !== undefined &&
+        (!Number.isSafeInteger(options.maxBufferedAmount) ||
+          options.maxBufferedAmount < 1)) ||
       (options.events !== undefined &&
         typeof options.events.status !== 'function')
     )
@@ -370,6 +401,7 @@ export class GatewayLinkController {
     this.#randomBytes = options.randomBytes ?? systemRandomBytes;
     this.#events = options.events;
     this.#onFrame = options.onFrame;
+    this.#maxBufferedAmount = options.maxBufferedAmount ?? LIMITS.frameBytes;
     this.#handshakeTimeoutMs = boundedPositive(
       options.handshakeTimeoutMs,
       GATEWAY_LINK_DEFAULTS.handshakeTimeoutMs,
@@ -517,6 +549,8 @@ export class GatewayLinkController {
       timer: undefined,
       opened: false,
       ready: false,
+      writingEffect: false,
+      effectQueue: [],
     };
     this.#live = live;
     this.#transition('connecting');
@@ -559,6 +593,10 @@ export class GatewayLinkController {
     live.opened = true;
     this.#transition('handshaking');
     if (!this.#isCurrent(live)) return;
+    if (!this.#hasCapacity(live, live.hello)) {
+      this.#attemptFailed(live, GATEWAY_LINK_CLOSE.unavailable, 'backpressure');
+      return;
+    }
     try {
       live.socket.sendText(live.hello);
     } catch {
@@ -626,8 +664,77 @@ export class GatewayLinkController {
       return;
     }
     try {
-      this.#onFrame?.(frame);
+      this.#onFrame?.(frame, this.#effectSink(live));
     } catch {}
+  }
+
+  #effectSink(live: LiveAttempt): GatewayLinkEffectSink {
+    return Object.freeze({
+      operationResult: (effect: ResidentOperationResultEffect) =>
+        this.#writeEffect(live, () => live.session.operationResult(effect)),
+      consoleOutput: (effect: ResidentConsoleOutputEffect) =>
+        this.#writeEffect(live, () => live.session.consoleOutput(effect)),
+      mediaResult: (effect: ResidentMediaResultEffect) =>
+        this.#writeEffect(live, () => live.session.mediaResult(effect)),
+    });
+  }
+
+  #writeEffect(
+    live: LiveAttempt,
+    create: () => Parameters<typeof serializeResidentFrame>[0],
+  ): boolean {
+    if (!this.#isCurrent(live) || !live.ready) return false;
+    if (live.effectQueue.length >= LIMITS.pendingRequestsPerConnection) {
+      this.#attemptFailed(live, GATEWAY_LINK_CLOSE.unavailable, 'backpressure');
+      return false;
+    }
+    const encoded = serializeResidentFrame(create());
+    live.effectQueue.push({ encoded });
+    // A hostile or injected adapter may synchronously deliver another frame
+    // while bufferedAmount/sendText is running. Queue immutable encoded bytes so
+    // seq N reaches the transport before seq N+1 and caller mutation cannot drift it.
+    if (live.writingEffect) return true;
+
+    live.writingEffect = true;
+    try {
+      while (this.#isCurrent(live)) {
+        const write = live.effectQueue.shift();
+        if (write === undefined) break;
+        if (!this.#hasCapacity(live, write.encoded)) {
+          this.#attemptFailed(
+            live,
+            GATEWAY_LINK_CLOSE.unavailable,
+            'backpressure',
+          );
+          break;
+        }
+        try {
+          live.socket.sendText(write.encoded);
+        } catch {
+          this.#attemptFailed(live);
+          break;
+        }
+      }
+    } finally {
+      live.writingEffect = false;
+      if (!this.#isCurrent(live)) live.effectQueue.length = 0;
+    }
+    return this.#isCurrent(live);
+  }
+
+  #hasCapacity(live: LiveAttempt, encoded: string): boolean {
+    let buffered = 0;
+    try {
+      const value = live.socket.bufferedAmount;
+      if (value !== undefined) buffered = value;
+    } catch {
+      return false;
+    }
+    return (
+      Number.isSafeInteger(buffered) &&
+      buffered >= 0 &&
+      buffered + encoder.encode(encoded).byteLength <= this.#maxBufferedAmount
+    );
   }
 
   #dispatch(live: LiveAttempt, operation: () => void): void {

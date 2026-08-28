@@ -348,3 +348,98 @@ test('resident viewer state changes only through a matching effect result', () =
     }),
   );
 });
+
+test('resident typed effects own sequence and reject replay or unknown targets', () => {
+  const resident = residentSession();
+  resident.receive(CANONICAL_V1.gatewayAck);
+  resident.receive(CANONICAL_V1.viewerOpen);
+
+  const opened = resident.operationResult({
+    requestId: CANONICAL_IDS.requestId,
+    viewerId: CANONICAL_IDS.viewerId,
+    operation: 'viewer.open',
+    ok: true,
+  });
+  assert.equal(opened.seq, 2);
+  assert.equal(opened.connectionId, CANONICAL_IDS.connectionId);
+  const output = resident.consoleOutput({
+    viewerId: CANONICAL_IDS.viewerId,
+    payload: '{"ready":true}',
+  });
+  assert.equal(output.seq, 3);
+
+  expectCode('request_mismatch', () =>
+    resident.operationResult({
+      requestId: CANONICAL_IDS.requestId,
+      viewerId: CANONICAL_IDS.viewerId,
+      operation: 'viewer.open',
+      ok: true,
+    }),
+  );
+  expectCode('request_mismatch', () =>
+    resident.consoleOutput({
+      viewerId: 'egv1.ZZZZZZZZZZZZZZZZZZZZZZ',
+      payload: '{}',
+    }),
+  );
+
+  const mediaRequest = 'egr1.EEEEEEEEEEEEEEEEEEEEEE' as const;
+  resident.receive({
+    version: PROTOCOL_VERSION,
+    connectionId: CANONICAL_IDS.connectionId,
+    seq: 3,
+    type: 'media.get',
+    requestId: mediaRequest,
+    route: '/frames/watch/a.png',
+  });
+  const media = resident.mediaResult({
+    requestId: mediaRequest,
+    ok: false,
+    error: { code: 'not_found', message: 'missing' },
+  });
+  assert.equal(media.seq, 4);
+  expectCode('request_mismatch', () =>
+    resident.mediaResult({
+      requestId: mediaRequest,
+      ok: false,
+      error: { code: 'not_found', message: 'missing' },
+    }),
+  );
+  expectCode('request_mismatch', () =>
+    resident.mediaResult({
+      requestId: 'egr1.FFFFFFFFFFFFFFFFFFFFFF',
+      ok: false,
+      error: { code: 'not_found', message: 'missing' },
+    }),
+  );
+});
+
+test('resident typed effects cannot override envelope or consume sequence on rejection', () => {
+  const resident = residentSession();
+  resident.receive(CANONICAL_V1.gatewayAck);
+  resident.receive(CANONICAL_V1.viewerOpen);
+  const result = resident.operationResult({
+    requestId: CANONICAL_IDS.requestId,
+    viewerId: CANONICAL_IDS.viewerId,
+    operation: 'viewer.open',
+    ok: true,
+    seq: 99,
+    connectionId: 'egx1.ZZZZZZZZZZZZZZZZZZZZZZ',
+  } as unknown as Parameters<ResidentInboundSession['operationResult']>[0]);
+  assert.equal(result.seq, 2);
+  assert.equal(result.connectionId, CANONICAL_IDS.connectionId);
+
+  expectCode('invalid_frame', () =>
+    resident.consoleOutput({
+      viewerId: CANONICAL_IDS.viewerId,
+      payload: 'x'.repeat(LIMITS.consolePayloadBytes + 1),
+    }),
+  );
+  assert.equal(
+    resident.consoleOutput({
+      viewerId: CANONICAL_IDS.viewerId,
+      payload: '{}',
+    }).seq,
+    3,
+  );
+});
