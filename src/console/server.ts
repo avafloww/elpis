@@ -18,9 +18,9 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from '../config.js';
 import type { ConsoleHub, HubClient } from './hub.js';
 import type { McpHttpEndpoint } from '../mcp/server.js';
-import { resolveDataLayout } from '../store/data-layout.js';
-import { ATTACHMENT_DIR } from '../types.js';
-import { watchCustodyRoot } from './watch-custody.js';
+import { createConsoleMediaReader } from './media.js';
+
+export { resolveAttachmentPath, resolveFramePath } from './media.js';
 
 export interface ConsoleServer {
   start(): Promise<void>;
@@ -43,93 +43,6 @@ const CONTENT_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
-
-// Types the /attachments/ route will serve inline; anything else (or unknown)
-// downloads as a generic byte stream rather than rendering in the browser.
-const ATTACHMENT_CONTENT_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.txt': 'text/plain; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.pdf': 'application/pdf',
-};
-
-/**
- * Resolve a `/attachments/<messageId>/<file>` request path (already
- * URL-decoded) to the on-disk file under ATTACHMENT_DIR, or null when the
- * path is not an attachment request or would escape the attachment root
- * (traversal). Exported for direct unit testing.
- */
-export function resolveAttachmentPath(reqPath: string): string | null {
-  const prefix = '/attachments/';
-  if (!reqPath.startsWith(prefix)) return null;
-  const resolved = path.normalize(
-    path.join(ATTACHMENT_DIR, reqPath.slice(prefix.length)),
-  );
-  if (!resolved.startsWith(ATTACHMENT_DIR + path.sep)) return null;
-  return resolved;
-}
-
-type FrameRequest = { file: string; root: string };
-const FRAME_MAX_BYTES = 25 * 1024 * 1024;
-
-function resolveFrameRequest(
-  reqPath: string,
-  dataDirectory: string,
-): FrameRequest | null {
-  const match = reqPath.match(
-    /^\/frames\/(watch|computer|browser|motor)\/(.+)$/,
-  );
-  if (!match) return null;
-  const layout = resolveDataLayout(dataDirectory);
-  const roots = {
-    watch: watchCustodyRoot(dataDirectory),
-    computer: path.join(layout.computer, 'screenshots'),
-    browser: path.join(layout.browser, 'screenshots'),
-    motor: path.join(layout.motor, 'episodes'),
-  } as const;
-  const kind = match[1] as keyof typeof roots;
-  const relative = match[2] ?? '';
-  // Custody writes only flat UUID capabilities. Do not let this route become a
-  // second generic tree browser even inside its private root.
-  if (
-    kind === 'watch' &&
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:png|jpe?g|gif|webp)$/i.test(
-      relative,
-    )
-  )
-    return null;
-  const root = roots[kind];
-  const file = path.normalize(path.join(root, relative));
-  if (!file.startsWith(root + path.sep)) return null;
-  if (!/\.(?:png|jpe?g|gif|webp)$/i.test(file)) return null;
-  return { file, root };
-}
-
-export function resolveFramePath(
-  reqPath: string,
-  dataDirectory: string,
-): string | null {
-  return resolveFrameRequest(reqPath, dataDirectory)?.file ?? null;
-}
-
-async function readFrame(request: FrameRequest): Promise<Buffer | null> {
-  try {
-    const [realRoot, realFile] = await Promise.all([
-      fs.promises.realpath(request.root),
-      fs.promises.realpath(request.file),
-    ]);
-    if (!realFile.startsWith(realRoot + path.sep)) return null;
-    const stat = await fs.promises.stat(realFile);
-    if (!stat.isFile() || stat.size > FRAME_MAX_BYTES) return null;
-    return await fs.promises.readFile(realFile);
-  } catch {
-    return null;
-  }
-}
 
 /** Wrap a ws.WebSocket as the minimal HubClient the hub talks to. */
 function asHubClient(ws: WebSocket): HubClient {
@@ -181,10 +94,22 @@ export function createConsoleServer(
   mcp?: McpHttpEndpoint,
 ): ConsoleServer {
   const log = config.logger;
+  const media = createConsoleMediaReader({
+    dataDirectory: config.paths.dataDirectory,
+    avatarPath: path.join(PUBLIC_DIR, 'elpis-icon-512.png'),
+  });
 
   const server = http.createServer((req, res) => {
     // Static file server for the SPA. Only GET, only within PUBLIC_DIR.
-    const reqPath = decodeURIComponent((req.url ?? '/').split('?')[0]);
+    const rawPath = (req.url ?? '/').split('?')[0];
+    let reqPath: string;
+    try {
+      reqPath = decodeURIComponent(rawPath);
+    } catch {
+      res.writeHead(400);
+      res.end('bad request');
+      return;
+    }
     if (reqPath === '/mcp') {
       if (!config.console.mcpEnabled || !mcp) {
         res.writeHead(404);
@@ -194,53 +119,23 @@ export function createConsoleServer(
       void mcp.handle(req, res);
       return;
     }
-    const frame = resolveFrameRequest(reqPath, config.paths.dataDirectory);
-    if (reqPath.startsWith('/frames/')) {
-      if (!frame) {
-        res.writeHead(403);
-        res.end('forbidden');
-        return;
-      }
-      void readFrame(frame).then((data) => {
-        if (!data) {
-          res.writeHead(404);
-          res.end('not found');
+    if (
+      rawPath.startsWith('/frames/') ||
+      rawPath.startsWith('/attachments/') ||
+      rawPath === '/identity/avatar'
+    ) {
+      void media.read(rawPath).then((result) => {
+        if (!result.ok) {
+          const unsafe = result.reason === 'invalid_route';
+          res.writeHead(unsafe ? 403 : 404);
+          res.end(unsafe ? 'forbidden' : 'not found');
           return;
         }
-        const ext = path.extname(frame.file).toLowerCase();
         res.writeHead(200, {
-          'content-type':
-            ATTACHMENT_CONTENT_TYPES[ext] ?? 'application/octet-stream',
+          'content-type': result.mediaType,
           'cache-control': 'private, max-age=3600',
         });
-        res.end(data);
-      });
-      return;
-    }
-    // Downloaded inbound Discord attachments (read-only) — lets the SPA render
-    // image inputs inline. Files live under /tmp, so a reboot clears them; the
-    // SPA falls back to a file chip on 404.
-    const attachment = resolveAttachmentPath(reqPath);
-    if (reqPath.startsWith('/attachments/')) {
-      if (!attachment) {
-        res.writeHead(403);
-        res.end('forbidden');
-        return;
-      }
-      fs.readFile(attachment, (err, data) => {
-        if (err) {
-          res.writeHead(404);
-          res.end('not found');
-          return;
-        }
-        const ext = path.extname(attachment).toLowerCase();
-        res.writeHead(200, {
-          'content-type':
-            ATTACHMENT_CONTENT_TYPES[ext] ?? 'application/octet-stream',
-          // Attachment files are immutable once downloaded — safe to cache.
-          'cache-control': 'private, max-age=3600',
-        });
-        res.end(data);
+        res.end(result.bytes);
       });
       return;
     }

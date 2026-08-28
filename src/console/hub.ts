@@ -291,6 +291,12 @@ export class ConsoleHub {
   private nextId = 0;
   private logs: LogLine[] = [];
   private clients = new Set<HubClient>();
+  /** Attachment generations prevent an async snapshot from reaching a client
+   * that was removed and later re-attached using the same object. */
+  private clientGenerations = new Map<HubClient, number>();
+  private clientSnapshotRequests = new Map<HubClient, number>();
+  private nextClientGeneration = 1;
+  private nextSnapshotRequest = 1;
   private sources: HubSources | null = null;
   /** Monotonic id for the active streaming turn (one at a time — the loop is
    * serial). Bumped at each stream start. */
@@ -509,12 +515,15 @@ export class ConsoleHub {
   // ---- client lifecycle ----
 
   async addClient(client: HubClient): Promise<void> {
-    this.clients.add(client);
+    if (!this.clients.has(client)) {
+      this.clients.add(client);
+      this.clientGenerations.set(client, this.nextClientGeneration++);
+    }
     await this.sendSnapshot(client);
   }
 
   removeClient(client: HubClient): void {
-    this.clients.delete(client);
+    this.detachClient(client);
   }
 
   /** Handle a client→server frame on the one multiplexed console socket. */
@@ -1058,9 +1067,19 @@ export class ConsoleHub {
 
   // ---- snapshot + backfill ----
 
-  private async sendSnapshot(client: HubClient): Promise<void> {
-    const start = Math.max(0, this.mirror.length - SNAPSHOT_MESSAGES);
-    const messages = this.mirror.slice(start);
+  /**
+   * Resend the ordinary full snapshot to one currently attached client.
+   *
+   * Snapshot construction awaits live sources. The captured attachment
+   * generation is checked after those awaits so removal, or removal followed
+   * by re-attachment of the same object, cannot receive a stale snapshot.
+   * Returns false for a stale/closed client or a failed transport write.
+   */
+  async sendSnapshot(client: HubClient): Promise<boolean> {
+    const generation = this.clientGenerations.get(client);
+    if (generation === undefined || client.closed) return false;
+    const snapshotRequest = this.nextSnapshotRequest++;
+    this.clientSnapshotRequests.set(client, snapshotRequest);
     let meta: MetaInfo | null = null;
     try {
       meta = this.sources ? await this.sources.meta() : null;
@@ -1071,7 +1090,18 @@ export class ConsoleHub {
       this.workerSnapshot(),
       this.secretarySnapshot(),
     ]);
-    this.safeSend(client, {
+    if (
+      this.clientGenerations.get(client) !== generation ||
+      this.clientSnapshotRequests.get(client) !== snapshotRequest ||
+      !this.clients.has(client) ||
+      client.closed
+    )
+      return false;
+    // Capture mutable mirror/stream state only after the asynchronous sources
+    // finish, making an explicit resend as fresh as the ordinary snapshot can be.
+    const start = Math.max(0, this.mirror.length - SNAPSHOT_MESSAGES);
+    const messages = this.mirror.slice(start);
+    return this.safeSend(client, {
       t: 'snapshot',
       usage: this.sources?.usage() ?? null,
       subUsage: this.sources?.subUsage() ?? null,
@@ -1166,22 +1196,34 @@ export class ConsoleHub {
     const data = JSON.stringify(payload);
     for (const c of this.clients) {
       if (c.closed) {
-        this.clients.delete(c);
+        this.detachClient(c);
         continue;
       }
       try {
         c.send(data);
       } catch {
-        this.clients.delete(c);
+        this.detachClient(c);
       }
     }
   }
 
-  private safeSend(client: HubClient, payload: unknown): void {
+  private detachClient(client: HubClient): void {
+    this.clients.delete(client);
+    this.clientGenerations.delete(client);
+    this.clientSnapshotRequests.delete(client);
+  }
+
+  private safeSend(client: HubClient, payload: unknown): boolean {
+    if (client.closed) {
+      this.detachClient(client);
+      return false;
+    }
     try {
       client.send(JSON.stringify(payload));
+      return true;
     } catch {
-      this.clients.delete(client);
+      this.detachClient(client);
+      return false;
     }
   }
 }

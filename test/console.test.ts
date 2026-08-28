@@ -1553,3 +1553,88 @@ test('v2 room rail is an observational lens with no duplicate moderation authori
   );
   assert.doesNotMatch(main, /['"](?:moderate|mute|deafen|undeafen)['"]/);
 });
+
+test('sendSnapshot resends only to an attached client', async () => {
+  let metaReads = 0;
+  const hub = new ConsoleHub();
+  hub.attach(
+    stubSources({
+      meta: () => {
+        metaReads++;
+        return stubSources().meta();
+      },
+    }),
+  );
+  const stale = recordingClient();
+  assert.equal(await hub.sendSnapshot(stale), false);
+  assert.equal(metaReads, 0, 'a stale client must not build a hidden snapshot');
+  assert.equal(stale.frames.length, 0);
+
+  await hub.addClient(stale);
+  assert.equal(await hub.sendSnapshot(stale), true);
+  assert.equal(stale.byType('snapshot').length, 2);
+
+  hub.removeClient(stale);
+  assert.equal(await hub.sendSnapshot(stale), false);
+  assert.equal(stale.byType('snapshot').length, 2);
+});
+
+test('an async snapshot cannot outlive its attachment generation', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let metaCall = 0;
+  const meta = stubSources().meta();
+  const hub = new ConsoleHub();
+  hub.attach(
+    stubSources({
+      meta: async () => {
+        metaCall++;
+        if (metaCall === 1) await blocked;
+        return meta;
+      },
+    }),
+  );
+  const client = recordingClient();
+  const staleAdd = hub.addClient(client);
+  await Promise.resolve();
+  hub.removeClient(client);
+
+  // Reusing the same transport object creates a distinct attachment generation.
+  await hub.addClient(client);
+  assert.equal(client.byType('snapshot').length, 1);
+  release();
+  await staleAdd;
+  assert.equal(
+    client.byType('snapshot').length,
+    1,
+    'the removed generation must not send after re-attachment',
+  );
+});
+
+test('the newest overlapping snapshot request is the only one sent', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let metaCall = 0;
+  const hub = new ConsoleHub();
+  hub.attach(
+    stubSources({
+      meta: async () => {
+        metaCall++;
+        if (metaCall === 1) await blocked;
+        return stubSources().meta();
+      },
+    }),
+  );
+  const client = recordingClient();
+  const first = hub.addClient(client);
+  await Promise.resolve();
+  assert.equal(await hub.sendSnapshot(client), true);
+  assert.equal(client.byType('snapshot').length, 1);
+  release();
+  await first;
+  assert.equal(client.byType('snapshot').length, 1);
+});
