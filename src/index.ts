@@ -111,6 +111,7 @@ import {
   type MetaInfo,
 } from './console/hub.js';
 import { createConsoleServer, type ConsoleServer } from './console/server.js';
+import { createConsoleMediaReader } from './console/media.js';
 import { createArchivedReader } from './console/history.js';
 import { createMcpEndpoint } from './mcp/server.js';
 import {
@@ -272,21 +273,9 @@ export async function createElpisRuntime(
     displayName: agentName,
     fetch: adapters.gatewayEnrollmentFetch ?? fetch,
   });
-  const gatewayLink = startGatewayLinkRuntime({
-    remote: config.dashboard.remote,
-    store: gatewayResidentStore,
-    identity: { name: agentName },
-    build: {
-      version: buildIdentity.version,
-      ...(buildIdentity.revision === null
-        ? {}
-        : { revision: buildIdentity.revision }),
-      state: buildIdentity.state,
-    },
-    factory: adapters.createGatewayLinkController,
-    onStatus: ({ state, failures }) =>
-      log(`gateway link: ${state} failures=${failures}`),
-  });
+  // Started only after the shared ConsoleHub has live sources attached. This
+  // prevents an immediately-ready remote link from observing a partial runtime.
+  let gatewayLink: GatewayLinkRuntime | null = null;
   launchGatewayEnrollment(gatewayEnrollment, (code) => {
     if (code !== 'not_configured') log(`gateway enrollment: ${code}`);
   });
@@ -344,9 +333,12 @@ export async function createElpisRuntime(
   // Operator console (Elpis Console): a read-only observer over the one history.
   // Created before the LLM/agent so both can push events into it. Seeded with the
   // primed history so a freshly-connecting client sees the current conversation.
-  const hub = config.console.enabled
-    ? new ConsoleHub(initialMessages)
-    : undefined;
+  // A configured remote Gateway uses the same hub even when the loopback Console
+  // server is disabled. The local server's enablement remains independent.
+  const hub =
+    config.console.enabled || config.dashboard.remote !== null
+      ? new ConsoleHub(initialMessages)
+      : undefined;
   if (hub) {
     setLogSink((level, msg) => hub.logLine(level, msg));
   }
@@ -760,6 +752,30 @@ export async function createElpisRuntime(
         };
       },
     });
+
+    const gatewayMedia =
+      config.dashboard.remote === null
+        ? null
+        : createConsoleMediaReader({
+            dataDirectory: config.paths.dataDirectory,
+          });
+    gatewayLink = startGatewayLinkRuntime({
+      remote: config.dashboard.remote,
+      store: gatewayResidentStore,
+      identity: { name: agentName },
+      build: {
+        version: buildIdentity.version,
+        ...(buildIdentity.revision === null
+          ? {}
+          : { revision: buildIdentity.revision }),
+        state: buildIdentity.state,
+      },
+      ...(gatewayMedia ? { console: { hub, media: gatewayMedia } } : {}),
+      factory: adapters.createGatewayLinkController,
+      onStatus: ({ state, failures }) =>
+        log(`gateway link: ${state} failures=${failures}`),
+    });
+
     const mcp = config.console.mcpEnabled
       ? createMcpEndpoint({
           mind,
@@ -787,8 +803,10 @@ export async function createElpisRuntime(
           },
         })
       : undefined;
-    consoleServer = createConsoleServer(config, hub, mcp);
-    await consoleServer.start();
+    if (config.console.enabled) {
+      consoleServer = createConsoleServer(config, hub, mcp);
+      await consoleServer.start();
+    }
   }
 
   // Autonomous one-shot wakes are armed explicitly by run.wake and recurring

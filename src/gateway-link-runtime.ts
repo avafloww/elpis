@@ -1,5 +1,11 @@
 import type { BuildMetadata, ResidentIdentity } from '@elpis/gateway-protocol';
 import type { DashboardRemoteConfig } from './config.js';
+import type { ConsoleMediaReader } from './console/media.js';
+import type { ConsoleHub } from './console/hub.js';
+import {
+  createGatewayConsoleBridge,
+  type GatewayConsoleBridge,
+} from './gateway-console-bridge.js';
 import {
   createGatewayLinkController,
   type GatewayLinkControllerOptions,
@@ -41,11 +47,18 @@ export interface GatewayControlStoppable {
   stop(): void;
 }
 
+export interface GatewayLinkConsoleOptions {
+  readonly hub: ConsoleHub;
+  readonly media: ConsoleMediaReader;
+}
+
 export interface StartGatewayLinkRuntimeOptions {
   readonly remote: DashboardRemoteConfig | null;
   readonly store: GatewayLinkStoreView;
   readonly identity: ResidentIdentity;
   readonly build: BuildMetadata;
+  /** Present only when the resident ConsoleHub and bounded media seam are wired. */
+  readonly console?: GatewayLinkConsoleOptions;
   readonly factory?: GatewayLinkControllerFactory;
   readonly onStatus?: (status: GatewayLinkStatus) => void;
 }
@@ -77,10 +90,15 @@ function safeStatus(value: unknown): GatewayLinkStatus {
 
 class StartedGatewayLinkRuntime implements GatewayLinkRuntime {
   readonly #controller: GatewayLinkControllerLike;
+  readonly #console: GatewayConsoleBridge | null;
   #stopped = false;
 
-  constructor(controller: GatewayLinkControllerLike) {
+  constructor(
+    controller: GatewayLinkControllerLike,
+    consoleBridge: GatewayConsoleBridge | null,
+  ) {
     this.#controller = controller;
+    this.#console = consoleBridge;
   }
 
   get status(): GatewayLinkStatus {
@@ -94,6 +112,10 @@ class StartedGatewayLinkRuntime implements GatewayLinkRuntime {
   stop(): void {
     if (this.#stopped) return;
     this.#stopped = true;
+    // Fence async snapshots/media before the controller invalidates its writer.
+    try {
+      this.#console?.stop();
+    } catch {}
     try {
       this.#controller.stop();
     } catch {}
@@ -139,14 +161,37 @@ export function startGatewayLinkRuntime(
     } catch {}
   };
   let controller: GatewayLinkControllerLike | null = null;
+  let consoleBridge: GatewayConsoleBridge | null = null;
   try {
+    consoleBridge = options.console
+      ? createGatewayConsoleBridge(options.console)
+      : null;
     const factory = options.factory ?? createGatewayLinkController;
     controller = factory({
       remote: options.remote,
       store: options.store,
       identity: options.identity,
       build: options.build,
-      events: { status: emit },
+      ...(consoleBridge
+        ? {
+            offeredCapabilities: [
+              'console.v1',
+              'identity.v1',
+              'media.v1',
+            ] as const,
+            onFrame: (frame, effects) =>
+              consoleBridge?.handleFrame(frame, effects),
+          }
+        : {}),
+      events: {
+        status: (value) => {
+          const status = safeStatus(value);
+          // Any state outside ready denotes an ended/not-yet-accepted link.
+          // Detach eagerly so reconnect cannot retain an old remote viewer.
+          if (status.state !== 'ready') consoleBridge?.disconnect();
+          emit(status);
+        },
+      },
     });
     if (
       !controller ||
@@ -157,8 +202,11 @@ export function startGatewayLinkRuntime(
         'gateway link factory returned an invalid controller',
       );
     controller.start();
-    return new StartedGatewayLinkRuntime(controller);
+    return new StartedGatewayLinkRuntime(controller, consoleBridge);
   } catch {
+    try {
+      consoleBridge?.stop();
+    } catch {}
     try {
       controller?.stop();
     } catch {}
