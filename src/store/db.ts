@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -844,6 +844,115 @@ export function runMigrations(db: DatabaseSync): void {
 
         DROP TABLE secretary_turns_v23;
         DROP TABLE secretary_sessions_v22;
+      `,
+    },
+    {
+      name: '0025-gateway-resident-state',
+      sql: `
+        CREATE TABLE gateway_resident_state (
+          singleton                INTEGER PRIMARY KEY CHECK (singleton = 1),
+          instance_id              TEXT NOT NULL UNIQUE
+            CHECK (length(instance_id) = 27 AND substr(instance_id,1,5) = 'egi1.'
+              AND substr(instance_id,6) NOT GLOB '*[^A-Za-z0-9_-]*'),
+          phase                    TEXT NOT NULL CHECK (phase IN ('idle','enrolling','active','rotating')),
+          endpoint                 TEXT CHECK (endpoint IS NULL OR length(endpoint) BETWEEN 1 AND 2048),
+          display_name             TEXT CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND 128),
+          enrollment_grant         TEXT
+            CHECK (enrollment_grant IS NULL OR
+              (length(enrollment_grant) = 71 AND substr(enrollment_grant,1,5) = 'ege1.'
+               AND substr(enrollment_grant,6,22) NOT GLOB '*[^A-Za-z0-9_-]*'
+               AND substr(enrollment_grant,28,1) = '.'
+               AND substr(enrollment_grant,29) NOT GLOB '*[^A-Za-z0-9_-]*')),
+          request_id               TEXT
+            CHECK (request_id IS NULL OR
+              (length(request_id) = 27 AND substr(request_id,1,5) = 'egr1.'
+               AND substr(request_id,6) NOT GLOB '*[^A-Za-z0-9_-]*')),
+          active_credential_id     TEXT
+            CHECK (active_credential_id IS NULL OR
+              (length(active_credential_id) = 22
+               AND active_credential_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+          active_credential_token  TEXT,
+          pending_credential_id    TEXT
+            CHECK (pending_credential_id IS NULL OR
+              (length(pending_credential_id) = 22
+               AND pending_credential_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+          pending_credential_token TEXT,
+          created_at               INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          updated_at               INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at >= created_at),
+          enrollment_started_at    INTEGER CHECK (enrollment_started_at IS NULL OR (typeof(enrollment_started_at) = 'integer' AND enrollment_started_at >= created_at)),
+          activated_at             INTEGER CHECK (activated_at IS NULL OR (typeof(activated_at) = 'integer' AND activated_at >= created_at)),
+          rotation_started_at      INTEGER CHECK (rotation_started_at IS NULL OR (typeof(rotation_started_at) = 'integer' AND rotation_started_at >= created_at)),
+          CHECK (active_credential_token IS NULL OR
+            (length(active_credential_token) = 71
+             AND substr(active_credential_token,1,5) = 'egc1.'
+             AND substr(active_credential_token,6,22) = active_credential_id
+             AND substr(active_credential_token,28,1) = '.'
+             AND substr(active_credential_token,29) NOT GLOB '*[^A-Za-z0-9_-]*')),
+          CHECK (pending_credential_token IS NULL OR
+            (length(pending_credential_token) = 71
+             AND substr(pending_credential_token,1,5) = 'egc1.'
+             AND substr(pending_credential_token,6,22) = pending_credential_id
+             AND substr(pending_credential_token,28,1) = '.'
+             AND substr(pending_credential_token,29) NOT GLOB '*[^A-Za-z0-9_-]*')),
+          CHECK (
+            (phase = 'idle' AND endpoint IS NULL AND display_name IS NULL
+              AND enrollment_grant IS NULL AND request_id IS NULL
+              AND active_credential_id IS NULL AND active_credential_token IS NULL
+              AND pending_credential_id IS NULL AND pending_credential_token IS NULL
+              AND enrollment_started_at IS NULL AND activated_at IS NULL AND rotation_started_at IS NULL)
+            OR
+            (phase = 'enrolling' AND endpoint IS NOT NULL AND display_name IS NOT NULL
+              AND enrollment_grant IS NOT NULL AND request_id IS NOT NULL
+              AND active_credential_id IS NULL AND active_credential_token IS NULL
+              AND pending_credential_id IS NOT NULL AND pending_credential_token IS NOT NULL
+              AND enrollment_started_at IS NOT NULL AND activated_at IS NULL AND rotation_started_at IS NULL)
+            OR
+            (phase = 'active' AND endpoint IS NOT NULL AND display_name IS NOT NULL
+              AND enrollment_grant IS NULL AND request_id IS NULL
+              AND active_credential_id IS NOT NULL AND active_credential_token IS NOT NULL
+              AND pending_credential_id IS NULL AND pending_credential_token IS NULL
+              AND enrollment_started_at IS NOT NULL AND activated_at IS NOT NULL AND rotation_started_at IS NULL)
+            OR
+            (phase = 'rotating' AND endpoint IS NOT NULL AND display_name IS NOT NULL
+              AND enrollment_grant IS NULL AND request_id IS NOT NULL
+              AND active_credential_id IS NOT NULL AND active_credential_token IS NOT NULL
+              AND pending_credential_id IS NOT NULL AND pending_credential_token IS NOT NULL
+              AND active_credential_id != pending_credential_id
+              AND enrollment_started_at IS NOT NULL AND activated_at IS NOT NULL AND rotation_started_at IS NOT NULL)
+          )
+        );
+        CREATE TRIGGER gateway_resident_state_identity_no_update
+        BEFORE UPDATE OF singleton, instance_id, created_at ON gateway_resident_state
+        BEGIN SELECT RAISE(ABORT, 'gateway resident identity is immutable'); END;
+        CREATE TRIGGER gateway_resident_state_no_delete
+        BEFORE DELETE ON gateway_resident_state
+        BEGIN SELECT RAISE(ABORT, 'gateway resident identity is immutable'); END;
+        CREATE TRIGGER gateway_resident_state_binding_no_update
+        BEFORE UPDATE OF endpoint, display_name ON gateway_resident_state
+        WHEN OLD.endpoint IS NOT NULL
+          AND (NEW.endpoint != OLD.endpoint OR NEW.display_name != OLD.display_name)
+        BEGIN SELECT RAISE(ABORT, 'gateway resident endpoint binding is immutable'); END;
+        CREATE TRIGGER gateway_resident_state_candidate_no_rewrite
+        BEFORE UPDATE OF enrollment_grant, request_id,
+          active_credential_id, active_credential_token,
+          pending_credential_id, pending_credential_token
+        ON gateway_resident_state
+        WHEN NEW.phase = OLD.phase
+        BEGIN SELECT RAISE(ABORT, 'gateway resident candidate is immutable'); END;
+        CREATE TRIGGER gateway_resident_state_timestamp_guard
+        BEFORE UPDATE ON gateway_resident_state
+        WHEN NEW.updated_at < OLD.updated_at
+          OR (OLD.enrollment_started_at IS NOT NULL AND NEW.enrollment_started_at < OLD.enrollment_started_at)
+          OR (OLD.activated_at IS NOT NULL AND NEW.activated_at < OLD.activated_at)
+        BEGIN SELECT RAISE(ABORT, 'gateway resident timestamps cannot regress'); END;
+        CREATE TRIGGER gateway_resident_state_transition_guard
+        BEFORE UPDATE OF phase ON gateway_resident_state
+        WHEN NEW.phase != OLD.phase AND NOT (
+          (OLD.phase = 'idle' AND NEW.phase = 'enrolling') OR
+          (OLD.phase = 'enrolling' AND NEW.phase = 'active') OR
+          (OLD.phase = 'active' AND NEW.phase = 'rotating') OR
+          (OLD.phase = 'rotating' AND NEW.phase = 'active'))
+        BEGIN SELECT RAISE(ABORT, 'invalid gateway resident phase transition'); END;
       `,
     },
   ]);

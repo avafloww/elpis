@@ -127,7 +127,7 @@ test('migration v6→v7: seeded v6 db gains token_density, existing rows survive
   db.close();
 });
 
-test('migration through v22 preserves fleet history and creates native worker state', () => {
+test('current migration prefix preserves fleet history and creates resident state', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const tables = (
@@ -166,7 +166,7 @@ test('migration through v22 preserves fleet history and creates native worker st
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    24,
+    25,
   );
   assert.deepEqual(
     (
@@ -188,6 +188,7 @@ test('migration through v22 preserves fleet history and creates native worker st
       { component: 'core', name: '0022-secretary-sessions' },
       { component: 'core', name: '0023-secretary-conversation-turns' },
       { component: 'core', name: '0024-global-secretary-authority' },
+      { component: 'core', name: '0025-gateway-resident-state' },
     ],
   );
   db.close();
@@ -248,7 +249,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    24,
+    25,
   );
   assert.deepEqual(
     (
@@ -270,6 +271,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0022-secretary-sessions',
       '0023-secretary-conversation-turns',
       '0024-global-secretary-authority',
+      '0025-gateway-resident-state',
     ],
   );
   runMigrations(db);
@@ -301,7 +303,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    11,
+    12,
   );
   db.close();
 });
@@ -341,7 +343,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 24);
+  assert.equal(version, 25);
   assert.equal(
     (
       reopened
