@@ -9,7 +9,7 @@ COPY packages/gateway/client packages/gateway/client
 COPY packages/gateway/public packages/gateway/public
 COPY packages/gateway/src packages/gateway/src
 COPY src/console/client src/console/client
-COPY src/console/public/elpis-logo-dark.svg src/console/public/elpis-logo-dark.svg
+COPY src/console/public src/console/public
 COPY packages/gateway-protocol/tsconfig.json packages/gateway-protocol/tsconfig.json
 COPY packages/gateway-protocol/src packages/gateway-protocol/src
 RUN npm run build:gateway \

@@ -46,6 +46,14 @@ test('container entrypoint fails closed around sentinel config and writable data
   assert.match(entry, /! -w \/data/);
   assert.match(entry, /! -r "\$ELPIS_CONFIG"/);
   assert.match(entry, /read-only at \/config\.yaml/);
+  assert.match(entry, /private_runtime_dir/);
+  assert.match(entry, /chmod 0700 "\$path" 2>\/dev\/null/);
+  assert.match(entry, /HOME=\$\(private_runtime_dir "\$HOME" \.elpis-home\)/);
+  assert.match(
+    entry,
+    /TMPDIR=\$\(private_runtime_dir "\$TMPDIR" \.elpis-tmp\)/,
+  );
+  assert.doesNotMatch(entry, /chmod 0700 "\$HOME" "\$TMPDIR"/);
   assert.match(entry, /exec "\$@"/);
 });
 
@@ -77,6 +85,10 @@ test('unified workflow publishes the current repository while PRs only build', (
   assert.match(workflow, /Build pull-request container without push/);
   assert.match(workflow, /if: github\.event_name == 'pull_request'/);
   assert.match(workflow, /docker push "\$target"/);
+  assert.match(workflow, /--tmpfs \/tmp:rw,noexec,nosuid,size=16m/);
+  assert.match(workflow, /--env HOME=\/tmp/);
+  assert.match(workflow, /--env TMPDIR=\/tmp/);
+  assert.match(workflow, /value\.startsWith\("\/tmp\/\.elpis-"\)/);
 });
 
 test('resident image owns exactly the protocol workspace dependency', () => {
@@ -134,7 +146,7 @@ test('resident image owns exactly the protocol workspace dependency', () => {
   );
   assert.deepEqual(gatewayDocker.match(/^COPY src\/[^\n]+$/gm), [
     'COPY src/console/client src/console/client',
-    'COPY src/console/public/elpis-logo-dark.svg src/console/public/elpis-logo-dark.svg',
+    'COPY src/console/public src/console/public',
   ]);
   assert.doesNotMatch(gatewayDocker, /COPY src(?:\s|\/(?!console\/))/);
   assert.doesNotMatch(

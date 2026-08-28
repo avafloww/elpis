@@ -156,6 +156,20 @@ jobs:
           docker run --rm --workdir /opt/elpis --entrypoint node "$image" \
             --input-type=module -e \
             "await import('@elpis/gateway-protocol'); const fs = await import('node:fs'); if (fs.existsSync('/opt/elpis/packages/gateway')) process.exit(1)"
+          config="$RUNNER_TEMP/elpis-entrypoint-config.yaml"
+          trap 'rm -f "$config"' EXIT
+          : > "$config"
+          chmod 0444 "$config"
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --env HOME=/tmp \
+            --env TMPDIR=/tmp \
+            --volume "$config:/config.yaml:ro" \
+            "$image" \
+            node -e 'const fs = require("node:fs"); for (const name of ["HOME", "TMPDIR"]) { const value = process.env[name]; if (!value || value === "/tmp" || !value.startsWith("/tmp/.elpis-")) process.exit(1); if ((fs.statSync(value).mode & 0o777) !== 0o700) process.exit(1); fs.accessSync(value, fs.constants.W_OK); }'
+          rm -f "$config"
+          trap - EXIT
       - name: Refetch and atomically publish release refs
         if: steps.prep.outputs.mode != 'none'
         run: |
