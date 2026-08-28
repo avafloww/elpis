@@ -1,6 +1,6 @@
 # Elpis Console
 
-Elpis Console is the private Preact interface for observing and steering one running resident. `src/console/server.ts` serves a static bundle built from `src/console/client`; `ConsoleHub` synchronizes every view over one same-origin WebSocket.
+Elpis Console is the private Preact interface for observing and steering one running resident. `src/console/server.ts` serves a static bundle built from `src/console/client`; `ConsoleHub` synchronizes every view over one same-origin WebSocket. The UI is exported as `ConsoleDashboard` from `src/console/client/dashboard.ts`, backed by the transport-neutral `useConsole(transport)` reducer/action hook. Its bounded transport can only publish connection/frame events and send Console frames.
 
 ## Views
 
@@ -15,7 +15,7 @@ The v2 visual and functional divergences are recorded in `docs/console-v2-adjust
 
 ## Build
 
-`npm run build` typechecks the Node harness, copies static authored assets, then strictly typechecks the browser client with `tsconfig.console.json` and bundles Preact through esbuild into stable `dist/console/public/app.js` and `app.css` assets. The design-tool `.dc.html` runtime is not part of production.
+`npm run build` typechecks the Node harness, copies static authored assets, then strictly typechecks the browser client with `tsconfig.console.json` and bundles the standalone entry and its same-origin `/ws` transport through esbuild into stable `dist/console/public/app.js` and `app.css` assets. The design-tool `.dc.html` runtime is not part of production.
 
 ## Behavioral invariants
 

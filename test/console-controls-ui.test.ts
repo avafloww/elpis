@@ -20,15 +20,29 @@ const root = path.join(here, '..');
 const read = (file: string): string =>
   fs.readFileSync(path.join(root, file), 'utf8');
 
-test('console source is a Preact five-view shell with one WebSocket reducer', () => {
+test('console exports one five-view dashboard over a bounded transport', () => {
   const main = read('src/console/client/main.tsx');
-  const socket = read('src/console/client/use-console.ts');
+  const hook = read('src/console/client/use-console.ts');
+  const transport = read('src/console/client/transport.ts');
+  const websocket = read('src/console/client/websocket-transport.ts');
+  const standalone = read('src/console/client/standalone.tsx');
   const html = read('src/console/public/index.html');
   assert.match(main, /Thread.*Context.*Mind.*Workers.*Secretary/s);
-  assert.match(main, /useConsole\(\)/);
-  assert.match(socket, /new WebSocket/);
-  assert.match(socket, /t: 'control'/);
-  assert.match(socket, /t: 'mind'/);
+  assert.match(main, /export function ConsoleDashboard/);
+  assert.match(main, /ConsoleDashboard\(\{ state, actions \}/);
+  assert.match(standalone, /useConsole\(transport\)/);
+  assert.doesNotMatch(hook, /WebSocket|location\.host|\/ws/);
+  assert.match(hook, /transport\.subscribe/);
+  assert.match(hook, /transport\.send/);
+  assert.match(transport, /interface ConsoleTransport/);
+  assert.match(websocket, /new WebSocket/);
+  assert.match(websocket, /location\.host}\/ws/);
+  assert.match(
+    standalone,
+    /<ConsoleDashboard state=\{state\} actions=\{actions\}/,
+  );
+  assert.match(hook, /t: 'control'/);
+  assert.match(hook, /t: 'mind'/);
   assert.match(html, /id="app"/);
   assert.match(html, /app\.css/);
   assert.match(html, /app\.js/);

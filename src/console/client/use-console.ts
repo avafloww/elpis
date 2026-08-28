@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'preact/hooks';
+import type { ConsoleTransport, ConsoleTransportEvent } from './transport.js';
 import type {
   ConsoleState,
   ControlSnapshot,
@@ -443,103 +444,81 @@ export interface ConsoleActions {
   clearNotice(): void;
 }
 
-export function useConsole(): [ConsoleState, ConsoleActions] {
+export function useConsole(
+  transport: ConsoleTransport,
+): [ConsoleState, ConsoleActions] {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const socket = useRef<WebSocket | null>(null);
-  const retry = useRef(500);
-  const retryTimer = useRef<number | null>(null);
   const requestId = useRef(0);
   const contextRefreshTimer = useRef<number | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  const send = useCallback((frame: JsonObject): boolean => {
-    if (socket.current?.readyState !== WebSocket.OPEN) {
+  const send = useCallback(
+    (frame: JsonObject): boolean => {
+      if (transport.send(frame)) return true;
       dispatch({ type: 'notice', value: 'Backend is not connected.' });
       return false;
-    }
-    socket.current.send(JSON.stringify(frame));
-    return true;
-  }, []);
+    },
+    [transport],
+  );
 
   useEffect(() => {
-    let disposed = false;
-    const connect = (): void => {
-      if (disposed) return;
-      dispatch({
-        type: 'connection',
-        value: retry.current === 500 ? 'connecting' : 'reconnecting',
-      });
-      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${protocol}://${location.host}/ws`);
-      socket.current = ws;
-      ws.onopen = () => {
-        retry.current = 500;
-        dispatch({ type: 'connection', value: 'connected' });
-      };
-      ws.onmessage = (event) => {
-        try {
-          const frame = JSON.parse(String(event.data)) as ServerFrame;
-          dispatch({ type: 'frame', frame });
-          if (frame.t === 'message' && stateRef.current.view === 'context') {
-            if (contextRefreshTimer.current !== null)
-              window.clearTimeout(contextRefreshTimer.current);
-            contextRefreshTimer.current = window.setTimeout(() => {
-              const reqId = ++requestId.current;
-              dispatch({ type: 'context-request', reqId });
-              send({ t: 'context', reqId });
-              contextRefreshTimer.current = null;
-            }, 150);
-          }
-          if (frame.t === 'mindResult') {
-            send({ t: 'mind', op: 'snapshot', reqId: ++requestId.current });
-            const selected = stateRef.current.selectedMindId;
-            if (selected)
-              send({
-                t: 'mind',
-                op: 'get',
-                id: selected,
-                reqId: ++requestId.current,
-              });
-          }
-          if (
-            frame.t === 'controlResult' &&
-            frame.ok !== false &&
-            frame.op !== 'snapshot'
-          ) {
-            const lane = frame.lane === 'secretary' ? 'secretary' : 'worker';
-            send({
-              t: 'control',
-              lane,
-              op: 'snapshot',
-              reqId: ++requestId.current,
-            });
-          }
-        } catch {
-          dispatch({
-            type: 'notice',
-            value: 'Ignored a malformed console frame.',
+    const unsubscribe = transport.subscribe((event: ConsoleTransportEvent) => {
+      if (event.type === 'connection') {
+        dispatch({ type: 'connection', value: event.value });
+        return;
+      }
+      if (event.type === 'malformed') {
+        dispatch({
+          type: 'notice',
+          value: 'Ignored a malformed console frame.',
+        });
+        return;
+      }
+
+      const frame = event.frame;
+      dispatch({ type: 'frame', frame });
+      if (frame.t === 'message' && stateRef.current.view === 'context') {
+        if (contextRefreshTimer.current !== null)
+          window.clearTimeout(contextRefreshTimer.current);
+        contextRefreshTimer.current = window.setTimeout(() => {
+          const reqId = ++requestId.current;
+          dispatch({ type: 'context-request', reqId });
+          send({ t: 'context', reqId });
+          contextRefreshTimer.current = null;
+        }, 150);
+      }
+      if (frame.t === 'mindResult') {
+        send({ t: 'mind', op: 'snapshot', reqId: ++requestId.current });
+        const selected = stateRef.current.selectedMindId;
+        if (selected)
+          send({
+            t: 'mind',
+            op: 'get',
+            id: selected,
+            reqId: ++requestId.current,
           });
-        }
-      };
-      ws.onerror = () => ws.close();
-      ws.onclose = () => {
-        if (disposed) return;
-        dispatch({ type: 'connection', value: 'reconnecting' });
-        const delay = retry.current;
-        retry.current = Math.min(8000, delay * 2);
-        retryTimer.current = window.setTimeout(connect, delay);
-      };
-    };
-    connect();
+      }
+      if (
+        frame.t === 'controlResult' &&
+        frame.ok !== false &&
+        frame.op !== 'snapshot'
+      ) {
+        const lane = frame.lane === 'secretary' ? 'secretary' : 'worker';
+        send({
+          t: 'control',
+          lane,
+          op: 'snapshot',
+          reqId: ++requestId.current,
+        });
+      }
+    });
     return () => {
-      disposed = true;
-      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+      unsubscribe();
       if (contextRefreshTimer.current !== null)
         window.clearTimeout(contextRefreshTimer.current);
-      socket.current?.close();
     };
-  }, [send]);
+  }, [send, transport]);
 
   useEffect(() => {
     if (

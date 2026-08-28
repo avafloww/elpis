@@ -1,4 +1,3 @@
-import { render } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ChatComposer, ActivityStrip } from './components/chat.js';
 import { clock, statusLabel, statusTone } from './components/common.js';
@@ -12,7 +11,6 @@ import type { ConsoleState, JsonObject, MindItem, ViewName } from './types.js';
 import { roomAfterSelection } from './navigation.js';
 import { clampLogRailHeight } from './scroll.js';
 import { number, text } from './types.js';
-import { useConsole } from './use-console.js';
 import './styles.css';
 
 const NAV: Array<{ view: ViewName; glyph: string; label: string }> = [
@@ -685,8 +683,12 @@ function MobileApp({
   );
 }
 
-function App() {
-  const [state, actions] = useConsole();
+export interface ConsoleDashboardProps {
+  state: ConsoleState;
+  actions: ConsoleActions;
+}
+
+export function ConsoleDashboard({ state, actions }: ConsoleDashboardProps) {
   const [hintMindId, setHintMindId] = useState<string | null>(null);
   const narrow = useNarrow();
   const proposals = useMemo(
@@ -721,5 +723,3 @@ function App() {
     </div>
   );
 }
-
-render(<App />, document.getElementById('app')!);

@@ -1,7 +1,7 @@
 import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/console/client/main.tsx'],
+  entryPoints: ['src/console/client/standalone.tsx'],
   outfile: 'dist/console/public/app.js',
   bundle: true,
   format: 'iife',
