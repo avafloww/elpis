@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 26;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -953,6 +953,36 @@ export function runMigrations(db: DatabaseSync): void {
           (OLD.phase = 'active' AND NEW.phase = 'rotating') OR
           (OLD.phase = 'rotating' AND NEW.phase = 'active'))
         BEGIN SELECT RAISE(ABORT, 'invalid gateway resident phase transition'); END;
+      `,
+    },
+    {
+      name: '0026-gateway-rotation-proposal-checkpoint',
+      sql: `
+        ALTER TABLE gateway_resident_state ADD COLUMN rotation_proposed_at INTEGER
+          CHECK (
+            rotation_proposed_at IS NULL
+            OR (
+              phase = 'rotating'
+              AND typeof(rotation_proposed_at) = 'integer'
+              AND rotation_started_at IS NOT NULL
+              AND rotation_proposed_at >= rotation_started_at
+              AND rotation_proposed_at <= updated_at
+            )
+          );
+        CREATE TRIGGER gateway_resident_state_rotation_proposal_guard
+        BEFORE UPDATE OF rotation_proposed_at ON gateway_resident_state
+        WHEN NOT (
+          (OLD.phase = 'active' AND NEW.phase = 'rotating'
+            AND NEW.rotation_proposed_at IS NULL)
+          OR
+          (OLD.phase = 'rotating' AND NEW.phase = 'rotating'
+            AND OLD.rotation_proposed_at IS NULL
+            AND NEW.rotation_proposed_at IS NOT NULL)
+          OR
+          (OLD.phase = 'rotating' AND NEW.phase = 'active'
+            AND NEW.rotation_proposed_at IS NULL)
+        )
+        BEGIN SELECT RAISE(ABORT, 'gateway rotation proposal checkpoint is immutable'); END;
       `,
     },
   ]);

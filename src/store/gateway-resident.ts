@@ -21,10 +21,7 @@ import type { Database } from './db.js';
 
 export type GatewayResidentPhase = 'idle' | 'enrolling' | 'active' | 'rotating';
 export type GatewayResidentErrorCode =
-  | 'invalid_input'
-  | 'invalid_state'
-  | 'conflict'
-  | 'corrupt_state';
+  'invalid_input' | 'invalid_state' | 'conflict' | 'corrupt_state';
 
 export class GatewayResidentStateError extends Error {
   constructor(readonly code: GatewayResidentErrorCode) {
@@ -46,6 +43,7 @@ export interface GatewayResidentSnapshot {
   readonly enrollmentStartedAt: number | null;
   readonly activatedAt: number | null;
   readonly rotationStartedAt: number | null;
+  readonly rotationProposedAt: number | null;
 }
 
 export interface BeginGatewayEnrollment {
@@ -81,6 +79,7 @@ type Row = {
   enrollment_started_at: number | null;
   activated_at: number | null;
   rotation_started_at: number | null;
+  rotation_proposed_at: number | null;
 };
 
 function fail(code: GatewayResidentErrorCode): never {
@@ -140,7 +139,10 @@ function validTime(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-function credentialToken(id: string | null, token: string | null): string | null {
+function credentialToken(
+  id: string | null,
+  token: string | null,
+): string | null {
   if (id === null && token === null) return null;
   if (id === null || token === null) fail('corrupt_state');
   const parsed = parseNodeCredential(token);
@@ -167,7 +169,12 @@ function assertRow(row: Row): void {
       (!validTime(row.activated_at) || row.activated_at < row.created_at)) ||
     (row.rotation_started_at !== null &&
       (!validTime(row.rotation_started_at) ||
-        row.rotation_started_at < row.created_at))
+        row.rotation_started_at < row.created_at)) ||
+    (row.rotation_proposed_at !== null &&
+      (!validTime(row.rotation_proposed_at) ||
+        row.rotation_started_at === null ||
+        row.rotation_proposed_at < row.rotation_started_at ||
+        row.rotation_proposed_at > row.updated_at))
   )
     fail('corrupt_state');
 
@@ -185,7 +192,8 @@ function assertRow(row: Row): void {
     row.pending_credential_token === null &&
     row.enrollment_started_at === null &&
     row.activated_at === null &&
-    row.rotation_started_at === null;
+    row.rotation_started_at === null &&
+    row.rotation_proposed_at === null;
   const enrolling =
     row.endpoint !== null &&
     row.display_name !== null &&
@@ -197,7 +205,8 @@ function assertRow(row: Row): void {
     row.pending_credential_token !== null &&
     row.enrollment_started_at !== null &&
     row.activated_at === null &&
-    row.rotation_started_at === null;
+    row.rotation_started_at === null &&
+    row.rotation_proposed_at === null;
   const active =
     row.endpoint !== null &&
     row.display_name !== null &&
@@ -209,7 +218,8 @@ function assertRow(row: Row): void {
     row.pending_credential_token === null &&
     row.enrollment_started_at !== null &&
     row.activated_at !== null &&
-    row.rotation_started_at === null;
+    row.rotation_started_at === null &&
+    row.rotation_proposed_at === null;
   const rotating =
     row.endpoint !== null &&
     row.display_name !== null &&
@@ -247,6 +257,7 @@ function publicSnapshot(row: Row): GatewayResidentSnapshot {
     enrollmentStartedAt: row.enrollment_started_at,
     activatedAt: row.activated_at,
     rotationStartedAt: row.rotation_started_at,
+    rotationProposedAt: row.rotation_proposed_at,
   });
 }
 
@@ -427,7 +438,8 @@ export class GatewayResidentStore {
     )
       fail('invalid_state');
     const parsed = parseNodeCredential(row.pending_credential_token);
-    if (!parsed || parsed.id !== row.pending_credential_id) fail('corrupt_state');
+    if (!parsed || parsed.id !== row.pending_credential_id)
+      fail('corrupt_state');
     return Object.freeze({
       format: RESIDENT_CONTROL_FORMATS.enrollmentRequest,
       grantToken: row.enrollment_grant,
@@ -442,10 +454,7 @@ export class GatewayResidentStore {
   activateEnrollment(value: unknown): GatewayResidentTransitionReceipt {
     const result = exactEnrollmentResult(value);
     const row = this.row();
-    if (
-      row.phase !== 'enrolling' ||
-      row.pending_credential_id === null
-    )
+    if (row.phase !== 'enrolling' || row.pending_credential_id === null)
       fail('invalid_state');
     if (
       result.instanceId !== row.instance_id ||
@@ -495,7 +504,8 @@ export class GatewayResidentStore {
         .prepare(
           `UPDATE gateway_resident_state SET
              phase='rotating', request_id=?, pending_credential_id=?,
-             pending_credential_token=?, rotation_started_at=?, updated_at=?
+             pending_credential_token=?, rotation_started_at=?,
+             rotation_proposed_at=NULL, updated_at=?
            WHERE singleton=1 AND phase='active' AND active_credential_id=?`,
         )
         .run(rid, next.id, next.token, at, at, old.active_credential_id);
@@ -520,7 +530,8 @@ export class GatewayResidentStore {
     )
       fail('invalid_state');
     const parsed = parseNodeCredential(row.pending_credential_token);
-    if (!parsed || parsed.id !== row.pending_credential_id) fail('corrupt_state');
+    if (!parsed || parsed.id !== row.pending_credential_id)
+      fail('corrupt_state');
     return Object.freeze({
       format: RESIDENT_CONTROL_FORMATS.rotationRequest,
       credentialId: row.pending_credential_id,
@@ -529,13 +540,64 @@ export class GatewayResidentStore {
     });
   }
 
-  activateRotation(value: unknown): GatewayResidentTransitionReceipt {
+  markRotationProposed(value: unknown): GatewayResidentSnapshot {
     const result = exactRotationResult(value);
     const row = this.row();
     if (
       row.phase !== 'rotating' ||
       row.active_credential_id === null ||
       row.pending_credential_id === null
+    )
+      fail('invalid_state');
+    if (
+      result.instanceId !== row.instance_id ||
+      result.credentialId !== row.pending_credential_id ||
+      result.previousCredentialId !== row.active_credential_id
+    )
+      fail('conflict');
+    if (row.rotation_proposed_at !== null) return publicSnapshot(row);
+
+    const at = Math.max(
+      timestamp(this.now),
+      row.updated_at,
+      row.rotation_started_at ?? 0,
+    );
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const changed = this.db
+        .prepare(
+          `UPDATE gateway_resident_state SET
+             rotation_proposed_at=?, updated_at=?
+           WHERE singleton=1 AND phase='rotating'
+             AND instance_id=? AND active_credential_id=?
+             AND pending_credential_id=? AND rotation_proposed_at IS NULL`,
+        )
+        .run(
+          at,
+          at,
+          row.instance_id,
+          row.active_credential_id,
+          row.pending_credential_id,
+        );
+      if (changed.changes !== 1) fail('conflict');
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {}
+      throw error;
+    }
+    return this.read();
+  }
+
+  activateRotation(value: unknown): GatewayResidentTransitionReceipt {
+    const result = exactRotationResult(value);
+    const row = this.row();
+    if (
+      row.phase !== 'rotating' ||
+      row.active_credential_id === null ||
+      row.pending_credential_id === null ||
+      row.rotation_proposed_at === null
     )
       fail('invalid_state');
     if (
@@ -556,10 +618,12 @@ export class GatewayResidentStore {
              active_credential_id=pending_credential_id,
              active_credential_token=pending_credential_token,
              pending_credential_id=NULL, pending_credential_token=NULL,
-             rotation_started_at=NULL, activated_at=?, updated_at=?
+             rotation_started_at=NULL, rotation_proposed_at=NULL,
+             activated_at=?, updated_at=?
            WHERE singleton=1 AND phase='rotating'
              AND instance_id=? AND active_credential_id=?
-             AND pending_credential_id=?`,
+             AND pending_credential_id=?
+             AND rotation_proposed_at IS NOT NULL`,
         )
         .run(at, at, row.instance_id, oldId, newId);
       if (changed.changes !== 1) fail('conflict');

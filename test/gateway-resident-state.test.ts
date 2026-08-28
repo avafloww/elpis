@@ -48,7 +48,9 @@ function enrollmentResult(
   };
 }
 
-function rotationResult(state: GatewayResidentSnapshot): ResidentRotationResult {
+function rotationResult(
+  state: GatewayResidentSnapshot,
+): ResidentRotationResult {
   return {
     format: RESIDENT_CONTROL_FORMATS.rotationResult,
     instanceId: state.instanceId as ResidentRotationResult['instanceId'],
@@ -68,9 +70,9 @@ function enroll(
     grantToken: grant,
     displayName: 'Resident',
   });
-  const candidateToken = store.secretValues().find((value) =>
-    value.startsWith('egc1.'),
-  )!;
+  const candidateToken = store
+    .secretValues()
+    .find((value) => value.startsWith('egc1.'))!;
   store.activateEnrollment(enrollmentResult(pending));
   return { active: store.read(), activeToken: candidateToken };
 }
@@ -108,6 +110,7 @@ test('enrollment candidate survives restart while public state remains secret-fr
     'enrollmentStartedAt',
     'activatedAt',
     'rotationStartedAt',
+    'rotationProposedAt',
   ]);
   assert.equal(Object.isFrozen(first), true);
   assert.equal(Object.isFrozen(firstSecrets), true);
@@ -197,6 +200,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   const oldId = enrolled.active.activeCredentialId!;
   now = 200;
   const rotating = store.beginRotation();
+  assert.equal(rotating.rotationProposedAt, null);
   const secrets = store.secretValues();
   const pendingToken = secrets.find((value) => value !== oldToken)!;
   assert.equal(store.activeNodeToken(), oldToken);
@@ -206,6 +210,18 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   const request = store.rotationRequest();
   assert.equal(request.credentialId, rotating.pendingCredentialId);
   assert.equal(Object.isFrozen(request), true);
+
+  // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
+  // Reopening must interpret every legacy rotation as not yet proposed.
+  db.exec(`
+    DROP TRIGGER gateway_resident_state_rotation_proposal_guard;
+    DROP TRIGGER elpis_migrations_no_delete;
+    DELETE FROM elpis_migrations
+      WHERE component='core'
+        AND name='0026-gateway-rotation-proposal-checkpoint';
+    ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;
+    PRAGMA user_version=25;
+  `);
   db.close();
 
   db = openDatabase(dir);
@@ -219,7 +235,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   assert.equal(store.pendingNodeToken(), pendingToken);
   assert.throws(
     () =>
-      store.activateRotation({
+      store.markRotationProposed({
         ...rotationResult(rotating),
         previousCredentialId: 'z'.repeat(22),
       }),
@@ -227,13 +243,49 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   );
   assert.throws(
     () =>
-      store.activateRotation({
+      store.markRotationProposed({
         ...rotationResult(rotating),
         replayed: 'false',
       }),
     stateError('invalid_input'),
   );
   assert.equal(store.activeNodeToken(), oldToken);
+  assert.throws(
+    () => store.activateRotation(rotationResult(rotating)),
+    stateError('invalid_state'),
+  );
+  assert.equal(store.activeNodeToken(), oldToken);
+  assert.equal(store.pendingNodeToken(), pendingToken);
+  const marked = store.markRotationProposed(rotationResult(rotating));
+  assert.equal(marked.rotationProposedAt, marked.updatedAt);
+  assert.ok(marked.rotationProposedAt! >= marked.rotationStartedAt!);
+  assertPublic(marked, secrets);
+  assert.deepEqual(
+    store.markRotationProposed({
+      ...rotationResult(rotating),
+      replayed: true,
+    }),
+    marked,
+  );
+  assert.throws(
+    () =>
+      db
+        .prepare(
+          'UPDATE gateway_resident_state SET rotation_proposed_at=rotation_proposed_at+1, updated_at=updated_at+1',
+        )
+        .run(),
+    /proposal checkpoint is immutable/,
+  );
+  db.close();
+
+  db = openDatabase(dir);
+  store = new GatewayResidentStore(db, {
+    now: () => ++now,
+    randomBytes: random,
+  });
+  assert.deepEqual(store.read(), marked);
+  assert.equal(store.activeNodeToken(), oldToken);
+  assert.equal(store.pendingNodeToken(), pendingToken);
 
   const receipt = store.activateRotation(rotationResult(rotating));
   assert.deepEqual(receipt, {
@@ -246,6 +298,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   assert.equal(active.phase, 'active');
   assert.equal(active.activeCredentialId, rotating.pendingCredentialId);
   assert.equal(active.pendingCredentialId, null);
+  assert.equal(active.rotationProposedAt, null);
   assert.equal(store.activeNodeToken(), pendingToken);
   assert.deepEqual(store.secretValues(), [pendingToken]);
   const rowText = JSON.stringify(
@@ -307,10 +360,12 @@ test('input validation, SQL guards, and read-time validation fail closed', (t) =
           },
         ) as never,
       ),
-    (error) => stateError('invalid_input')(error) && !String(error).includes(grant),
+    (error) =>
+      stateError('invalid_input')(error) && !String(error).includes(grant),
   );
   assert.throws(
-    () => db.prepare("UPDATE gateway_resident_state SET instance_id='bad'").run(),
+    () =>
+      db.prepare("UPDATE gateway_resident_state SET instance_id='bad'").run(),
     /immutable/,
   );
   assert.throws(
@@ -337,12 +392,15 @@ test('input validation, SQL guards, and read-time validation fail closed', (t) =
     /identity is immutable/,
   );
   assert.throws(
-    () => db.prepare("UPDATE gateway_resident_state SET request_id='nope'").run(),
+    () =>
+      db.prepare("UPDATE gateway_resident_state SET request_id='nope'").run(),
     /(candidate is immutable|CHECK constraint failed)/,
   );
   db.exec('DROP TRIGGER gateway_resident_state_binding_no_update');
   db.exec('PRAGMA ignore_check_constraints=ON');
-  db.prepare("UPDATE gateway_resident_state SET endpoint='http://bad.example'").run();
+  db.prepare(
+    "UPDATE gateway_resident_state SET endpoint='http://bad.example'",
+  ).run();
   let caught: unknown;
   try {
     store.read();
@@ -350,6 +408,7 @@ test('input validation, SQL guards, and read-time validation fail closed', (t) =
     caught = error;
   }
   assert.ok(stateError('corrupt_state')(caught));
-  for (const secret of secrets) assert.equal(String(caught).includes(secret), false);
+  for (const secret of secrets)
+    assert.equal(String(caught).includes(secret), false);
   db.close();
 });
