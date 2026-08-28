@@ -9,7 +9,13 @@ import {
 import type { ConsoleActions } from '../use-console.js';
 import type { ConsoleState, MindItem, StreamEntry } from '../types.js';
 import { object, text } from '../types.js';
-import { attachmentsOf, attachmentUrl, utterance } from '../envelope.js';
+import {
+  attachmentsOf,
+  attachmentUrl,
+  utterance,
+  type EnvelopeAttachment,
+} from '../envelope.js';
+import { useConsoleMediaUrl } from '../media-resolver.js';
 import {
   formatRunSource,
   resultSummary,
@@ -740,6 +746,44 @@ function BackgroundCard({ entry }: { entry: StreamEntry }) {
   );
 }
 
+function AttachmentCard({
+  attachment,
+  index,
+  view,
+}: {
+  attachment: EnvelopeAttachment;
+  index: number;
+  view(url: string, name: string): void;
+}) {
+  const route = attachmentUrl(attachment.localPath);
+  const url = useConsoleMediaUrl(route);
+  const image = attachment.contentType.startsWith('image/');
+  return (
+    <div class='attachment-surface' key={`${attachment.name}-${index}`}>
+      <header>
+        <span class='surface-label'>{image ? 'image' : 'attachment'}</span>
+        <strong>{attachment.name}</strong>
+        <span class='surface-spacer' />
+        <span>{attachment.size.toLocaleString()} bytes</span>
+      </header>
+      {image && url ? (
+        <button
+          class='attachment-image-button'
+          onClick={() => view(url, attachment.name)}
+          aria-label={`View ${attachment.name}`}
+        >
+          <img src={url} alt={attachment.name} loading='lazy' />
+        </button>
+      ) : null}
+      {url ? (
+        <a href={url} target='_blank' rel='noreferrer'>
+          open attachment
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
 function AttachmentCards({
   attachments,
 }: {
@@ -759,36 +803,14 @@ function AttachmentCards({
   return (
     <>
       <div class='attachment-grid'>
-        {attachments.map((attachment, index) => {
-          const url = attachmentUrl(attachment.localPath);
-          const image = attachment.contentType.startsWith('image/');
-          return (
-            <div class='attachment-surface' key={`${attachment.name}-${index}`}>
-              <header>
-                <span class='surface-label'>
-                  {image ? 'image' : 'attachment'}
-                </span>
-                <strong>{attachment.name}</strong>
-                <span class='surface-spacer' />
-                <span>{attachment.size.toLocaleString()} bytes</span>
-              </header>
-              {image && url ? (
-                <button
-                  class='attachment-image-button'
-                  onClick={() => setViewer({ url, name: attachment.name })}
-                  aria-label={`View ${attachment.name}`}
-                >
-                  <img src={url} alt={attachment.name} loading='lazy' />
-                </button>
-              ) : null}
-              {url ? (
-                <a href={url} target='_blank' rel='noreferrer'>
-                  open attachment
-                </a>
-              ) : null}
-            </div>
-          );
-        })}
+        {attachments.map((attachment, index) => (
+          <AttachmentCard
+            attachment={attachment}
+            index={index}
+            view={(url, name) => setViewer({ url, name })}
+            key={`${attachment.name}-${index}`}
+          />
+        ))}
       </div>
       {viewer ? (
         <div class='image-viewer-layer' onClick={() => setViewer(null)}>
@@ -817,6 +839,7 @@ function AttachmentCards({
 }
 
 function WatchSurface({ entry }: { entry: StreamEntry }) {
+  const frameUrl = useConsoleMediaUrl(entry.frameUrl ?? null);
   const summary = utterance(entry.content).replace(/^\[watch\]\s*/i, '');
   return (
     <div class='desktop-surface'>
@@ -827,14 +850,23 @@ function WatchSurface({ entry }: { entry: StreamEntry }) {
         <span>{clock(entry.ts)}</span>
       </header>
       <div>
-        {entry.frameUrl ? (
-          <a href={entry.frameUrl} target='_blank' rel='noreferrer'>
-            <img
-              class='desktop-frame'
-              src={entry.frameUrl}
-              alt={summary || 'post-action desktop frame'}
-              loading='lazy'
-            />
+        {frameUrl ? (
+          <a href={frameUrl} target='_blank' rel='noreferrer'>
+            {frameUrl === entry.frameUrl ? (
+              <img
+                class='desktop-frame'
+                src={entry.frameUrl}
+                alt={summary || 'post-action desktop frame'}
+                loading='lazy'
+              />
+            ) : (
+              <img
+                class='desktop-frame'
+                src={frameUrl}
+                alt={summary || 'post-action desktop frame'}
+                loading='lazy'
+              />
+            )}
           </a>
         ) : (
           <div class='desktop-frame'>frame unavailable</div>

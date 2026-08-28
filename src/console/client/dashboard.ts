@@ -7,3 +7,4 @@ export type {
 } from './transport.js';
 export { useConsole } from './use-console.js';
 export type { ConsoleActions } from './use-console.js';
+export type { ConsoleMediaResolver } from './media-resolver.js';

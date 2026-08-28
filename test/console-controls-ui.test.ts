@@ -29,7 +29,15 @@ test('console exports one five-view dashboard over a bounded transport', () => {
   const html = read('src/console/public/index.html');
   assert.match(main, /Thread.*Context.*Mind.*Workers.*Secretary/s);
   assert.match(main, /export function ConsoleDashboard/);
-  assert.match(main, /ConsoleDashboard\(\{ state, actions \}/);
+  assert.match(
+    main,
+    /export function ConsoleDashboard\(\{\s*state,\s*actions,\s*mediaResolver,\s*\}: ConsoleDashboardProps\)/,
+  );
+  assert.match(
+    main,
+    /<ConsoleMediaResolverContext\.Provider value=\{mediaResolver\}>/,
+  );
+
   assert.match(standalone, /useConsole\(transport\)/);
   assert.doesNotMatch(hook, /WebSocket|location\.host|\/ws/);
   assert.match(hook, /transport\.subscribe/);

@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import {
+  ConsoleMediaResolverContext,
+  type ConsoleMediaResolver,
+} from './media-resolver.js';
 import { ChatComposer, ActivityStrip } from './components/chat.js';
 import { clock, statusLabel, statusTone } from './components/common.js';
 import { ContextView } from './components/context.js';
@@ -686,9 +690,15 @@ function MobileApp({
 export interface ConsoleDashboardProps {
   state: ConsoleState;
   actions: ConsoleActions;
+  /** Optional transport-owned resolver for resident media routes. */
+  mediaResolver?: ConsoleMediaResolver;
 }
 
-export function ConsoleDashboard({ state, actions }: ConsoleDashboardProps) {
+export function ConsoleDashboard({
+  state,
+  actions,
+  mediaResolver,
+}: ConsoleDashboardProps) {
   const [hintMindId, setHintMindId] = useState<string | null>(null);
   const narrow = useNarrow();
   const proposals = useMemo(
@@ -713,13 +723,15 @@ export function ConsoleDashboard({ state, actions }: ConsoleDashboardProps) {
     />
   );
   return (
-    <div class='app-root'>
-      {body}
-      {state.notice ? (
-        <button class='global-notice' onClick={() => actions.clearNotice()}>
-          {state.notice} ×
-        </button>
-      ) : null}
-    </div>
+    <ConsoleMediaResolverContext.Provider value={mediaResolver}>
+      <div class='app-root'>
+        {body}
+        {state.notice ? (
+          <button class='global-notice' onClick={() => actions.clearNotice()}>
+            {state.notice} ×
+          </button>
+        ) : null}
+      </div>
+    </ConsoleMediaResolverContext.Provider>
   );
 }
