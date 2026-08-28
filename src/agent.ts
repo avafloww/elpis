@@ -43,7 +43,11 @@ import {
   externalThinkingJuice,
 } from './llm/llm.js';
 import { createCacheStats, type CacheStats } from './llm/cache-stats.js';
-import { redactSecrets, collectSecretValues } from './lib/secrets.js';
+import {
+  SecretRegistry,
+  createSecretRegistry,
+  redactSecrets,
+} from './lib/secrets.js';
 import { findRepetition, BLIND_SPOTS } from './lib/similarity.js';
 import type { ContextTracker } from './llm/context-tracker.js';
 import type { Compactor } from './llm/compactor.js';
@@ -158,7 +162,7 @@ function boundReceiptField(
 
 function redactOperationReceipts(
   receipts: RunOperationReceipt[] | undefined,
-  secrets: string[],
+  secrets: SecretRegistry,
 ): RunOperationReceipt[] | undefined {
   if (receipts === undefined) return undefined;
   return receipts.map((receipt) => {
@@ -640,6 +644,9 @@ export interface InboundMessage {
 
 export interface AgentDeps {
   config: Config;
+  /** Shared live redaction state. Production passes one instance so credential
+   * lifecycle code can register and unregister values after Agent construction. */
+  secretRegistry?: SecretRegistry;
   sandbox: {
     run(request: ManagedRunRequest): Promise<RunResult>;
     adviseWake?(
@@ -881,13 +888,12 @@ export class Agent {
    * disabled or not yet started. */
   private ambientTimer: NodeJS.Timeout | null = null;
 
-  /** Live secret values for tool-result redaction. Config is immutable after
-   * boot, so collected once here — and used UNCONDITIONALLY (redaction is a
-   * safety property of result formatting). */
-  private readonly secretValues: string[];
+  /** Shared live registry used unconditionally at every result boundary. */
+  private readonly secretRegistry: SecretRegistry;
 
   constructor(private deps: AgentDeps) {
-    this.secretValues = collectSecretValues(deps.config);
+    this.secretRegistry =
+      deps.secretRegistry ?? createSecretRegistry(deps.config);
     this.guildIndex = buildGuildIndex(deps.config.discord.guilds);
     // Seed every configured guild's clock to boot time (see lastSendAt's doc
     // comment) — a guild added later never gets a seeded entry, but a fresh
@@ -2389,7 +2395,7 @@ export class Agent {
               '| preview=',
               redactSecrets(
                 result.ok ? preview(result, 512) : cap(result.error || '', 512),
-                this.secretValues,
+                this.secretRegistry,
               ),
             );
           } catch (error) {
@@ -2405,7 +2411,7 @@ export class Agent {
 
           const operationReceipts = redactOperationReceipts(
             result.operationReceipts,
-            this.secretValues,
+            this.secretRegistry,
           );
           let wakeMetadata: RunWakeMetadata | undefined;
           if (parsed?.wake) {
@@ -2454,7 +2460,7 @@ export class Agent {
               };
               const contextResult = redactSecrets(
                 formatRunResult(result, contextRunMetadata),
-                this.secretValues,
+                this.secretRegistry,
               );
               const history = buildWakeAdvisorHistory(
                 this.messages,
@@ -2536,7 +2542,7 @@ export class Agent {
               : {}),
           };
           let resultText = formatRunResult(result, runMetadata);
-          const redacted = redactSecrets(resultText, this.secretValues);
+          const redacted = redactSecrets(resultText, this.secretRegistry);
           if (redacted !== resultText) {
             resultText = redacted;
             this.logger.warn('[agent] secret value redacted from tool result');

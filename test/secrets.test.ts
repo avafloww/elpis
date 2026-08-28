@@ -1,7 +1,12 @@
 import { createEnrollmentCredential } from '@elpis/gateway-protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectSecretValues, redactSecrets } from '../src/lib/secrets.js';
+import {
+  SecretRegistry,
+  collectSecretValues,
+  createSecretRegistry,
+  redactSecrets,
+} from '../src/lib/secrets.js';
 import { makeConfig } from './helpers.js';
 
 test('collectSecretValues reads configured credentials and ignores short or absent values', () => {
@@ -35,6 +40,46 @@ test('collectSecretValues reads configured credentials and ignores short or abse
       }),
     ),
     [],
+  );
+});
+
+test('SecretRegistry changes live without exposing or echoing secret values', () => {
+  const configured = 'configured-secret-abcdefgh';
+  const dynamic = 'dynamic-secret-ijklmnop';
+  const registry = new SecretRegistry([configured]);
+  assert.equal(registry.size, 1);
+  assert.deepEqual(Reflect.ownKeys(registry), []);
+  assert.equal(JSON.stringify(registry), '{}');
+  assert.equal(
+    redactSecrets(`before ${configured} ${dynamic}`, registry),
+    'before [SECRET REDACTED] dynamic-secret-ijklmnop',
+  );
+  assert.equal(registry.register(dynamic), true);
+  assert.equal(registry.register(dynamic), false);
+  assert.equal(registry.size, 2);
+  assert.equal(
+    redactSecrets(`after ${configured} ${dynamic}`, registry),
+    'after [SECRET REDACTED] [SECRET REDACTED]',
+  );
+  assert.equal(registry.unregister(dynamic), true);
+  assert.equal(registry.unregister(dynamic), false);
+  assert.equal(redactSecrets(dynamic, registry), dynamic);
+  const rejected = 'tiny';
+  assert.throws(
+    () => registry.register(rejected),
+    (error) => error instanceof TypeError && !error.message.includes(rejected),
+  );
+  const fromConfig = createSecretRegistry(
+    makeConfig({ kagi: { apiKey: configured } }),
+  );
+  assert.equal(redactSecrets(configured, fromConfig), '[SECRET REDACTED]');
+  const oversized = 'x'.repeat(4097);
+  assert.throws(
+    () => collectSecretValues(makeConfig({ kagi: { apiKey: oversized } })),
+    (error) =>
+      error instanceof TypeError &&
+      /redaction bound/.test(error.message) &&
+      !error.message.includes(oversized),
   );
 });
 

@@ -38,6 +38,7 @@ import { createSandboxRegistry } from './sandbox/registry.js';
 import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
+import { createSecretRegistry } from './lib/secrets.js';
 import {
   createTranscriptStore,
   loadMostRecentMain,
@@ -577,8 +578,10 @@ export async function createElpisRuntime(
     transcript.adopt(MAIN_TRANSCRIPT_ID, initialTranscript.path);
   }
 
+  const secretRegistry = createSecretRegistry(config);
   const agent = new Agent({
     config,
+    secretRegistry,
     sandbox: sandboxManager,
     memory,
     mind,

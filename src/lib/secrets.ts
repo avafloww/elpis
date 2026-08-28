@@ -1,16 +1,53 @@
-// secrets.ts — secret collection + redaction for tool-result text. Redacting
-// credentials from model-visible tool results is an unconditional safety
-// property of result formatting.
-
 import type { Config } from '../config.js';
 
-/** The live secret values worth scanning tool results for. Only values ≥8 chars
- * are considered (shorter ones would false-positive on tiny common substrings).
- *
- * Sourced from the loaded config, NOT from process.env: config.yaml is the sole
- * home of these credentials and the systemd unit carries no EnvironmentFile, so
- * reading the env here would silently yield [] — turning redactSecrets into a
- * no-op with no boot warning. */
+const MIN_SECRET_LENGTH = 8;
+const MAX_SECRET_BYTES = 4096;
+
+function validSecret(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= MIN_SECRET_LENGTH &&
+    Buffer.byteLength(value, 'utf8') <= MAX_SECRET_BYTES
+  );
+}
+
+/** Live process-local redaction state. Secret bytes remain inside a private set;
+ * callers can mutate membership or ask for redaction, never enumerate values. */
+export class SecretRegistry {
+  readonly #values = new Set<string>();
+
+  constructor(initial: Iterable<string> = []) {
+    for (const value of initial) this.register(value);
+  }
+
+  get size(): number {
+    return this.#values.size;
+  }
+
+  register(value: string): boolean {
+    if (!validSecret(value))
+      throw new TypeError('secret registry value must be a bounded string');
+    const size = this.#values.size;
+    this.#values.add(value);
+    return this.#values.size !== size;
+  }
+
+  unregister(value: string): boolean {
+    if (!validSecret(value)) return false;
+    return this.#values.delete(value);
+  }
+
+  redact(text: string): string {
+    let out = text;
+    const values = [...this.#values].sort((a, b) => b.length - a.length);
+    for (const value of values)
+      if (out.includes(value)) out = out.split(value).join('[SECRET REDACTED]');
+    return out;
+  }
+}
+
+/** Config is the boot source. Later credential state registers through the same
+ * instance instead of rebuilding a stale snapshot. */
 export function collectSecretValues(config: Config): string[] {
   const candidates = [
     config.llm.apiKey,
@@ -20,19 +57,29 @@ export function collectSecretValues(config: Config): string[] {
     config.dashboard.remote?.enrollmentToken,
   ];
   const out: string[] = [];
-  for (const v of candidates) {
-    if (v && v.length >= 8) out.push(v);
+  for (const value of candidates) {
+    if (!value || value.length < MIN_SECRET_LENGTH) continue;
+    if (!validSecret(value))
+      throw new TypeError('configured secret exceeds the redaction bound');
+    if (!out.includes(value)) out.push(value);
   }
   return out;
 }
 
-/** Redact known secret values from a tool-result/preview string (D4). */
-export function redactSecrets(text: string, secretValues: string[]): string {
+export function createSecretRegistry(config: Config): SecretRegistry {
+  return new SecretRegistry(collectSecretValues(config));
+}
+
+/** Redact known values before text crosses a model/log/receipt boundary. Arrays
+ * remain accepted for small pure callers; Agent uses the live registry. */
+export function redactSecrets(
+  text: string,
+  secrets: SecretRegistry | readonly string[],
+): string {
+  if (secrets instanceof SecretRegistry) return secrets.redact(text);
   let out = text;
-  for (const s of secretValues) {
-    if (s.length > 0 && out.includes(s)) {
-      out = out.split(s).join('[SECRET REDACTED]');
-    }
-  }
+  for (const value of [...secrets].sort((a, b) => b.length - a.length))
+    if (value.length > 0 && out.includes(value))
+      out = out.split(value).join('[SECRET REDACTED]');
   return out;
 }

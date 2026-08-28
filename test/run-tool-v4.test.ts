@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { RUN_TOOL } from '../src/llm/llm.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
+import { createSecretRegistry } from '../src/lib/secrets.js';
 
 test('run v4 schema requires concise detail with code, exact sandbox alias, and one-shot wake without end', () => {
   const parameters = RUN_TOOL.function.parameters;
@@ -198,20 +199,19 @@ test('run v4 rejects invalid wake before execution and forwards exact sandbox al
 test('operation receipts are redacted before tool metadata commit and stay out of tool text', async () => {
   const secret = 'abcd1234';
   const base = makeConfig();
+  const secretRegistry = createSecretRegistry(base);
   const h = buildTestAgent({
-    config: {
-      ...base,
-      llm: { ...base.llm, apiKey: secret },
-    },
+    config: base,
     llm: scripted([
       runResponse({ code: 'secret', wake: { after: '1h' } }, 'secret-run'),
     ]),
     tmpPrefix: 'run-v4-receipt-secret-',
     agentDeps: {
+      secretRegistry,
       sandbox: {
         run: async () => ({
           ok: true,
-          preview: 'done',
+          preview: `done ${secret}`,
           operationReceipts: [
             {
               sequence: 0,
@@ -235,6 +235,7 @@ test('operation receipts are redacted before tool metadata commit and stay out o
       },
     },
   });
+  assert.equal(secretRegistry.register(secret), true);
   void h.agent.loop();
   h.agent.enqueue(inbound());
   await settle();
@@ -253,7 +254,8 @@ test('operation receipts are redacted before tool metadata commit and stay out o
   );
   assert.equal(tool.run.operationReceipts[0]?.stdoutTruncated, true);
   assert.doesNotMatch(tool.content, /operationReceipts|printf|warning|caught/);
-  assert.match(tool.content, /done/);
+  assert.doesNotMatch(tool.content, new RegExp(secret));
+  assert.match(tool.content, /done \[SECRET REDACTED\]/);
   h.cleanup();
 });
 
