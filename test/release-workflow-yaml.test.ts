@@ -26,7 +26,9 @@ test('unified workflow has exact triggers concurrency and least job permissions'
     'workflow_dispatch',
   ]);
   assert.deepEqual(workflow.on.push.branches, ['main']);
+  assert.deepEqual(workflow.on.push['paths-ignore'], ['**/*.md']);
   assert.equal(workflow.on.push.tags, undefined);
+  assert.equal(workflow.on.pull_request, null);
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.bootstrap, {
     description: 'Publish the explicit first v0.1.0 release',
     required: true,

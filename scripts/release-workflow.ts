@@ -133,6 +133,21 @@ export async function prepareReleaseWorkflow(
   await requireAnnotatedTag(root, previousTag, false);
   const commits = await commitsBetween(root, previousTag, testedSha);
   const plan = await planReleaseSync(root, previousTag, commits);
+  const classification = classifyRelease(previousTag, commits);
+  const changedPaths = await changedPathsInRange(
+    root,
+    `${previousTag}..${testedSha}`,
+  );
+  if (
+    changedPaths.length > 0 &&
+    classification.commits.every((commit) => commit.prefix === 'docs') &&
+    changedPaths.every((entry) => entry.endsWith('.md'))
+  ) {
+    return emptyResult(
+      testedSha,
+      'all unreleased commits are docs-prefixed and only change Markdown',
+    );
+  }
   const applied = await applyReleaseSync(
     root,
     previousTag,
@@ -470,6 +485,24 @@ async function commitsBetween(
   testedSha: string,
 ): Promise<Array<{ sha: string; subject: string }>> {
   return commitsInRange(root, `${previousTag}..${testedSha}`);
+}
+
+async function changedPathsInRange(
+  root: string,
+  range: string,
+): Promise<string[]> {
+  return (
+    await git(root, [
+      'log',
+      '--format=',
+      '--name-only',
+      '--no-renames',
+      range,
+      '--',
+    ])
+  )
+    .split('\n')
+    .filter(Boolean);
 }
 
 async function commitsInRange(

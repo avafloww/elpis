@@ -106,6 +106,23 @@ const addWork = async (root: string): Promise<string> => {
   return sha;
 };
 
+const addCommit = async (
+  root: string,
+  subject: string,
+  files: Record<string, string>,
+): Promise<string> => {
+  for (const [relative, content] of Object.entries(files)) {
+    const absolute = path.join(root, relative);
+    await fs.mkdir(path.dirname(absolute), { recursive: true });
+    await fs.writeFile(absolute, content);
+  }
+  await git(root, ['add', '--', ...Object.keys(files)]);
+  await git(root, ['commit', '--no-gpg-sign', '-m', subject]);
+  const sha = await git(root, ['rev-parse', 'HEAD']);
+  await git(root, ['update-ref', 'refs/remotes/origin/main', sha]);
+  return sha;
+};
+
 test('release notes render bounded escaped work commits with abbreviated hashes', () => {
   const notes = renderReleaseNotes([
     { sha: 'a'.repeat(40), subject: 'fix: plain' },
@@ -210,6 +227,58 @@ test('CLI writes exact bounded no-release GitHub outputs', async (t) => {
   );
   assert.match(await fs.readFile(output, 'utf8'), /release_notes_sha256=\n/);
   await assert.rejects(fs.lstat(notes), { code: 'ENOENT' });
+});
+
+test('docs-only Markdown ranges skip releases without weakening mixed ranges', async (t) => {
+  const roots = await Promise.all(
+    Array.from({ length: 5 }, () => fixture(true)),
+  );
+  t.after(() =>
+    Promise.all(
+      roots.map((root) => fs.rm(root, { recursive: true, force: true })),
+    ),
+  );
+
+  await addCommit(roots[0], 'docs: first', { 'README.md': 'first\n' });
+  const docsSha = await addCommit(roots[0], 'docs(gateway): second', {
+    'docs/gateway.md': 'second\n',
+  });
+  const docs = await prepareReleaseWorkflow(roots[0], docsSha);
+  assert.equal(docs.mode, 'none');
+  assert.match(docs.reason, /docs-prefixed/);
+  assert.equal(await git(roots[0], ['rev-parse', 'HEAD']), docsSha);
+  assert.equal(await git(roots[0], ['tag', '--points-at', 'HEAD']), '');
+  assert.equal(await git(roots[0], ['status', '--porcelain=v1']), '');
+
+  const codeSha = await addCommit(roots[1], 'docs: describe source', {
+    'src/example.ts': 'export {};\n',
+  });
+  const code = await prepareReleaseWorkflow(roots[1], codeSha, 'human');
+  assert.equal(code.mode, 'release');
+  assert.equal(code.tag, 'v0.2.0');
+
+  const fixSha = await addCommit(roots[2], 'fix: correct prose', {
+    'README.md': 'fixed\n',
+  });
+  const fix = await prepareReleaseWorkflow(roots[2], fixSha, 'human');
+  assert.equal(fix.mode, 'release');
+  assert.equal(fix.tag, 'v0.1.1');
+
+  await addCommit(roots[3], 'docs: explain', { 'README.md': 'docs\n' });
+  const mixedSha = await addCommit(roots[3], 'fix: correct docs', {
+    'docs/mixed.md': 'fixed\n',
+  });
+  const mixed = await prepareReleaseWorkflow(roots[3], mixedSha, 'human');
+  assert.equal(mixed.mode, 'release');
+  assert.equal(mixed.tag, 'v0.2.0');
+
+  const malformedSha = await addCommit(roots[4], 'docs(BAD): malformed', {
+    'README.md': 'bad\n',
+  });
+  await assert.rejects(
+    prepareReleaseWorkflow(roots[4], malformedSha),
+    /invalid conventional commit subject/,
+  );
 });
 
 test('explicit bootstrap creates only deterministic v0.1.0 tag and supports recovery', async (t) => {
