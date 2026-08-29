@@ -962,7 +962,7 @@ export class Agent {
     if (this.turnSendScope === 'observe_only') return;
     if (channelId === CONSOLE_CHANNEL_ID) return;
     const policy = this.policyForChannel(channelId);
-    if (policy && !policy.allowSend) return;
+    if (!policy?.allowSend) return;
     this.deps.onThinking?.(channelId);
   }
 
@@ -992,7 +992,12 @@ export class Agent {
       throw new Error('no send handler wired');
     }
     const configPolicy = this.policyForChannel(channelId);
-    if (configPolicy && !configPolicy.allowSend) {
+    if (!configPolicy) {
+      throw new Error(
+        `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled because the channel is not configured`,
+      );
+    }
+    if (!configPolicy.allowSend) {
       throw new Error(
         `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
       );

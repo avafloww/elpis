@@ -2198,7 +2198,12 @@ export function createDiscord(
       policyChannelId,
       guildIndex,
     );
-    if (configPolicy && !configPolicy.allowSend) {
+    if (!configPolicy) {
+      throw new Error(
+        `sending to #${channelDisplayName(channel)} is disabled because the fetched channel is not configured`,
+      );
+    }
+    if (!configPolicy.allowSend) {
       throw new Error(
         `sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
       );

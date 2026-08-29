@@ -76,6 +76,18 @@ test('moderate: self-mute writes a self row and appends an internal notice', asy
   cleanup();
 });
 
+test('send rejects an unconfigured raw channel before transport', async () => {
+  const { agent, sent, cleanup } = build();
+
+  await assert.rejects(
+    () => agent.send('999999', 'must not leave'),
+    /channel is not configured/,
+  );
+  assert.equal(sent.length, 0);
+  agent.stop();
+  cleanup();
+});
+
 test('moderate: send to a muted channel throws with reason and release note', async () => {
   const { agent, cleanup } = build();
 

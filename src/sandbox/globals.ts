@@ -1559,10 +1559,13 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         `elpis.channel('internal') is not a real room — it is a provenance label. Pass a real channel ref or id.`,
       );
     }
-    // Resolve a ref to an id (a Discord id is all digits and skips resolution).
+    // Resolve every ref, including numeric Discord ids. Agent.resolveChannelRef
+    // accepts configured-but-never-seen ids from the boot-frozen guild index and
+    // rejects unknown ids; skipping numeric resolution let arbitrary fetchable
+    // Discord channels bypass the configured outbound allowlist.
     // A bare unqualified name THROWS from resolveChannel itself (agent.ts) —
     // that throw already lists qualified candidates, so it propagates as-is.
-    if (!/^\d+$/.test(channelId) && deps.resolveChannel) {
+    if (deps.resolveChannel) {
       const resolved = deps.resolveChannel(channelId);
       if (resolved) {
         channelId = resolved;
@@ -1571,7 +1574,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ? deps.listChannelsWithNames().map((c) => c.name)
           : [];
         throw new Error(
-          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified name ('friends-a/lounge') or a raw id. Known: ${known.length ? known.join(', ') : '(none yet)'}`,
+          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified name ('friends-a/lounge') or a configured raw id. Known: ${known.length ? known.join(', ') : '(none yet)'}`,
         );
       }
     }

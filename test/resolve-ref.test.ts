@@ -232,8 +232,9 @@ test('elpis.channel().send(): delivered-echo renders the guild-qualified label e
   cleanup();
 });
 
-test('elpis.channel().send(): delivered-echo for an unknown channel id renders it once, not twice (Fix 3)', async () => {
+test('elpis.channel().send(): unknown raw id is refused before delivery', async () => {
   const { agent, cleanup } = buildAgentWithChannels();
+  let sends = 0;
   const g = buildGlobals({
     config: {
       paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
@@ -247,15 +248,19 @@ test('elpis.channel().send(): delivered-echo for an unknown channel id renders i
     },
     resolveChannel: (ref: string) => agent.resolveChannelRef(ref),
     channelLabel: (id: string) => agent.qualifiedChannelLabel(id),
-    send: async () => {},
+    send: async () => {
+      sends++;
+    },
   } as Parameters<typeof buildGlobals>[0]);
   const elpis = g.elpis as {
     channel: (ref: string) => {
       send: (t: string) => Promise<{ note: string }>;
     };
   };
-  const res = await elpis.channel('999999').send('hi');
-  assert.match(res.note, /delivered to 999999\./);
-  assert.doesNotMatch(res.note, /999999 \(999999\)/);
+  assert.throws(
+    () => elpis.channel('999999'),
+    /unknown channel.*configured raw id/s,
+  );
+  assert.equal(sends, 0);
   cleanup();
 });

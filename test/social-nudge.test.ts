@@ -103,11 +103,15 @@ test('a send into a thread stamps the parent guild', async () => {
   }
 });
 
-test('a send to an unresolvable channel stamps no guild', async () => {
-  const { agent, cleanup } = buildAgent();
+test('an unresolvable send is refused and stamps no guild', async () => {
+  const { agent, sent, cleanup } = buildAgent();
   try {
     const before = new Map(lastSendAt(agent));
-    await agent.send('totally-unknown-channel', 'hello');
+    await assert.rejects(
+      () => agent.send('totally-unknown-channel', 'hello'),
+      /channel is not configured/,
+    );
+    assert.equal(sent.length, 0);
     assert.deepEqual(lastSendAt(agent), before);
   } finally {
     agent.stop();
