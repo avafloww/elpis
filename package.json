@@ -36,7 +36,8 @@
     "replay-policy-denial": "tsx scripts/replay-policy-denial.ts",
     "toggle-external-thinking": "tsx scripts/toggle-external-thinking.ts",
     "build:gateway-protocol": "npm run build --workspace @elpis/gateway-protocol",
-    "test:gateway-protocol": "npm test --workspace @elpis/gateway-protocol"
+    "test:gateway-protocol": "npm test --workspace @elpis/gateway-protocol",
+    "test:live-llm": "TEST_LIVE_LLM=1 node --test --test-concurrency=1 --test-timeout=30000 --import ./test/temp-root.mjs --import tsx/esm test/discord.test.ts test/llm-integration.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.5",

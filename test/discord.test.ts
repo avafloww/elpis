@@ -5,12 +5,33 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chunkText, attachmentLocalPath } from '../src/discord/discord.js';
 import { fetchContextWindow } from '../src/llm/llm.js';
-import { loadConfigFile, defaultConfigPath } from '../src/config.js';
+import {
+  loadConfigFile,
+  defaultConfigPath,
+  type Config,
+} from '../src/config.js';
+import { openDatabase, type Database } from '../src/store/db.js';
+import { resolveDataLayout } from '../src/store/data-layout.js';
 import * as fs from 'node:fs';
 
-/** Live tests need real credentials. Without a config.yaml there is nothing to
- * run against, so skip rather than fail — same spirit as the NO_NETWORK gate. */
+const LIVE_LLM = process.env.TEST_LIVE_LLM === '1';
+const NO_NETWORK = !!process.env.TEST_NO_NETWORK;
 const NO_CONFIG = !fs.existsSync(defaultConfigPath());
+const SKIP_LIVE = !LIVE_LLM || NO_NETWORK || NO_CONFIG;
+
+async function withLiveConfig<T>(
+  run: (config: Config, database: Database) => Promise<T>,
+): Promise<T> {
+  const config = loadConfigFile();
+  const database = openDatabase(
+    resolveDataLayout(config.paths.dataDirectory).root,
+  );
+  try {
+    return await run(config, database);
+  } finally {
+    database.close();
+  }
+}
 
 test('chunkText: short text unchanged', () => {
   assert.deepEqual(chunkText('hello'), ['hello']);
@@ -46,36 +67,42 @@ test('chunkText: custom max param', () => {
   for (const c of chunks) assert.ok(c.length <= 5);
 });
 
-// ---------- fetchContextWindow (live, against the real endpoint) ----------
-
-const NO_NETWORK = !!process.env.TEST_NO_NETWORK;
+// ---------- fetchContextWindow (explicit live endpoint probes) ----------
 
 test(
   'fetchContextWindow: resolves configured model context_window',
-  { skip: NO_NETWORK || NO_CONFIG },
+  { skip: SKIP_LIVE },
   async () => {
-    const config = loadConfigFile();
-    const cw = await fetchContextWindow({
-      ...config,
-      llm: { ...config.llm, contextSize: null },
+    await withLiveConfig(async (config, database) => {
+      const cw = await fetchContextWindow(
+        {
+          ...config,
+          llm: { ...config.llm, contextSize: null },
+        },
+        database,
+      );
+      assert.ok(Number.isFinite(cw));
+      assert.ok(cw > 0);
+      assert.ok(cw >= 100000, `unexpectedly small context window: ${cw}`);
     });
-    assert.ok(Number.isFinite(cw));
-    assert.ok(cw > 0);
-    // umans-kimi-k2.7 → 262144 (the configured model in config.yaml)
-    assert.ok(cw >= 100000, `unexpectedly small context window: ${cw}`);
   },
 );
 
 test(
   'fetchContextWindow: throws clearly for unknown model',
-  { skip: NO_NETWORK || NO_CONFIG },
+  { skip: SKIP_LIVE },
   async () => {
-    const config = loadConfigFile();
-    const bad = {
-      ...config,
-      llm: { ...config.llm, contextSize: null, model: 'nonexistent-model-xyz' },
-    };
-    await assert.rejects(() => fetchContextWindow(bad));
+    await withLiveConfig(async (config, database) => {
+      const bad = {
+        ...config,
+        llm: {
+          ...config.llm,
+          contextSize: null,
+          model: 'nonexistent-model-xyz',
+        },
+      };
+      await assert.rejects(() => fetchContextWindow(bad, database));
+    });
   },
 );
 
