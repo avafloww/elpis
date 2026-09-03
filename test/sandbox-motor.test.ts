@@ -516,6 +516,48 @@ test('failed start at capacity preserves retained episodes until commit', async 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('semantic gamepad keys map through the bounded press grammar', async () => {
+  const dir = tempDir();
+  const outputs = [
+    completion('press', { key: 'GAMEPAD_A' }),
+    completion('press', { key: 'GAMEPAD_B' }),
+    completion('press', { key: 'GAMEPAD_START' }),
+    completion('press', { key: 'GAMEPAD_SELECT' }),
+    completion('done', { summary: 'gamepad key map complete' }),
+  ];
+  let firstOptions: StandaloneCompleteOptions | undefined;
+  const { motor, calls } = fixture(dir, async (_messages, options) => {
+    firstOptions ??= options;
+    return outputs.shift()!;
+  });
+  motor.start('exercise each semantic gamepad key once', {
+    episodeId: 'gamepad-keys',
+    settleMs: 0,
+    authority: { allowedTools: ['press'], maxKeyPresses: 4 },
+  });
+  const ended = await until(
+    () => motor.status('gamepad-keys'),
+    (value) => value.status === 'completed',
+  );
+  assert.equal(ended.counters.keyPresses, 4);
+  assert.deepEqual(calls.key, ['x', 'z', 'Return', 'Shift_R']);
+  const pressTool = firstOptions?.tools?.find(
+    (tool) => tool.type === 'function' && tool.function.name === 'press',
+  );
+  assert.deepEqual(
+    pressTool &&
+      'function' in pressTool &&
+      (
+        pressTool.function.parameters as {
+          properties: { key: { enum: string[] } };
+        }
+      ).properties.key.enum.filter((key) => key.startsWith('GAMEPAD_')),
+    ['GAMEPAD_A', 'GAMEPAD_B', 'GAMEPAD_START', 'GAMEPAD_SELECT'],
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('authority validation fails closed before an ungranted action', async () => {
   const dir = tempDir();
   const { motor, calls } = fixture(dir, async () =>

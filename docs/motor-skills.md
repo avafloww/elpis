@@ -9,7 +9,7 @@ Elpis discovers motor-skill packages at boot from two owned roots:
 
 The package directory and frontmatter `name` must match. Duplicate names across roots fail startup. Package resources are bounded regular UTF-8 text files; symlinks, special files, unsupported extensions, and traversal-shaped names are rejected.
 
-The resident-facing `elpis.motor.start` documentation always includes the bounded name-and-description catalog, not full bodies. The resident selects up to four packages with `start(goal, { skills: [...] })`. Selection order is preserved and combined main bodies may not exceed 32 KiB. Motor skills supply instructions only; they cannot widen the separately validated motor authority envelope.
+The resident-facing `elpis.motor.start` documentation always includes the bounded name-and-description catalog, not full bodies. The resident selects up to four packages with `start(goal, { skills: [...] })`. Selection order is preserved and combined main bodies may not exceed 32 KiB. Motor skills supply instructions only; they cannot widen the separately validated motor authority envelope. The bounded `press` grammar includes semantic `GAMEPAD_A`, `GAMEPAD_B`, `GAMEPAD_START`, and `GAMEPAD_SELECT` keys for keyboard-driven emulators; arbitrary key emission remains unavailable.
 
 `elpis.motor.inspectSkill(name)` explicitly returns the main `SKILL.md` body, description, source kind, SHA-256 digest, package root, absolute main-file path, and auxiliary resource manifest to the resident. It does not load the skill into an episode.
 
