@@ -20,6 +20,27 @@ function asFetch(
   return implementation as typeof globalThis.fetch;
 }
 
+function cancellableRequest(url = responseUrl): {
+  request: Request;
+  cancelled: () => number;
+} {
+  let cancelCount = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('payload'));
+    },
+    cancel() {
+      cancelCount += 1;
+    },
+  });
+  const request = new Request(url, {
+    method: 'POST',
+    body,
+    ...({ duplex: 'half' } as object),
+  });
+  return { request, cancelled: () => cancelCount };
+}
+
 test('preserves exact request bytes and exact provider response', async () => {
   const providerResponse = new Response('provider bytes', {
     status: 207,
@@ -79,10 +100,8 @@ test('takes immutable custody of a mutable URL before credential lookup', async 
 });
 
 test('rejects a Request with a deceptive URL getter before side effects', async () => {
-  const deceptive = new Request('https://attacker.invalid/steal', {
-    method: 'POST',
-    body: 'payload',
-  });
+  const body = cancellableRequest('https://attacker.invalid/steal');
+  const deceptive = body.request;
   Object.defineProperty(deceptive, 'url', {
     get: () => responseUrl,
   });
@@ -106,6 +125,7 @@ test('rejects a Request with a deceptive URL getter before side effects', async 
   );
   assert.equal(keys, 0);
   assert.equal(calls, 0);
+  assert.equal(body.cancelled(), 1);
 });
 
 test('rejects an already-aborted request before credential lookup', async () => {
@@ -170,6 +190,51 @@ test('abort cancels a pending key lookup and removes its listener', async () => 
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   assert.equal(keys, 1);
   assert.equal(calls, 0);
+});
+
+test('abort during key lookup cancels a transferred request body', async () => {
+  const controller = new AbortController();
+  const body = cancellableRequest();
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => new Promise<string>(() => undefined),
+    fetch: asFetch(async () => new Response()),
+  });
+
+  const pending = pinned(body.request, { signal: controller.signal });
+  await Promise.resolve();
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(body.request.bodyUsed, true);
+  assert.equal(body.cancelled(), 1);
+});
+
+test('key-source failure cancels a transferred request body', async () => {
+  const body = cancellableRequest();
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      throw new Error('source secret');
+    },
+    fetch: asFetch(async () => new Response()),
+  });
+
+  await assert.rejects(() => pinned(body.request), /API key source failed/);
+  assert.equal(body.request.bodyUsed, true);
+  assert.equal(body.cancelled(), 1);
+});
+
+test('invalid key cancels a transferred request body', async () => {
+  const body = cancellableRequest();
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'invalid key with spaces',
+    fetch: asFetch(async () => new Response()),
+  });
+
+  await assert.rejects(() => pinned(body.request), /API key is invalid/);
+  assert.equal(body.request.bodyUsed, true);
+  assert.equal(body.cancelled(), 1);
 });
 
 test('locks a Request body before asynchronous credential lookup', async () => {

@@ -121,6 +121,24 @@ function abortReason(signal: AbortSignal): unknown {
   );
 }
 
+async function releaseRequestBody(request: Request): Promise<void> {
+  if (!request.body || request.bodyUsed) return;
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      request.body.cancel().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 100);
+        timer.unref();
+      }),
+    ]);
+  } catch {
+    // Releasing owned input must never replace the primary request failure.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function awaitWithAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
@@ -166,26 +184,34 @@ export function createOpenAICompatibleFetch(
   const dispatcher = options.dispatcher;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = snapshotRequest(input, init);
-    validateRequest(request, allowedUrls);
-    const headers = new Headers(request.headers);
-    for (const name of SENSITIVE_REQUEST_HEADERS) headers.delete(name);
-    if (request.signal.aborted) throw abortReason(request.signal);
+    let request: Request | null = null;
+    let handedOff = false;
+    try {
+      request = snapshotRequest(input, init);
+      validateRequest(request, allowedUrls);
+      const headers = new Headers(request.headers);
+      for (const name of SENSITIVE_REQUEST_HEADERS) headers.delete(name);
+      if (request.signal.aborted) throw abortReason(request.signal);
 
-    const suppliedKey = await awaitWithAbort(
-      Promise.resolve()
-        .then(apiKeySource)
-        .catch(() => {
-          throw new Error('OpenAI-compatible API key source failed');
-        }),
-      request.signal,
-    );
-    if (request.signal.aborted) throw abortReason(request.signal);
-    headers.set('authorization', `Bearer ${validateApiKey(suppliedKey)}`);
+      const suppliedKey = await awaitWithAbort(
+        Promise.resolve()
+          .then(apiKeySource)
+          .catch(() => {
+            throw new Error('OpenAI-compatible API key source failed');
+          }),
+        request.signal,
+      );
+      if (request.signal.aborted) throw abortReason(request.signal);
+      headers.set('authorization', `Bearer ${validateApiKey(suppliedKey)}`);
 
-    const outbound = new Request(request, { headers });
-    if (dispatcher === undefined) return underlyingFetch(outbound);
-    const fetchInit: FetchInitWithDispatcher = { dispatcher };
-    return underlyingFetch(outbound, fetchInit);
+      const outbound = new Request(request, { headers });
+      handedOff = true;
+      if (dispatcher === undefined) return underlyingFetch(outbound);
+      const fetchInit: FetchInitWithDispatcher = { dispatcher };
+      return underlyingFetch(outbound, fetchInit);
+    } catch (error) {
+      if (request && !handedOff) await releaseRequestBody(request);
+      throw error;
+    }
   };
 }
