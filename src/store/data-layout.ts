@@ -14,6 +14,7 @@ export interface DataLayout {
   extensions: string;
   wordlists: string;
   skills: string;
+  motorSkills: string;
   database: string;
   sessions: string;
   bg: string;
@@ -41,6 +42,7 @@ export function resolveDataLayout(dataDirectory: string): DataLayout {
     extensions: path.join(config, 'extensions'),
     wordlists: path.join(config, 'wordlists'),
     skills: path.join(root, 'skills'),
+    motorSkills: path.join(root, 'motor-skills'),
     database: path.join(root, 'elpis.db'),
     sessions: path.join(root, 'sessions'),
     bg: path.join(root, 'bg'),
@@ -97,6 +99,8 @@ export function ensureElpisDataScaffold(dataDirectory: string): {
   fs.chmodSync(layout.config, 0o700);
   fs.mkdirSync(layout.skills, { recursive: true, mode: 0o700 });
   fs.chmodSync(layout.skills, 0o700);
+  fs.mkdirSync(layout.motorSkills, { recursive: true, mode: 0o700 });
+  fs.chmodSync(layout.motorSkills, 0o700);
 
   let gitignoreRepaired = true;
   try {

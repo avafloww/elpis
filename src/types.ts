@@ -28,6 +28,7 @@ import type {
   ContextResourceDescriptor,
   ContextResources,
 } from './context-resources.js';
+import type { MotorSkills } from './motor-skills.js';
 
 export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
@@ -122,6 +123,8 @@ export interface SandboxDeps {
     ContextResources,
     'beforeFileAccess' | 'beforeTreeAccess'
   >;
+  /** Boot-frozen catalog selected by the resident for bounded motor episodes. */
+  motorSkills?: Pick<MotorSkills, 'inspect' | 'select'>;
   send?: (
     channelId: string,
     content: string,

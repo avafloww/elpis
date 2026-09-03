@@ -11,6 +11,7 @@ COPY packages/gateway-protocol/src ./packages/gateway-protocol/src
 COPY scripts/build-console.mjs ./scripts/build-console.mjs
 COPY src ./src
 COPY skills ./skills
+COPY motor-skills ./motor-skills
 COPY bench ./bench
 COPY test/helpers.ts ./test/helpers.ts
 RUN npm run build

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -8,6 +8,17 @@ import {
   type StandaloneCompleteResult,
 } from '../llm/llm.js';
 import { resolveDataLayout } from '../store/data-layout.js';
+import {
+  MAX_MOTOR_SKILL_BYTES,
+  MAX_MOTOR_SKILL_DESCRIPTION_CHARS,
+  MAX_MOTOR_SKILL_PACKAGE_BYTES,
+  MAX_MOTOR_SKILL_RESOURCE_BYTES,
+  MAX_MOTOR_SKILL_RESOURCES,
+  MAX_MOTOR_SKILLS_PER_EPISODE,
+  MAX_MOTOR_SKILL_TOTAL_BYTES,
+  type MotorSkills,
+  type ResolvedMotorSkill,
+} from '../motor-skills.js';
 
 type MotorToolName =
   'click' | 'double_click' | 'drag' | 'write' | 'press' | 'scroll';
@@ -49,6 +60,8 @@ const MAX_WRITE_CHARS = 2_000;
 const MAX_EPISODES = 100;
 const MAX_MESSAGES = 160;
 const RECENT_SCREENSHOTS = 3;
+const MAX_SKILL_RESOURCE_READS = 8;
+const MAX_SKILL_RESOURCE_READ_BYTES = 32 * 1024;
 
 export interface MotorAuthorityInput {
   allowedTools?: MotorToolName[];
@@ -70,6 +83,7 @@ interface MotorAuthority {
 
 export interface MotorStartOptions {
   episodeId?: string;
+  skills?: string[];
   dryRun?: boolean;
   maxTurns?: number;
   softTurnBudget?: number;
@@ -102,6 +116,7 @@ export interface MotorOversightPacket {
 
 export interface MotorControllerDeps {
   dataDirectory: string;
+  motorSkills?: Pick<MotorSkills, 'inspect' | 'select'>;
   completeStandalone: (
     messages: ChatMessage[],
     opts?: StandaloneCompleteOptions,
@@ -129,6 +144,8 @@ interface EpisodeCounters {
   textChars: number;
   keyPresses: number;
   scrolls: number;
+  skillResourceReads: number;
+  skillResourceBytes: number;
 }
 
 interface EpisodeRecord {
@@ -144,9 +161,10 @@ interface EpisodeRecord {
   frame: string | null;
   traceFile: string;
   messages: ChatMessage[];
+  motorSkills: ReadonlyArray<Readonly<ResolvedMotorSkill>>;
   authority: MotorAuthority;
   counters: EpisodeCounters;
-  opts: Required<Omit<MotorStartOptions, 'episodeId' | 'authority'>>;
+  opts: Required<Omit<MotorStartOptions, 'episodeId' | 'authority' | 'skills'>>;
   pendingGuidance: string | null;
   recent: Array<{
     tool: string;
@@ -191,6 +209,21 @@ Do not invent completion: call done only after success is visibly present. Use n
 Coordinates are normalized integers from 0 to 1000 against the exact screenshot, origin at top-left.
 Tool receipts are authoritative. Prior screenshots may be replaced by [screenshot evicted]; preserve useful state in concise assistant content when needed.
 Keep credentials out of reasoning, action arguments, and traces; use opaque host secret handoff when available. Never broaden the goal or authority envelope.`;
+
+function motorSystemPrompt(
+  goal: string,
+  skills: ReadonlyArray<Readonly<ResolvedMotorSkill>>,
+): string {
+  const selected = skills.map((skill) => {
+    const resources = skill.resources.length
+      ? '\nThis selected package has auxiliary resources. Use read_skill_resource only for an exact skill:name/path handle cited by this loaded body and only when the current problem needs it.'
+      : '\nThis selected skill has no auxiliary package resources.';
+    return `<resident-selected-motor-skill name=${JSON.stringify(skill.name)} sha256=${JSON.stringify(skill.sha256)}>\nThis SKILL.md body is already loaded. Never source or reread it.\n${skill.body}${resources}\n</resident-selected-motor-skill>`;
+  });
+  return [MOTOR_SYSTEM_PROMPT, ...selected, `Scoped goal: ${goal}`].join(
+    '\n\n',
+  );
+}
 
 const amountSchema = {
   type: 'string',
@@ -289,6 +322,22 @@ export const DESKTOP_MOTOR_TOOLS: NativeTool[] = [
           amount: amountSchema,
         },
         required: ['direction', 'amount'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_skill_resource',
+      description:
+        'Read one auxiliary text resource from a resident-selected motor-skill package. Selected SKILL.md bodies are already loaded and must not be sourced with this tool. Use it only when the loaded skill or current visible problem makes that resource relevant.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: { type: 'string', minLength: 1, maxLength: 512 },
+        },
+        required: ['path'],
       },
     },
   },
@@ -483,12 +532,17 @@ export function parseMotorToolCall(
   return { call, args: args as Record<string, unknown> };
 }
 
-function toolsFor(scope: MotorAuthority): NativeTool[] {
+function toolsFor(
+  scope: MotorAuthority,
+  skills: ReadonlyArray<Readonly<ResolvedMotorSkill>>,
+): NativeTool[] {
+  const hasResources = skills.some((skill) => skill.resources.length > 0);
   return DESKTOP_MOTOR_TOOLS.filter((tool) => {
     const name = tool.function.name;
     return (
       name === 'done' ||
       name === 'needs_guidance' ||
+      (name === 'read_skill_resource' && hasResources) ||
       scope.allowedTools.includes(name as MotorToolName)
     );
   });
@@ -498,6 +552,7 @@ function snapshot(episode: EpisodeRecord) {
   return {
     episodeId: episode.episodeId,
     goal: episode.goal,
+    skills: episode.motorSkills.map((skill) => skill.name),
     status: episode.status,
     checkpointSeq: episode.checkpointSeq,
     turns: episode.turns,
@@ -634,6 +689,7 @@ function resolvedOptions(value: MotorStartOptions = {}): EpisodeRecord['opts'] {
 function incrementRecoveredCounters(
   counters: EpisodeCounters,
   call: NativeToolCall,
+  skills: ReadonlyArray<Readonly<ResolvedMotorSkill>>,
 ): void {
   let args: Record<string, unknown> = {};
   try {
@@ -653,6 +709,149 @@ function incrementRecoveredCounters(
   }
   if (call.function.name === 'press') counters.keyPresses++;
   if (call.function.name === 'scroll') counters.scrolls++;
+  if (call.function.name === 'read_skill_resource') {
+    const handle = typeof args.path === 'string' ? args.path : '';
+    const resource = skills
+      .flatMap((skill) => skill.resources)
+      .find((candidate) => candidate.handle === handle);
+    if (resource) {
+      counters.skillResourceReads++;
+      counters.skillResourceBytes += resource.bytes;
+    }
+  }
+}
+
+function recoverMotorSkills(
+  value: unknown,
+): ReadonlyArray<Readonly<ResolvedMotorSkill>> {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > MAX_MOTOR_SKILLS_PER_EPISODE)
+    throw new Error('recovered motor skills are invalid');
+  const seen = new Set<string>();
+  let totalMainBytes = 0;
+  const skills = value.map((item) => {
+    const skill = strictObject(item, 'recovered motor skill', [
+      'name',
+      'description',
+      'source',
+      'rootPath',
+      'path',
+      'sha256',
+      'body',
+      'resources',
+    ]);
+    const name = boundedText(skill.name, 'recovered motor skill name', 64);
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name) || seen.has(name))
+      throw new Error('recovered motor skill name is invalid');
+    seen.add(name);
+    const description = boundedText(
+      skill.description,
+      'recovered motor skill description',
+      MAX_MOTOR_SKILL_DESCRIPTION_CHARS,
+    );
+    if (skill.source !== 'data' && skill.source !== 'bundled')
+      throw new Error('recovered motor skill source is invalid');
+    const rootPath = boundedText(
+      skill.rootPath,
+      'recovered motor skill root path',
+      4_096,
+    );
+    const skillPath = boundedText(
+      skill.path,
+      'recovered motor skill path',
+      4_096,
+    );
+    if (
+      !path.isAbsolute(rootPath) ||
+      skillPath !== path.join(rootPath, 'SKILL.md')
+    )
+      throw new Error('recovered motor skill paths are invalid');
+    if (typeof skill.body !== 'string')
+      throw new Error('recovered motor skill body is invalid');
+    const mainBytes = Buffer.byteLength(skill.body, 'utf8');
+    if (mainBytes > MAX_MOTOR_SKILL_BYTES)
+      throw new Error('recovered motor skill body is oversized');
+    totalMainBytes += mainBytes;
+    if (totalMainBytes > MAX_MOTOR_SKILL_TOTAL_BYTES)
+      throw new Error('recovered motor skill bodies exceed aggregate limit');
+    if (
+      typeof skill.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(skill.sha256) ||
+      createHash('sha256').update(skill.body, 'utf8').digest('hex') !==
+        skill.sha256
+    )
+      throw new Error('recovered motor skill digest is invalid');
+    if (
+      !Array.isArray(skill.resources) ||
+      skill.resources.length > MAX_MOTOR_SKILL_RESOURCES
+    )
+      throw new Error('recovered motor skill resources are invalid');
+    let packageBytes = mainBytes;
+    const resourceNames = new Set<string>();
+    const resources = skill.resources.map((item) => {
+      const resource = strictObject(item, 'recovered motor skill resource', [
+        'handle',
+        'relativePath',
+        'path',
+        'sha256',
+        'bytes',
+        'body',
+      ]);
+      const relativePath = boundedText(
+        resource.relativePath,
+        'recovered motor skill resource relative path',
+        512,
+      );
+      const segments = relativePath.split('/');
+      if (
+        segments.length > 4 ||
+        segments.some(
+          (segment) => !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(segment),
+        ) ||
+        resourceNames.has(relativePath)
+      )
+        throw new Error('recovered motor skill resource path is invalid');
+      resourceNames.add(relativePath);
+      const handle = `skill:${name}/${relativePath}`;
+      const resourcePath = path.join(rootPath, ...segments);
+      if (resource.handle !== handle || resource.path !== resourcePath)
+        throw new Error('recovered motor skill resource binding is invalid');
+      if (typeof resource.body !== 'string')
+        throw new Error('recovered motor skill resource body is invalid');
+      const bytes = Buffer.byteLength(resource.body, 'utf8');
+      if (bytes > MAX_MOTOR_SKILL_RESOURCE_BYTES || resource.bytes !== bytes)
+        throw new Error('recovered motor skill resource size is invalid');
+      packageBytes += bytes;
+      if (packageBytes > MAX_MOTOR_SKILL_PACKAGE_BYTES)
+        throw new Error('recovered motor skill package is oversized');
+      if (
+        typeof resource.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(resource.sha256) ||
+        createHash('sha256').update(resource.body, 'utf8').digest('hex') !==
+          resource.sha256
+      )
+        throw new Error('recovered motor skill resource digest is invalid');
+      return Object.freeze({
+        handle,
+        relativePath,
+        path: resourcePath,
+        sha256: resource.sha256,
+        bytes,
+        body: resource.body,
+      });
+    });
+    return Object.freeze({
+      name,
+      description,
+      source: skill.source,
+      rootPath,
+      path: skillPath,
+      sha256: skill.sha256,
+      body: skill.body,
+      resources: Object.freeze(resources),
+    });
+  });
+  return Object.freeze(skills);
 }
 
 function restoreEpisode(
@@ -680,10 +879,12 @@ function restoreEpisode(
   const episodeId = safeId(start.episodeId);
   if (path.basename(traceFile) !== `${episodeId}.jsonl`) return null;
   let goal: string;
+  let motorSkills: ReadonlyArray<Readonly<ResolvedMotorSkill>>;
   let scope: MotorAuthority;
   let opts: EpisodeRecord['opts'];
   try {
     goal = boundedText(start.goal, 'recovered motor goal', MAX_GOAL_CHARS);
+    motorSkills = recoverMotorSkills(start.motorSkills);
     scope = authority((start.authority ?? {}) as MotorAuthorityInput);
     opts = resolvedOptions((start.options ?? {}) as MotorStartOptions);
   } catch {
@@ -696,7 +897,7 @@ function restoreEpisode(
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: `${MOTOR_SYSTEM_PROMPT}\n\nScoped goal: ${goal}`,
+      content: motorSystemPrompt(goal, motorSkills),
     },
   ];
   const counters: EpisodeCounters = {
@@ -705,6 +906,8 @@ function restoreEpisode(
     textChars: 0,
     keyPresses: 0,
     scrolls: 0,
+    skillResourceReads: 0,
+    skillResourceBytes: 0,
   };
   const recent: EpisodeRecord['recent'] = [];
   const prepared = new Set<string>();
@@ -761,7 +964,7 @@ function restoreEpisode(
         content: event.receipt,
         tool_call_id: call.id,
       });
-      incrementRecoveredCounters(counters, call);
+      incrementRecoveredCounters(counters, call, motorSkills);
       turns = Math.max(
         turns,
         typeof event.turn === 'number' ? event.turn + 1 : turns + 1,
@@ -853,6 +1056,7 @@ function restoreEpisode(
     frame,
     traceFile,
     messages,
+    motorSkills,
     authority: scope,
     counters,
     opts,
@@ -950,6 +1154,34 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       return {
         receipt: `paused for guidance: ${reason}`,
         terminal: 'needs_guidance',
+      };
+    }
+    if (name === 'read_skill_resource') {
+      const args = strictObject(argsValue, name, ['path']);
+      const handle = boundedText(args.path, 'motor skill resource path', 512);
+      const resource = episode.motorSkills
+        .flatMap((skill) => skill.resources)
+        .find((candidate) => candidate.handle === handle);
+      if (!resource)
+        throw new Error(
+          `motor skill resource is outside selected packages: ${handle}`,
+        );
+      if (episode.counters.skillResourceReads >= MAX_SKILL_RESOURCE_READS)
+        throw new Error('motor skill resource-read budget exhausted');
+      if (
+        episode.counters.skillResourceBytes + resource.bytes >
+        MAX_SKILL_RESOURCE_READ_BYTES
+      )
+        throw new Error('motor skill resource-byte budget exhausted');
+      episode.counters.skillResourceReads++;
+      episode.counters.skillResourceBytes += resource.bytes;
+      return {
+        receipt: JSON.stringify({
+          ok: true,
+          path: resource.handle,
+          sha256: resource.sha256,
+          body: resource.body,
+        }),
       };
     }
     if (!episode.authority.allowedTools.includes(name as MotorToolName))
@@ -1110,7 +1342,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         return await episode.runtime.completeStandalone(episode.messages, {
           cacheKey: `motor-${episode.episodeId}`,
           reasoningEffort: 'medium',
-          tools: toolsFor(episode.authority),
+          tools: toolsFor(episode.authority, episode.motorSkills),
           toolChoice: 'required',
           temperature: 0.8,
           topP: 0.95,
@@ -1422,6 +1654,13 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       const runtime = deps;
       const originChannelId = runtime.originChannelId?.() ?? null;
       const episodeOptions = resolvedOptions(opts);
+      const selectedSkills = deps.motorSkills
+        ? deps.motorSkills.select(opts.skills ?? [])
+        : opts.skills?.length
+          ? (() => {
+              throw new Error('elpis.motor: motor skills are unavailable');
+            })()
+          : Object.freeze([]);
       const record: EpisodeRecord = {
         episodeId,
         goal,
@@ -1437,9 +1676,10 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         messages: [
           {
             role: 'system',
-            content: `${MOTOR_SYSTEM_PROMPT}\n\nScoped goal: ${goal}`,
+            content: motorSystemPrompt(goal, selectedSkills),
           },
         ],
+        motorSkills: selectedSkills,
         authority: authority(opts.authority),
         counters: {
           pointerActions: 0,
@@ -1447,6 +1687,8 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
           textChars: 0,
           keyPresses: 0,
           scrolls: 0,
+          skillResourceReads: 0,
+          skillResourceBytes: 0,
         },
         opts: episodeOptions,
         pendingGuidance: null,
@@ -1458,18 +1700,28 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         runtime,
       };
       episodes.set(episodeId, record);
-      append(record.traceFile, {
-        type: 'start',
-        at: new Date(startedAt).toISOString(),
-        episodeId,
-        goal,
-        authority: record.authority,
-        options: record.opts,
-        originChannelId,
-      });
+      append(
+        record.traceFile,
+        {
+          type: 'start',
+          at: new Date(startedAt).toISOString(),
+          episodeId,
+          goal,
+          authority: record.authority,
+          options: record.opts,
+          motorSkills: record.motorSkills,
+          originChannelId,
+        },
+        true,
+      );
       secureAndPruneEpisodeFiles(episodesDir);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
+    },
+    inspectSkill: (name: string) => {
+      if (!deps.motorSkills)
+        throw new Error('elpis.motor: motor skills are unavailable');
+      return deps.motorSkills.inspect(name);
     },
     status: (episodeId?: string) =>
       episodeId

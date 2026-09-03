@@ -4,7 +4,10 @@ import { build } from '../src/llm/prompt.js';
 import { resolveBuiltinModules } from '../src/builtin-modules.js';
 import { makeConfig } from './helpers.js';
 
-function prompt(config: ReturnType<typeof makeConfig>) {
+function prompt(
+  config: ReturnType<typeof makeConfig>,
+  motorSkills: Array<{ name: string; description: string }> = [],
+) {
   return build({
     soul: '',
     memory: '',
@@ -12,6 +15,7 @@ function prompt(config: ReturnType<typeof makeConfig>) {
     harnessRoot: '/harness',
     dataDirectory: '/data',
     modules: resolveBuiltinModules(config),
+    motorSkills,
   });
 }
 
@@ -33,6 +37,19 @@ test('only active built-in modules enter the prompt', () => {
     'Bluesky is selected but not configured',
   ])
     assert.equal(p.includes(absent), false, absent);
+});
+
+test('active motor docs expose only the resident-selectable motor-skill catalog', () => {
+  const p = prompt(
+    makeConfig({
+      modules: { enabled: ['computer', 'motor'], disabled: [] },
+    }),
+    [{ name: 'pixel-game', description: 'LeafGreen controls and save ritual' }],
+  );
+  assert.match(p, /Available motor skills for `opts\.skills`/);
+  assert.match(p, /`pixel-game`: LeafGreen controls and save ritual/);
+  assert.match(p, /inspectSkill\(name\)/);
+  assert.doesNotMatch(p, /SUPER SECRET MOTOR BODY/);
 });
 
 test('disabled and unavailable modules are both entirely absent from prompt text', () => {

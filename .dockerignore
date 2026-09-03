@@ -23,6 +23,8 @@
 !src/**
 !skills/
 !skills/**
+!motor-skills/
+!motor-skills/**
 !test/
 !test/helpers.ts
 !bench/

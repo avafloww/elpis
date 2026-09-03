@@ -1236,6 +1236,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     const motorComputer = computerApi;
     e.motor = createMotorController({
       dataDirectory: deps.config.paths.dataDirectory,
+      motorSkills: deps.motorSkills,
       completeStandalone: (messages, opts) => {
         if (!deps.motorCompleteStandalone)
           throw new Error(

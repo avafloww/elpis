@@ -76,6 +76,7 @@ import {
 } from './llm/prompt.js';
 import type { Config } from './config.js';
 import type { ContextResources } from './context-resources.js';
+import type { MotorSkills } from './motor-skills.js';
 import type {
   BuiltinModuleRegistry,
   RuntimeProfile,
@@ -662,6 +663,8 @@ export interface AgentDeps {
   mind?: MindService;
   /** Shared current-window skill and AGENTS.md context state. */
   contextResources?: ContextResources;
+  /** Boot-frozen resident-selected motor-skill catalog. */
+  motorSkills?: MotorSkills;
   /** Boot-frozen deterministic prompt blocks from data-directory extensions. */
   extensionPrompt?: string;
   /** Boot-resolved built-in modules; also used by the sandbox. */
@@ -3212,6 +3215,7 @@ export class Agent {
       modules: this.deps.modules,
       profile: this.deps.profile,
       skills: this.deps.contextResources?.catalog(),
+      motorSkills: this.deps.motorSkills?.catalog(),
     });
     const externalThinkingHint = this.config.llm.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`

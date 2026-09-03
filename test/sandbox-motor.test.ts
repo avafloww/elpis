@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -17,11 +18,30 @@ import type {
   StandaloneCompleteResult,
 } from '../src/llm/llm.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
+import { MotorSkills } from '../src/motor-skills.js';
 
 const usage = { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 };
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-resident-motor-test-'));
+}
+
+function writeMotorSkill(
+  dataDirectory: string,
+  name: string,
+  body: string,
+): string {
+  const file = path.join(
+    resolveDataLayout(dataDirectory).motorSkills,
+    name,
+    'SKILL.md',
+  );
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    `---\nname: ${name}\ndescription: ${name} motor technique\n---\n\n${body}\n`,
+  );
+  return file;
 }
 
 function fakePng(file: string, width = 1280, height = 800): void {
@@ -252,6 +272,7 @@ test('resident motor completes a native click-write-done episode with parsed rec
   assert.deepEqual(Object.keys(motor).sort(), [
     'continue',
     'guide',
+    'inspectSkill',
     'interrupt',
     'start',
     'status',
@@ -525,6 +546,228 @@ test('interrupt aborts an in-flight provider call without executing an action', 
   );
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('resident selects, reads resources, traces, and exactly restores motor packages', async () => {
+  const dir = tempDir();
+  const file = writeMotorSkill(dir, 'pixel-game', 'ORIGINAL MOTOR BODY');
+  const rootPath = path.dirname(file);
+  const resourceFile = path.join(rootPath, 'TROUBLESHOOTING.md');
+  fs.writeFileSync(resourceFile, 'ORIGINAL RESOURCE BODY\n');
+  const firstCatalog = new MotorSkills({
+    dataDirectory: dir,
+    bundledSkillsDirectory: null,
+  });
+  const firstSeen: Array<{
+    messages: ChatMessage[];
+    opts: StandaloneCompleteOptions;
+  }> = [];
+  const outputs = [
+    completion('read_skill_resource', {
+      path: 'skill:pixel-game/TROUBLESHOOTING.md',
+    }),
+    completion('needs_guidance', { reason: 'pause for restart' }),
+  ];
+  const first = fixture(
+    dir,
+    async (messages, opts = {}) => {
+      firstSeen.push({ messages: structuredClone(messages), opts });
+      return outputs.shift()!;
+    },
+    { motorSkills: firstCatalog },
+  );
+  const inspected = first.motor.inspectSkill('pixel-game');
+  assert.equal(inspected.name, 'pixel-game');
+  assert.equal(inspected.path, file);
+  assert.equal(inspected.rootPath, rootPath);
+  assert.equal(inspected.source, 'data');
+  assert.equal(inspected.body, fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(inspected.resources, [
+    {
+      handle: 'skill:pixel-game/TROUBLESHOOTING.md',
+      relativePath: 'TROUBLESHOOTING.md',
+      path: resourceFile,
+      sha256: createHash('sha256')
+        .update('ORIGINAL RESOURCE BODY\n')
+        .digest('hex'),
+      bytes: 23,
+    },
+  ]);
+
+  const started = first.motor.start('take one safe step', {
+    episodeId: 'motor-skilled',
+    skills: ['pixel-game'],
+    settleMs: 0,
+  });
+  assert.deepEqual(started.skills, ['pixel-game']);
+  const paused = await until(
+    () => first.motor.status('motor-skilled'),
+    (value) => value.status === 'needs_guidance',
+  );
+  assert.equal(paused.counters.skillResourceReads, 1);
+  assert.equal(paused.counters.skillResourceBytes, 23);
+  const prompt = firstSeen[0].messages[0].content;
+  assert.match(prompt, /ORIGINAL MOTOR BODY/);
+  assert.match(prompt, /This SKILL\.md body is already loaded/);
+  assert.doesNotMatch(prompt, /skill:pixel-game\/TROUBLESHOOTING\.md/);
+  assert.doesNotMatch(prompt, /ORIGINAL RESOURCE BODY/);
+  assert.ok(
+    prompt.indexOf('ORIGINAL MOTOR BODY') <
+      prompt.indexOf('Scoped goal: take one safe step'),
+  );
+  assert.doesNotMatch(
+    prompt,
+    new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  assert.equal(
+    firstSeen[0].opts.tools?.some(
+      (tool) =>
+        tool.type === 'function' &&
+        tool.function.name === 'read_skill_resource',
+    ),
+    true,
+  );
+  assert.match(
+    firstSeen[1].messages.find((message) => message.role === 'tool')?.content ??
+      '',
+    /ORIGINAL RESOURCE BODY/,
+  );
+
+  const traceFile = path.join(
+    resolveDataLayout(dir).motor,
+    'episodes',
+    'motor-skilled.jsonl',
+  );
+  const trace = fs.readFileSync(traceFile, 'utf8').trim().split('\n');
+  const traceStart = JSON.parse(trace[0]);
+  assert.equal(traceStart.motorSkills[0].body, fs.readFileSync(file, 'utf8'));
+  assert.equal(
+    traceStart.motorSkills[0].resources[0].body,
+    'ORIGINAL RESOURCE BODY\n',
+  );
+
+  fs.writeFileSync(
+    file,
+    '---\nname: pixel-game\ndescription: pixel-game motor technique\n---\n\nMUTATED BODY\n',
+  );
+  fs.writeFileSync(resourceFile, 'MUTATED RESOURCE\n');
+  resetResidentMotorForTest(dir);
+  const restoredSeen: ChatMessage[][] = [];
+  const second = fixture(
+    dir,
+    async (messages) => {
+      restoredSeen.push(structuredClone(messages));
+      return completion('done', { summary: 'restored exact skill' });
+    },
+    {
+      motorSkills: new MotorSkills({
+        dataDirectory: dir,
+        bundledSkillsDirectory: null,
+      }),
+    },
+  );
+  const restored = second.motor.status('motor-skilled');
+  assert.deepEqual(restored.skills, ['pixel-game']);
+  assert.equal(restored.counters.skillResourceReads, 1);
+  assert.equal(restored.counters.skillResourceBytes, 23);
+  second.motor.continue('motor-skilled', restored.checkpointSeq);
+  await until(
+    () => second.motor.status('motor-skilled'),
+    (value) => value.status === 'completed',
+  );
+  assert.match(restoredSeen[0][0].content, /ORIGINAL MOTOR BODY/);
+  assert.doesNotMatch(restoredSeen[0][0].content, /MUTATED BODY/);
+  assert.match(
+    restoredSeen[0].find((message) => message.role === 'tool')?.content ?? '',
+    /ORIGINAL RESOURCE BODY/,
+  );
+  assert.doesNotMatch(
+    restoredSeen[0].find((message) => message.role === 'tool')?.content ?? '',
+    /MUTATED RESOURCE/,
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('motor resource reads cannot cross the resident-selected package boundary', async () => {
+  const dir = tempDir();
+  const selectedFile = writeMotorSkill(dir, 'selected', 'SELECTED BODY');
+  const hiddenFile = writeMotorSkill(dir, 'hidden', 'HIDDEN BODY');
+  fs.writeFileSync(
+    path.join(path.dirname(selectedFile), 'REFERENCE.md'),
+    'selected reference',
+  );
+  fs.writeFileSync(
+    path.join(path.dirname(hiddenFile), 'SECRET.md'),
+    'hidden reference',
+  );
+  const calls = fixture(
+    dir,
+    async () =>
+      completion('read_skill_resource', {
+        path: 'skill:hidden/SECRET.md',
+      }),
+    {
+      motorSkills: new MotorSkills({
+        dataDirectory: dir,
+        bundledSkillsDirectory: null,
+      }),
+    },
+  );
+  calls.motor.start('use only the selected package', {
+    episodeId: 'resource-boundary',
+    skills: ['selected'],
+    settleMs: 0,
+  });
+  const ended = await until(
+    () => calls.motor.status('resource-boundary'),
+    (value) => value.status === 'failed',
+  );
+  assert.match(ended.lastError ?? '', /outside selected packages/);
+  assert.equal(ended.counters.skillResourceReads, 0);
+  assert.equal(ended.counters.skillResourceBytes, 0);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('motor resource reads stop at the independent observation budget', async () => {
+  const dir = tempDir();
+  const file = writeMotorSkill(
+    dir,
+    'bounded',
+    'Read the cited reference only when needed.',
+  );
+  fs.writeFileSync(path.join(path.dirname(file), 'REFERENCE.md'), 'small body');
+  const motor = fixture(
+    dir,
+    async () =>
+      completion('read_skill_resource', {
+        path: 'skill:bounded/REFERENCE.md',
+      }),
+    {
+      motorSkills: new MotorSkills({
+        dataDirectory: dir,
+        bundledSkillsDirectory: null,
+      }),
+    },
+  ).motor;
+  motor.start('exercise the bounded reference reader', {
+    episodeId: 'resource-budget',
+    skills: ['bounded'],
+    settleMs: 0,
+    softTurnBudget: 10,
+    hardTurnBudget: 12,
+  });
+  const ended = await until(
+    () => motor.status('resource-budget'),
+    (value) => value.status === 'failed',
+  );
+  assert.match(ended.lastError ?? '', /resource-read budget exhausted/);
+  assert.equal(ended.counters.skillResourceReads, 8);
+  assert.equal(ended.counters.skillResourceBytes, 80);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('cold restart restores paused history and resumes only after matching oversight', async () => {
   const dir = tempDir();
   const outputs = [

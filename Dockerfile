@@ -8,6 +8,7 @@ COPY packages/gateway-protocol/tsconfig.json ./packages/gateway-protocol/tsconfi
 COPY packages/gateway-protocol/src ./packages/gateway-protocol/src
 COPY scripts/build-console.mjs ./scripts/build-console.mjs
 COPY skills ./skills
+COPY motor-skills ./motor-skills
 COPY src ./src
 RUN npm run build \
   && npm prune --omit=dev --legacy-peer-deps --workspace @elpis/gateway-protocol --include-workspace-root

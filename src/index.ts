@@ -40,6 +40,7 @@ import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
 import { createSecretRegistry } from './lib/secrets.js';
 import { ContextResources } from './context-resources.js';
+import { MotorSkills } from './motor-skills.js';
 import {
   createGatewayEnrollmentController,
   launchGatewayEnrollment,
@@ -467,9 +468,16 @@ export async function createElpisRuntime(
     dataDirectory: config.paths.dataDirectory,
     logger: config.logger,
   });
+  const motorSkills = modules.isActive('motor')
+    ? new MotorSkills({
+        dataDirectory: config.paths.dataDirectory,
+        logger: config.logger,
+      })
+    : undefined;
   const sandboxDeps: SandboxDeps = {
     config,
     contextResources,
+    motorSkills,
     replayIdentity: modules.isActive('motor')
       ? replayIdentityForConfig(configForLlmRole(config, 'motor'))
       : null,
@@ -646,6 +654,7 @@ export async function createElpisRuntime(
     memory,
     mind,
     contextResources,
+    motorSkills,
     extensionPrompt: extensions.prompt,
     modules,
     profile,
