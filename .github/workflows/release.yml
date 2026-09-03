@@ -47,7 +47,8 @@ jobs:
       - run: npm run build
       - run: npm run build:gateway
       - run: npm run bench:check
-      - run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit production dependencies
+        run: scripts/npm-audit-ci.sh
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: github.event_name == 'pull_request'
         with:
@@ -135,7 +136,7 @@ jobs:
           npm run build
           npm run build:gateway
           npm run bench:check
-          npm audit --omit=dev --audit-level=moderate
+          scripts/npm-audit-ci.sh
           test "$(git rev-parse HEAD)" = '${{ steps.prep.outputs.release_sha }}'
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0

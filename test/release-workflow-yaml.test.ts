@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
@@ -174,5 +175,85 @@ test('every workflow run block is valid Bash after expression substitution', asy
         maxBuffer: 1024 * 1024,
       });
     }
+  }
+});
+
+test('audit script retries only bounded transient network failures', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'elpis-audit-ci-'));
+  const bin = path.join(tmp, 'bin');
+  await fs.mkdir(bin, { mode: 0o700 });
+  await fs.writeFile(
+    path.join(bin, 'npm'),
+    `#!/bin/bash
+count=0
+[ ! -f "$COUNT_FILE" ] || count="$(cat "$COUNT_FILE")"
+count=$((count + 1))
+printf '%s' "$count" >"$COUNT_FILE"
+case "$CASE" in
+  transient)
+    if [ "$count" -eq 1 ]; then
+      echo 'npm warn audit 503 Service Unavailable - POST https://registry.npmjs.org/'
+      echo 'npm error audit endpoint returned an error'
+      exit 1
+    fi
+    echo 'found 0 vulnerabilities'
+    exit 0
+    ;;
+  unauthorized)
+    echo 'npm warn audit 401 Unauthorized - POST https://registry.npmjs.org/'
+    echo 'npm error audit endpoint returned an error'
+    exit 1
+    ;;
+  advisory-text)
+    echo 'high severity advisory: network timeout at dependency boundary'
+    exit 1
+    ;;
+  outage)
+    echo 'npm warn audit network timeout at: https://registry.npmjs.org/'
+    echo 'npm error audit endpoint returned an error'
+    exit 1
+    ;;
+  *) exit 99 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  await fs.writeFile(path.join(bin, 'sleep'), '#!/bin/bash\nexit 0\n', {
+    mode: 0o700,
+  });
+
+  const cases = [
+    { name: 'transient', status: 0, calls: 2 },
+    { name: 'unauthorized', status: 1, calls: 1 },
+    { name: 'advisory-text', status: 1, calls: 1 },
+    { name: 'outage', status: 1, calls: 3 },
+  ];
+  try {
+    for (const fixture of cases) {
+      const countFile = path.join(tmp, `${fixture.name}.count`);
+      let status = 0;
+      try {
+        await execFileAsync(path.join(root, 'scripts/npm-audit-ci.sh'), [], {
+          encoding: 'utf8',
+          maxBuffer: 1024 * 1024,
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            CASE: fixture.name,
+            COUNT_FILE: countFile,
+          },
+        });
+      } catch (error) {
+        status = (error as { code?: number }).code ?? -1;
+      }
+      assert.equal(status, fixture.status, fixture.name);
+      assert.equal(
+        Number(await fs.readFile(countFile, 'utf8')),
+        fixture.calls,
+        fixture.name,
+      );
+    }
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
   }
 });
