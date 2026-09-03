@@ -424,6 +424,73 @@ test('failed start persistence leaves no phantom episode or reserved id', async 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('failed start at capacity preserves retained episodes until commit', async () => {
+  const dir = tempDir();
+  const episodesDir = path.join(resolveDataLayout(dir).motor, 'episodes');
+  fs.mkdirSync(episodesDir, { recursive: true, mode: 0o700 });
+  for (let index = 0; index < 100; index++) {
+    const episodeId = `retained-${String(index).padStart(3, '0')}`;
+    fs.writeFileSync(
+      path.join(episodesDir, `${episodeId}.jsonl`),
+      [
+        JSON.stringify({
+          type: 'start',
+          at: new Date(index + 1).toISOString(),
+          episodeId,
+          goal: 'retained terminal episode',
+          authority: {},
+          options: {},
+        }),
+        JSON.stringify({
+          type: 'completed',
+          at: new Date(index + 2).toISOString(),
+          checkpointSeq: 0,
+        }),
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+  }
+  const motor = fixture(dir, async () =>
+    completion('done', { summary: 'capacity start committed' }),
+  ).motor;
+  const before = motor.status() as Array<{ episodeId: string }>;
+  assert.equal(before.length, 100);
+  assert.throws(
+    () =>
+      motor.start('invalid start at capacity', {
+        episodeId: 'capacity-failure',
+        skills: ['unavailable'],
+      }),
+    /motor skills are unavailable/,
+  );
+  const after = motor.status() as Array<{ episodeId: string }>;
+  assert.deepEqual(
+    after.map((episode) => episode.episodeId).sort(),
+    before.map((episode) => episode.episodeId).sort(),
+  );
+  assert.equal(
+    fs.existsSync(path.join(episodesDir, 'capacity-failure.jsonl')),
+    false,
+  );
+  motor.start('valid start at capacity', {
+    episodeId: 'capacity-success',
+    settleMs: 0,
+  });
+  await until(
+    () => motor.status('capacity-success'),
+    (value) => value.status === 'completed',
+  );
+  const committed = motor.status() as Array<{ episodeId: string }>;
+  assert.equal(committed.length, 100);
+  assert.equal(
+    committed.some((episode) => episode.episodeId === 'retained-000'),
+    false,
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('authority validation fails closed before an ungranted action', async () => {
   const dir = tempDir();
   const { motor, calls } = fixture(dir, async () =>
@@ -1051,6 +1118,56 @@ test('cold recovery keeps mid-flight guidance on the next observation', async ()
   );
   assert.doesNotMatch(historicalObservations[0].content, /next lower control/);
   assert.match(historicalObservations[1].content, /next lower control/);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cold recovery rejects uncited frozen package resources', async () => {
+  const dir = tempDir();
+  const file = writeMotorSkill(
+    dir,
+    'cited-live',
+    'Use skill:cited-live/REFERENCE.md only when needed.',
+  );
+  fs.writeFileSync(path.join(path.dirname(file), 'REFERENCE.md'), 'reference');
+  const first = fixture(
+    dir,
+    async () => completion('needs_guidance', { reason: 'pause for tamper' }),
+    {
+      motorSkills: new MotorSkills({
+        dataDirectory: dir,
+        bundledSkillsDirectory: null,
+      }),
+    },
+  );
+  first.motor.start('freeze a cited package', {
+    episodeId: 'uncited-recovery',
+    skills: ['cited-live'],
+    settleMs: 0,
+  });
+  const paused = await until(
+    () => first.motor.status('uncited-recovery'),
+    (value) => value.status === 'needs_guidance',
+  );
+  const lines = fs.readFileSync(paused.traceFile, 'utf8').trimEnd().split('\n');
+  const start = JSON.parse(lines[0]);
+  start.motorSkills[0].body = start.motorSkills[0].body.replace(
+    'skill:cited-live/REFERENCE.md',
+    'the omitted reference',
+  );
+  start.motorSkills[0].sha256 = createHash('sha256')
+    .update(start.motorSkills[0].body)
+    .digest('hex');
+  lines[0] = JSON.stringify(start);
+  fs.writeFileSync(paused.traceFile, `${lines.join('\n')}\n`);
+  resetResidentMotorForTest(dir);
+  const second = fixture(dir, async () => {
+    throw new Error('uncited recovered package must not run');
+  });
+  assert.throws(
+    () => second.motor.status('uncited-recovery'),
+    /unknown episode/,
+  );
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });

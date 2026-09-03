@@ -912,6 +912,12 @@ function recoverMotorSkills(
         body: resource.body,
       });
     });
+    for (const resource of resources) {
+      if (!skill.body.includes(resource.handle))
+        throw new Error(
+          `recovered motor skill resource is not cited by SKILL.md: ${resource.handle}`,
+        );
+    }
     return Object.freeze({
       name,
       description,
@@ -1768,16 +1774,13 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         throw new Error(
           `elpis.motor: episode ${active.episodeId} is already active (${active.status})`,
         );
-      if (episodes.size >= MAX_EPISODES) {
-        const removable = [...episodes.values()]
-          .filter((episode) => TERMINAL_STATUSES.has(episode.status))
-          .sort((a, b) => a.updatedAt - b.updatedAt);
-        for (const episode of removable.slice(
-          0,
-          episodes.size - MAX_EPISODES + 1,
-        ))
-          episodes.delete(episode.episodeId);
-      }
+      const evictionCandidates =
+        episodes.size >= MAX_EPISODES
+          ? [...episodes.values()]
+              .filter((episode) => TERMINAL_STATUSES.has(episode.status))
+              .sort((a, b) => a.updatedAt - b.updatedAt)
+              .slice(0, episodes.size - MAX_EPISODES + 1)
+          : [];
       const episodeId = safeId(
         opts.episodeId ??
           `motor-${new Date(now()).toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`,
@@ -1866,6 +1869,8 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         }
         throw error;
       }
+      for (const episode of evictionCandidates)
+        episodes.delete(episode.episodeId);
       episodes.set(episodeId, record);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
