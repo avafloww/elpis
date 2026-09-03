@@ -307,6 +307,23 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /query option proxies are not supported/,
   );
   assert.equal(queryProxyTrapCalls, 0);
+  let optionPrototypeTrapCalls = 0;
+  const optionPrototype = new Proxy(Object.prototype, {
+    getOwnPropertyDescriptor(target, property) {
+      optionPrototypeTrapCalls++;
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+  const optionPrototypeInput = Object.create(optionPrototype);
+  Object.defineProperties(optionPrototypeInput, {
+    prompt: { value: 'x', enumerable: true },
+    model: { value: 'weak', enumerable: true },
+  });
+  assert.throws(
+    () => runtime.prepare(optionPrototypeInput),
+    /query option prototype proxies are not supported/,
+  );
+  assert.equal(optionPrototypeTrapCalls, 0);
   const hiddenPrompt = { model: 'weak' } as Record<string, unknown>;
   Object.defineProperty(hiddenPrompt, 'prompt', {
     value: 'x',
@@ -314,7 +331,7 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
   });
   await assert.rejects(
     runtime.query(hiddenPrompt),
-    /own enumerable data properties/,
+    /prompt must be a non-empty string/,
   );
   const getterPrompt = { model: 'weak' } as Record<string, unknown>;
   let topLevelGetterCalls = 0;
@@ -330,6 +347,52 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /own enumerable data properties/,
   );
   assert.equal(topLevelGetterCalls, 0);
+  let ignoredAccessorCalls = 0;
+  const inertSchema: Record<PropertyKey, unknown> = { type: 'string' };
+  Object.defineProperty(inertSchema, 'hidden', {
+    enumerable: false,
+    get: () => {
+      ignoredAccessorCalls++;
+      return 'must-not-run';
+    },
+  });
+  Object.defineProperty(inertSchema, Symbol('hidden-schema'), {
+    enumerable: true,
+    get: () => {
+      ignoredAccessorCalls++;
+      return 'must-not-run';
+    },
+  });
+  const inertInput: Record<PropertyKey, unknown> = {
+    prompt: 'x',
+    model: 'weak',
+    schema: inertSchema,
+  };
+  Object.defineProperty(inertInput, 'hidden', {
+    enumerable: false,
+    get: () => {
+      ignoredAccessorCalls++;
+      return 'must-not-run';
+    },
+  });
+  Object.defineProperty(inertInput, Symbol('hidden-option'), {
+    enumerable: true,
+    get: () => {
+      ignoredAccessorCalls++;
+      return 'must-not-run';
+    },
+  });
+  const inertPrepared = runtime.prepare(inertInput);
+  assert.deepEqual(Object.keys(inertPrepared.schema ?? {}), ['type']);
+  assert.equal(inertPrepared.schema?.type, 'string');
+  assert.equal(ignoredAccessorCalls, 0);
+  const tooManyOptions: Record<string, unknown> = {
+    prompt: 'x',
+    model: 'weak',
+  };
+  for (let index = 0; index < 100; index++)
+    tooManyOptions[`extra${index}`] = index;
+  assert.throws(() => runtime.prepare(tooManyOptions), /too many options/);
   let nestedGetterCalls = 0;
   const getterSchema = {};
   Object.defineProperty(getterSchema, 'type', {
