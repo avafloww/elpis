@@ -79,9 +79,10 @@
   "author": "Ava Chaney",
   "overrides": {
     "@hono/node-server": "2.1.0",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
     "hono": "4.12.34",
-    "ip-address": "10.5.0"
+    "ip-address": "10.5.0",
+    "qs": "6.16.0"
   },
   "workspaces": [
     "packages/*"
