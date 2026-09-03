@@ -256,6 +256,7 @@ test('OpenAI Responses standalone aborts before visible output exceeds its byte 
   let signal: AbortSignal | undefined;
   let chunks = 0;
   let returnCalls = 0;
+  let returnSettled = false;
   (llm.client as any).responses.create = async (
     _params: Record<string, unknown>,
     options: { signal?: AbortSignal },
@@ -275,6 +276,8 @@ test('OpenAI Responses standalone aborts before visible output exceeds its byte 
           },
           async return() {
             returnCalls++;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            returnSettled = true;
             return { done: true };
           },
         };
@@ -290,6 +293,7 @@ test('OpenAI Responses standalone aborts before visible output exceeds its byte 
   assert.equal(signal?.aborted, true);
   assert.equal(chunks, 2);
   assert.equal(returnCalls, 1);
+  assert.equal(returnSettled, true);
 });
 
 test('OpenAI Responses closes immediately after a failed terminal event', async () => {
@@ -417,10 +421,14 @@ test('Anthropic standalone rejects error events and missing message_stop', async
             'data: {"error":{"type":"overloaded_error","message":"overloaded"}}',
             '',
           ].join('\n')
-        : [
-            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
-            '',
-          ].join('\n');
+        : request === 2
+          ? [
+              'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+              '',
+            ].join('\n')
+          : ['data: {malformed', 'data: {"type":"message_stop"}', ''].join(
+              '\n',
+            );
     return new Response(sse, { status: 200 });
   };
   try {
@@ -432,6 +440,10 @@ test('Anthropic standalone rejects error events and missing message_stop', async
     await assert.rejects(
       llm.completeStandalone!([{ role: 'user', content: 'bounded' }]),
       /ended without message_stop/,
+    );
+    await assert.rejects(
+      llm.completeStandalone!([{ role: 'user', content: 'bounded' }]),
+      /malformed JSON event/,
     );
   } finally {
     globalThis.fetch = originalFetch;

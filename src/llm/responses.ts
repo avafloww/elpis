@@ -544,7 +544,7 @@ export async function streamResponsesComplete(
       }
     };
 
-    let closeIterator: (() => void) | null = null;
+    let closeIterator: (() => Promise<void>) | null = null;
     try {
       const baseRequest = {
         ...buildResponsesParams(config, prepared, modelTools),
@@ -568,14 +568,31 @@ export async function streamResponsesComplete(
       requestId = (stream as unknown as { _request_id?: string })._request_id;
       const iterator = stream[Symbol.asyncIterator]();
       let iteratorClosed = false;
-      closeIterator = () => {
+      closeIterator = async () => {
         if (iteratorClosed) return;
         iteratorClosed = true;
+        let closing: PromiseLike<unknown> | undefined;
         try {
-          const closing = iterator.return?.();
-          void Promise.resolve(closing).catch(() => {});
+          closing = iterator.return?.();
         } catch {
-          /* cleanup must not replace the provider result */
+          return;
+        }
+        if (!closing) return;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        try {
+          const deadline = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 1_000);
+            timer.unref();
+          });
+          await Promise.race([
+            Promise.resolve(closing).then(
+              () => undefined,
+              () => undefined,
+            ),
+            deadline,
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       };
       streamLoop: for (;;) {
@@ -679,7 +696,7 @@ export async function streamResponsesComplete(
       }
       throw classifyError(e);
     } finally {
-      closeIterator?.();
+      if (closeIterator) await closeIterator();
     }
 
     if (failure) throw classifyError(failure);

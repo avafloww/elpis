@@ -688,14 +688,18 @@ async function* parseSSE(
       } else if (line.startsWith('data:')) {
         const payload = line.slice(5).trim();
         if (payload === '[DONE]' || payload === '') continue;
+        let event: Record<string, unknown>;
         try {
-          const event = JSON.parse(payload) as Record<string, unknown>;
-          if (eventName === 'error' && event.type === undefined)
-            event.type = 'error';
-          yield event;
+          event = JSON.parse(payload) as Record<string, unknown>;
         } catch {
-          /* malformed events cannot produce a successful terminal stream */
+          throw Object.assign(
+            new Error('anthropic stream contained malformed JSON event'),
+            { status: 502, code: 'malformed_stream_event' },
+          );
         }
+        if (eventName === 'error' && event.type === undefined)
+          event.type = 'error';
+        yield event;
         eventName = '';
       } else if (line.trim() === '') {
         eventName = '';
