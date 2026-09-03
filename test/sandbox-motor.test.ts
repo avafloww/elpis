@@ -9,6 +9,7 @@ import {
   resetResidentMotorForTest,
   parseMotorToolCall,
   trimMotorImages,
+  writeMotorTraceRecord,
   type MotorControllerDeps,
   type MotorOversightPacket,
 } from '../src/sandbox/motor.js';
@@ -134,6 +135,21 @@ function fixture(
   };
   return { motor: createMotorController(deps) as any, calls, deps };
 }
+
+test('motor trace writes loop until every byte is persisted', () => {
+  const chunks: Buffer[] = [];
+  const payload = Buffer.from('a deliberately larger trace record');
+  writeMotorTraceRecord(7, payload, (_fd, buffer, offset, length) => {
+    const written = Math.min(3, length);
+    chunks.push(Buffer.from(buffer.subarray(offset, offset + written)));
+    return written;
+  });
+  assert.equal(Buffer.concat(chunks).toString(), payload.toString());
+  assert.throws(
+    () => writeMotorTraceRecord(7, payload, () => 0),
+    /made invalid progress/,
+  );
+});
 
 test('native motor tool parser requires exactly one closed function call', () => {
   assert.deepEqual(
@@ -603,8 +619,17 @@ test('resident selects, reads resources, traces, and exactly restores motor pack
     () => first.motor.status('motor-skilled'),
     (value) => value.status === 'needs_guidance',
   );
+  const resourceReceipt = JSON.stringify({
+    ok: true,
+    path: 'skill:pixel-game/TROUBLESHOOTING.md',
+    sha256: createHash('sha256')
+      .update('ORIGINAL RESOURCE BODY\n')
+      .digest('hex'),
+    body: 'ORIGINAL RESOURCE BODY\n',
+  });
+  const resourceReceiptBytes = Buffer.byteLength(resourceReceipt);
   assert.equal(paused.counters.skillResourceReads, 1);
-  assert.equal(paused.counters.skillResourceBytes, 23);
+  assert.equal(paused.counters.skillResourceBytes, resourceReceiptBytes);
   const prompt = firstSeen[0].messages[0].content;
   assert.match(prompt, /ORIGINAL MOTOR BODY/);
   assert.match(prompt, /This SKILL\.md body is already loaded/);
@@ -668,7 +693,7 @@ test('resident selects, reads resources, traces, and exactly restores motor pack
   const restored = second.motor.status('motor-skilled');
   assert.deepEqual(restored.skills, ['pixel-game']);
   assert.equal(restored.counters.skillResourceReads, 1);
-  assert.equal(restored.counters.skillResourceBytes, 23);
+  assert.equal(restored.counters.skillResourceBytes, resourceReceiptBytes);
   second.motor.continue('motor-skilled', restored.checkpointSeq);
   await until(
     () => second.motor.status('motor-skilled'),
@@ -762,8 +787,56 @@ test('motor resource reads stop at the independent observation budget', async ()
     (value) => value.status === 'failed',
   );
   assert.match(ended.lastError ?? '', /resource-read budget exhausted/);
+  const receiptBytes = Buffer.byteLength(
+    JSON.stringify({
+      ok: true,
+      path: 'skill:bounded/REFERENCE.md',
+      sha256: createHash('sha256').update('small body').digest('hex'),
+      body: 'small body',
+    }),
+  );
   assert.equal(ended.counters.skillResourceReads, 8);
-  assert.equal(ended.counters.skillResourceBytes, 80);
+  assert.equal(ended.counters.skillResourceBytes, receiptBytes * 8);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('motor resource byte budget charges the serialized tool receipt', async () => {
+  const dir = tempDir();
+  const file = writeMotorSkill(
+    dir,
+    'escaped',
+    'Read the cited resource only when needed.',
+  );
+  fs.writeFileSync(
+    path.join(path.dirname(file), 'CONTROL.txt'),
+    '\0'.repeat(6_000),
+  );
+  const motor = fixture(
+    dir,
+    async () =>
+      completion('read_skill_resource', {
+        path: 'skill:escaped/CONTROL.txt',
+      }),
+    {
+      motorSkills: new MotorSkills({
+        dataDirectory: dir,
+        bundledSkillsDirectory: null,
+      }),
+    },
+  ).motor;
+  motor.start('keep context bounded', {
+    episodeId: 'escaped-budget',
+    skills: ['escaped'],
+    settleMs: 0,
+  });
+  const ended = await until(
+    () => motor.status('escaped-budget'),
+    (value) => value.status === 'failed',
+  );
+  assert.match(ended.lastError ?? '', /resource-byte budget exhausted/);
+  assert.equal(ended.counters.skillResourceReads, 0);
+  assert.equal(ended.counters.skillResourceBytes, 0);
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -789,6 +862,7 @@ test('cold restart restores paused history and resumes only after matching overs
     (value) => value.status === 'awaiting_oversight',
   );
   assert.equal(paused.counters.scrolls, 2);
+  fs.appendFileSync(paused.traceFile, '{\"type\":');
 
   resetResidentMotorForTest(dir);
   const seen: ChatMessage[][] = [];
@@ -824,6 +898,88 @@ test('cold restart restores paused history and resumes only after matching overs
   }).motor.status('restart-paused');
   assert.equal(terminal.status, 'completed');
   assert.equal(terminal.turns, 3);
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cold restart restores supervisor guidance inside prior observations', async () => {
+  const dir = tempDir();
+  const outputs = [
+    completion('needs_guidance', { reason: 'ambiguous control' }),
+    completion('needs_guidance', { reason: 'pause after guided look' }),
+  ];
+  const first = fixture(dir, async () => outputs.shift()!);
+  first.motor.start('preserve guided history', {
+    episodeId: 'restart-guidance',
+    settleMs: 0,
+  });
+  const initialPause = await until(
+    () => first.motor.status('restart-guidance'),
+    (value) => value.status === 'needs_guidance',
+  );
+  first.motor.guide(
+    'restart-guidance',
+    initialPause.checkpointSeq,
+    'use the lower neutral control',
+  );
+  await until(
+    () => first.motor.status('restart-guidance'),
+    (value) => value.status === 'needs_guidance' && value.turns === 2,
+  );
+
+  resetResidentMotorForTest(dir);
+  const seen: ChatMessage[][] = [];
+  const second = fixture(dir, async (messages) => {
+    seen.push(structuredClone(messages));
+    return completion('done', { summary: 'guidance survived restart' });
+  });
+  const restored = second.motor.status('restart-guidance');
+  second.motor.continue('restart-guidance', restored.checkpointSeq);
+  await until(
+    () => second.motor.status('restart-guidance'),
+    (value) => value.status === 'completed',
+  );
+  assert.equal(
+    seen[0].some(
+      (message) =>
+        message.role === 'user' &&
+        message.content.includes(
+          'Supervisor guidance: use the lower neutral control',
+        ),
+    ),
+    true,
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cold restart rejects malformed interior trace records', async () => {
+  const dir = tempDir();
+  const first = fixture(dir, async () =>
+    completion('needs_guidance', { reason: 'pause before corruption' }),
+  );
+  first.motor.start('reject interior corruption', {
+    episodeId: 'restart-corrupt',
+    settleMs: 0,
+  });
+  const paused = await until(
+    () => first.motor.status('restart-corrupt'),
+    (value) => value.status === 'needs_guidance',
+  );
+  const raw = fs.readFileSync(paused.traceFile, 'utf8');
+  const boundary = raw.indexOf('\n') + 1;
+  fs.writeFileSync(
+    paused.traceFile,
+    `${raw.slice(0, boundary)}{malformed interior}\n${raw.slice(boundary)}`,
+  );
+  resetResidentMotorForTest(dir);
+  const second = fixture(dir, async () => {
+    throw new Error('corrupt trace must not resume');
+  });
+  assert.throws(
+    () => second.motor.status('restart-corrupt'),
+    /unknown episode/,
+  );
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });

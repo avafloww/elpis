@@ -25,6 +25,8 @@ const TEXT_EXTENSIONS = new Set([
   '.yml',
   '.csv',
 ]);
+const DIRECTORY_FLAGS =
+  fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
 const moduleFile = fileURLToPath(import.meta.url);
 export const DEFAULT_BUNDLED_MOTOR_SKILLS_DIRECTORY = path.resolve(
   path.dirname(moduleFile),
@@ -61,18 +63,42 @@ export interface MotorSkillInspection extends Omit<
   resources: ReadonlyArray<Readonly<Omit<ResolvedMotorSkillResource, 'body'>>>;
 }
 
+interface PinnedRoot {
+  directory: string;
+  source: ResolvedMotorSkill['source'];
+  fd: number;
+}
+
 interface MotorSkillRecord extends MotorSkillSummary {
   source: ResolvedMotorSkill['source'];
+  root: PinnedRoot;
+  directoryName: string;
   rootPath: string;
   path: string;
-  realPath: string;
-  realRootPath: string;
+  packageDev: bigint;
+  packageIno: bigint;
 }
 
 export interface MotorSkillsOptions {
   dataDirectory: string;
   bundledSkillsDirectory?: string | null;
   logger?: { warn(...args: unknown[]): void };
+}
+
+function descriptorPath(fd: number, ...segments: string[]): string {
+  return path.join('/proc/self/fd', String(fd), ...segments);
+}
+
+function openDirectory(file: string): number {
+  const fd = fs.openSync(file, DIRECTORY_FLAGS);
+  try {
+    if (!fs.fstatSync(fd).isDirectory())
+      throw new Error(`not a directory: ${file}`);
+    return fd;
+  } catch (error) {
+    fs.closeSync(fd);
+    throw error;
+  }
 }
 
 function readText(file: string, maxBytes: number, label: string): string {
@@ -105,7 +131,7 @@ function digest(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex');
 }
 
-function roots(options: MotorSkillsOptions): Array<{
+function configuredRoots(options: MotorSkillsOptions): Array<{
   directory: string;
   source: ResolvedMotorSkill['source'];
 }> {
@@ -134,31 +160,60 @@ function roots(options: MotorSkillsOptions): Array<{
   });
 }
 
-function discover(options: MotorSkillsOptions): Map<string, MotorSkillRecord> {
-  const found = new Map<string, MotorSkillRecord>();
-  for (const root of roots(options)) {
-    let directories: string[];
+function pinRoots(options: MotorSkillsOptions): PinnedRoot[] {
+  const roots: PinnedRoot[] = [];
+  for (const configured of configuredRoots(options)) {
+    let fd: number;
     try {
-      directories = fs.readdirSync(root.directory).sort();
-    } catch {
+      if (fs.lstatSync(configured.directory).isSymbolicLink())
+        throw new Error('library root is a symlink');
+      fd = openDirectory(configured.directory);
+    } catch (error) {
+      if (fs.existsSync(configured.directory))
+        options.logger?.warn(
+          'motor skill library ignored: root must be a real directory',
+          configured.directory,
+          error,
+        );
       continue;
     }
-    for (const directoryName of directories) {
-      const rootPath = path.join(root.directory, directoryName);
-      const candidate = path.join(rootPath, 'SKILL.md');
-      let realPath: string;
-      let realRootPath: string;
+    roots.push({ ...configured, fd });
+  }
+  return roots;
+}
+
+function discover(
+  roots: PinnedRoot[],
+  options: MotorSkillsOptions,
+): Map<string, MotorSkillRecord> {
+  const found = new Map<string, MotorSkillRecord>();
+  for (const root of roots) {
+    const entries = fs
+      .readdirSync(descriptorPath(root.fd), { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const directoryName = entry.name;
+      let packageFd: number;
       let raw: string;
       try {
-        if (!fs.lstatSync(rootPath).isDirectory()) continue;
-        if (!fs.lstatSync(candidate).isFile()) continue;
-        realRootPath = fs.realpathSync.native(rootPath);
-        realPath = fs.realpathSync.native(candidate);
-        if (realPath !== path.join(realRootPath, 'SKILL.md')) continue;
-        raw = readText(realPath, MAX_MOTOR_SKILL_BYTES, 'motor skill');
+        packageFd = openDirectory(descriptorPath(root.fd, directoryName));
       } catch {
         continue;
       }
+      let identity: fs.BigIntStats;
+      try {
+        identity = fs.fstatSync(packageFd, { bigint: true });
+        raw = readText(
+          descriptorPath(packageFd, 'SKILL.md'),
+          MAX_MOTOR_SKILL_BYTES,
+          'motor skill',
+        );
+      } catch {
+        fs.closeSync(packageFd);
+        continue;
+      }
+      fs.closeSync(packageFd);
       const parsed = parseFrontmatter(raw);
       const name = parsed?.frontmatter.name;
       const description = parsed?.frontmatter.description;
@@ -171,10 +226,11 @@ function discover(options: MotorSkillsOptions): Map<string, MotorSkillRecord> {
       ) {
         options.logger?.warn(
           'motor skill ignored: invalid or mismatched name/description',
-          candidate,
+          path.join(root.directory, directoryName, 'SKILL.md'),
         );
         continue;
       }
+      const candidate = path.join(root.directory, directoryName, 'SKILL.md');
       const duplicate = found.get(name);
       if (duplicate)
         throw new Error(
@@ -188,59 +244,110 @@ function discover(options: MotorSkillsOptions): Map<string, MotorSkillRecord> {
         name,
         description: normalizeDescription(description),
         source: root.source,
-        rootPath,
+        root,
+        directoryName,
+        rootPath: path.join(root.directory, directoryName),
         path: candidate,
-        realPath,
-        realRootPath,
+        packageDev: identity.dev,
+        packageIno: identity.ino,
       });
     }
   }
   return found;
 }
 
-function resourceFiles(rootPath: string): string[] {
-  const files: string[] = [];
-  let entries = 0;
-  const walk = (directory: string, segments: string[]) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      entries++;
-      if (entries > MAX_MOTOR_SKILL_RESOURCE_ENTRIES)
+function snapshotResources(
+  packageFd: number,
+  packagePath: string,
+  name: string,
+): ReadonlyArray<Readonly<ResolvedMotorSkillResource>> {
+  const resources: Array<Readonly<ResolvedMotorSkillResource>> = [];
+  let entriesSeen = 0;
+  let resourceBytes = 0;
+  const walk = (directoryFd: number, segments: string[]) => {
+    const entries = fs
+      .readdirSync(descriptorPath(directoryFd), { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      entriesSeen++;
+      if (entriesSeen > MAX_MOTOR_SKILL_RESOURCE_ENTRIES)
         throw new Error(
           `motor skill package exceeds ${MAX_MOTOR_SKILL_RESOURCE_ENTRIES} entries`,
         );
       if (!RESOURCE_SEGMENT_PATTERN.test(entry.name))
         throw new Error(`invalid motor skill resource name: ${entry.name}`);
       const childSegments = [...segments, entry.name];
-      const child = path.join(directory, entry.name);
       if (entry.isSymbolicLink())
-        throw new Error(`motor skill resources may not be symlinks: ${child}`);
+        throw new Error(
+          `motor skill resources may not be symlinks: ${path.join(packagePath, ...childSegments)}`,
+        );
       if (entry.isDirectory()) {
         if (childSegments.length > 4)
           throw new Error('motor skill resource nesting exceeds four levels');
-        walk(child, childSegments);
+        const childFd = openDirectory(descriptorPath(directoryFd, entry.name));
+        try {
+          walk(childFd, childSegments);
+        } finally {
+          fs.closeSync(childFd);
+        }
         continue;
       }
       if (!entry.isFile())
-        throw new Error(`motor skill resource is not a regular file: ${child}`);
+        throw new Error(
+          `motor skill resource is not a regular file: ${path.join(packagePath, ...childSegments)}`,
+        );
       if (segments.length === 0 && entry.name === 'SKILL.md') continue;
+      const relativePath = childSegments.join('/');
       if (!TEXT_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
-        throw new Error(`unsupported motor skill resource type: ${child}`);
-      files.push(childSegments.join('/'));
-      if (files.length > MAX_MOTOR_SKILL_RESOURCES)
+        throw new Error(
+          `unsupported motor skill resource type: ${path.join(packagePath, ...childSegments)}`,
+        );
+      if (resources.length >= MAX_MOTOR_SKILL_RESOURCES)
         throw new Error(
           `motor skill package exceeds ${MAX_MOTOR_SKILL_RESOURCES} resources`,
         );
+      const body = readText(
+        descriptorPath(directoryFd, entry.name),
+        MAX_MOTOR_SKILL_RESOURCE_BYTES,
+        'motor skill resource',
+      );
+      const bytes = Buffer.byteLength(body, 'utf8');
+      resourceBytes += bytes;
+      const handle = `skill:${name}/${relativePath}`;
+      if (handle.length > 512)
+        throw new Error('motor skill resource handle exceeds 512 characters');
+      resources.push(
+        Object.freeze({
+          handle,
+          relativePath,
+          path: path.join(packagePath, ...childSegments),
+          sha256: digest(body),
+          bytes,
+          body,
+        }),
+      );
     }
   };
-  walk(rootPath, []);
-  return files.sort();
+  walk(packageFd, []);
+  if (resourceBytes > MAX_MOTOR_SKILL_PACKAGE_BYTES)
+    throw new Error(
+      `motor skill package resources exceed ${MAX_MOTOR_SKILL_PACKAGE_BYTES} bytes`,
+    );
+  return Object.freeze(resources);
 }
 
 export class MotorSkills {
+  private readonly roots: PinnedRoot[];
   private readonly skills: Map<string, MotorSkillRecord>;
 
-  constructor(private readonly options: MotorSkillsOptions) {
-    this.skills = discover(options);
+  constructor(options: MotorSkillsOptions) {
+    this.roots = pinRoots(options);
+    try {
+      this.skills = discover(this.roots, options);
+    } catch (error) {
+      for (const root of this.roots) fs.closeSync(root.fd);
+      throw error;
+    }
   }
 
   catalog(): MotorSkillSummary[] {
@@ -261,65 +368,54 @@ export class MotorSkills {
         `unknown motor skill ${JSON.stringify(name)}${available ? `; available: ${available}` : ''}`,
       );
     }
-    if (
-      !fs.lstatSync(record.rootPath).isDirectory() ||
-      fs.realpathSync.native(record.rootPath) !== record.realRootPath ||
-      !fs.lstatSync(record.path).isFile() ||
-      fs.realpathSync.native(record.path) !== record.realPath
-    )
-      throw new Error(`motor skill package changed before selection: ${name}`);
-    const body = readText(
-      record.realPath,
-      MAX_MOTOR_SKILL_BYTES,
-      'motor skill',
+    const packageFd = openDirectory(
+      descriptorPath(record.root.fd, record.directoryName),
     );
-    const parsed = parseFrontmatter(body);
-    if (
-      parsed?.frontmatter.name !== record.name ||
-      typeof parsed.frontmatter.description !== 'string' ||
-      normalizeDescription(parsed.frontmatter.description) !==
-        record.description
-    )
-      throw new Error(`motor skill metadata changed before selection: ${name}`);
-    let packageBytes = Buffer.byteLength(body, 'utf8');
-    const resources = resourceFiles(record.rootPath).map((relativePath) => {
-      const resourcePath = path.join(
-        record.rootPath,
-        ...relativePath.split('/'),
+    try {
+      const identity = fs.fstatSync(packageFd, { bigint: true });
+      if (
+        identity.dev !== record.packageDev ||
+        identity.ino !== record.packageIno
+      )
+        throw new Error(
+          `motor skill package changed before selection: ${name}`,
+        );
+      const body = readText(
+        descriptorPath(packageFd, 'SKILL.md'),
+        MAX_MOTOR_SKILL_BYTES,
+        'motor skill',
       );
-      const resourceBody = readText(
-        resourcePath,
-        MAX_MOTOR_SKILL_RESOURCE_BYTES,
-        'motor skill resource',
-      );
-      const bytes = Buffer.byteLength(resourceBody, 'utf8');
-      packageBytes += bytes;
+      const parsed = parseFrontmatter(body);
+      if (
+        parsed?.frontmatter.name !== record.name ||
+        typeof parsed.frontmatter.description !== 'string' ||
+        normalizeDescription(parsed.frontmatter.description) !==
+          record.description
+      )
+        throw new Error(
+          `motor skill metadata changed before selection: ${name}`,
+        );
+      const resources = snapshotResources(packageFd, record.rootPath, name);
+      const packageBytes =
+        Buffer.byteLength(body, 'utf8') +
+        resources.reduce((total, resource) => total + resource.bytes, 0);
       if (packageBytes > MAX_MOTOR_SKILL_PACKAGE_BYTES)
         throw new Error(
           `motor skill package exceeds ${MAX_MOTOR_SKILL_PACKAGE_BYTES} bytes`,
         );
-      const handle = `skill:${name}/${relativePath}`;
-      if (handle.length > 512)
-        throw new Error(`motor skill resource handle exceeds 512 characters`);
       return Object.freeze({
-        handle,
-        relativePath,
-        path: resourcePath,
-        sha256: digest(resourceBody),
-        bytes,
-        body: resourceBody,
+        name: record.name,
+        description: record.description,
+        source: record.source,
+        rootPath: record.rootPath,
+        path: record.path,
+        sha256: digest(body),
+        body,
+        resources,
       });
-    });
-    return Object.freeze({
-      name: record.name,
-      description: record.description,
-      source: record.source,
-      rootPath: record.rootPath,
-      path: record.path,
-      sha256: digest(body),
-      body,
-      resources: Object.freeze(resources),
-    });
+    } finally {
+      fs.closeSync(packageFd);
+    }
   }
 
   inspect(name: string): Readonly<MotorSkillInspection> {

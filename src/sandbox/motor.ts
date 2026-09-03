@@ -570,34 +570,85 @@ function snapshot(episode: EpisodeRecord) {
   };
 }
 
+export function writeMotorTraceRecord(
+  fd: number,
+  bytes: Buffer,
+  write: (
+    fd: number,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ) => number = fs.writeSync,
+): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = write(fd, bytes, offset, bytes.length - offset, null);
+    if (
+      !Number.isInteger(written) ||
+      written <= 0 ||
+      written > bytes.length - offset
+    )
+      throw new Error('motor trace write made invalid progress');
+    offset += written;
+  }
+}
+
 function append(
   file: string,
   event: Record<string, unknown>,
   durable = false,
 ): void {
   const fd = fs.openSync(file, 'a', 0o600);
+  const originalSize = fs.fstatSync(fd).size;
   try {
-    fs.writeSync(fd, `${JSON.stringify(event)}\n`, undefined, 'utf8');
+    writeMotorTraceRecord(
+      fd,
+      Buffer.from(`${JSON.stringify(event)}\n`, 'utf8'),
+    );
     if (durable) fs.fsyncSync(fd);
+  } catch (error) {
+    fs.ftruncateSync(fd, originalSize);
+    fs.fsyncSync(fd);
+    throw error;
   } finally {
     fs.closeSync(fd);
   }
   fs.chmodSync(file, 0o600);
 }
 
+function parseMotorTrace(
+  file: string,
+  repairTrailingRecord = false,
+): Array<Record<string, unknown>> {
+  const raw = fs.readFileSync(file);
+  const lastNewline = raw.lastIndexOf(0x0a);
+  const complete =
+    lastNewline < 0 ? Buffer.alloc(0) : raw.subarray(0, lastNewline + 1);
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(complete);
+  const lines = text.split('\n');
+  lines.pop();
+  const events = lines.map((line) => {
+    if (!line) throw new Error('motor trace contains an empty interior record');
+    return JSON.parse(line) as Record<string, unknown>;
+  });
+  if (repairTrailingRecord && complete.length !== raw.length) {
+    const fd = fs.openSync(file, 'r+');
+    try {
+      fs.ftruncateSync(fd, complete.length);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  return events;
+}
+
 function terminalTrace(file: string): boolean {
   try {
-    return fs
-      .readFileSync(file, 'utf8')
-      .trim()
-      .split('\n')
-      .some((line) => {
-        try {
-          return TERMINAL_STATUSES.has(JSON.parse(line).type);
-        } catch {
-          return false;
-        }
-      });
+    return parseMotorTrace(file).some((event) =>
+      TERMINAL_STATUSES.has(event.type as EpisodeStatus),
+    );
   } catch {
     return false;
   }
@@ -689,6 +740,7 @@ function resolvedOptions(value: MotorStartOptions = {}): EpisodeRecord['opts'] {
 function incrementRecoveredCounters(
   counters: EpisodeCounters,
   call: NativeToolCall,
+  receipt: string,
   skills: ReadonlyArray<Readonly<ResolvedMotorSkill>>,
 ): void {
   let args: Record<string, unknown> = {};
@@ -716,7 +768,7 @@ function incrementRecoveredCounters(
       .find((candidate) => candidate.handle === handle);
     if (resource) {
       counters.skillResourceReads++;
-      counters.skillResourceBytes += resource.bytes;
+      counters.skillResourceBytes += Buffer.byteLength(receipt, 'utf8');
     }
   }
 }
@@ -763,6 +815,7 @@ function recoverMotorSkills(
     );
     if (
       !path.isAbsolute(rootPath) ||
+      path.basename(rootPath) !== name ||
       skillPath !== path.join(rootPath, 'SKILL.md')
     )
       throw new Error('recovered motor skill paths are invalid');
@@ -813,6 +866,12 @@ function recoverMotorSkills(
         throw new Error('recovered motor skill resource path is invalid');
       resourceNames.add(relativePath);
       const handle = `skill:${name}/${relativePath}`;
+      if (
+        relativePath === 'SKILL.md' ||
+        !/\.(?:md|txt|json|ya?ml|csv)$/i.test(relativePath) ||
+        handle.length > 512
+      )
+        throw new Error('recovered motor skill resource handle is invalid');
       const resourcePath = path.join(rootPath, ...segments);
       if (resource.handle !== handle || resource.path !== resourcePath)
         throw new Error('recovered motor skill resource binding is invalid');
@@ -860,12 +919,7 @@ function restoreEpisode(
 ): EpisodeRecord | null {
   let events: Array<Record<string, unknown>>;
   try {
-    events = fs
-      .readFileSync(traceFile, 'utf8')
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    events = parseMotorTrace(traceFile, true);
   } catch {
     return null;
   }
@@ -918,6 +972,7 @@ function restoreEpisode(
   let frame: string | null = null;
   let updatedAt = startedAt;
   let lastError: string | null = null;
+  let pendingRecoveredGuidance: string | null = null;
 
   for (const event of events) {
     if (typeof event.at === 'string' && Number.isFinite(Date.parse(event.at)))
@@ -939,7 +994,7 @@ function restoreEpisode(
         typeof event.frame === 'string' && fs.existsSync(event.frame)
           ? event.frame
           : null;
-      const text = `<observation>\nGoal: ${goal}\nRecovered durable interface state and authoritative tool receipt.\n`;
+      const text = `<observation>\nGoal: ${goal}\n${pendingRecoveredGuidance ? `Supervisor guidance: ${pendingRecoveredGuidance}\n` : ''}Recovered durable interface state and authoritative tool receipt.\n`;
       const observation: ChatMessage = {
         role: 'user',
         content: `${text}${restoredFrame ? '[screenshot]' : '[screenshot unavailable]'}\n</observation>`,
@@ -964,7 +1019,8 @@ function restoreEpisode(
         content: event.receipt,
         tool_call_id: call.id,
       });
-      incrementRecoveredCounters(counters, call, motorSkills);
+      incrementRecoveredCounters(counters, call, event.receipt, motorSkills);
+      pendingRecoveredGuidance = null;
       turns = Math.max(
         turns,
         typeof event.turn === 'number' ? event.turn + 1 : turns + 1,
@@ -995,8 +1051,22 @@ function restoreEpisode(
       });
       status = 'running';
     }
-    if (event.type === 'continue' || event.type === 'guidance')
+    if (event.type === 'continue') {
+      pendingRecoveredGuidance = null;
       status = 'running';
+    }
+    if (event.type === 'guidance') {
+      try {
+        pendingRecoveredGuidance = boundedText(
+          event.guidance,
+          'recovered motor guidance',
+          MAX_GUIDANCE_CHARS,
+        );
+      } catch {
+        return null;
+      }
+      status = 'running';
+    }
     if (event.type === 'awaiting_oversight') status = 'awaiting_oversight';
     if (event.type === 'needs_guidance') status = 'needs_guidance';
     if (
@@ -1166,23 +1236,23 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         throw new Error(
           `motor skill resource is outside selected packages: ${handle}`,
         );
+      const receipt = JSON.stringify({
+        ok: true,
+        path: resource.handle,
+        sha256: resource.sha256,
+        body: resource.body,
+      });
+      const receiptBytes = Buffer.byteLength(receipt, 'utf8');
       if (episode.counters.skillResourceReads >= MAX_SKILL_RESOURCE_READS)
         throw new Error('motor skill resource-read budget exhausted');
       if (
-        episode.counters.skillResourceBytes + resource.bytes >
+        episode.counters.skillResourceBytes + receiptBytes >
         MAX_SKILL_RESOURCE_READ_BYTES
       )
         throw new Error('motor skill resource-byte budget exhausted');
       episode.counters.skillResourceReads++;
-      episode.counters.skillResourceBytes += resource.bytes;
-      return {
-        receipt: JSON.stringify({
-          ok: true,
-          path: resource.handle,
-          sha256: resource.sha256,
-          body: resource.body,
-        }),
-      };
+      episode.counters.skillResourceBytes += receiptBytes;
+      return { receipt };
     }
     if (!episode.authority.allowedTools.includes(name as MotorToolName))
       throw new Error(`motor action is outside authority: ${name}`);
@@ -1507,26 +1577,30 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
           at: new Date(episode.updatedAt).toISOString(),
         };
         episode.recent = [...episode.recent, recent].slice(-4);
-        append(episode.traceFile, {
-          type: 'turn',
-          at: recent.at,
-          episodeId: episode.episodeId,
-          turn: episode.turns - 1,
-          checkpointSeq: episode.checkpointSeq,
-          frame,
-          dimensions,
-          call,
-          receipt: outcome.receipt,
-          counters: episode.counters,
-          reasoning: completion.reasoningContent ?? null,
-          content: completion.content ?? '',
-          usage: completion.usage,
-          latencyMs: Math.max(0, episode.updatedAt - started),
-          model: completion.model,
-          providerType: completion.providerType,
-          apiSurface: completion.apiSurface,
-          apiEndpoint: completion.apiEndpoint,
-        });
+        append(
+          episode.traceFile,
+          {
+            type: 'turn',
+            at: recent.at,
+            episodeId: episode.episodeId,
+            turn: episode.turns - 1,
+            checkpointSeq: episode.checkpointSeq,
+            frame,
+            dimensions,
+            call,
+            receipt: outcome.receipt,
+            counters: episode.counters,
+            reasoning: completion.reasoningContent ?? null,
+            content: completion.content ?? '',
+            usage: completion.usage,
+            latencyMs: Math.max(0, episode.updatedAt - started),
+            model: completion.model,
+            providerType: completion.providerType,
+            apiSurface: completion.apiSurface,
+            apiEndpoint: completion.apiEndpoint,
+          },
+          call.function.name === 'read_skill_resource',
+        );
         if (outcome.terminal) {
           episode.status = outcome.terminal;
           append(episode.traceFile, {

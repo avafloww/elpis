@@ -191,6 +191,42 @@ test('MotorSkills rejects duplicate packages and symlink resources', () => {
   }
 });
 
+test('MotorSkills rejects symlinked library roots and swapped package directories', () => {
+  const f = fixture();
+  try {
+    const outsideRoot = path.join(f.root, 'outside-root');
+    fs.mkdirSync(outsideRoot);
+    writeSkill(outsideRoot, 'outside');
+    fs.rmSync(f.dataSkills, { recursive: true });
+    fs.symlinkSync(outsideRoot, f.dataSkills, 'dir');
+    const warnings: unknown[][] = [];
+    const symlinked = new MotorSkills({
+      dataDirectory: f.data,
+      bundledSkillsDirectory: null,
+      logger: { warn: (...args) => warnings.push(args) },
+    });
+    assert.deepEqual(symlinked.catalog(), []);
+    assert.equal(warnings.length, 1);
+
+    fs.rmSync(f.dataSkills);
+    fs.mkdirSync(f.dataSkills);
+    writeSkill(f.dataSkills, 'swapped');
+    const pinned = new MotorSkills({
+      dataDirectory: f.data,
+      bundledSkillsDirectory: null,
+    });
+    const original = path.join(f.root, 'original-package');
+    fs.renameSync(path.join(f.dataSkills, 'swapped'), original);
+    writeSkill(f.dataSkills, 'swapped', 'replacement body');
+    assert.throws(
+      () => pinned.select(['swapped']),
+      /package changed before selection/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('source-mode motor-skill root is repository-owned', () => {
   assert.equal(
     DEFAULT_BUNDLED_MOTOR_SKILLS_DIRECTORY,
