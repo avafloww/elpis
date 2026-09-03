@@ -20,7 +20,10 @@ function asFetch(
   return implementation as typeof globalThis.fetch;
 }
 
-function cancellableRequest(url = responseUrl): {
+function cancellableRequest(
+  url = responseUrl,
+  onCancel: () => void | PromiseLike<void> = () => undefined,
+): {
   request: Request;
   cancelled: () => number;
 } {
@@ -31,6 +34,7 @@ function cancellableRequest(url = responseUrl): {
     },
     cancel() {
       cancelCount += 1;
+      return onCancel();
     },
   });
   const request = new Request(url, {
@@ -234,6 +238,74 @@ test('invalid key cancels a transferred request body', async () => {
 
   await assert.rejects(() => pinned(body.request), /API key is invalid/);
   assert.equal(body.request.bodyUsed, true);
+  assert.equal(body.cancelled(), 1);
+});
+
+test('synchronous fetch failure cancels the outbound request body', async () => {
+  const body = cancellableRequest();
+  let outbound: Request | null = null;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'configured-key',
+    fetch: asFetch((input) => {
+      outbound = input as Request;
+      throw new Error('transport sync');
+    }),
+  });
+
+  await assert.rejects(() => pinned(body.request), /transport sync/);
+  assert.equal(body.request.bodyUsed, true);
+  assert.equal(outbound?.bodyUsed, true);
+  assert.equal(body.cancelled(), 1);
+});
+
+test('asynchronous fetch rejection retains transport body custody', async () => {
+  const body = cancellableRequest();
+  let outbound: Request | null = null;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'configured-key',
+    fetch: asFetch((input) => {
+      outbound = input as Request;
+      return Promise.reject(new Error('transport async'));
+    }),
+  });
+
+  await assert.rejects(() => pinned(body.request), /transport async/);
+  assert.equal(body.request.bodyUsed, true);
+  assert.equal(outbound?.bodyUsed, false);
+  assert.equal(body.cancelled(), 0);
+  await outbound?.body?.cancel();
+});
+
+test('rejecting body cancellation does not mask the primary refusal', async () => {
+  const body = cancellableRequest('https://attacker.invalid/steal', () =>
+    Promise.reject(new Error('cancel rejected')),
+  );
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'configured-key',
+    fetch: asFetch(async () => new Response()),
+  });
+
+  await assert.rejects(() => pinned(body.request), /refused request/);
+  assert.equal(body.cancelled(), 1);
+});
+
+test('non-settling body cancellation cannot hang the primary refusal', async () => {
+  const body = cancellableRequest(
+    'https://attacker.invalid/steal',
+    () => new Promise<void>(() => undefined),
+  );
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'configured-key',
+    fetch: asFetch(async () => new Response()),
+  });
+  const startedAt = Date.now();
+
+  await assert.rejects(() => pinned(body.request), /refused request/);
+  assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(body.cancelled(), 1);
 });
 

@@ -184,14 +184,14 @@ export function createOpenAICompatibleFetch(
   const dispatcher = options.dispatcher;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
-    let request: Request | null = null;
+    let ownedRequest: Request | null = null;
     let handedOff = false;
     try {
-      request = snapshotRequest(input, init);
-      validateRequest(request, allowedUrls);
-      const headers = new Headers(request.headers);
+      ownedRequest = snapshotRequest(input, init);
+      validateRequest(ownedRequest, allowedUrls);
+      const headers = new Headers(ownedRequest.headers);
       for (const name of SENSITIVE_REQUEST_HEADERS) headers.delete(name);
-      if (request.signal.aborted) throw abortReason(request.signal);
+      if (ownedRequest.signal.aborted) throw abortReason(ownedRequest.signal);
 
       const suppliedKey = await awaitWithAbort(
         Promise.resolve()
@@ -199,18 +199,24 @@ export function createOpenAICompatibleFetch(
           .catch(() => {
             throw new Error('OpenAI-compatible API key source failed');
           }),
-        request.signal,
+        ownedRequest.signal,
       );
-      if (request.signal.aborted) throw abortReason(request.signal);
+      if (ownedRequest.signal.aborted) throw abortReason(ownedRequest.signal);
       headers.set('authorization', `Bearer ${validateApiKey(suppliedKey)}`);
 
-      const outbound = new Request(request, { headers });
+      const outbound = new Request(ownedRequest, { headers });
+      ownedRequest = outbound;
+      let response: Promise<Response>;
+      if (dispatcher === undefined) {
+        response = underlyingFetch(outbound);
+      } else {
+        const fetchInit: FetchInitWithDispatcher = { dispatcher };
+        response = underlyingFetch(outbound, fetchInit);
+      }
       handedOff = true;
-      if (dispatcher === undefined) return underlyingFetch(outbound);
-      const fetchInit: FetchInitWithDispatcher = { dispatcher };
-      return underlyingFetch(outbound, fetchInit);
+      return response;
     } catch (error) {
-      if (request && !handedOff) await releaseRequestBody(request);
+      if (ownedRequest && !handedOff) await releaseRequestBody(ownedRequest);
       throw error;
     }
   };
