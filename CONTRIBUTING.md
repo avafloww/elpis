@@ -11,3 +11,5 @@ Before opening a pull request:
 5. Update docs and `config.example.yaml` with the code they describe.
 
 Pull requests should explain the invariant being changed, the failure mode addressed, and how the result was verified. Large architectural changes should begin as an issue or discussion before implementation.
+
+Commits reaching `main` must use Conventional Commit subjects. Do not rewrite already-published history solely to repair a malformed subject. As a last-resort release recovery, a later `fix(release): ...` commit may carry `Release-Subject-Alias: <full earlier SHA> <conventional subject>` in its body. The workflow accepts only bounded, exact aliases for earlier malformed commits in the same unreleased range; it rejects aliases for valid, missing, current, later, reserved release, or multiply-aliased commits. The recovered subject is used consistently for version classification and release notes.

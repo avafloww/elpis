@@ -73,6 +73,14 @@ const RELEASE =
   /^chore\(release\): v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const SHA = /^[0-9a-f]{7,64}$/;
 
+export function isOrdinaryReleaseSubject(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    !value.startsWith('chore(release):') &&
+    SUBJECT.test(value)
+  );
+}
+
 export function classifyRelease(
   previousVersion: string,
   input: readonly ReleaseCommit[],

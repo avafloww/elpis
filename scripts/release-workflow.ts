@@ -14,6 +14,7 @@ import {
 import {
   RELEASE_OWNED_PATHS,
   classifyRelease,
+  isOrdinaryReleaseSubject,
   validateOwnedReleaseCommit,
   type GitIdentity,
   type OwnedReleaseCommitFacts,
@@ -28,6 +29,11 @@ const MAX_GIT_OUTPUT = 8 * 1024 * 1024;
 const MAX_RELEASE_NOTE_COMMITS = 512;
 const MAX_RELEASE_NOTE_SUBJECT_BYTES = 512;
 const MAX_RELEASE_NOTES_BYTES = 64 * 1024;
+const MAX_RELEASE_ALIAS_BODY_BYTES = 16 * 1024;
+const MAX_RELEASE_SUBJECT_ALIASES = 32;
+const RELEASE_ALIAS =
+  /^Release-Subject-Alias: ([0-9a-f]{40}) (\S(?:[^\r\n]*\S)?)$/;
+const RELEASE_ALIAS_COMMIT = /^fix\(release\): \S/;
 
 export const RELEASE_BOT_LOGIN = 'github-actions[bot]';
 export const RELEASE_BOT_IDENTITY: GitIdentity = Object.freeze({
@@ -524,7 +530,70 @@ async function commitsInRange(
     requireSha(sha, 'commit SHA');
     commits.push({ sha, subject });
   }
-  return commits;
+  return applyReleaseSubjectAliases(root, commits);
+}
+
+async function applyReleaseSubjectAliases(
+  root: string,
+  commits: readonly { sha: string; subject: string }[],
+): Promise<Array<{ sha: string; subject: string }>> {
+  const repairCommits = commits.filter((commit) =>
+    RELEASE_ALIAS_COMMIT.test(commit.subject),
+  );
+  if (repairCommits.length > MAX_RELEASE_SUBJECT_ALIASES)
+    throw new ReleaseWorkflowError('too many release subject alias commits');
+  const indices = new Map(
+    commits.map((commit, index) => [commit.sha, index] as const),
+  );
+  const aliases = new Map<string, string>();
+  for (const repair of repairCommits) {
+    const repairIndex = indices.get(repair.sha);
+    if (repairIndex === undefined)
+      throw new ReleaseWorkflowError('release alias source is unavailable');
+    const body = await git(root, ['show', '-s', '--format=%b', repair.sha]);
+    const lines = body
+      .split('\n')
+      .filter((line) => line.startsWith('Release-Subject-Alias:'));
+    if (lines.length === 0) continue;
+    if (Buffer.byteLength(body, 'utf8') > MAX_RELEASE_ALIAS_BODY_BYTES)
+      throw new ReleaseWorkflowError('release subject alias body is too large');
+    for (const line of lines) {
+      const match = RELEASE_ALIAS.exec(line);
+      if (!match)
+        throw new ReleaseWorkflowError('release subject alias is invalid');
+      if (aliases.size >= MAX_RELEASE_SUBJECT_ALIASES)
+        throw new ReleaseWorkflowError('too many release subject aliases');
+      const targetSha = match[1];
+      const subject = match[2];
+      const targetIndex = indices.get(targetSha);
+      if (targetIndex === undefined || targetIndex >= repairIndex)
+        throw new ReleaseWorkflowError(
+          'release subject alias must target an earlier commit in the release range',
+        );
+      const target = commits[targetIndex];
+      if (
+        target.subject.startsWith('chore(release):') ||
+        isOrdinaryReleaseSubject(target.subject)
+      )
+        throw new ReleaseWorkflowError(
+          'release subject alias target already has a conventional subject',
+        );
+      if (aliases.has(targetSha))
+        throw new ReleaseWorkflowError('release subject alias is duplicated');
+      if (
+        Buffer.byteLength(subject, 'utf8') > MAX_RELEASE_NOTE_SUBJECT_BYTES ||
+        !isOrdinaryReleaseSubject(subject)
+      )
+        throw new ReleaseWorkflowError(
+          'release subject alias replacement is invalid',
+        );
+      aliases.set(targetSha, subject);
+    }
+  }
+  return commits.map((commit) => ({
+    sha: commit.sha,
+    subject: aliases.get(commit.sha) ?? commit.subject,
+  }));
 }
 
 export async function releaseNotesForResult(

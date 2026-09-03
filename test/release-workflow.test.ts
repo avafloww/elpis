@@ -110,6 +110,7 @@ const addCommit = async (
   root: string,
   subject: string,
   files: Record<string, string>,
+  body = '',
 ): Promise<string> => {
   for (const [relative, content] of Object.entries(files)) {
     const absolute = path.join(root, relative);
@@ -117,7 +118,9 @@ const addCommit = async (
     await fs.writeFile(absolute, content);
   }
   await git(root, ['add', '--', ...Object.keys(files)]);
-  await git(root, ['commit', '--no-gpg-sign', '-m', subject]);
+  const args = ['commit', '--no-gpg-sign', '-m', subject];
+  if (body !== '') args.push('-m', body);
+  await git(root, args);
   const sha = await git(root, ['rev-parse', 'HEAD']);
   await git(root, ['update-ref', 'refs/remotes/origin/main', sha]);
   return sha;
@@ -278,6 +281,81 @@ test('docs-only Markdown ranges skip releases without weakening mixed ranges', a
   await assert.rejects(
     prepareReleaseWorkflow(roots[4], malformedSha),
     /invalid conventional commit subject/,
+  );
+});
+
+test('exact later trailers recover malformed published subjects without relaxing validation', async (t) => {
+  const roots = await Promise.all(
+    Array.from({ length: 4 }, () => fixture(true)),
+  );
+  t.after(() =>
+    Promise.all(
+      roots.map((root) => fs.rm(root, { recursive: true, force: true })),
+    ),
+  );
+
+  const malformed = await addCommit(roots[0], 'Add published feature', {
+    'src/feature.ts': 'export {};\n',
+  });
+  const repaired = await addCommit(
+    roots[0],
+    'fix(release): recover published subject',
+    { 'docs/release-recovery.md': 'recovery\n' },
+    `Release-Subject-Alias: ${malformed} feat: add published feature`,
+  );
+  const release = await prepareReleaseWorkflow(roots[0], repaired);
+  assert.equal(release.mode, 'release');
+  assert.equal(release.tag, 'v0.2.0');
+  const notes = await releaseNotesForResult(roots[0], release);
+  assert.ok(
+    notes.includes(
+      `- \`${malformed.slice(0, 7)}\` feat: add published feature`,
+    ),
+  );
+  assert.ok(
+    notes.includes(
+      `- \`${repaired.slice(0, 7)}\` fix\\(release\\): recover published subject`,
+    ),
+  );
+  assert.doesNotMatch(notes, /Add published feature/);
+
+  const valid = await addCommit(roots[1], 'fix: valid work', {
+    'src/valid.ts': 'export {};\n',
+  });
+  const validAlias = await addCommit(
+    roots[1],
+    'fix(release): reject valid target aliases',
+    { 'docs/valid-alias.md': 'invalid\n' },
+    `Release-Subject-Alias: ${valid} feat: relabel valid work`,
+  );
+  await assert.rejects(
+    prepareReleaseWorkflow(roots[1], validAlias),
+    /alias target already has a conventional subject/,
+  );
+
+  const duplicated = await addCommit(roots[2], 'Malformed duplicate target', {
+    'src/duplicate.ts': 'export {};\n',
+  });
+  const duplicateAlias = await addCommit(
+    roots[2],
+    'fix(release): reject duplicate aliases',
+    { 'docs/duplicate-alias.md': 'invalid\n' },
+    `Release-Subject-Alias: ${duplicated} feat: first alias\nRelease-Subject-Alias: ${duplicated} feat: second alias`,
+  );
+  await assert.rejects(
+    prepareReleaseWorkflow(roots[2], duplicateAlias),
+    /release subject alias is duplicated/,
+  );
+
+  const unknownAlias = await addCommit(
+    roots[3],
+    'fix(release): reject unknown aliases',
+    { 'docs/unknown-alias.md': 'invalid\n' },
+    `Release-Subject-Alias: ${'f'.repeat(40)} feat: impossible target`,
+  );
+  await assert.rejects(
+    prepareReleaseWorkflow(roots[3], unknownAlias),
+    /alias must target an earlier commit in the release range/,
   );
 });
 
