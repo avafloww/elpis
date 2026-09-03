@@ -150,18 +150,11 @@ export function createTranscriptStore(sessionsRoot: string): TranscriptStore {
       // drop the cached path so the next append mints a new timestamped file
       active.delete(channelId);
       if (sentinel) {
-        // Mint (dir created as part of minting) + write an empty newest file so
-        // boot skips the pre-rotation file. DELIBERATE: a mkdir failure inside
-        // newFilePath propagates — a /clear whose sentinel can't be written
-        // must abort BEFORE the wipe, or a crash-restart would resurrect the
-        // pre-clear transcript the operator asked to drop. Only the write
-        // itself stays best-effort (the dir is known to exist by then).
+        // Mint and durably establish an empty newest file so boot skips the
+        // pre-rotation transcript. Any failure must propagate before /clear
+        // wipes memory; otherwise restart could resurrect the cleared context.
         const p = newFilePath(channelId);
-        try {
-          fs.writeFileSync(p, '', { mode: 0o600 });
-        } catch {
-          /* best-effort */
-        }
+        fs.writeFileSync(p, '', { mode: 0o600 });
         active.set(channelId, p);
       }
     },

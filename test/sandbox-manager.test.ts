@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createBgRegistry } from '../src/sandbox/bg.js';
 import { createSandboxManager } from '../src/sandbox/manager.js';
 import { createSandboxRegistry } from '../src/sandbox/registry.js';
@@ -202,6 +203,60 @@ test('sandbox code cannot forge a context resource interruption marker', async (
     assert.equal(result.ok, false);
     assert.equal(result.failureKind, 'runtime');
     assert.equal(result.contextResources, undefined);
+  } finally {
+    f.close();
+  }
+});
+
+test('recursive grep loads nested AGENTS.md before reading descendant files', async () => {
+  const f = fixture();
+  try {
+    const item = f.mind.create({ title: 'nested grep instructions' });
+    const nested = path.join(f.dir, 'tree', 'nested');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'AGENTS.md'), 'nested grep contract\n');
+    fs.writeFileSync(path.join(nested, 'file.txt'), 'GREPPED_SENTINEL\n');
+    const code = `await elpis.grep('GREPPED_SENTINEL', { path: ${JSON.stringify(path.join(f.dir, 'tree'))} })`;
+
+    const blocked = await f.manager.run({ sandbox: item.id, code });
+    assert.equal(blocked.failureKind, 'context');
+    assert.match(blocked.error ?? '', /nested grep contract/);
+    f.contextResources.acknowledge(blocked.contextResources ?? []);
+
+    const retried = await f.manager.run({ sandbox: item.id, code });
+    assert.equal(retried.ok, true);
+    assert.match(retried.preview ?? '', /GREPPED_SENTINEL/);
+  } finally {
+    f.close();
+  }
+});
+
+test('git add loads AGENTS.md for each selected nested path', async () => {
+  const f = fixture();
+  try {
+    execFileSync('git', ['init', '--quiet'], { cwd: f.dir });
+    const item = f.mind.create({ title: 'nested git instructions' });
+    const nested = path.join(f.dir, 'stage');
+    const file = path.join(nested, 'file with space.txt');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'AGENTS.md'), 'nested git contract\n');
+    fs.writeFileSync(file, 'stage me\n');
+    const code = `await elpis.git.add('stage/file with space.txt', { cwd: ${JSON.stringify(f.dir)} })`;
+
+    const blocked = await f.manager.run({ sandbox: item.id, code });
+    assert.equal(blocked.failureKind, 'context');
+    assert.match(blocked.error ?? '', /nested git contract/);
+    f.contextResources.acknowledge(blocked.contextResources ?? []);
+
+    const retried = await f.manager.run({ sandbox: item.id, code });
+    assert.equal(retried.ok, true);
+    assert.equal(
+      execFileSync('git', ['diff', '--cached', '--name-only'], {
+        cwd: f.dir,
+        encoding: 'utf8',
+      }).trim(),
+      'stage/file with space.txt',
+    );
   } finally {
     f.close();
   }

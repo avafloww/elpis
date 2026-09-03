@@ -88,6 +88,32 @@ test('clearContext: empties history, queued inbound, zeroes the tracker, and res
   );
 });
 
+test('clearContext: transcript sentinel failure leaves epoch and live history untouched', () => {
+  const h = buildTestAgent({
+    agentDeps: {
+      initialMessages: [{ role: 'user', content: 'must survive failed clear' }],
+    },
+    tmpPrefix: 'harness-clear-sentinel-fail-',
+  });
+  const transcript = h.agent['deps'].transcript;
+  const originalRotate = transcript.rotate;
+  const epoch = h.agent['epoch'];
+  transcript.rotate = () => {
+    throw new Error('sentinel write failed');
+  };
+  try {
+    assert.throws(() => h.agent.clearContext(), /sentinel write failed/);
+    assert.equal(h.agent['epoch'], epoch);
+    assert.deepEqual(h.agent.messagesForTest, [
+      { role: 'user', content: 'must survive failed clear' },
+    ]);
+  } finally {
+    transcript.rotate = originalRotate;
+    h.agent.stop();
+    h.cleanup();
+  }
+});
+
 test('clearContext: no-op clear returns false and stays consistent', () => {
   const { agent, tracker } = buildAgent();
   const had = agent.clearContext();

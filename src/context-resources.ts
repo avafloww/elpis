@@ -9,6 +9,8 @@ export const MAX_SKILL_DESCRIPTION_CHARS = 512;
 export const MAX_SKILL_BYTES = 64 * 1024;
 export const MAX_SKILL_TOTAL_BYTES = 192 * 1024;
 export const MAX_AGENTS_BYTES = 64 * 1024;
+export const MAX_TREE_DIRECTORIES = 4096;
+export const MAX_TREE_AGENTS = 128;
 
 export interface SkillSummary {
   name: string;
@@ -328,6 +330,54 @@ export class ContextResources {
       ].join('\n\n'),
       resources: bodies.map(({ resource }) => resource),
     };
+  }
+
+  beforeTreeAccess(target: string): void {
+    this.beforeFileAccess(target, 'auto');
+    let root: string;
+    try {
+      root = fs.realpathSync.native(path.resolve(target));
+      if (!fs.statSync(root).isDirectory()) return;
+    } catch {
+      return;
+    }
+    const pending = [root];
+    let directories = 0;
+    let agentsFiles = 0;
+    while (pending.length > 0) {
+      const directory = pending.pop()!;
+      directories++;
+      if (directories > MAX_TREE_DIRECTORIES) {
+        throw new Error(
+          `AGENTS.md tree preflight exceeds ${MAX_TREE_DIRECTORIES} directories: ${target}`,
+        );
+      }
+      let entries: fs.Dirent[];
+      try {
+        entries = fs
+          .readdirSync(directory, { withFileTypes: true })
+          .sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const candidate = path.join(directory, entry.name);
+        if (
+          entry.name === 'AGENTS.md' &&
+          (entry.isFile() || entry.isSymbolicLink())
+        ) {
+          agentsFiles++;
+          if (agentsFiles > MAX_TREE_AGENTS) {
+            throw new Error(
+              `AGENTS.md tree preflight exceeds ${MAX_TREE_AGENTS} instruction files: ${target}`,
+            );
+          }
+          this.beforeFileAccess(candidate, 'file');
+        } else if (entry.isDirectory()) {
+          pending.push(candidate);
+        }
+      }
+    }
   }
 
   beforeFileAccess(

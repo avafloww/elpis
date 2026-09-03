@@ -31,7 +31,7 @@ One call may select at most 8 skills. Each `SKILL.md` is limited to 64 KiB and o
 
 Before the first supported `elpis.read`, `elpis.edit`, `elpis.grep`, or `elpis.git` access under a directory, Elpis walks upward from the target and finds the nearest `AGENTS.md`. File symlinks check both the lexical parent and the physical target parent, one unseen scope per retry. The run fails with the complete file, up to 64 KiB, so the resident sees each local contract before retrying the operation.
 
-Catching that interruption inside JavaScript does not approve it. The same file continues interrupting supported access until an uncaught result has been appended to model-visible history. Different nested scopes interrupt independently. Raw `fs`, `elpis.sh`, `elpis.sudo`, and other indirect filesystem surfaces are deliberate bypasses and must not be described as covered.
+Catching that interruption inside JavaScript does not approve it. The same file continues interrupting supported access until an uncaught result has been appended to model-visible history. Different nested scopes interrupt independently. Recursive grep preflights nested instruction files, bounded to 4,096 directories and 128 `AGENTS.md` files; Git add preflights the exact tracked or unignored paths selected by its pathspec. Raw `fs`, `elpis.sh`, `elpis.sudo`, and other indirect filesystem surfaces are deliberate bypasses and must not be described as covered. Preflight and the later target operation are separate filesystem steps, so concurrent symlink retargeting can outrun the physical-scope check; this is context guidance, not a security boundary.
 
 ## Lifetime and privacy
 

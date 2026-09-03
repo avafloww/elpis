@@ -1134,7 +1134,7 @@ test('git: status/diff/add/commit in a temp repo', async () => {
   assert.match(commit.preview ?? '', /sha:/);
   assert.deepEqual(
     commit.operationReceipts?.map((receipt) => receipt.name),
-    ['commit', 'rev-parse'],
+    ['diff', 'commit', 'rev-parse'],
   );
   assert.ok(commit.operationReceipts?.every((receipt) => receipt.ok));
 
@@ -1198,17 +1198,23 @@ test('git: commit with nothing staged THROWS instead of silently no-oping', asyn
   const r = await sb.run('await elpis.git.commit("nothing staged")');
   assert.equal(r.ok, false, 'a no-op commit must not look like success');
   assert.match(r.error ?? '', /git\.commit failed/);
-  assert.equal(r.operationReceipts?.[0]?.kind, 'git');
-  assert.equal(r.operationReceipts?.[0]?.name, 'commit');
-  assert.equal(r.operationReceipts?.[0]?.state, 'completed');
-  assert.equal(r.operationReceipts?.[0]?.ok, false);
+  assert.deepEqual(
+    r.operationReceipts?.map((receipt) => receipt.name),
+    ['diff', 'commit'],
+  );
+  const failedCommit = r.operationReceipts?.at(-1);
+  assert.equal(failedCommit?.kind, 'git');
+  assert.equal(failedCommit?.state, 'completed');
+  assert.equal(failedCommit?.ok, false);
 
   const caught = await sb.run(
     'try { await elpis.git.commit("nothing staged") } catch {} "caught"',
   );
   assert.equal(caught.ok, true, String(caught.error));
-  assert.equal(caught.operationReceipts?.[0]?.ok, false);
-  assert.notEqual(caught.operationReceipts?.[0]?.code, 0);
+  const caughtCommit = caught.operationReceipts?.at(-1);
+  assert.equal(caughtCommit?.name, 'commit');
+  assert.equal(caughtCommit?.ok, false);
+  assert.notEqual(caughtCommit?.code, 0);
 });
 
 test('git: commitAndPush stages untracked files by default', async () => {

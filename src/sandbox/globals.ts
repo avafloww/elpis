@@ -697,7 +697,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       );
     }
     const where = opts.path ?? path.join(deps.config.paths.harnessRoot, 'src');
-    deps.contextResources?.beforeFileAccess(where, 'auto');
+    deps.contextResources?.beforeTreeAccess(where);
     const flags = ['-rn', '--color=never'];
     if (opts.ignoreCase) flags.push('-i');
     // Extended regex by default: a bare `|` in BRE is a literal, which made
@@ -1437,22 +1437,48 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       { kind: 'git', name: action, command },
     );
   }
+  async function preflightGitFiles(
+    args: string,
+    opts: GitOpts | undefined,
+    label: string,
+  ): Promise<void> {
+    const listing = await gitRun(args, opts);
+    if (listing.code !== 0) {
+      throw new Error(
+        `elpis.git.${label} preflight failed (exit ${listing.code}): ${(listing.stderr || listing.stdout).trim().slice(0, 500)}`,
+      );
+    }
+    const cwd = opts?.cwd ?? deps.config.paths.dataDirectory;
+    for (const file of listing.stdout.split('\0').filter(Boolean)) {
+      deps.contextResources?.beforeFileAccess(path.resolve(cwd, file), 'auto');
+    }
+  }
   const gitApi = {
     status: async (opts?: GitOpts) => {
       const r = await gitRun('status --short --branch', opts);
       return { ok: r.code === 0, ...r };
     },
     diff: async (opts?: GitOpts) => {
+      await preflightGitFiles('ls-files --modified --deleted -z', opts, 'diff');
       const r = await gitRun('diff', opts);
       return { ok: r.code === 0, ...r };
     },
     add: async (paths?: string | string[], opts?: GitOpts) => {
-      const spec =
+      const selected =
         paths === undefined
-          ? '.'
+          ? ['.']
           : Array.isArray(paths)
-            ? paths.join(' ')
-            : String(paths);
+            ? paths.map(String)
+            : [String(paths)];
+      if (selected.length === 0 || selected.some((value) => value === '')) {
+        throw new Error('elpis.git.add(paths): paths must not be empty');
+      }
+      const spec = selected.map(sh.q).join(' ');
+      await preflightGitFiles(
+        `ls-files --cached --others --exclude-standard -z -- ${spec}`,
+        opts,
+        'add',
+      );
       const r = await gitRun(`add -- ${spec}`, opts);
       // Throw on failure: a returned {ok:false} that the caller ignored
       // is how two fixes were silently lost — a git op that fails must fail loud.
@@ -1468,6 +1494,14 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           'elpis.git.commit(message): message must be a non-empty string',
         );
       }
+      if (opts?.add) {
+        await preflightGitFiles(
+          'ls-files --modified --deleted -z',
+          opts,
+          'commit',
+        );
+      }
+      await preflightGitFiles('diff --cached --name-only -z', opts, 'commit');
       const flags = opts?.add ? '-a' : '';
       const r = await gitRun(
         `commit ${flags} -m ${JSON.stringify(message)}`,

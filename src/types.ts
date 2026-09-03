@@ -118,7 +118,10 @@ export interface SandboxDeps {
     overwrite(text: string): unknown;
   };
   /** Best-effort repository instruction gate for supported elpis file verbs. */
-  contextResources?: Pick<ContextResources, 'beforeFileAccess'>;
+  contextResources?: Pick<
+    ContextResources,
+    'beforeFileAccess' | 'beforeTreeAccess'
+  >;
   send?: (
     channelId: string,
     content: string,

@@ -5,9 +5,11 @@ import {
   anthropicModelTool,
   createBillingHeader,
   patchCch,
+  createAnthropicOAuthLLM,
 } from '../src/llm/anthropic-client.js';
 import { build } from '../src/llm/prompt.js';
 import { RUN_TOOL, SKILL_TOOL, type ChatMessage } from '../src/llm/llm.js';
+import { makeConfig } from './helpers.js';
 
 const sys = (): ChatMessage => ({
   role: 'system',
@@ -27,6 +29,44 @@ test('anthropicModelTool preserves run and skill input schemas', () => {
   assert.equal(run.name, 'run');
   assert.equal(skill.name, 'skill');
   assert.equal(skill.input_schema, SKILL_TOOL.function.parameters);
+});
+
+test('Anthropic completion sends the resident skill declaration in its wire body', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: any = null;
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body));
+    return new Response('', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  };
+  const config = makeConfig({
+    llm: {
+      ...makeConfig().llm,
+      baseUrl: 'https://anthropic.invalid',
+      model: 'test-anthropic',
+    },
+  });
+  const store = {
+    read: () => null,
+    getAccessToken: async () => 'test-access-token',
+    forceRefresh: async () => undefined,
+  };
+  try {
+    const llm = createAnthropicOAuthLLM(config, store as any, undefined);
+    await llm.complete([sys(), { role: 'user', content: 'hello' }], {
+      skillTool: SKILL_TOOL,
+    });
+    assert.ok(capturedBody);
+    assert.ok(
+      capturedBody.tools.some((tool: any) => tool.name === 'skill'),
+      'the resident skill declaration must reach the Anthropic wire body',
+    );
+    assert.equal(capturedBody.tool_choice.disable_parallel_tool_use, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('translate: system blocks lead with billing + CC identity, then tiered body', () => {

@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createLLM } from '../src/llm/llm.js';
+import { createLLM, SKILL_TOOL } from '../src/llm/llm.js';
 import { ensureFile } from '../src/store/memory.js';
 import { makeConfig } from './helpers.js';
 
@@ -78,10 +78,13 @@ test('llm: signal is passed as a request option, not in the API body', async () 
     return emptyStream() as any;
   };
 
-  await llm.complete([
-    { role: 'system', content: 'sys' },
-    { role: 'user', content: 'hi' },
-  ]);
+  await llm.complete(
+    [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hi' },
+    ],
+    { skillTool: SKILL_TOOL },
+  );
 
   // Restore.
   (llm.client.chat.completions as any).create = origCreate;
@@ -92,6 +95,10 @@ test('llm: signal is passed as a request option, not in the API body', async () 
     capturedBody.parallel_tool_calls,
     false,
     'generic Chat requests must keep model tool dispatch serial',
+  );
+  assert.ok(
+    capturedBody.tools.some((tool: any) => tool.function?.name === 'skill'),
+    'the resident skill declaration must reach the generic Chat wire body',
   );
   assert.ok(
     !('signal' in capturedBody),
@@ -273,14 +280,21 @@ test('llm: responses path passes signal as a request option, not in the API body
     return emptyResponsesStream() as any;
   };
 
-  await llm.complete([
-    { role: 'system', content: 'sys' },
-    { role: 'user', content: 'hi' },
-  ]);
+  await llm.complete(
+    [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hi' },
+    ],
+    { skillTool: SKILL_TOOL },
+  );
 
   (llm.client.responses as any).create = origCreate;
 
   assert.ok(capturedBody, 'responses.create() was called with a body');
+  assert.ok(
+    capturedBody.tools.some((tool: any) => tool.name === 'skill'),
+    'the resident skill declaration must reach the generic Responses wire body',
+  );
   assert.ok(
     !('signal' in capturedBody),
     'signal must NOT be in the API request body',
