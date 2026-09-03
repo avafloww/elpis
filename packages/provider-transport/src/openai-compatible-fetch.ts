@@ -61,39 +61,47 @@ function canonicalBaseUrl(value: string | URL): string {
     : url.href.replace(/\/+$/, '');
 }
 
-function parseRequestUrl(input: RequestInfo | URL): {
-  url: URL;
-  suppliedHref: string;
-} {
-  let suppliedHref: string;
-  if (typeof input === 'string') suppliedHref = input;
-  else if (input instanceof URL) suppliedHref = input.href;
-  else if (input instanceof Request) suppliedHref = input.url;
-  else throw refusedRequest();
-
+function snapshotRequest(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Request {
+  let stableInput = input;
   try {
-    return { url: new URL(suppliedHref), suppliedHref };
+    if (typeof input === 'string') {
+      if (input !== new URL(input).href) throw refusedRequest();
+    } else if (input instanceof URL) {
+      stableInput = input.href;
+    } else if (!(input instanceof Request)) {
+      throw refusedRequest();
+    }
+    return new Request(stableInput, {
+      ...init,
+      credentials: 'omit',
+      redirect: 'error',
+      referrer: '',
+    });
   } catch {
     throw refusedRequest();
   }
 }
 
-function requirePost(input: RequestInfo | URL, init?: RequestInit): 'POST' {
-  const method =
-    init?.method ?? (input instanceof Request ? input.method : 'GET');
-  if (typeof method !== 'string' || !/^post$/i.test(method))
-    throw refusedRequest();
-  return 'POST';
-}
-
-function copyHeaders(input: RequestInfo | URL, init?: RequestInit): Headers {
+function validateRequest(request: Request, allowedUrls: Set<string>): void {
+  let url: URL;
   try {
-    return new Headers(
-      init?.headers ?? (input instanceof Request ? input.headers : undefined),
-    );
+    url = new URL(request.url);
   } catch {
     throw refusedRequest();
   }
+  if (
+    request.method !== 'POST' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    request.url !== url.href ||
+    !allowedUrls.has(request.url)
+  )
+    throw refusedRequest();
 }
 
 function validateApiKey(value: unknown): string {
@@ -105,6 +113,34 @@ function validateApiKey(value: unknown): string {
   )
     throw new TypeError('OpenAI-compatible API key is invalid');
   return value;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ?? new DOMException('The request was aborted', 'AbortError')
+  );
+}
+
+async function awaitWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw abortReason(signal);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortReason(signal)));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 /**
@@ -130,38 +166,26 @@ export function createOpenAICompatibleFetch(
   const dispatcher = options.dispatcher;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
-    const { url, suppliedHref } = parseRequestUrl(input);
-    if (
-      url.username !== '' ||
-      url.password !== '' ||
-      url.search !== '' ||
-      url.hash !== '' ||
-      suppliedHref !== url.href ||
-      !allowedUrls.has(suppliedHref)
-    )
-      throw refusedRequest();
-
-    const method = requirePost(input, init);
-    const headers = copyHeaders(input, init);
+    const request = snapshotRequest(input, init);
+    validateRequest(request, allowedUrls);
+    const headers = new Headers(request.headers);
     for (const name of SENSITIVE_REQUEST_HEADERS) headers.delete(name);
+    if (request.signal.aborted) throw abortReason(request.signal);
 
-    const outboundInit: FetchInitWithDispatcher = {
-      ...init,
-      method,
-      headers,
-      redirect: 'error',
-    };
-    delete outboundInit.dispatcher;
-    if (dispatcher !== undefined) outboundInit.dispatcher = dispatcher;
-
-    let suppliedKey: unknown;
-    try {
-      suppliedKey = await apiKeySource();
-    } catch {
-      throw new Error('OpenAI-compatible API key source failed');
-    }
+    const suppliedKey = await awaitWithAbort(
+      Promise.resolve()
+        .then(apiKeySource)
+        .catch(() => {
+          throw new Error('OpenAI-compatible API key source failed');
+        }),
+      request.signal,
+    );
+    if (request.signal.aborted) throw abortReason(request.signal);
     headers.set('authorization', `Bearer ${validateApiKey(suppliedKey)}`);
 
-    return underlyingFetch(input, outboundInit);
+    const outbound = new Request(request, { headers });
+    if (dispatcher === undefined) return underlyingFetch(outbound);
+    const fetchInit: FetchInitWithDispatcher = { dispatcher };
+    return underlyingFetch(outbound, fetchInit);
   };
 }

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { getEventListeners, once } from 'node:events';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { createOpenAICompatibleFetch } from '../src/index.js';
 
@@ -30,10 +32,13 @@ test('preserves exact request bytes and exact provider response', async () => {
     apiKey: async () => 'key:with!compatible-punctuation',
     fetch: asFetch(async (input, init) => {
       calls += 1;
-      assert.equal(input, request);
-      assert.equal(init?.method, 'POST');
-      assert.equal(init?.redirect, 'error');
-      const received = new Request(input, init);
+      assert.notEqual(input, request);
+      assert.equal(input instanceof Request, true);
+      const received = new Request(input);
+      assert.equal(received.url, chatUrl);
+      assert.equal(received.method, 'POST');
+      assert.equal(received.redirect, 'error');
+      assert.equal(init, undefined);
       assert.deepEqual(new Uint8Array(await received.arrayBuffer()), bytes);
       return providerResponse;
     }),
@@ -47,18 +52,201 @@ test('preserves exact request bytes and exact provider response', async () => {
   assert.equal(calls, 1);
 });
 
+test('takes immutable custody of a mutable URL before credential lookup', async () => {
+  let releaseKey!: () => void;
+  const keyGate = new Promise<void>((resolve) => {
+    releaseKey = resolve;
+  });
+  const target = new URL(responseUrl);
+  let observedUrl: string | undefined;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      await keyGate;
+      return 'configured-key';
+    },
+    fetch: asFetch(async (input) => {
+      observedUrl = new Request(input).url;
+      return new Response();
+    }),
+  });
+
+  const pending = pinned(target, { method: 'POST' });
+  target.href = 'https://attacker.invalid/steal';
+  releaseKey();
+  await pending;
+  assert.equal(observedUrl, responseUrl);
+});
+
+test('rejects a Request with a deceptive URL getter before side effects', async () => {
+  const deceptive = new Request('https://attacker.invalid/steal', {
+    method: 'POST',
+    body: 'payload',
+  });
+  Object.defineProperty(deceptive, 'url', {
+    get: () => responseUrl,
+  });
+  let keys = 0;
+  let calls = 0;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      keys += 1;
+      return 'configured-key';
+    },
+    fetch: asFetch(async () => {
+      calls += 1;
+      return new Response();
+    }),
+  });
+
+  await assert.rejects(
+    () => pinned(deceptive),
+    /OpenAI-compatible fetch refused request/,
+  );
+  assert.equal(keys, 0);
+  assert.equal(calls, 0);
+});
+
+test('rejects an already-aborted request before credential lookup', async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  let keys = 0;
+  let calls = 0;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      keys += 1;
+      return 'configured-key';
+    },
+    fetch: asFetch(async () => {
+      calls += 1;
+      return new Response();
+    }),
+  });
+
+  await assert.rejects(
+    () => pinned(responseUrl, { method: 'POST', signal: controller.signal }),
+    { name: 'AbortError' },
+  );
+  assert.equal(keys, 0);
+  assert.equal(calls, 0);
+});
+
+test('abort cancels a pending key lookup and removes its listener', async () => {
+  const controller = new AbortController();
+  let keys = 0;
+  let calls = 0;
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      keys += 1;
+      return new Promise<string>(() => undefined);
+    },
+    fetch: asFetch(async () => {
+      calls += 1;
+      return new Response();
+    }),
+  });
+
+  const pending = pinned(responseUrl, {
+    method: 'POST',
+    signal: controller.signal,
+  });
+  await Promise.resolve();
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  const outcome = await Promise.race([
+    pending.then(
+      () => 'resolved',
+      (error: unknown) =>
+        error instanceof DOMException && error.name === 'AbortError'
+          ? 'aborted'
+          : 'other-error',
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 30)),
+  ]);
+  assert.equal(outcome, 'aborted');
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  assert.equal(keys, 1);
+  assert.equal(calls, 0);
+});
+
+test('locks a Request body before asynchronous credential lookup', async () => {
+  let releaseKey!: () => void;
+  const keyGate = new Promise<void>((resolve) => {
+    releaseKey = resolve;
+  });
+  const original = new Request(responseUrl, {
+    method: 'POST',
+    body: 'payload',
+  });
+  let observedBody = '';
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => {
+      await keyGate;
+      return 'configured-key';
+    },
+    fetch: asFetch(async (input) => {
+      observedBody = await new Request(input).text();
+      return new Response();
+    }),
+  });
+
+  const pending = pinned(original);
+  await Promise.resolve();
+  assert.equal(original.bodyUsed, true);
+  await assert.rejects(() => original.text(), TypeError);
+  releaseKey();
+  await pending;
+  assert.equal(observedBody, 'payload');
+});
+
+test('forwards only standard Request state plus trusted dispatcher', async () => {
+  const dispatcher = { fixture: 'trusted dispatcher' };
+  const pinned = createOpenAICompatibleFetch({
+    baseUrl,
+    apiKey: async () => 'configured-key',
+    dispatcher,
+    fetch: asFetch(async (input, init) => {
+      assert.equal(input instanceof Request, true);
+      assert.deepEqual(Object.keys(init ?? {}), ['dispatcher']);
+      assert.equal(init?.dispatcher, dispatcher);
+      return new Response();
+    }),
+  });
+
+  await pinned(responseUrl, {
+    method: 'POST',
+    body: 'payload',
+    ...({
+      dispatcher: { fixture: 'caller dispatcher' },
+      agent: { attacker: true },
+      lookup: () => 'attacker.invalid',
+      proxy: 'http://attacker.invalid',
+    } as object),
+  });
+});
+
 test('passes the exact AbortSignal and propagates abort rejection', async () => {
   const controller = new AbortController();
   let observedSignal: AbortSignal | null | undefined;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
   const pinned = createOpenAICompatibleFetch({
     baseUrl,
     apiKey: async () => 'key',
-    fetch: asFetch(async (_input, init) => {
-      observedSignal = init?.signal;
+    fetch: asFetch(async (input) => {
+      const request = new Request(input);
+      observedSignal = request.signal;
+      markStarted();
       return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener(
+        request.signal.addEventListener(
           'abort',
-          () => reject(init.signal?.reason),
+          () => reject(request.signal.reason),
           { once: true },
         );
       });
@@ -70,11 +258,12 @@ test('passes the exact AbortSignal and propagates abort rejection', async () => 
     body: '{}',
     signal: controller.signal,
   });
-  await Promise.resolve();
+  await started;
   controller.abort(new DOMException('cancelled', 'AbortError'));
 
   await assert.rejects(pending, { name: 'AbortError' });
-  assert.equal(observedSignal, controller.signal);
+  assert.notEqual(observedSignal, undefined);
+  assert.equal(observedSignal?.aborted, true);
 });
 
 test('owns sensitive headers and dispatcher while preserving safe headers', async () => {
@@ -83,8 +272,9 @@ test('owns sensitive headers and dispatcher while preserving safe headers', asyn
     baseUrl,
     apiKey: async () => 'configured-key',
     dispatcher,
-    fetch: asFetch(async (_input, init) => {
-      const headers = new Headers(init?.headers);
+    fetch: asFetch(async (input, init) => {
+      const request = new Request(input);
+      const headers = request.headers;
       assert.equal(headers.get('authorization'), 'Bearer configured-key');
       for (const name of [
         'x-api-key',
@@ -95,7 +285,7 @@ test('owns sensitive headers and dispatcher while preserving safe headers', asyn
       ])
         assert.equal(headers.get(name), null);
       assert.equal(headers.get('content-type'), 'application/json');
-      assert.equal(init?.redirect, 'error');
+      assert.equal(request.redirect, 'error');
       assert.equal(init?.dispatcher, dispatcher);
       return new Response();
     }),
@@ -120,8 +310,9 @@ test('drops caller dispatcher when none is configured', async () => {
   const pinned = createOpenAICompatibleFetch({
     baseUrl,
     apiKey: async () => 'key',
-    fetch: asFetch(async (_input, init) => {
-      assert.equal(Object.hasOwn(init ?? {}, 'dispatcher'), false);
+    fetch: asFetch(async (input, init) => {
+      assert.equal(input instanceof Request, true);
+      assert.equal(init, undefined);
       return new Response();
     }),
   });
@@ -178,7 +369,7 @@ test('permits only the two exact POST routes under a normalized base URL', async
     baseUrl: `${baseUrl}/`,
     apiKey: async () => 'key',
     fetch: asFetch(async (input) => {
-      seen.push(String(input));
+      seen.push(new Request(input).url);
       return new Response();
     }),
   });
@@ -228,6 +419,40 @@ test('rejects malformed keys and key-source failures without leaking values', as
     (error: unknown) =>
       error instanceof Error && !error.message.includes(sourceSecret),
   );
+});
+
+test('default fetch refuses redirects without reaching the redirect target', async () => {
+  let redirected = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/v1/responses') {
+      response.writeHead(302, { location: '/stolen' });
+      response.end();
+      return;
+    }
+    redirected += 1;
+    response.writeHead(204);
+    response.end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.notEqual(address, null);
+  assert.equal(typeof address, 'object');
+  try {
+    const localBase = `http://127.0.0.1:${address.port}/v1`;
+    const pinned = createOpenAICompatibleFetch({
+      baseUrl: localBase,
+      apiKey: async () => 'configured-key',
+    });
+    await assert.rejects(
+      () => pinned(`${localBase}/responses`, { method: 'POST' }),
+      TypeError,
+    );
+    assert.equal(redirected, 0);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
 });
 
 test('rejects unsafe base URL configuration without leaking values', () => {
