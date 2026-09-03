@@ -282,7 +282,20 @@ test('a later provider/model stamp replaces attribution without mixing epochs', 
 test('automatic Responses fallback attributes the successful Chat endpoint', async () => {
   let responses = 0,
     chats = 0;
+  const seenHeaders: Array<{
+    authorization: string | null;
+    apiKey: string | null;
+    cookie: string | null;
+  }> = [];
   const server = createServer((req, res) => {
+    seenHeaders.push({
+      authorization: req.headers.authorization ?? null,
+      apiKey:
+        typeof req.headers['x-api-key'] === 'string'
+          ? req.headers['x-api-key']
+          : null,
+      cookie: req.headers.cookie ?? null,
+    });
     if (req.url === '/v1/responses') {
       responses++;
       res
@@ -347,12 +360,13 @@ test('automatic Responses fallback attributes the successful Chat endpoint', asy
         llm: {
           ...makeConfig().llm,
           baseUrl: `http://127.0.0.1:${address.port}/v1`,
-          apiKey: 'test',
+          apiKey: 'transport-real-key',
           model: 'swap-model',
           api: 'auto',
         },
       }),
     );
+    assert.equal(llm.client?.apiKey, 'elpis-transport-owned');
     const result = await llm.complete([{ role: 'user', content: 'hi' }]);
     assert.equal(result.message.provenance?.apiSurface, 'chat-completions');
     assert.equal(
@@ -363,6 +377,23 @@ test('automatic Responses fallback attributes the successful Chat endpoint', asy
     await llm.complete([{ role: 'user', content: 'again' }]);
     assert.equal(responses, 1);
     assert.equal(chats, 2);
+    assert.deepEqual(seenHeaders, [
+      {
+        authorization: 'Bearer transport-real-key',
+        apiKey: null,
+        cookie: null,
+      },
+      {
+        authorization: 'Bearer transport-real-key',
+        apiKey: null,
+        cookie: null,
+      },
+      {
+        authorization: 'Bearer transport-real-key',
+        apiKey: null,
+        cookie: null,
+      },
+    ]);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

@@ -14,6 +14,7 @@
 // streaming, sanitizer, usage, and request-diet contracts are shared; only the wire format differs.
 
 import OpenAI from 'openai';
+import { createOpenAICompatibleFetch } from '@elpis/provider-transport';
 import { Agent } from 'undici';
 import type { DatabaseSync } from 'node:sqlite';
 import { configForLlmRole, type Config } from '../config.js';
@@ -1323,18 +1324,22 @@ export function createLLM(
   // Raise both timeouts to 20 min. They are inter-event, not whole-request:
   // each received chunk resets `bodyTimeout`, so an actively-streaming response
   // never trips it, while a genuinely dead connection still errors eventually.
-  // The dispatcher is honored by the SDK's global fetch via `fetchOptions`
+  // The dispatcher is owned by the pinned provider fetch beneath the SDK
   // (verified: a custom Agent's timeout fires in place of undici's default).
   const dispatcher = new Agent({
     bodyTimeout: 1_200_000,
     headersTimeout: 1_200_000,
   });
   const client = new OpenAI({
-    apiKey: config.llm.apiKey,
+    apiKey: 'elpis-transport-owned',
     baseURL: config.llm.baseUrl,
     maxRetries: 3,
     timeout: 1_200_000,
-    fetchOptions: { dispatcher } as unknown as Record<string, unknown>,
+    fetch: createOpenAICompatibleFetch({
+      baseUrl: config.llm.baseUrl,
+      apiKey: async () => config.llm.apiKey,
+      dispatcher,
+    }),
   });
 
   // API-surface selection (llm.api): 'responses' | 'chat' | 'auto'. Auto tries

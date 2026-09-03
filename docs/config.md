@@ -25,6 +25,8 @@ The example file is the exhaustive annotated reference. This document explains t
 
 `anthropic-oauth` and `codex-oauth` use credentials stored in `elpis-data/elpis.db`; run `npm run oauth-login` after configuring the provider. See the provider-specific docs.
 
+OpenAI-compatible generation requests are pinned to the configured credential-free HTTP(S) `base_url` and exactly its `/responses` and `/chat/completions` routes. Elpis refuses redirects and injects `api_key` only after the final request route has been validated.
+
 The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor` and `secretary` are optional. A configured `secretary` resolves through the same provider-local model registry and remains unused until the Kubernetes-only secretary runtime is enabled.
 
 A canonical model may set `tool_tier: weak`, `medium`, or `strong` to opt into the resident's bounded `elpis.llm` one-shot query surface. Each tier may be assigned to at most one model across the whole registry; duplicates fail configuration loading. Omitted or `null` means unavailable. The legacy flat LLM form exposes no query models.
