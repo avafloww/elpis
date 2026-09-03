@@ -43,6 +43,10 @@ import type OpenAI from 'openai';
 import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
 import {
+  addStandaloneOutputBytes,
+  assertStandaloneOutputBytes,
+} from './standalone-limits.js';
+import {
   RUN_TOOL,
   THINK_TOOL,
   RetriableError,
@@ -463,6 +467,7 @@ export async function streamResponsesComplete(
   outerSignal?: AbortSignal,
   runTool: RunTool = RUN_TOOL,
   skillTool?: SkillTool,
+  maxOutputBytes?: number,
 ): Promise<CompleteResult> {
   try {
     try {
@@ -491,6 +496,7 @@ export async function streamResponsesComplete(
     );
 
     let content = '';
+    let visibleOutputBytes = 0;
     let reasoningPreview = '';
     // Function-call args accumulate per output index until the terminal item.
     const callSlots: Record<
@@ -567,6 +573,12 @@ export async function streamResponsesComplete(
         switch (event.type) {
           case 'response.output_text.delta': {
             if (event.delta) markMeaningfulProgress();
+            visibleOutputBytes = addStandaloneOutputBytes(
+              visibleOutputBytes,
+              event.delta,
+              maxOutputBytes,
+              () => controller.abort(),
+            );
             content += event.delta;
             try {
               hub?.streamDelta('content', event.delta);
@@ -689,12 +701,14 @@ export async function streamResponsesComplete(
     const responseForAssembly = { ...finalResponse, output };
     const streamedTextFallback =
       parsedOutput.content || content.length === 0 ? '' : content;
-    return assembleResult(
+    const result = assembleResult(
       responseForAssembly,
       charsSent,
       streamedTextFallback,
       requestId,
     );
+    assertStandaloneOutputBytes(result.message.content ?? '', maxOutputBytes);
+    return result;
   } finally {
     try {
       hub?.streamEnd();

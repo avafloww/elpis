@@ -130,10 +130,12 @@ test('LLM tool runtime exposes only opted-in models and sends fresh user-only ca
     { role: 'user', content: 'plain prompt' },
   ]);
   assert.deepEqual(Object.keys(seen[0].options ?? {}).sort(), [
+    'maxOutputBytes',
     'maxTokens',
     'signal',
   ]);
   assert.equal(seen[0].options?.maxTokens, 4096);
+  assert.equal(seen[0].options?.maxOutputBytes, LLM_TOOL_MAX_OUTPUT_BYTES);
   const serialized = JSON.stringify(weak);
   assert.doesNotMatch(
     serialized,
@@ -142,6 +144,49 @@ test('LLM tool runtime exposes only opted-in models and sends fresh user-only ca
   assert(Object.isFrozen(weak));
   assert(Object.isFrozen(weak.provenance));
   assert(Object.isFrozen(weak.usage));
+});
+
+test('LLM tool runtime prepares one canonical semantic snapshot', async () => {
+  const prompts: string[] = [];
+  const runtime = createLlmToolRuntime(canonicalConfig(), {
+    create(config) {
+      return makeStubLLM({
+        model: config.llm.model,
+        async completeStandalone(messages) {
+          prompts.push(messages[0]?.content ?? '');
+          return result('"ok"', config.llm.model);
+        },
+      });
+    },
+  });
+  assert(runtime);
+  await assert.rejects(
+    runtime.queryPrepared(
+      Object.freeze({
+        prompt: 'forged',
+        selector: 'weak',
+        schema: null,
+        schemaJson: null,
+        inputBytes: 1,
+      }),
+    ),
+    /prepared query was not created by this runtime/,
+  );
+  assert.deepEqual(prompts, []);
+  const schema = { type: 'string' };
+  const input = { prompt: 'before', model: 'weak', schema };
+  const prepared = runtime.prepare(input);
+  assert(Object.isFrozen(prepared));
+  assert.equal(
+    prepared.inputBytes,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+  );
+  input.prompt = 'after';
+  schema.type = 'number';
+  await runtime.queryPrepared(prepared);
+  assert.match(prompts[0] ?? '', /^before\n\n/);
+  assert.match(prompts[0] ?? '', /"type":"string"/);
+  assert.doesNotMatch(prompts[0] ?? '', /after|number/);
 });
 
 test('LLM tool runtime validates exact JSON against a bounded schema', async () => {
@@ -194,6 +239,25 @@ test('LLM tool runtime validates exact JSON against a bounded schema', async () 
     }),
     /schema keyword \$ref is not supported/,
   );
+  await assert.rejects(
+    runtime.query({
+      prompt: 'bad schema',
+      model: 'weak',
+      schema: { type: 'string', pattern: '(a+)+$' },
+    }),
+    /schema keyword pattern is not supported/,
+  );
+  await assert.rejects(
+    runtime.query({
+      prompt: 'bad schema',
+      model: 'weak',
+      schema: {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'string',
+      },
+    }),
+    /only JSON Schema draft-07 is supported/,
+  );
 });
 
 test('LLM tool runtime rejects unexposed models, malformed input, and byte overflow before or after calls', async () => {
@@ -225,6 +289,24 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     runtime.query({ prompt: 'x', model: 'weak', extra: true }),
     /unknown option/,
   );
+  const hiddenPrompt = { model: 'weak' } as Record<string, unknown>;
+  Object.defineProperty(hiddenPrompt, 'prompt', {
+    value: 'x',
+    enumerable: false,
+  });
+  await assert.rejects(
+    runtime.query(hiddenPrompt),
+    /own enumerable data properties/,
+  );
+  const getterPrompt = { model: 'weak' } as Record<string, unknown>;
+  Object.defineProperty(getterPrompt, 'prompt', {
+    enumerable: true,
+    get: () => 'x',
+  });
+  await assert.rejects(
+    runtime.query(getterPrompt),
+    /own enumerable data properties/,
+  );
   await assert.rejects(
     runtime.query({
       prompt: 'x'.repeat(LLM_TOOL_MAX_PROMPT_BYTES + 1),
@@ -237,11 +319,27 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     runtime.query({ prompt: 'x', model: 'weak' }),
     /output exceeds/,
   );
-  assert.equal(calls, 1);
+  await assert.rejects(
+    runtime.query({
+      prompt: 'x',
+      model: 'weak',
+      schema: { type: 'object' },
+    }),
+    /output exceeds/,
+  );
+  assert.equal(calls, 2);
 });
 
 test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-call drift', async () => {
-  let mode: 'timeout' | 'provider' | 'model' | 'surface' | 'tools' = 'timeout';
+  let mode:
+    | 'timeout'
+    | 'provider'
+    | 'limit'
+    | 'hostile-error'
+    | 'model'
+    | 'surface'
+    | 'tools' = 'timeout';
+  let timeoutAborted = false;
   const runtime = createLlmToolRuntime(canonicalConfig(), {
     timeoutMs: 5,
     create(config) {
@@ -249,22 +347,34 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
         model: config.llm.model,
         async completeStandalone(_messages, options) {
           if (mode === 'timeout') {
-            return await new Promise<StandaloneCompleteResult>(
-              (_resolve, reject) => {
-                options?.signal?.addEventListener(
-                  'abort',
-                  () => reject(new Error('aborted')),
-                  {
-                    once: true,
-                  },
-                );
+            options?.signal?.addEventListener(
+              'abort',
+              () => {
+                timeoutAborted = true;
               },
+              { once: true },
             );
+            return await new Promise<StandaloneCompleteResult>(() => {});
           }
           if (mode === 'provider')
             throw new Error(
               'request failed at https://private-endpoint.example with secret-token',
             );
+          if (mode === 'limit')
+            throw Object.assign(new Error('secret provider detail'), {
+              cause: Object.assign(new Error('internal limit detail'), {
+                code: 'standalone_output_limit',
+              }),
+            });
+          if (mode === 'hostile-error') {
+            const error = {};
+            Object.defineProperty(error, 'code', {
+              get: () => {
+                throw new Error('getter-secret');
+              },
+            });
+            throw error;
+          }
           if (mode === 'model') return result('x', 'wrong-model');
           if (mode === 'surface')
             return result('x', config.llm.model, {
@@ -288,12 +398,31 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
     runtime.query({ prompt: 'x', model: 'weak' }),
     /timed out after 5ms/,
   );
+  assert.equal(timeoutAborted, true);
   mode = 'provider';
   await assert.rejects(
     runtime.query({ prompt: 'x', model: 'weak' }),
     (error: Error) => {
       assert.match(error.message, /provider request failed for p\/weak/);
       assert.doesNotMatch(error.message, /private-endpoint|secret-token/);
+      return true;
+    },
+  );
+  mode = 'limit';
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak' }),
+    (error: Error) => {
+      assert.match(error.message, /output exceeds 65536 UTF-8 bytes/);
+      assert.doesNotMatch(error.message, /secret|internal limit detail/);
+      return true;
+    },
+  );
+  mode = 'hostile-error';
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak' }),
+    (error: Error) => {
+      assert.match(error.message, /provider request failed for p\/weak/);
+      assert.doesNotMatch(error.message, /getter-secret/);
       return true;
     },
   );

@@ -18,6 +18,7 @@ import { Agent } from 'undici';
 import type { DatabaseSync } from 'node:sqlite';
 import { configForLlmRole, type Config } from '../config.js';
 import type { LlmRole } from './model-registry.js';
+import { addStandaloneOutputBytes } from './standalone-limits.js';
 import type { ConsoleHub } from '../console/hub.js';
 // llm.ts ⇄ responses.ts import each other (this module routes to the Responses
 // path; that module reuses this one's helpers). Safe in ESM because every
@@ -172,6 +173,8 @@ export interface StandaloneCompleteOptions {
   topP?: number;
   topK?: number;
   maxTokens?: number;
+  /** Abort standalone streaming after this many visible UTF-8 bytes. */
+  maxOutputBytes?: number;
   chatTemplateKwargs?: Record<string, unknown>;
   /** Replay a closed historical function-call/output chain. */
   allowHistoricalToolMessages?: boolean;
@@ -1021,6 +1024,7 @@ export async function streamComplete(
     topP?: number;
     topK?: number;
     maxTokens?: number;
+    maxOutputBytes?: number;
     chatTemplateKwargs?: Record<string, unknown>;
     signal?: AbortSignal;
   } = {},
@@ -1067,6 +1071,7 @@ export async function streamComplete(
     };
     const params = withEffort(config, base);
     let content = '';
+    let visibleOutputBytes = 0;
     let reasoningContent = '';
     const partialToolCalls: Record<
       number,
@@ -1124,6 +1129,12 @@ export async function streamComplete(
           }
         }
         if (delta?.content) {
+          visibleOutputBytes = addStandaloneOutputBytes(
+            visibleOutputBytes,
+            delta.content,
+            options.maxOutputBytes,
+            () => controller.abort(),
+          );
           content += delta.content;
           try {
             hub?.streamDelta('content', delta.content);
@@ -1456,6 +1467,7 @@ export function createLLM(
             topP: opts.topP,
             topK: opts.topK,
             maxTokens: opts.maxTokens,
+            maxOutputBytes: opts.maxOutputBytes,
             chatTemplateKwargs: opts.chatTemplateKwargs,
             signal: opts.signal,
           }),
@@ -1473,10 +1485,16 @@ export function createLLM(
               undefined,
               {
                 tools: undefined,
+                ...(opts.maxTokens !== undefined
+                  ? { max_output_tokens: opts.maxTokens }
+                  : {}),
                 ...(opts.cacheKey ? { prompt_cache_key: opts.cacheKey } : {}),
               },
               undefined,
               opts.signal,
+              RUN_TOOL,
+              undefined,
+              opts.maxOutputBytes,
             ),
             isolated,
             'responses',
@@ -1485,6 +1503,8 @@ export function createLLM(
           standaloneResult(
             await streamComplete(client, isolated, messages, undefined, {
               toolFree: true,
+              maxTokens: opts.maxTokens,
+              maxOutputBytes: opts.maxOutputBytes,
               signal: opts.signal,
             }),
             isolated,

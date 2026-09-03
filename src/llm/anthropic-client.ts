@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { Agent } from 'undici';
 import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
+import { addStandaloneOutputBytes } from './standalone-limits.js';
 import { segmentSystemPrompt, type SystemTier } from './prompt.js';
 import { xxh64 } from './oauth/xxhash.js';
 import type { OAuthStore } from './oauth/store.js';
@@ -389,6 +390,8 @@ async function anthropicComplete(
     runTool?: RunTool;
     skillTool?: SkillTool;
     toolChoice?: 'required' | 'auto';
+    maxTokens?: number;
+    maxOutputBytes?: number;
   } = {},
 ): Promise<CompleteResult> {
   try {
@@ -407,7 +410,7 @@ async function anthropicComplete(
     const { system, wire } = translate(prepared);
     const body: Record<string, unknown> = {
       model: config.llm.model,
-      max_tokens: MAX_OUTPUT_TOKENS,
+      max_tokens: options.maxTokens ?? MAX_OUTPUT_TOKENS,
       system,
       messages: wire,
       ...(options.toolFree
@@ -433,6 +436,7 @@ async function anthropicComplete(
     }
 
     let content = '';
+    let visibleOutputBytes = 0;
     let reasoning = '';
     const toolBlocks: Record<
       number,
@@ -504,6 +508,12 @@ async function anthropicComplete(
               }
             | undefined;
           if (d?.type === 'text_delta' && d.text) {
+            visibleOutputBytes = addStandaloneOutputBytes(
+              visibleOutputBytes,
+              d.text,
+              options.maxOutputBytes,
+              () => controller.abort(),
+            );
             content += d.text;
             try {
               hub?.streamDelta('content', d.text);
@@ -716,7 +726,12 @@ export function createAnthropicOAuthLLM(
         store,
         messages,
         undefined,
-        { toolFree: true, signal: opts.signal },
+        {
+          toolFree: true,
+          signal: opts.signal,
+          maxTokens: opts.maxTokens,
+          maxOutputBytes: opts.maxOutputBytes,
+        },
       );
       return {
         content: result.message.content ?? '',

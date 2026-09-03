@@ -502,6 +502,8 @@ test('completeStandalone uses its lane key for authenticated transport and reque
       cacheKey: 'motor-lane',
       model: 'gpt-5.6-luna',
       reasoningEffort: 'low',
+      maxTokens: 7,
+      maxOutputBytes: 64,
       signal: controller.signal,
     },
   );
@@ -515,6 +517,7 @@ test('completeStandalone uses its lane key for authenticated transport and reque
   assert.equal(body?.model, 'gpt-5.6-luna');
   assert.deepEqual(body?.include, ['reasoning.encrypted_content']);
   assert.deepEqual(body?.reasoning, { effort: 'low', context: 'all_turns' });
+  assert.equal('max_output_tokens' in (body ?? {}), false);
   assert.equal('tools' in (body ?? {}), false);
   assert.equal(result.content, '{"keys":["Up"]}');
   assert.deepEqual(result.usage, {
@@ -541,6 +544,40 @@ test('completeStandalone uses its lane key for authenticated transport and reque
     }),
     /different Codex wire grammar/,
   );
+});
+
+test('Codex standalone aborts before visible output exceeds its byte limit', async () => {
+  const { store } = fakeStore();
+  let signal: AbortSignal | null | undefined;
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    signal = init?.signal;
+    const events = [
+      { type: 'response.output_text.delta', delta: 'abcd' },
+      { type: 'response.output_text.delta', delta: 'efgh' },
+      { type: 'response.output_text.delta', delta: 'not-consumed' },
+    ];
+    const sse =
+      events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') +
+      'data: [DONE]\n\n';
+    return new Response(sse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+  const llm = createCodexOAuthLLM(
+    codexConfig('gpt-5.6-sol'),
+    store,
+    undefined,
+    fetchFn,
+  );
+  await assert.rejects(
+    llm.completeStandalone!([{ role: 'user', content: 'bounded' }], {
+      cacheKey: 'bounded-lane',
+      maxOutputBytes: 5,
+    }),
+    /standalone visible output exceeds 5 UTF-8 bytes/,
+  );
+  assert.equal(signal?.aborted, true);
 });
 
 test('Codex LLM defaults to required tools, permits auto, and rotates cache identity on reset', async () => {

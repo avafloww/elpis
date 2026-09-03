@@ -2180,34 +2180,24 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           throw new Error(
             `elpis.llm.query: at most ${LLM_TOOL_MAX_CALLS_PER_RUN} calls are allowed per run`,
           );
-        let serialized = '';
-        try {
-          serialized = JSON.stringify(input) ?? '';
-        } catch {
-          // The runtime reports the malformed value; accounting remains zero-byte.
-        }
-        const inputBytes = Buffer.byteLength(serialized, 'utf8');
+        const prepared = deps.llmTool!.prepare(input);
+        const inputBytes = prepared.inputBytes;
         scope.llmToolInputBytes += inputBytes;
         if (scope.llmToolInputBytes > LLM_TOOL_MAX_RUN_INPUT_BYTES)
           throw new Error(
             `elpis.llm.query: run input exceeds ${LLM_TOOL_MAX_RUN_INPUT_BYTES} UTF-8 bytes`,
           );
-        const selector =
-          input && typeof input === 'object' && !Array.isArray(input)
-            ? (input as { model?: unknown }).model
-            : undefined;
-        const selectorIsExposed =
-          typeof selector === 'string' &&
-          deps
-            .llmTool!.list()
-            .some((item) => item.tier === selector || item.ref === selector);
+        const selector = prepared.selector;
+        const selectorIsExposed = deps
+          .llmTool!.list()
+          .some((item) => item.tier === selector || item.ref === selector);
         const receipt = beginOperationReceipt({
           kind: 'llm',
           name: 'llm.query',
           command: `model=${selectorIsExposed ? selector : '<invalid>'} input_bytes=${inputBytes}`,
         });
         try {
-          const result = await deps.llmTool!.query(input);
+          const result = await deps.llmTool!.queryPrepared(prepared);
           completeOperationReceipt(receipt, {
             stdout: '',
             stderr: '',

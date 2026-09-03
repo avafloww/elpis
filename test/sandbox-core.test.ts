@@ -167,9 +167,27 @@ test('LLM tool is full-resident-only and enforces per-run call and input budgets
           contextSize: 32000,
         }),
       ]),
-    query: async (input) => {
+    prepare: (input) => {
+      const query = input as {
+        prompt: string;
+        model: string;
+        schema?: Record<string, unknown>;
+      };
+      const normalized = JSON.stringify(query);
+      return Object.freeze({
+        prompt: query.prompt,
+        selector: query.model,
+        schema: query.schema ?? null,
+        schemaJson: query.schema ? JSON.stringify(query.schema) : null,
+        inputBytes: Buffer.byteLength(normalized, 'utf8'),
+      });
+    },
+    queryPrepared: async (query) => {
       calls++;
-      return { input } as never;
+      return { query } as never;
+    },
+    query: async () => {
+      throw new Error('sandbox must execute the prepared query path');
     },
   };
   const full = createSandbox(fullDeps);

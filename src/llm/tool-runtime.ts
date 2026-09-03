@@ -14,6 +14,7 @@ import {
   type StandaloneCompleteResult,
 } from './llm.js';
 import type { ApiSurface } from './provenance.js';
+import { isStandaloneOutputLimitError } from './standalone-limits.js';
 
 export const LLM_TOOL_MAX_CALLS_PER_RUN = 4;
 export const LLM_TOOL_MAX_PROMPT_BYTES = 64 * 1024;
@@ -45,8 +46,18 @@ export interface LlmToolQueryResult {
   usage: LLMUsage;
 }
 
+export interface PreparedLlmToolQuery {
+  readonly prompt: string;
+  readonly selector: string;
+  readonly schema: Record<string, unknown> | null;
+  readonly schemaJson: string | null;
+  readonly inputBytes: number;
+}
+
 export interface LlmToolRuntime {
   list(): readonly LlmToolCatalogEntry[];
+  prepare(input: unknown): PreparedLlmToolQuery;
+  queryPrepared(query: PreparedLlmToolQuery): Promise<LlmToolQueryResult>;
   query(input: unknown): Promise<LlmToolQueryResult>;
 }
 
@@ -55,13 +66,6 @@ interface RuntimeOptions {
   db?: DatabaseSync;
   timeoutMs?: number;
   maxTokens?: number;
-}
-
-interface ParsedQuery {
-  prompt: string;
-  selector: string;
-  schema: Record<string, unknown> | null;
-  schemaJson: string | null;
 }
 
 function utf8Bytes(value: string): number {
@@ -102,9 +106,23 @@ function boundSchema(value: unknown): {
       return;
     }
     for (const [key, child] of Object.entries(node)) {
-      if (key === '$ref' || key === '$dynamicRef' || key === '$recursiveRef')
+      if (
+        key === '$ref' ||
+        key === '$dynamicRef' ||
+        key === '$recursiveRef' ||
+        key === 'pattern' ||
+        key === 'patternProperties'
+      )
         throw new Error(
           `elpis.llm.query: schema keyword ${key} is not supported`,
+        );
+      if (
+        key === '$schema' &&
+        child !== 'http://json-schema.org/draft-07/schema#' &&
+        child !== 'https://json-schema.org/draft-07/schema#'
+      )
+        throw new Error(
+          'elpis.llm.query: only JSON Schema draft-07 is supported',
         );
       visit(child, depth + 1);
     }
@@ -113,35 +131,63 @@ function boundSchema(value: unknown): {
   return { schema, json };
 }
 
-function parseQuery(input: unknown): ParsedQuery {
+function prepareQuery(input: unknown): PreparedLlmToolQuery {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new Error('elpis.llm.query: expected { prompt, model, schema? }');
-  const record = input as Record<string, unknown>;
-  const unknown = Object.keys(record).filter(
+  let descriptors: PropertyDescriptorMap;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(input);
+  } catch {
+    throw new Error(
+      'elpis.llm.query: options must use own enumerable data properties',
+    );
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.some(
+      (key) =>
+        typeof key !== 'string' ||
+        !descriptors[key]?.enumerable ||
+        !Object.hasOwn(descriptors[key] ?? {}, 'value'),
+    )
+  )
+    throw new Error(
+      'elpis.llm.query: options must use own enumerable data properties',
+    );
+  const unknown = keys.filter(
     (key) => key !== 'prompt' && key !== 'model' && key !== 'schema',
   );
   if (unknown.length > 0)
     throw new Error(
       `elpis.llm.query: unknown option(s): ${unknown.join(', ')}`,
     );
-  if (typeof record.prompt !== 'string' || record.prompt.length === 0)
+  const prompt = descriptors.prompt?.value;
+  const selector = descriptors.model?.value;
+  const schemaValue = descriptors.schema?.value;
+  if (typeof prompt !== 'string' || prompt.length === 0)
     throw new Error('elpis.llm.query: prompt must be a non-empty string');
-  if (typeof record.model !== 'string' || record.model.length === 0)
+  if (typeof selector !== 'string' || selector.length === 0)
     throw new Error(
       'elpis.llm.query: model must be an exposed tier or model ref',
     );
-  if (utf8Bytes(record.prompt) > LLM_TOOL_MAX_PROMPT_BYTES)
+  if (utf8Bytes(prompt) > LLM_TOOL_MAX_PROMPT_BYTES)
     throw new Error(
       `elpis.llm.query: prompt exceeds ${LLM_TOOL_MAX_PROMPT_BYTES} UTF-8 bytes`,
     );
   const bounded =
-    record.schema === undefined ? null : boundSchema(record.schema);
-  return {
-    prompt: record.prompt,
-    selector: record.model,
+    descriptors.schema === undefined ? null : boundSchema(schemaValue);
+  const normalized = {
+    prompt,
+    model: selector,
+    ...(bounded ? { schema: bounded.schema } : {}),
+  };
+  return Object.freeze({
+    prompt,
+    selector,
     schema: bounded?.schema ?? null,
     schemaJson: bounded?.json ?? null,
-  };
+    inputBytes: utf8Bytes(JSON.stringify(normalized)),
+  });
 }
 
 function schemaPrompt(prompt: string, schemaJson: string): string {
@@ -193,11 +239,12 @@ function sanitizedApiSurface(value: unknown): ApiSurface | null {
   throw new Error('elpis.llm.query: provider API surface provenance mismatch');
 }
 
-function sanitizedResult(
+function assertBoundedResult(
   result: StandaloneCompleteResult,
   entry: LlmToolCatalogEntry,
-  parsed?: unknown,
-): LlmToolQueryResult {
+): void {
+  if (typeof result.content !== 'string')
+    throw new Error('elpis.llm.query: provider returned invalid text');
   if (result.model && result.model !== entry.model)
     throw new Error('elpis.llm.query: provider model provenance mismatch');
   if (result.providerType && result.providerType !== entry.providerType)
@@ -210,6 +257,15 @@ function sanitizedResult(
     throw new Error(
       `elpis.llm.query: output exceeds ${LLM_TOOL_MAX_OUTPUT_BYTES} UTF-8 bytes`,
     );
+  sanitizedApiSurface(result.apiSurface);
+}
+
+function sanitizedResult(
+  result: StandaloneCompleteResult,
+  entry: LlmToolCatalogEntry,
+  parsed?: unknown,
+): LlmToolQueryResult {
+  assertBoundedResult(result, entry);
   return Object.freeze({
     text: result.content,
     ...(parsed === undefined ? {} : { parsed: freezeJson(parsed) }),
@@ -274,69 +330,99 @@ export function createLlmToolRuntime(
     useDefaults: false,
     validateFormats: false,
   });
+  const mintedQueries = new WeakSet<PreparedLlmToolQuery>();
+  const prepare = (input: unknown): PreparedLlmToolQuery => {
+    const query = prepareQuery(input);
+    mintedQueries.add(query);
+    return query;
+  };
+  const queryPrepared = async (
+    query: PreparedLlmToolQuery,
+  ): Promise<LlmToolQueryResult> => {
+    if (!mintedQueries.has(query))
+      throw new Error(
+        'elpis.llm.query: prepared query was not created by this runtime',
+      );
+    const entry = selectors.get(query.selector);
+    if (!entry)
+      throw new Error(
+        `elpis.llm.query: model must be an exposed tier or ref (${catalog.map((item) => `${item.tier}|${item.ref}`).join(', ')})`,
+      );
+    const client = clients.get(entry.ref);
+    if (!client?.completeStandalone)
+      throw new Error(
+        `elpis.llm.query: configured model ${entry.ref} has no standalone completion path`,
+      );
+    const prompt = query.schemaJson
+      ? schemaPrompt(query.prompt, query.schemaJson)
+      : query.prompt;
+    if (utf8Bytes(prompt) > LLM_TOOL_MAX_COMBINED_INPUT_BYTES)
+      throw new Error(
+        `elpis.llm.query: combined prompt exceeds ${LLM_TOOL_MAX_COMBINED_INPUT_BYTES} UTF-8 bytes`,
+      );
+    let validate: ValidateFunction | null = null;
+    if (query.schema) {
+      try {
+        validate = ajv.compile(query.schema);
+      } catch (error) {
+        throw new Error(
+          `elpis.llm.query: invalid JSON Schema: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(new Error('LLM tool timeout'));
+        reject(new Error(`elpis.llm.query: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    const completion = client.completeStandalone(
+      [{ role: 'user', content: prompt }],
+      {
+        maxTokens,
+        maxOutputBytes: LLM_TOOL_MAX_OUTPUT_BYTES,
+        signal: controller.signal,
+      },
+    );
+    void completion.catch(() => {});
+    let result: StandaloneCompleteResult;
+    try {
+      result = await Promise.race([completion, timeout]);
+    } catch (error) {
+      if (timedOut)
+        throw new Error(`elpis.llm.query: timed out after ${timeoutMs}ms`);
+      if (isStandaloneOutputLimitError(error))
+        throw new Error(
+          `elpis.llm.query: output exceeds ${LLM_TOOL_MAX_OUTPUT_BYTES} UTF-8 bytes`,
+        );
+      throw new Error(
+        `elpis.llm.query: provider request failed for ${entry.ref}`,
+      );
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    assertBoundedResult(result, entry);
+    if (!validate) return sanitizedResult(result, entry);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.content);
+    } catch {
+      throw new Error('elpis.llm.query: model output was not exact JSON');
+    }
+    if (!validate(parsed))
+      throw new Error(
+        `elpis.llm.query: model output failed schema validation: ${validationError(ajv, validate.errors)}`,
+      );
+    return sanitizedResult(result, entry, parsed);
+  };
   return Object.freeze({
     list: () => catalog,
-    query: async (input: unknown): Promise<LlmToolQueryResult> => {
-      const query = parseQuery(input);
-      const entry = selectors.get(query.selector);
-      if (!entry)
-        throw new Error(
-          `elpis.llm.query: model must be an exposed tier or ref (${catalog.map((item) => `${item.tier}|${item.ref}`).join(', ')})`,
-        );
-      const client = clients.get(entry.ref);
-      if (!client?.completeStandalone)
-        throw new Error(
-          `elpis.llm.query: configured model ${entry.ref} has no standalone completion path`,
-        );
-      const prompt = query.schemaJson
-        ? schemaPrompt(query.prompt, query.schemaJson)
-        : query.prompt;
-      if (utf8Bytes(prompt) > LLM_TOOL_MAX_COMBINED_INPUT_BYTES)
-        throw new Error(
-          `elpis.llm.query: combined prompt exceeds ${LLM_TOOL_MAX_COMBINED_INPUT_BYTES} UTF-8 bytes`,
-        );
-      let validate: ValidateFunction | null = null;
-      if (query.schema) {
-        try {
-          validate = ajv.compile(query.schema);
-        } catch (error) {
-          throw new Error(
-            `elpis.llm.query: invalid JSON Schema: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-      const controller = new AbortController();
-      const timer = setTimeout(
-        () => controller.abort(new Error('LLM tool timeout')),
-        timeoutMs,
-      );
-      let result: StandaloneCompleteResult;
-      try {
-        result = await client.completeStandalone(
-          [{ role: 'user', content: prompt }],
-          { maxTokens, signal: controller.signal },
-        );
-      } catch {
-        if (controller.signal.aborted)
-          throw new Error(`elpis.llm.query: timed out after ${timeoutMs}ms`);
-        throw new Error(
-          `elpis.llm.query: provider request failed for ${entry.ref}`,
-        );
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!validate) return sanitizedResult(result, entry);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(result.content);
-      } catch {
-        throw new Error('elpis.llm.query: model output was not exact JSON');
-      }
-      if (!validate(parsed))
-        throw new Error(
-          `elpis.llm.query: model output failed schema validation: ${validationError(ajv, validate.errors)}`,
-        );
-      return sanitizedResult(result, entry, parsed);
-    },
+    prepare,
+    queryPrepared,
+    query: async (input: unknown) => queryPrepared(prepare(input)),
   });
 }

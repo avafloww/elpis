@@ -39,10 +39,12 @@ test('OpenAI Chat standalone omits tools and reports the resolved role identity'
     body = params;
     return chatStream();
   };
-  const result = await llm.completeStandalone!([
-    { role: 'user', content: 'classify' },
-  ]);
+  const result = await llm.completeStandalone!(
+    [{ role: 'user', content: 'classify' }],
+    { maxTokens: 7, maxOutputBytes: 64 },
+  );
   assert.ok(body && !Object.hasOwn(body, 'tools'));
+  assert.equal(body?.max_tokens, 7);
   assert.equal(result.content, 'chat-ok');
   assert.equal(result.model, 'wire-role-model');
   assert.equal(result.providerType, 'openai-compatible');
@@ -58,6 +60,36 @@ test('OpenAI Chat standalone omits tools and reports the resolved role identity'
       }),
     /configured role target/,
   );
+});
+
+test('OpenAI Chat standalone aborts before visible output exceeds its byte limit', async () => {
+  const llm = createLLM(config('chat'));
+  let signal: AbortSignal | undefined;
+  let chunks = 0;
+  (llm.client as any).chat.completions.create = async (
+    _params: Record<string, unknown>,
+    options: { signal?: AbortSignal },
+  ) => {
+    signal = options.signal;
+    return {
+      async *[Symbol.asyncIterator]() {
+        chunks++;
+        yield { choices: [{ delta: { content: 'abcd' } }] };
+        chunks++;
+        yield { choices: [{ delta: { content: 'efgh' } }] };
+        chunks++;
+        yield { choices: [{ delta: { content: 'not-consumed' } }] };
+      },
+    };
+  };
+  await assert.rejects(
+    llm.completeStandalone!([{ role: 'user', content: 'bounded' }], {
+      maxOutputBytes: 5,
+    }),
+    /standalone visible output exceeds 5 UTF-8 bytes/,
+  );
+  assert.equal(signal?.aborted, true);
+  assert.equal(chunks, 2);
 });
 
 test('OpenAI Chat standalone sends native tools and returns streamed function calls', async () => {
@@ -209,13 +241,44 @@ test('OpenAI Responses standalone omits tools and carries an isolated cache key'
   };
   const result = await llm.completeStandalone!(
     [{ role: 'user', content: 'classify' }],
-    { cacheKey: 'classifier-lane' },
+    { cacheKey: 'classifier-lane', maxTokens: 7, maxOutputBytes: 64 },
   );
   assert.ok(body && !Object.hasOwn(body, 'tools'));
+  assert.equal(body?.max_output_tokens, 7);
   assert.equal(body?.prompt_cache_key, 'classifier-lane');
   assert.equal(result.content, 'responses-ok');
   assert.equal(result.requestId, 'req-responses');
   assert.equal(result.apiSurface, 'responses');
+});
+
+test('OpenAI Responses standalone aborts before visible output exceeds its byte limit', async () => {
+  const llm = createLLM(config('responses'));
+  let signal: AbortSignal | undefined;
+  let chunks = 0;
+  (llm.client as any).responses.create = async (
+    _params: Record<string, unknown>,
+    options: { signal?: AbortSignal },
+  ) => {
+    signal = options.signal;
+    return {
+      async *[Symbol.asyncIterator]() {
+        chunks++;
+        yield { type: 'response.output_text.delta', delta: 'abcd' };
+        chunks++;
+        yield { type: 'response.output_text.delta', delta: 'efgh' };
+        chunks++;
+        yield { type: 'response.output_text.delta', delta: 'not-consumed' };
+      },
+    };
+  };
+  await assert.rejects(
+    llm.completeStandalone!([{ role: 'user', content: 'bounded' }], {
+      maxOutputBytes: 5,
+    }),
+    /standalone visible output exceeds 5 UTF-8 bytes/,
+  );
+  assert.equal(signal?.aborted, true);
+  assert.equal(chunks, 2);
 });
 
 test('Anthropic standalone omits tools and tool choice on the wire', async () => {
@@ -262,15 +325,57 @@ test('Anthropic standalone omits tools and tool choice on the wire', async () =>
         }),
       /does not support caller-defined native tools/,
     );
-    const result = await llm.completeStandalone!([
-      { role: 'user', content: 'classify' },
-    ]);
+    const result = await llm.completeStandalone!(
+      [{ role: 'user', content: 'classify' }],
+      { maxTokens: 7, maxOutputBytes: 64 },
+    );
     assert.ok(body && !Object.hasOwn(body, 'tools'));
+    assert.equal(body?.max_tokens, 7);
     assert.ok(body && !Object.hasOwn(body, 'tool_choice'));
     assert.equal(result.content, 'anthropic-ok');
     assert.equal(result.requestId, 'req-anthropic');
     assert.equal(result.providerType, 'anthropic-oauth');
     assert.equal(result.apiSurface, 'anthropic-messages');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Anthropic standalone aborts before visible output exceeds its byte limit', async () => {
+  const value = config('responses');
+  Object.assign(value.llm, {
+    providerType: 'anthropic-oauth',
+    apiKey: '',
+    baseUrl: 'https://api.anthropic.test',
+    model: 'claude-role-model',
+  });
+  const store = {
+    read: () => null,
+    getAccessToken: async () => 'test-oauth-token',
+    forceRefresh: async () => {},
+  } as any;
+  const originalFetch = globalThis.fetch;
+  let signal: AbortSignal | null | undefined;
+  globalThis.fetch = async (_input, init) => {
+    signal = init?.signal;
+    const sse = [
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"abcd"}}',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"efgh"}}',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"not-consumed"}}',
+      '',
+    ].join('\n');
+    return new Response(sse, { status: 200 });
+  };
+  try {
+    const llm = createAnthropicOAuthLLM(value, store, undefined);
+    await assert.rejects(
+      llm.completeStandalone!([{ role: 'user', content: 'bounded' }], {
+        maxOutputBytes: 5,
+      }),
+      /standalone visible output exceeds 5 UTF-8 bytes/,
+    );
+    assert.equal(signal?.aborted, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

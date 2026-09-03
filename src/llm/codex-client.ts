@@ -15,6 +15,10 @@ import { Agent } from 'undici';
 import OpenAI from 'openai';
 import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
+import {
+  addStandaloneOutputBytes,
+  assertStandaloneOutputBytes,
+} from './standalone-limits.js';
 import type { OAuthStore } from './oauth/store.js';
 import {
   OPENAI_CODEX_BASE_URL,
@@ -555,7 +559,14 @@ export async function codexStandaloneComplete(
     responsesLite,
     opts,
   );
+  const controller = new AbortController();
+  if (opts.signal?.aborted) controller.abort();
+  else
+    opts.signal?.addEventListener('abort', () => controller.abort(), {
+      once: true,
+    });
   let streamed = '';
+  let visibleOutputBytes = 0;
   let final: {
     id?: unknown;
     output?: unknown[];
@@ -564,13 +575,19 @@ export async function codexStandaloneComplete(
   } | null = null;
   const completedItems = new Map<number, unknown>();
   try {
-    const events = await client.responses.create(
-      body,
-      opts.signal ? { signal: opts.signal } : undefined,
-    );
+    const events = await client.responses.create(body, {
+      signal: controller.signal,
+    });
     for await (const event of events) {
-      if (event.type === 'response.output_text.delta') streamed += event.delta;
-      else if (event.type === 'response.output_item.done')
+      if (event.type === 'response.output_text.delta') {
+        visibleOutputBytes = addStandaloneOutputBytes(
+          visibleOutputBytes,
+          event.delta,
+          opts.maxOutputBytes,
+          () => controller.abort(),
+        );
+        streamed += event.delta;
+      } else if (event.type === 'response.output_item.done')
         completedItems.set(event.output_index, event.item);
       else if (event.type === 'response.completed') final = event.response;
       else if (event.type === 'response.incomplete') {
@@ -595,9 +612,11 @@ export async function codexStandaloneComplete(
           .sort(([a], [b]) => a - b)
           .map(([, item]) => item);
   const parts = fromResponseOutput(output);
+  const content = parts.content || streamed;
+  assertStandaloneOutputBytes(content, opts.maxOutputBytes);
   const requestId = typeof final.id === 'string' ? final.id : undefined;
   return {
-    content: parts.content || streamed,
+    content,
     ...(parts.reasoningContent
       ? { reasoningContent: parts.reasoningContent }
       : {}),
