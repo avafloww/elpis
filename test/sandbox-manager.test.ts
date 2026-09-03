@@ -76,8 +76,7 @@ function fixture(
   const bg = createBgRegistry(dir);
   const contextResources = new ContextResources({
     dataDirectory: dir,
-    harnessRoot: dir,
-    homeDirectory: null,
+    bundledSkillsDirectory: null,
   });
   const deps = {
     config,

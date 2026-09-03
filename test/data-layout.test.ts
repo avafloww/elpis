@@ -25,6 +25,7 @@ test('resolveDataLayout keeps inhabitant root separate from harness state and co
   assert.equal(layout.sessions, '/agent/elpis-data/sessions');
   assert.equal(layout.extensions, '/agent/elpis-data/config/extensions');
   assert.equal(layout.wordlists, '/agent/elpis-data/config/wordlists');
+  assert.equal(layout.skills, '/agent/elpis-data/skills');
   assert.equal(layout.policyDenials, '/agent/elpis-data/policy-denials');
   assert.equal(layout.playwrightCli, '/agent/elpis-data/playwright-cli');
 });
@@ -40,6 +41,7 @@ test('ensureElpisDataScaffold owns exact gitignore and repairs drift without tou
   );
   assert.equal(fs.statSync(first.layout.root).mode & 0o777, 0o700);
   assert.equal(fs.statSync(first.layout.config).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(first.layout.skills).mode & 0o777, 0o700);
   assert.equal(fs.statSync(first.layout.gitignore).mode & 0o777, 0o644);
   assert.equal(
     fs.readFileSync(path.join(root, 'SOUL.md'), 'utf8'),

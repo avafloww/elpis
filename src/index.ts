@@ -465,8 +465,6 @@ export async function createElpisRuntime(
   });
   const contextResources = new ContextResources({
     dataDirectory: config.paths.dataDirectory,
-    harnessRoot: config.paths.harnessRoot,
-    homeDirectory: process.env.HOME,
     logger: config.logger,
   });
   const sandboxDeps: SandboxDeps = {

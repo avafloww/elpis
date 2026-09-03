@@ -7,6 +7,7 @@ COPY tsconfig.json tsconfig.console.json ./
 COPY packages/gateway-protocol/tsconfig.json ./packages/gateway-protocol/tsconfig.json
 COPY packages/gateway-protocol/src ./packages/gateway-protocol/src
 COPY scripts/build-console.mjs ./scripts/build-console.mjs
+COPY skills ./skills
 COPY src ./src
 RUN npm run build \
   && npm prune --omit=dev --legacy-peer-deps --workspace @elpis/gateway-protocol --include-workspace-root

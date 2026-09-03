@@ -21,6 +21,10 @@
 !packages/gateway/src/**
 !src/
 !src/**
+!skills/
+!skills/**
+!test/
+!test/helpers.ts
 !bench/
 !bench/**
 !scripts/

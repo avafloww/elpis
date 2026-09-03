@@ -1,7 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { parseFrontmatter } from './lib/frontmatter.js';
+import { resolveDataLayout } from './store/data-layout.js';
 
 export const MAX_SKILLS_PER_CALL = 8;
 export const MAX_SKILL_CATALOG = 128;
@@ -79,10 +81,15 @@ interface SkillRecord extends SkillSummary {
 
 export interface ContextResourcesOptions {
   dataDirectory: string;
-  harnessRoot: string;
-  homeDirectory?: string | null;
+  bundledSkillsDirectory?: string | null;
   logger?: { warn(...args: unknown[]): void };
 }
+
+const contextResourcesModule = fileURLToPath(import.meta.url);
+export const DEFAULT_BUNDLED_SKILLS_DIRECTORY = path.resolve(
+  path.dirname(contextResourcesModule),
+  contextResourcesModule.endsWith('.ts') ? '../skills' : 'skills',
+);
 
 function ancestors(start: string): string[] {
   const out: string[] = [];
@@ -93,10 +100,6 @@ function ancestors(start: string): string[] {
     if (parent === current) return out;
     current = parent;
   }
-}
-
-function unique(values: string[]): string[] {
-  return [...new Set(values.map((value) => path.resolve(value)))];
 }
 
 function readBounded(
@@ -147,21 +150,13 @@ function versionOf(raw: string): string {
 }
 
 function skillRoots(options: ContextResourcesOptions): string[] {
-  const roots: string[] = [];
-  const chains = [options.dataDirectory, options.harnessRoot].map((start) =>
-    ancestors(path.resolve(start)),
-  );
-  const depth = Math.max(...chains.map((chain) => chain.length));
-  for (let index = 0; index < depth; index++) {
-    for (const chain of chains) {
-      const directory = chain[index];
-      if (directory) roots.push(path.join(directory, '.agents', 'skills'));
-    }
-  }
-  if (options.homeDirectory) {
-    roots.push(path.join(options.homeDirectory, '.agents', 'skills'));
-  }
-  return unique(roots);
+  const roots = [
+    resolveDataLayout(options.dataDirectory).skills,
+    options.bundledSkillsDirectory === undefined
+      ? DEFAULT_BUNDLED_SKILLS_DIRECTORY
+      : options.bundledSkillsDirectory,
+  ].filter((root): root is string => typeof root === 'string');
+  return [...new Set(roots.map((root) => path.resolve(root)))];
 }
 
 function discoverSkills(
@@ -200,13 +195,16 @@ function discoverSkills(
         );
         continue;
       }
-      if (found.has(name)) {
-        options.logger?.warn(
-          'skill ignored: duplicate name shadowed by earlier root',
-          name,
-          candidate,
+      const duplicate = found.get(name);
+      if (duplicate) {
+        throw new Error(
+          `duplicate skill name ${JSON.stringify(name)}: ${duplicate.path} and ${candidate}`,
         );
-        continue;
+      }
+      if (found.size >= MAX_SKILL_CATALOG) {
+        throw new Error(
+          `skill catalog exceeds the ${MAX_SKILL_CATALOG}-skill limit`,
+        );
       }
       found.set(name, {
         name,
@@ -214,12 +212,6 @@ function discoverSkills(
         path: candidate,
         realPath,
       });
-      if (found.size >= MAX_SKILL_CATALOG) {
-        options.logger?.warn(
-          `skill catalog reached ${MAX_SKILL_CATALOG} entries; remaining candidates were ignored`,
-        );
-        return found;
-      }
     }
   }
   return found;

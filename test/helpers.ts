@@ -281,8 +281,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const llm = opts.llm ?? makeStubLLM();
   const contextResources = new ContextResources({
     dataDirectory: config.paths.dataDirectory,
-    harnessRoot: config.paths.harnessRoot,
-    homeDirectory: null,
+    bundledSkillsDirectory: null,
     logger: config.logger,
   });
   const sent: { channelId: string; text: string }[] = [];

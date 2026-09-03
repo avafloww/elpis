@@ -15,7 +15,7 @@ description: Verify a release candidate before publication
 Full instructions go here.
 ```
 
-Elpis discovers `.agents/skills/*/SKILL.md` at boot. It checks the data directory and harness root first, then walks their ancestor directories outward, and finally checks `$HOME/.agents/skills`. A nearer earlier root wins when names collide. Names use letters, digits, `.`, `_`, or `-`; descriptions are shown in the system-prompt catalog. The boot catalog is capped at 128 skills and each displayed description at 512 characters.
+Elpis discovers skills from exactly two owned roots at boot: `elpis-data/skills/*/SKILL.md` for inhabitant-authored skills, and the bundled `dist/skills/*/SKILL.md` copied from the repository's `skills/` directory during build. It does not inspect `.agents/skills`, `$HOME`, or ancestor directories for skills; ancestor walking belongs only to `AGENTS.md`. Duplicate skill names across the two roots fail startup visibly instead of silently shadowing one body with another. Names use letters, digits, `.`, `_`, or `-`; descriptions are shown in the system-prompt catalog. The boot catalog is capped at 128 skills and each displayed description at 512 characters; a 129th valid skill fails startup rather than hiding the remaining catalog.
 
 The resident model loads full bodies with the top-level `skill` tool:
 

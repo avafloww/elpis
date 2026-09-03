@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ContextResourceInterrupt,
   ContextResources,
+  DEFAULT_BUNDLED_SKILLS_DIRECTORY,
   MAX_AGENTS_BYTES,
 } from '../src/context-resources.js';
 
@@ -16,12 +18,17 @@ function fixture() {
   const data = path.join(root, 'work', 'nested');
   const harness = path.join(root, 'harness');
   const home = path.join(root, 'home');
-  fs.mkdirSync(data, { recursive: true });
+  const dataSkills = path.join(data, 'elpis-data', 'skills');
+  const bundled = path.join(root, 'bundled-skills');
+  fs.mkdirSync(dataSkills, { recursive: true });
   fs.mkdirSync(harness, { recursive: true });
   fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(bundled, { recursive: true });
   return {
     root,
     data,
+    dataSkills,
+    bundled,
     harness,
     home,
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
@@ -29,34 +36,40 @@ function fixture() {
 }
 
 function writeSkill(root: string, directory: string, text: string): string {
-  const file = path.join(root, '.agents', 'skills', directory, 'SKILL.md');
+  const file = path.join(root, directory, 'SKILL.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
   return file;
 }
 
-test('ContextResources discovers standard skill roots and loads full bodies', () => {
+test('source-mode default resolves repository bundled skills', () => {
+  assert.equal(
+    DEFAULT_BUNDLED_SKILLS_DIRECTORY,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills'),
+  );
+});
+
+test('ContextResources discovers only Elpis-owned skill roots and loads full bodies', () => {
   const f = fixture();
   try {
     writeSkill(
-      f.data,
+      f.dataSkills,
       'alpha',
       '---\nname: alpha\ndescription: Alpha workflow\n---\n\nDo alpha exactly.\n',
     );
     writeSkill(
-      f.home,
+      f.bundled,
       'beta',
       '---\nname: beta\ndescription: Beta workflow\n---\n\nDo beta carefully.\n',
     );
     writeSkill(
-      path.dirname(f.data),
-      'shadow',
-      '---\nname: alpha\ndescription: Shadowed alpha\n---\n\nWrong alpha.\n',
+      path.join(f.home, '.agents', 'skills'),
+      'poison',
+      '---\nname: poison\ndescription: Ambient poison\n---\n\nWrong body.\n',
     );
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
 
     assert.deepEqual(
@@ -71,7 +84,7 @@ test('ContextResources discovers standard skill roots and loads full bodies', ()
     const loaded = resources.loadSkills(['alpha', 'beta']);
     assert.match(loaded, /Do alpha exactly\./);
     assert.match(loaded, /Do beta carefully\./);
-    assert.doesNotMatch(loaded, /Wrong alpha/);
+    assert.doesNotMatch(loaded, /Wrong body/);
     assert.deepEqual(resources.snapshot().skills, ['alpha', 'beta']);
     assert.equal(
       resources.loadSkills(['alpha']),
@@ -90,21 +103,84 @@ test('ContextResources discovers standard skill roots and loads full bodies', ()
   }
 });
 
+test('ContextResources rejects duplicate names across owned roots', () => {
+  const f = fixture();
+  try {
+    const body =
+      '---\nname: collision\ndescription: Conflicting workflow\n---\n\nbody\n';
+    writeSkill(f.dataSkills, 'data-copy', body);
+    writeSkill(f.bundled, 'bundled-copy', body);
+    assert.throws(
+      () =>
+        new ContextResources({
+          dataDirectory: f.data,
+          bundledSkillsDirectory: f.bundled,
+        }),
+      /duplicate skill name "collision"/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('ContextResources checks duplicates before refusing an overfull catalog', () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 128; index++) {
+      const name = `data-${String(index).padStart(3, '0')}`;
+      writeSkill(
+        f.dataSkills,
+        name,
+        `---\nname: ${name}\ndescription: Data workflow\n---\n\nbody\n`,
+      );
+    }
+    const duplicate = writeSkill(
+      f.bundled,
+      'duplicate',
+      '---\nname: data-000\ndescription: Duplicate workflow\n---\n\nbody\n',
+    );
+    assert.throws(
+      () =>
+        new ContextResources({
+          dataDirectory: f.data,
+          bundledSkillsDirectory: f.bundled,
+        }),
+      /duplicate skill name "data-000"/,
+    );
+
+    fs.rmSync(path.dirname(duplicate), { recursive: true });
+    writeSkill(
+      f.bundled,
+      'extra',
+      '---\nname: bundled-extra\ndescription: Extra workflow\n---\n\nbody\n',
+    );
+    assert.throws(
+      () =>
+        new ContextResources({
+          dataDirectory: f.data,
+          bundledSkillsDirectory: f.bundled,
+        }),
+      /skill catalog exceeds the 128-skill limit/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('ContextResources rejects duplicate, over-count, and aggregate skill selections', () => {
   const f = fixture();
   try {
     for (let index = 0; index < 9; index++) {
       const name = `skill-${index}`;
       writeSkill(
-        f.data,
+        f.dataSkills,
         name,
         `---\nname: ${name}\ndescription: Workflow ${index}\n---\n\n${'x'.repeat(50 * 1024)}`,
       );
     }
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     assert.throws(
       () => resources.loadSkills(['skill-0', 'skill-0']),
@@ -131,15 +207,14 @@ test('ContextResources catalogs oversized skills and rejects them explicitly on 
   const f = fixture();
   try {
     writeSkill(
-      f.data,
+      f.dataSkills,
       'large',
       '---\nname: large\ndescription: Oversized workflow\n---\n\n' +
         'x'.repeat(70 * 1024),
     );
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     assert.deepEqual(
       resources.catalog().map(({ name }) => name),
@@ -164,13 +239,12 @@ test('ContextResources follows a symlinked skill folder', () => {
       path.join(external, 'SKILL.md'),
       '---\nname: linked\ndescription: Linked workflow\n---\n\nLinked body.\n',
     );
-    const skills = path.join(f.data, '.agents', 'skills');
+    const skills = f.dataSkills;
     fs.mkdirSync(skills, { recursive: true });
     fs.symlinkSync(external, path.join(skills, 'linked'));
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     assert.deepEqual(
       resources.catalog().map((skill) => skill.name),
@@ -197,8 +271,7 @@ test('ContextResources checks lexical and physical AGENTS.md scopes for symlinke
     fs.symlinkSync(target, link);
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
 
     let first: ContextResourceInterrupt | null = null;
@@ -238,8 +311,7 @@ test('ContextResources interrupts once for each nearest AGENTS.md scope', () => 
     fs.writeFileSync(nestedAgents, 'nested instructions\n');
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     const nestedTarget = path.join(f.data, 'src', 'file.ts');
     fs.mkdirSync(path.dirname(nestedTarget), { recursive: true });
@@ -297,14 +369,13 @@ test('ContextResources restart restoration uses the latest descriptor for each k
   const f = fixture();
   try {
     const skillPath = writeSkill(
-      f.data,
+      f.dataSkills,
       'changing',
       '---\nname: changing\ndescription: Changes\n---\n\nversion one\n',
     );
     const original = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     const v1 = original.loadSkillContext(['changing']).resources[0];
     original.acknowledge([v1]);
@@ -321,8 +392,7 @@ test('ContextResources restart restoration uses the latest descriptor for each k
 
     const restored = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     restored.restore([v1, v2]);
     assert.deepEqual(restored.snapshot().skills, []);
@@ -335,14 +405,13 @@ test('ContextResources keeps post-start survivors out of the compaction reminder
   const f = fixture();
   try {
     writeSkill(
-      f.data,
+      f.dataSkills,
       'survivor',
       '---\nname: survivor\ndescription: Remains\n---\n\nbody\n',
     );
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     const descriptor = resources.loadSkillContext(['survivor']).resources[0];
     resources.acknowledge([descriptor]);
@@ -357,7 +426,7 @@ test('ContextResources compaction reminder clears and requires deliberate reload
   const f = fixture();
   try {
     writeSkill(
-      f.data,
+      f.dataSkills,
       'alpha',
       '---\nname: alpha\ndescription: Alpha workflow\n---\n\nAlpha body.\n',
     );
@@ -368,8 +437,7 @@ test('ContextResources compaction reminder clears and requires deliberate reload
     fs.writeFileSync(target, 'x');
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     resources.loadSkills(['alpha']);
     let interrupted: ContextResourceInterrupt | null = null;
@@ -410,8 +478,7 @@ test('ContextResources refuses oversized AGENTS.md without marking it loaded', (
     fs.writeFileSync(target, 'x');
     const resources = new ContextResources({
       dataDirectory: f.data,
-      harnessRoot: f.harness,
-      homeDirectory: f.home,
+      bundledSkillsDirectory: f.bundled,
     });
     assert.throws(
       () => resources.beforeFileAccess(target, 'file'),

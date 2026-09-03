@@ -12,7 +12,7 @@
     "build": "rm -rf dist && npm run build:gateway-protocol && tsc && npm run copy-assets && npm run build:console",
     "build:console": "tsc -p tsconfig.console.json && node scripts/build-console.mjs",
     "build:gateway": "npm run build:gateway-protocol && npm run build --workspace @elpis/gateway",
-    "copy-assets": "rm -rf dist/console/public && mkdir -p dist/console/public && cp -r src/console/public/. dist/console/public/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js",
+    "copy-assets": "rm -rf dist/console/public dist/skills && mkdir -p dist/console/public dist/skills && cp -r src/console/public/. dist/console/public/ && cp -r skills/. dist/skills/ && cp node_modules/marked/lib/marked.umd.js dist/console/public/marked.umd.js",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "repl": "tsx src/repl.ts",

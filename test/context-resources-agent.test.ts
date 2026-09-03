@@ -83,7 +83,7 @@ async function settle(ms = 120): Promise<void> {
 
 function skillFixture(): { dir: string; cleanup(): void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-agent-skill-'));
-  const file = path.join(dir, '.agents', 'skills', 'alpha', 'SKILL.md');
+  const file = path.join(dir, 'elpis-data', 'skills', 'alpha', 'SKILL.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(
     file,
@@ -196,8 +196,7 @@ test('restart restores only resource descriptors whose files still match', () =>
   const f = skillFixture();
   const sourceResources = new ContextResources({
     dataDirectory: f.dir,
-    harnessRoot: f.dir,
-    homeDirectory: null,
+    bundledSkillsDirectory: null,
   });
   const loaded = sourceResources.loadSkillContext(['alpha']);
   const initialMessages: ChatMessage[] = [
@@ -218,7 +217,13 @@ test('restart restores only resource descriptors whose files still match', () =>
     first.cleanup();
   }
 
-  const skillFile = path.join(f.dir, '.agents', 'skills', 'alpha', 'SKILL.md');
+  const skillFile = path.join(
+    f.dir,
+    'elpis-data',
+    'skills',
+    'alpha',
+    'SKILL.md',
+  );
   fs.appendFileSync(skillFile, '\nchanged after transcript\n');
   const changed = buildTestAgent({
     dir: f.dir,
