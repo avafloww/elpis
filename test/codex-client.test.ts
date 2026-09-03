@@ -37,6 +37,8 @@ function codexConfig(model = 'gpt-test-codex'): Config {
       reasoningSummary: null,
       reasoningContext: null,
       completionReserveTokens: 8192,
+      streamIdleTimeoutMs: 30_000,
+      callTimeoutMs: 120_000,
     },
     compaction: { triggerTokens: 180000, keepTokens: 50000 },
     logger: noopLogger,

@@ -447,6 +447,7 @@ async function anthropicComplete(
     const thinkingAcc: Record<number, AnthropicThinkingBlock> = {};
     let usage: AnthropicUsage = {};
     let requestId: string | undefined;
+    let messageStopped = false;
     const controller = new AbortController();
     if (options.signal?.aborted) controller.abort();
     else
@@ -467,6 +468,41 @@ async function anthropicComplete(
         res.headers.get('x-request-id') ??
         undefined;
       for await (const evt of parseSSE(res, controller.signal)) {
+        if (evt.type === 'error') {
+          const detail = evt.error as { type?: unknown } | undefined;
+          const code =
+            typeof detail?.type === 'string' &&
+            /^[a-z][a-z0-9_]{0,63}$/i.test(detail.type)
+              ? detail.type
+              : 'stream_error';
+          const status =
+            code === 'invalid_request_error'
+              ? 400
+              : code === 'authentication_error'
+                ? 401
+                : code === 'permission_error'
+                  ? 403
+                  : code === 'not_found_error'
+                    ? 404
+                    : code === 'request_too_large'
+                      ? 413
+                      : code === 'rate_limit_error'
+                        ? 429
+                        : code === 'overloaded_error'
+                          ? 529
+                          : 500;
+          const error = Object.assign(
+            new Error(`anthropic stream error (${code})`),
+            { status, code },
+          );
+          throw status < 500 && status !== 429
+            ? new NonRetriableError(error)
+            : new RetriableError(error);
+        }
+        if (evt.type === 'message_stop') {
+          messageStopped = true;
+          break;
+        }
         if (evt.type === 'message_start') {
           const u = (evt.message as { usage?: AnthropicUsage } | undefined)
             ?.usage;
@@ -551,6 +587,10 @@ async function anthropicComplete(
         ? e
         : classifyError(e);
     }
+    if (!messageStopped)
+      throw new RetriableError(
+        new Error('anthropic stream ended without message_stop'),
+      );
 
     // Assemble tool calls; arguments must be the JSON string the run tool expects.
     const tool_calls = Object.keys(toolBlocks)
@@ -634,6 +674,7 @@ async function* parseSSE(
   if (!body) return;
   const decoder = new TextDecoder();
   let buffer = '';
+  let eventName = '';
   // Node's fetch body is a web ReadableStream (async-iterable in Node ≥18).
   for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
     if (signal.aborted) return;
@@ -642,14 +683,22 @@ async function* parseSSE(
     while ((nl = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, nl);
       buffer = buffer.slice(nl + 1);
-      if (line.startsWith('data:')) {
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
         const payload = line.slice(5).trim();
         if (payload === '[DONE]' || payload === '') continue;
         try {
-          yield JSON.parse(payload) as Record<string, unknown>;
+          const event = JSON.parse(payload) as Record<string, unknown>;
+          if (eventName === 'error' && event.type === undefined)
+            event.type = 'error';
+          yield event;
         } catch {
-          /* skip malformed */
+          /* malformed events cannot produce a successful terminal stream */
         }
+        eventName = '';
+      } else if (line.trim() === '') {
+        eventName = '';
       }
     }
   }

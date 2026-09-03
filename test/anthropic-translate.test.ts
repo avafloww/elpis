@@ -36,7 +36,7 @@ test('Anthropic completion sends the resident skill declaration in its wire body
   let capturedBody: any = null;
   globalThis.fetch = async (_input, init) => {
     capturedBody = JSON.parse(String(init?.body));
-    return new Response('', {
+    return new Response('data: {"type":"message_stop"}\n\n', {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
     });

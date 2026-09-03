@@ -255,19 +255,29 @@ test('OpenAI Responses standalone aborts before visible output exceeds its byte 
   const llm = createLLM(config('responses'));
   let signal: AbortSignal | undefined;
   let chunks = 0;
+  let returnCalls = 0;
   (llm.client as any).responses.create = async (
     _params: Record<string, unknown>,
     options: { signal?: AbortSignal },
   ) => {
     signal = options.signal;
+    const events = [
+      { type: 'response.output_text.delta', delta: 'abcd' },
+      { type: 'response.output_text.delta', delta: 'efgh' },
+      { type: 'response.output_text.delta', delta: 'not-consumed' },
+    ];
     return {
-      async *[Symbol.asyncIterator]() {
-        chunks++;
-        yield { type: 'response.output_text.delta', delta: 'abcd' };
-        chunks++;
-        yield { type: 'response.output_text.delta', delta: 'efgh' };
-        chunks++;
-        yield { type: 'response.output_text.delta', delta: 'not-consumed' };
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            const value = events[chunks++];
+            return value ? { done: false, value } : { done: true };
+          },
+          async return() {
+            returnCalls++;
+            return { done: true };
+          },
+        };
       },
     };
   };
@@ -279,6 +289,47 @@ test('OpenAI Responses standalone aborts before visible output exceeds its byte 
   );
   assert.equal(signal?.aborted, true);
   assert.equal(chunks, 2);
+  assert.equal(returnCalls, 1);
+});
+
+test('OpenAI Responses closes immediately after a failed terminal event', async () => {
+  const llm = createLLM(config('responses'));
+  let signal: AbortSignal | undefined;
+  let nextCalls = 0;
+  let returnCalls = 0;
+  (llm.client as any).responses.create = async (
+    _params: Record<string, unknown>,
+    options: { signal?: AbortSignal },
+  ) => {
+    signal = options.signal;
+    const events = [
+      {
+        type: 'response.failed',
+        response: { error: { code: 'server_error', message: 'failed' } },
+      },
+      { type: 'response.output_text.delta', delta: 'must-not-be-consumed' },
+    ];
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            const value = events[nextCalls++];
+            return value ? { done: false, value } : { done: true };
+          },
+          async return() {
+            returnCalls++;
+            return { done: true };
+          },
+        };
+      },
+    };
+  };
+  await assert.rejects(
+    llm.completeStandalone!([{ role: 'user', content: 'bounded' }]),
+  );
+  assert.equal(signal?.aborted, true);
+  assert.equal(nextCalls, 1);
+  assert.equal(returnCalls, 1);
 });
 
 test('Anthropic standalone omits tools and tool choice on the wire', async () => {
@@ -336,6 +387,52 @@ test('Anthropic standalone omits tools and tool choice on the wire', async () =>
     assert.equal(result.requestId, 'req-anthropic');
     assert.equal(result.providerType, 'anthropic-oauth');
     assert.equal(result.apiSurface, 'anthropic-messages');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Anthropic standalone rejects error events and missing message_stop', async () => {
+  const value = config('responses');
+  Object.assign(value.llm, {
+    providerType: 'anthropic-oauth',
+    apiKey: '',
+    baseUrl: 'https://api.anthropic.test',
+    model: 'claude-role-model',
+  });
+  const store = {
+    read: () => null,
+    getAccessToken: async () => 'test-oauth-token',
+    forceRefresh: async () => {},
+  } as any;
+  const originalFetch = globalThis.fetch;
+  let request = 0;
+  globalThis.fetch = async () => {
+    request++;
+    const sse =
+      request === 1
+        ? [
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+            'event: error',
+            'data: {"error":{"type":"overloaded_error","message":"overloaded"}}',
+            '',
+          ].join('\n')
+        : [
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+            '',
+          ].join('\n');
+    return new Response(sse, { status: 200 });
+  };
+  try {
+    const llm = createAnthropicOAuthLLM(value, store, undefined);
+    await assert.rejects(
+      llm.completeStandalone!([{ role: 'user', content: 'bounded' }]),
+      /anthropic stream error/,
+    );
+    await assert.rejects(
+      llm.completeStandalone!([{ role: 'user', content: 'bounded' }]),
+      /ended without message_stop/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

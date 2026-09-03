@@ -544,6 +544,7 @@ export async function streamResponsesComplete(
       }
     };
 
+    let closeIterator: (() => void) | null = null;
     try {
       const baseRequest = {
         ...buildResponsesParams(config, prepared, modelTools),
@@ -566,9 +567,23 @@ export async function streamResponsesComplete(
       config.logger.info('[llm/responses] stage=stream-acquired');
       requestId = (stream as unknown as { _request_id?: string })._request_id;
       const iterator = stream[Symbol.asyncIterator]();
-      for (;;) {
+      let iteratorClosed = false;
+      closeIterator = () => {
+        if (iteratorClosed) return;
+        iteratorClosed = true;
+        try {
+          const closing = iterator.return?.();
+          void Promise.resolve(closing).catch(() => {});
+        } catch {
+          /* cleanup must not replace the provider result */
+        }
+      };
+      streamLoop: for (;;) {
         const step = await awaitBeforeProgressDeadline(iterator.next());
-        if (step.done) break;
+        if (step.done) {
+          iteratorClosed = true;
+          break;
+        }
         const event = step.value;
         switch (event.type) {
           case 'response.output_text.delta': {
@@ -639,12 +654,13 @@ export async function streamResponsesComplete(
             // generated; surface it like chat's truncated finish rather than
             // erroring the turn.
             finalResponse = event.response;
-            break;
+            break streamLoop;
           }
           case 'response.failed': {
             markMeaningfulProgress();
             failure = failureToError(event.response?.error);
-            break;
+            controller.abort();
+            break streamLoop;
           }
           default:
             break;
@@ -662,6 +678,8 @@ export async function streamResponsesComplete(
         );
       }
       throw classifyError(e);
+    } finally {
+      closeIterator?.();
     }
 
     if (failure) throw classifyError(failure);
