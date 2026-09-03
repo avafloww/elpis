@@ -33,23 +33,27 @@ export interface LoadedSkillContext {
   resources: ContextResourceDescriptor[];
 }
 
+const authenticInterrupts = new WeakSet<object>();
+
 export class ContextResourceInterrupt extends Error {
   readonly contextResourceInterrupt = true;
   readonly resourceType = 'agents-md';
+  readonly resource: ContextResourceDescriptor;
 
-  constructor(
-    readonly resource: ContextResourceDescriptor,
-    message: string,
-  ) {
+  constructor(resource: ContextResourceDescriptor, message: string) {
     super(message);
     this.name = 'ContextResourceInterrupt';
+    this.resource = Object.freeze({ ...resource });
+    authenticInterrupts.add(this);
+    Object.freeze(this);
   }
 }
 
 export function isContextResourceInterrupt(
   value: unknown,
 ): value is ContextResourceInterrupt {
-  if (!value || typeof value !== 'object') return false;
+  if (!value || typeof value !== 'object' || !authenticInterrupts.has(value))
+    return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.contextResourceInterrupt !== true) return false;
   if (!candidate.resource || typeof candidate.resource !== 'object')
@@ -93,37 +97,47 @@ function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => path.resolve(value)))];
 }
 
-function boundedPrefix(file: string, maxBytes: number): string {
-  const stat = fs.statSync(file);
-  if (!stat.isFile()) throw new Error(`not a regular file: ${file}`);
-  const size = Math.min(stat.size, maxBytes);
-  const buffer = Buffer.alloc(size);
+function readBounded(
+  file: string,
+  maxBytes: number,
+  label: string,
+  truncate: boolean,
+): string {
   const fd = fs.openSync(file, 'r');
   try {
-    const read = fs.readSync(fd, buffer, 0, size, 0);
-    return buffer.subarray(0, read).toString('utf8');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile())
+      throw new Error(`${label} is not a regular file: ${file}`);
+    if (!truncate && stat.size > maxBytes) {
+      throw new Error(
+        `${label} exceeds the ${maxBytes}-byte context limit: ${file} (${stat.size} bytes)`,
+      );
+    }
+    const capacity = truncate ? maxBytes : maxBytes + 1;
+    const buffer = Buffer.alloc(capacity);
+    let total = 0;
+    while (total < capacity) {
+      const read = fs.readSync(fd, buffer, total, capacity - total, null);
+      if (read === 0) break;
+      total += read;
+    }
+    if (!truncate && total > maxBytes) {
+      throw new Error(
+        `${label} exceeds the ${maxBytes}-byte context limit while reading: ${file}`,
+      );
+    }
+    return buffer.subarray(0, total).toString('utf8');
   } finally {
     fs.closeSync(fd);
   }
 }
 
+function boundedPrefix(file: string, maxBytes: number): string {
+  return readBounded(file, maxBytes, 'skill catalog candidate', true);
+}
+
 function boundedFile(file: string, maxBytes: number, label: string): string {
-  const stat = fs.statSync(file);
-  if (!stat.isFile())
-    throw new Error(`${label} is not a regular file: ${file}`);
-  if (stat.size > maxBytes) {
-    throw new Error(
-      `${label} exceeds the ${maxBytes}-byte context limit: ${file} (${stat.size} bytes)`,
-    );
-  }
-  const raw = fs.readFileSync(file, 'utf8');
-  const bytes = Buffer.byteLength(raw, 'utf8');
-  if (bytes > maxBytes) {
-    throw new Error(
-      `${label} exceeds the ${maxBytes}-byte context limit after decoding: ${file} (${bytes} bytes)`,
-    );
-  }
-  return raw;
+  return readBounded(file, maxBytes, label, false);
 }
 
 function versionOf(raw: string): string {
@@ -321,32 +335,32 @@ export class ContextResources {
     kind: 'file' | 'directory' | 'auto' = 'auto',
   ): void {
     if (typeof target !== 'string' || target.trim() === '') return;
-    const agents = this.nearestAgents(target, kind);
-    if (!agents) return;
-    const raw = boundedFile(agents.realPath, MAX_AGENTS_BYTES, 'AGENTS.md');
-    const resource: ContextResourceDescriptor = {
-      kind: 'agents',
-      key: agents.realPath,
-      display: agents.path,
-      version: versionOf(raw),
-    };
-    if (this.loadedAgents.get(resource.key)?.version === resource.version)
-      return;
-    const pending = this.pendingAgents.get(resource.key);
-    const message =
-      pending?.resource.version === resource.version
-        ? pending.message
-        : [
-            '[AGENTS.md loaded before file access — retry the run]',
-            `target: ${path.resolve(target)}`,
-            `instructions: ${agents.path}`,
-            '',
-            `<AGENTS.md path=${JSON.stringify(agents.path)}>`,
-            raw,
-            '</AGENTS.md>',
-          ].join('\n');
-    this.pendingAgents.set(resource.key, { resource, message });
-    throw new ContextResourceInterrupt(resource, message);
+    for (const agents of this.nearestAgents(target, kind)) {
+      const raw = boundedFile(agents.realPath, MAX_AGENTS_BYTES, 'AGENTS.md');
+      const resource: ContextResourceDescriptor = {
+        kind: 'agents',
+        key: agents.realPath,
+        display: agents.path,
+        version: versionOf(raw),
+      };
+      if (this.loadedAgents.get(resource.key)?.version === resource.version)
+        continue;
+      const pending = this.pendingAgents.get(resource.key);
+      const message =
+        pending?.resource.version === resource.version
+          ? pending.message
+          : [
+              '[AGENTS.md loaded before file access — retry the run]',
+              `target: ${path.resolve(target)}`,
+              `instructions: ${agents.path}`,
+              '',
+              `<AGENTS.md path=${JSON.stringify(agents.path)}>`,
+              raw,
+              '</AGENTS.md>',
+            ].join('\n');
+      this.pendingAgents.set(resource.key, { resource, message });
+      throw new ContextResourceInterrupt(resource, message);
+    }
   }
 
   acknowledge(resources: ContextResourceDescriptor[]): void {
@@ -373,6 +387,7 @@ export class ContextResources {
   restore(resources: ContextResourceDescriptor[]): void {
     for (const resource of resources) {
       if (resource.kind === 'skill') {
+        this.loadedSkills.delete(resource.key);
         const record = this.skills.get(resource.key);
         if (!record) continue;
         try {
@@ -384,6 +399,7 @@ export class ContextResources {
           continue;
         }
       } else {
+        this.loadedAgents.delete(resource.key);
         try {
           const raw = boundedFile(resource.key, MAX_AGENTS_BYTES, 'AGENTS.md');
           if (versionOf(raw) === resource.version) {
@@ -407,9 +423,23 @@ export class ContextResources {
     };
   }
 
-  takeCompactionReminder(): string | null {
-    const prior = this.snapshot();
+  takeCompactionReminder(
+    survivingResources: ContextResourceDescriptor[] = [],
+  ): string | null {
+    const priorSkills = new Map(this.loadedSkills);
+    const priorAgents = new Map(this.loadedAgents);
     this.resetContext();
+    this.restore(survivingResources);
+    const prior: ContextResourceSnapshot = {
+      skills: [...priorSkills]
+        .filter(([key]) => !this.loadedSkills.has(key))
+        .map(([, resource]) => resource.display)
+        .sort(),
+      agentsFiles: [...priorAgents]
+        .filter(([key]) => !this.loadedAgents.has(key))
+        .map(([, resource]) => resource.display)
+        .sort(),
+    };
     if (prior.skills.length === 0 && prior.agentsFiles.length === 0)
       return null;
     const lines = [
@@ -439,32 +469,44 @@ export class ContextResources {
   private nearestAgents(
     target: string,
     kind: 'file' | 'directory' | 'auto',
-  ): { path: string; realPath: string } | null {
+  ): { path: string; realPath: string }[] {
     const absolute = path.resolve(target);
-    let directory: string;
-    if (kind === 'directory') {
-      directory = absolute;
-    } else if (kind === 'file') {
-      directory = path.dirname(absolute);
-    } else {
+    const directoryFor = (candidate: string): string => {
+      if (kind === 'directory') return candidate;
+      if (kind === 'file') return path.dirname(candidate);
       try {
-        directory = fs.statSync(absolute).isDirectory()
-          ? absolute
-          : path.dirname(absolute);
+        return fs.statSync(candidate).isDirectory()
+          ? candidate
+          : path.dirname(candidate);
       } catch {
-        directory = path.dirname(absolute);
+        return path.dirname(candidate);
+      }
+    };
+    const directories = [directoryFor(absolute)];
+    try {
+      const physical = fs.realpathSync.native(absolute);
+      const physicalDirectory = directoryFor(physical);
+      if (!directories.includes(physicalDirectory))
+        directories.push(physicalDirectory);
+    } catch {
+      // A missing target still inherits instructions from its lexical parent.
+    }
+    const found: { path: string; realPath: string }[] = [];
+    const seen = new Set<string>();
+    for (const directory of directories) {
+      for (const current of ancestors(directory)) {
+        const candidate = path.join(current, 'AGENTS.md');
+        try {
+          const realPath = fs.realpathSync.native(candidate);
+          if (!fs.statSync(realPath).isFile() || seen.has(realPath)) continue;
+          seen.add(realPath);
+          found.push({ path: candidate, realPath });
+          break;
+        } catch {
+          continue;
+        }
       }
     }
-    for (const current of ancestors(directory)) {
-      const candidate = path.join(current, 'AGENTS.md');
-      try {
-        const realPath = fs.realpathSync.native(candidate);
-        if (!fs.statSync(realPath).isFile()) continue;
-        return { path: candidate, realPath };
-      } catch {
-        continue;
-      }
-    }
-    return null;
+    return found;
   }
 }

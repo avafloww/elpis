@@ -45,7 +45,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 
 ### Files and code
 
-- `elpis.read`, `elpis.grep`, `elpis.edit`, `elpis.fill`; supported read/grep/edit/git entry points interrupt once with the nearest unseen `AGENTS.md` before access;
+- `elpis.read`, `elpis.grep`, `elpis.edit`, `elpis.fill`; supported read/grep/edit/git entry points interrupt with each nearest unseen `AGENTS.md` scope before access, including lexical and physical parents for file symlinks;
 - `elpis.sh`, `elpis.sudo`, `elpis.ssh`;
 - `elpis.git`, `elpis.deploy`, `elpis.restart`;
 - `elpis.preview`.

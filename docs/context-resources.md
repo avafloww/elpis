@@ -29,12 +29,12 @@ One call may select at most 8 skills. Each `SKILL.md` is limited to 64 KiB and o
 
 ## `AGENTS.md`
 
-Before the first supported `elpis.read`, `elpis.edit`, `elpis.grep`, or `elpis.git` access under a directory, Elpis walks upward from the target and finds the nearest `AGENTS.md`. The run fails with the complete file, up to 64 KiB, so the resident sees the local contract before retrying the operation.
+Before the first supported `elpis.read`, `elpis.edit`, `elpis.grep`, or `elpis.git` access under a directory, Elpis walks upward from the target and finds the nearest `AGENTS.md`. File symlinks check both the lexical parent and the physical target parent, one unseen scope per retry. The run fails with the complete file, up to 64 KiB, so the resident sees each local contract before retrying the operation.
 
 Catching that interruption inside JavaScript does not approve it. The same file continues interrupting supported access until an uncaught result has been appended to model-visible history. Different nested scopes interrupt independently. Raw `fs`, `elpis.sh`, `elpis.sudo`, and other indirect filesystem surfaces are deliberate bypasses and must not be described as covered.
 
 ## Lifetime and privacy
 
-Loaded resources apply to one context window. Their bounded descriptors are stored beside tool results so a process restart can reconstruct the window without silently re-reading changed files. A whole-context clear drops the state immediately. Successful compaction removes old descriptors and full instruction bodies from both the summary input and retained tail, clears the loaded set, and extends the existing single compaction notice with a reminder to reload only resources still relevant; a failed compaction changes nothing.
+Loaded resources apply to one context window. Their bounded descriptors are stored beside tool results so a process restart can reconstruct the window without silently re-reading changed files. A whole-context clear drops the state immediately. Successful compaction removes resource-bearing tool results that existed when the fold began from both the summary input and retained tail, then extends the existing single compaction notice with a reminder to reload only resources still relevant. Resources loaded after that fold began survive into the next request. A failed or stale fold changes nothing.
 
 Full skill and `AGENTS.md` bodies enter provider context and private transcripts. Do not put credentials or material unsuitable for that provider in these files.

@@ -283,19 +283,64 @@ test('compactor: applyCompaction swaps [summary, ...tail, notice]', async () => 
   assert.match(result[4].content, /context compacted — 7 earlier messages/);
 });
 
+test('compactor: a changed frozen prefix discards the completed result', async () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const logs: string[] = [];
+  const llm = fakeLLM({ summary: 'STALE' });
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    log: (line) => logs.push(line),
+  });
+  const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
+  c.start(msgs);
+  llm.resolveAll();
+  await c.done();
+  msgs[0] = big('replacement');
+
+  const result = c.applyCompaction(msgs);
+  assert.equal(result, msgs);
+  assert.equal(result[0], msgs[0]);
+  assert.doesNotMatch(
+    result.map((message) => message.content).join('\n'),
+    /STALE/,
+  );
+  assert.equal(c.hasCompletedResult(), false);
+  assert.equal(c.boundaryIndex, 0);
+  assert.ok(
+    logs.includes('compaction result discarded: frozen prefix changed'),
+  );
+});
+
 test('compactor: messages appended DURING compaction survive verbatim', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
   const llm = fakeLLM({ summary: 'S' });
   const c = createCompactor(llm, tracker, { keepTokens: 250 });
   const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
   c.start(msgs); // boundary = 7
+  const postStartResource = mk('tool', 'post-start resource body', {
+    tool_call_id: 'skill-after-start',
+    contextResources: [
+      {
+        kind: 'skill',
+        key: 'after-start',
+        display: 'after-start',
+        version: 'b'.repeat(64),
+      },
+    ],
+  });
   msgs.push(mk('user', 'during-compaction'));
   msgs.push(mk('assistant', 'reply-during'));
+  msgs.push(postStartResource);
   llm.resolveAll();
   await c.done();
   const result = c.applyCompaction(msgs);
-  assert.match(result[result.length - 3].content, /during-compaction/);
-  assert.match(result[result.length - 2].content, /reply-during/);
+  assert.match(result[result.length - 4].content, /during-compaction/);
+  assert.match(result[result.length - 3].content, /reply-during/);
+  assert.equal(result[result.length - 2], postStartResource);
+  assert.equal(
+    result[result.length - 2].contextResources?.[0].key,
+    'after-start',
+  );
 });
 
 test('compactor: skip-guard — a trivial fold (single message tail) does not summarize', () => {

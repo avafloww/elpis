@@ -88,6 +88,11 @@ test('llm: signal is passed as a request option, not in the API body', async () 
 
   // The body (API payload) must NOT contain `signal`.
   assert.ok(capturedBody, 'create() was called with a body');
+  assert.equal(
+    capturedBody.parallel_tool_calls,
+    false,
+    'generic Chat requests must keep model tool dispatch serial',
+  );
   assert.ok(
     !('signal' in capturedBody),
     'signal must NOT be in the API request body — it serializes to "signal":{} ' +

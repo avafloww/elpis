@@ -2358,6 +2358,10 @@ export class Agent {
         resp.message,
         async (tc, { callIndex }) => {
           yieldedByWake = false;
+          if (callEpoch !== this.epoch) {
+            this.deps.contextResources?.discardPending();
+            return { content: '[tool result discarded: context was cleared]' };
+          }
           if (invalidSkillBatch) {
             return {
               content:
@@ -2616,16 +2620,14 @@ export class Agent {
             this.pushMessage(assistant, this.turnChannel);
           },
           appendTool: (toolMsg) => {
+            if (callEpoch !== this.epoch) {
+              this.deps.contextResources?.discardPending();
+              return;
+            }
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
             if (toolMsg.contextResources) {
-              if (callEpoch === this.epoch) {
-                this.deps.contextResources?.acknowledge(
-                  toolMsg.contextResources,
-                );
-              } else {
-                this.deps.contextResources?.discardPending();
-              }
+              this.deps.contextResources?.acknowledge(toolMsg.contextResources);
             }
           },
         },
@@ -2745,14 +2747,20 @@ export class Agent {
   private runCompactionCheckpoint(idle: boolean): void {
     if (this.compactor.hasCompletedResult()) {
       const replaced = this.compactor.boundaryIndex;
-      this.messages = this.compactor.applyCompaction(this.messages);
+      const compacted = this.compactor.applyCompaction(this.messages);
+      if (compacted === this.messages) {
+        this.compactingSince = null;
+        this.compactionCycleInFlight = false;
+        return;
+      }
+      this.messages = compacted;
+      const survivingResources = this.messages.flatMap(
+        (message) => message.contextResources ?? [],
+      );
       const resourceReminder =
-        this.deps.contextResources?.takeCompactionReminder() ?? null;
-      this.messages = this.messages.map((message) => {
-        if (!message.contextResources) return message;
-        const { contextResources: _drop, ...rest } = message;
-        return rest;
-      });
+        this.deps.contextResources?.takeCompactionReminder(
+          survivingResources,
+        ) ?? null;
       if (resourceReminder) {
         const notice = this.messages.at(-1);
         if (notice) notice.content = `${notice.content}\n\n${resourceReminder}`;

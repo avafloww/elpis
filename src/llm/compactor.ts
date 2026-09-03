@@ -172,6 +172,8 @@ export function createCompactor(
   const foldSerializeCap = opts.foldSerializeCap ?? 520000;
   const ratioFn = opts.ratio ?? (() => 4);
   let boundaryIndex = 0;
+  let startedLength = 0;
+  let frozenPrefix: ChatMessage[] = [];
   let resultSummary: string | null = null;
   const summarizer = createGuardedSummarizer(llm, {
     retries: 3,
@@ -218,6 +220,8 @@ export function createCompactor(
         return;
       }
       resultSummary = null;
+      startedLength = messages.length;
+      frozenPrefix = messages.slice(0, boundaryIndex);
       const recent = serializeHistory(foldSlice, {
         totalCap: foldSerializeCap,
       });
@@ -247,7 +251,24 @@ export function createCompactor(
     applyCompaction(messages: ChatMessage[]): ChatMessage[] {
       const summary = resultSummary;
       if (summary === null) return messages;
-      const kept = evictContextResourceBodies(messages.slice(boundaryIndex));
+      const prefixMatches =
+        frozenPrefix.length === boundaryIndex &&
+        frozenPrefix.every((message, index) => messages[index] === message);
+      if (!prefixMatches) {
+        opts.log?.('compaction result discarded: frozen prefix changed');
+        resultSummary = null;
+        boundaryIndex = 0;
+        startedLength = 0;
+        frozenPrefix = [];
+        return messages;
+      }
+      const oldTailEnd = Math.min(startedLength, messages.length);
+      const kept = [
+        ...evictContextResourceBodies(
+          messages.slice(boundaryIndex, oldTailEnd),
+        ),
+        ...messages.slice(oldTailEnd),
+      ];
       opts.log?.(
         `compaction applied | replaced=${boundaryIndex} | summary_chars=${summary.length}`,
       );
@@ -258,6 +279,8 @@ export function createCompactor(
       ];
       resultSummary = null;
       boundaryIndex = 0;
+      startedLength = 0;
+      frozenPrefix = [];
       tracker.recompute(next);
       return next;
     },
@@ -265,6 +288,8 @@ export function createCompactor(
       summarizer.reset();
       resultSummary = null;
       boundaryIndex = 0;
+      startedLength = 0;
+      frozenPrefix = [];
       tracker.recompute([]);
     },
   };

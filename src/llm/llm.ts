@@ -1045,7 +1045,9 @@ export async function streamComplete(
     const base = {
       model: config.llm.model,
       messages: prepared.map(toApiMessage),
-      ...(options.toolFree ? {} : { tools: modelTools }),
+      ...(options.toolFree
+        ? {}
+        : { tools: modelTools, parallel_tool_calls: false }),
       ...(options.toolChoice !== undefined
         ? { tool_choice: options.toolChoice }
         : {}),

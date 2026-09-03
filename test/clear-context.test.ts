@@ -6,8 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as path from 'node:path';
 import type { ChatMessage, LLM, CompleteResult } from '../src/llm/llm.js';
 import { buildTestAgent } from './helpers.js';
+import { makeStubLLM } from './helpers.js';
+import { loadMostRecentMain } from '../src/store/sessions.js';
 
 interface FakeLLMState {
   /** Resolves when an in-flight complete() should return. */
@@ -122,6 +125,78 @@ test('clearContext: resets compactor boundary and drops pending summary', async 
   );
   assert.equal(compactor.boundaryIndex, 0);
   assert.equal(compactor.running, false);
+});
+
+test('clearContext: in-flight tool result cannot repopulate memory or transcript', async () => {
+  const { promise: runEntered, resolve: signalRunEntered } =
+    Promise.withResolvers<void>();
+  const { promise: releaseRun, resolve: resolveRun } =
+    Promise.withResolvers<void>();
+  let completions = 0;
+  const llm = makeStubLLM({
+    complete: async () => {
+      completions++;
+      return {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'blocked-run',
+              type: 'function',
+              function: {
+                name: 'run',
+                arguments: JSON.stringify({
+                  code: 'await blockedWork()',
+                  detail: 'Wait for test release',
+                }),
+              },
+            },
+          ],
+        },
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      };
+    },
+  });
+  const h = buildTestAgent({
+    llm,
+    tmpPrefix: 'harness-clear-tool-',
+    agentDeps: {
+      sandbox: {
+        run: async () => {
+          signalRunEntered();
+          await releaseRun;
+          return { ok: true, preview: 'STALE TOOL RESULT' };
+        },
+      },
+    },
+  });
+  h.agent.enqueue({
+    channelId: 'c',
+    channelName: 'g',
+    author: 'a',
+    content: 'pre-clear tool request',
+  });
+  void h.agent.loop();
+  await runEntered;
+  assert.equal(completions, 1);
+
+  h.agent.clearContext();
+  resolveRun();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(h.agent.messagesForTest, []);
+  assert.equal(h.tracker.currentTokens, 0);
+  assert.equal(
+    loadMostRecentMain(path.join(h.tmpDir, 'sessions')),
+    null,
+    'the clear sentinel must remain the newest empty transcript',
+  );
+  h.agent.stop();
 });
 
 test('clearContext: in-flight LLM response is discarded, not appended to fresh history', async () => {

@@ -182,6 +182,53 @@ test('ContextResources follows a symlinked skill folder', () => {
   }
 });
 
+test('ContextResources checks lexical and physical AGENTS.md scopes for symlinked files', () => {
+  const f = fixture();
+  try {
+    const lexical = path.join(f.data, 'lexical');
+    const physical = path.join(f.home, 'physical');
+    fs.mkdirSync(lexical, { recursive: true });
+    fs.mkdirSync(physical, { recursive: true });
+    fs.writeFileSync(path.join(lexical, 'AGENTS.md'), 'lexical rules\n');
+    fs.writeFileSync(path.join(physical, 'AGENTS.md'), 'physical rules\n');
+    const target = path.join(physical, 'file.ts');
+    const link = path.join(lexical, 'link.ts');
+    fs.writeFileSync(target, 'value\n');
+    fs.symlinkSync(target, link);
+    const resources = new ContextResources({
+      dataDirectory: f.data,
+      harnessRoot: f.harness,
+      homeDirectory: f.home,
+    });
+
+    let first: ContextResourceInterrupt | null = null;
+    assert.throws(
+      () => resources.beforeFileAccess(link, 'file'),
+      (error: unknown) => {
+        assert.ok(error instanceof ContextResourceInterrupt);
+        first = error;
+        assert.match(error.message, /lexical rules/);
+        return true;
+      },
+    );
+    resources.acknowledge([first!.resource]);
+    let second: ContextResourceInterrupt | null = null;
+    assert.throws(
+      () => resources.beforeFileAccess(link, 'file'),
+      (error: unknown) => {
+        assert.ok(error instanceof ContextResourceInterrupt);
+        second = error;
+        assert.match(error.message, /physical rules/);
+        return true;
+      },
+    );
+    resources.acknowledge([second!.resource]);
+    assert.doesNotThrow(() => resources.beforeFileAccess(link, 'file'));
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('ContextResources interrupts once for each nearest AGENTS.md scope', () => {
   const f = fixture();
   try {
@@ -241,6 +288,66 @@ test('ContextResources interrupts once for each nearest AGENTS.md scope', () => 
       resources.snapshot().agentsFiles,
       [nestedAgents, rootAgents].sort(),
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('ContextResources restart restoration uses the latest descriptor for each key', () => {
+  const f = fixture();
+  try {
+    const skillPath = writeSkill(
+      f.data,
+      'changing',
+      '---\nname: changing\ndescription: Changes\n---\n\nversion one\n',
+    );
+    const original = new ContextResources({
+      dataDirectory: f.data,
+      harnessRoot: f.harness,
+      homeDirectory: f.home,
+    });
+    const v1 = original.loadSkillContext(['changing']).resources[0];
+    original.acknowledge([v1]);
+    fs.writeFileSync(
+      skillPath,
+      '---\nname: changing\ndescription: Changes\n---\n\nversion two\n',
+    );
+    const v2 = original.loadSkillContext(['changing']).resources[0];
+    original.acknowledge([v2]);
+    fs.writeFileSync(
+      skillPath,
+      '---\nname: changing\ndescription: Changes\n---\n\nversion one\n',
+    );
+
+    const restored = new ContextResources({
+      dataDirectory: f.data,
+      harnessRoot: f.harness,
+      homeDirectory: f.home,
+    });
+    restored.restore([v1, v2]);
+    assert.deepEqual(restored.snapshot().skills, []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('ContextResources keeps post-start survivors out of the compaction reminder', () => {
+  const f = fixture();
+  try {
+    writeSkill(
+      f.data,
+      'survivor',
+      '---\nname: survivor\ndescription: Remains\n---\n\nbody\n',
+    );
+    const resources = new ContextResources({
+      dataDirectory: f.data,
+      harnessRoot: f.harness,
+      homeDirectory: f.home,
+    });
+    const descriptor = resources.loadSkillContext(['survivor']).resources[0];
+    resources.acknowledge([descriptor]);
+    assert.equal(resources.takeCompactionReminder([descriptor]), null);
+    assert.deepEqual(resources.snapshot().skills, ['survivor']);
   } finally {
     f.cleanup();
   }
