@@ -93,13 +93,30 @@ export interface LoadedTranscript {
   path: string;
 }
 
+export interface TranscriptStoreOptions {
+  writeSentinel?: (temporaryPath: string, finalPath: string) => void;
+}
+
 export function createTranscriptStore(
   sessionsRoot: string,
-  io: Pick<typeof fs, 'writeFileSync'> = fs,
+  options: TranscriptStoreOptions = {},
 ): TranscriptStore {
   hardenTranscriptTree(sessionsRoot);
   // channelId -> absolute path of the active transcript file
   const active = new Map<string, string>();
+  const writeSentinel =
+    options.writeSentinel ??
+    ((temporaryPath: string, finalPath: string): void => {
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(temporaryPath, 'wx', 0o600);
+        fs.fsyncSync(fd);
+      } finally {
+        if (fd !== undefined) fs.closeSync(fd);
+      }
+      fs.renameSync(temporaryPath, finalPath);
+    });
+
   // monotonic counter so two rotations within the same millisecond produce
   // distinct filenames (timestamp alone can collide on a fast machine)
   let seqCounter = 0;
@@ -158,7 +175,21 @@ export function createTranscriptStore(
       // failure must propagate before /clear wipes memory, and a later append
       // must still continue the retained pre-clear transcript.
       const p = newFilePath(channelId);
-      io.writeFileSync(p, '', { mode: 0o600 });
+      const temporary = `${p}.pending`;
+      try {
+        writeSentinel(temporary, p);
+      } catch (error) {
+        for (const candidate of [temporary, p]) {
+          try {
+            fs.unlinkSync(candidate);
+          } catch (cleanupError) {
+            if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') {
+              // Keep the original publication failure as the useful cause.
+            }
+          }
+        }
+        throw error;
+      }
       active.set(channelId, p);
     },
     adopt(channelId, filePath) {

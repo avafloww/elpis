@@ -334,13 +334,24 @@ test('sessions: failed sentinel rotation retains the old active transcript', () 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-sessions-'));
   let failSentinel = true;
   const store = createTranscriptStore(root, {
-    writeFileSync(file, data, options) {
-      if (failSentinel) throw new Error('injected sentinel failure');
-      fs.writeFileSync(file, data, options);
+    writeSentinel(temporary, final) {
+      if (failSentinel) {
+        fs.writeFileSync(temporary, 'partially created sentinel');
+        throw new Error('injected sentinel failure');
+      }
+      fs.writeFileSync(temporary, '');
+      fs.renameSync(temporary, final);
     },
   });
   store.append('main', { role: 'user', content: 'before failed clear' });
   assert.throws(() => store.rotate('main', true), /injected sentinel failure/);
+  const transcriptDir = path.join(root, 'discord', 'main');
+  assert.equal(
+    fs.readdirSync(transcriptDir).filter((name) => name.endsWith('.jsonl'))
+      .length,
+    1,
+    'a partially written temporary sentinel must not become restart-visible',
+  );
   failSentinel = false;
   store.append('main', { role: 'assistant', content: 'after failed clear' });
 
