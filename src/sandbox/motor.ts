@@ -682,7 +682,10 @@ function removeEpisodeFiles(episodesDir: string, episodeId: string): void {
   }
 }
 
-function secureAndPruneEpisodeFiles(episodesDir: string): void {
+function secureAndPruneEpisodeFiles(
+  episodesDir: string,
+  enforceStartupLimit = false,
+): void {
   fs.mkdirSync(episodesDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(episodesDir, 0o700);
   const entries = fs.readdirSync(episodesDir, { withFileTypes: true });
@@ -705,6 +708,7 @@ function secureAndPruneEpisodeFiles(episodesDir: string): void {
     const match = /^(.*)-\d{4}\.png$/.exec(entry.name);
     if (match && !traceIds.has(match[1])) fs.rmSync(file, { force: true });
   }
+  if (!enforceStartupLimit) return;
   let count = traces.length;
   for (const trace of traces.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
     if (count <= MAX_EPISODES) break;
@@ -1235,7 +1239,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
     resolveDataLayout(deps.dataDirectory).motor,
     'episodes',
   );
-  secureAndPruneEpisodeFiles(episodesDir);
+  secureAndPruneEpisodeFiles(episodesDir, true);
   const episodes = new Map<string, EpisodeRecord>();
   for (const entry of fs.readdirSync(episodesDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
@@ -1856,7 +1860,6 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
           true,
         );
         fsyncDirectory(episodesDir);
-        secureAndPruneEpisodeFiles(episodesDir);
       } catch (error) {
         try {
           fs.rmSync(record.traceFile, { force: true });
@@ -1869,9 +1872,13 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         }
         throw error;
       }
-      for (const episode of evictionCandidates)
+      for (const episode of evictionCandidates) {
+        removeEpisodeFiles(episodesDir, episode.episodeId);
         episodes.delete(episode.episodeId);
+      }
+      if (evictionCandidates.length > 0) fsyncDirectory(episodesDir);
       episodes.set(episodeId, record);
+      secureAndPruneEpisodeFiles(episodesDir);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
     },

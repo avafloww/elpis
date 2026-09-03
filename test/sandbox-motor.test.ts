@@ -451,6 +451,10 @@ test('failed start at capacity preserves retained episodes until commit', async 
       { mode: 0o600 },
     );
   }
+  const oldByEventTime = path.join(episodesDir, 'retained-000.jsonl');
+  const oldByMtime = path.join(episodesDir, 'retained-099.jsonl');
+  fs.utimesSync(oldByEventTime, new Date(10_000), new Date(10_000));
+  fs.utimesSync(oldByMtime, new Date(1_000), new Date(1_000));
   const motor = fixture(dir, async () =>
     completion('done', { summary: 'capacity start committed' }),
   ).motor;
@@ -486,6 +490,27 @@ test('failed start at capacity preserves retained episodes until commit', async 
   assert.equal(
     committed.some((episode) => episode.episodeId === 'retained-000'),
     false,
+  );
+  assert.equal(
+    committed.some((episode) => episode.episodeId === 'retained-099'),
+    true,
+  );
+  resetResidentMotorForTest(dir);
+  const restored = fixture(dir, async () => {
+    throw new Error('terminal capacity recovery must not call model');
+  }).motor.status() as Array<{ episodeId: string }>;
+  assert.equal(restored.length, 100);
+  assert.equal(
+    restored.some((episode) => episode.episodeId === 'retained-000'),
+    false,
+  );
+  assert.equal(
+    restored.some((episode) => episode.episodeId === 'retained-099'),
+    true,
+  );
+  assert.equal(
+    restored.some((episode) => episode.episodeId === 'capacity-success'),
+    true,
   );
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
