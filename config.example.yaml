@@ -49,6 +49,43 @@ llm:
   # Subtracted from the context window to leave room for the reply.
   completion_reserve_tokens: 8192
   #
+  # The flat keys above are legacy-compatible and do not expose elpis.llm. New
+  # multi-model configurations should replace the whole llm block with the
+  # canonical registry below. `tool_tier` explicitly opts one model into bare,
+  # resident-only one-shot queries; omit it to keep that model unavailable.
+  # weak, medium, and strong may each name at most one model across all providers.
+  #
+  # providers:
+  #   primary:
+  #     provider_type: openai-compatible
+  #     api_key: sk-...
+  #     base_url: https://api.example.com/v1
+  #     api: responses
+  #     models:
+  #       main:
+  #         name: gpt-example
+  #         context_size: 128000
+  #         reasoning_effort: high
+  #         tool_tier: strong
+  #       classifier:
+  #         name: gpt-example-mini
+  #         context_size: 32000
+  #         reasoning_effort: low
+  #   local:
+  #     provider_type: openai-compatible
+  #     api_key: local-placeholder
+  #     base_url: http://127.0.0.1:8080/v1
+  #     api: chat
+  #     models:
+  #       advisor:
+  #         name: local-example
+  #         context_size: 64000
+  #         tool_tier: weak
+  # roles:
+  #   main: primary/main
+  #   classifier: primary/classifier
+  # completion_reserve_tokens: 8192
+  #
   # --- anthropic-oauth (Claude Pro/Max subscription) ---
   # To use a subscription instead of the above, run `npm run oauth-login` once,
   # then replace the whole llm block with just these two keys:

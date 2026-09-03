@@ -72,7 +72,16 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.watch` for ephemeral image batches;
 - `elpis.bsky` for AT Protocol;
 - `elpis.motor` for bounded screenshot-to-action control with resident-selected [motor skills](motor-skills.md);
+- optional `elpis.llm` for models explicitly opted in with a canonical `tool_tier`; `list()` returns only tier, canonical ref, endpoint model name, provider type, and context size, while `query({ prompt, model, schema? })` performs a fresh isolated call with no resident context or tools;
 - optional `elpis.worker` supervision for Mind-rooted workers; a worker sandbox itself receives only its parent-bound `run(code, detail)` tool and workspace allowlist.
+
+### Bare LLM queries
+
+`elpis.llm` exists only in the full resident sandbox and only when at least one canonical model has `tool_tier: weak|medium|strong`. It is absent from core, worker, and secretary surfaces. The model selector accepts an exposed tier or its exact canonical `provider/model` ref.
+
+Every query sends exactly one user message through a boot-created standalone client. It receives no SOUL, MEMORY, history, Mind, social context, provider reasoning replay, cache key, or function tools. The result contains text, sanitized model/provenance/usage fields, and optional validated JSON; it never returns provider endpoints, credentials, request IDs, tool calls, or reasoning fields/items.
+
+A run may make at most four queries and submit at most 128 KiB of serialized query input. Each prompt is limited to 64 KiB, each optional schema to 16 KiB, combined provider input to 80 KiB, and returned text to 64 KiB. Calls request at most 4096 output tokens and time out after 120 seconds. Schema mode appends a JSON-only instruction, rejects remote or recursive references, parses exact JSON, and validates locally with Ajv without coercion, defaults, or property removal. Invalid model output throws; it is never repaired silently.
 
 ### Local extensions
 

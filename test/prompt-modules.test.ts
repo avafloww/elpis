@@ -7,6 +7,13 @@ import { makeConfig } from './helpers.js';
 function prompt(
   config: ReturnType<typeof makeConfig>,
   motorSkills: Array<{ name: string; description: string }> = [],
+  llmTools: Array<{
+    tier: 'weak' | 'medium' | 'strong';
+    ref: string;
+    model: string;
+    providerType: 'openai-compatible';
+    contextSize: number | null;
+  }> = [],
 ) {
   return build({
     soul: '',
@@ -16,6 +23,7 @@ function prompt(
     dataDirectory: '/data',
     modules: resolveBuiltinModules(config),
     motorSkills,
+    llmTools,
   });
 }
 
@@ -50,6 +58,33 @@ test('active motor docs expose only the resident-selectable motor-skill catalog'
   assert.match(p, /`pixel-game`: LeafGreen controls and save ritual/);
   assert.match(p, /inspectSkill\(name\)/);
   assert.doesNotMatch(p, /SUPER SECRET MOTOR BODY/);
+});
+
+test('bare LLM docs appear only for an opted-in sanitized model catalog', () => {
+  const absent = prompt(makeConfig());
+  assert.doesNotMatch(absent, /### `elpis\.llm`/);
+  const present = prompt(
+    makeConfig(),
+    [],
+    [
+      {
+        tier: 'weak',
+        ref: 'p/weak',
+        model: 'wire-weak',
+        providerType: 'openai-compatible',
+        contextSize: 32000,
+      },
+    ],
+  );
+  assert.match(present, /### `elpis\.llm`/);
+  assert.match(present, /`weak` or `p\/weak`: `wire-weak`/);
+  assert.match(present, /one fresh user message/);
+  assert.match(
+    present,
+    /no SOUL, MEMORY, history, Mind, social context, tools/,
+  );
+  assert.match(present, /invalid JSON or schema output throws/);
+  assert.doesNotMatch(present, /private-endpoint|apiKey|reasoningContent/);
 });
 
 test('disabled and unavailable modules are both entirely absent from prompt text', () => {

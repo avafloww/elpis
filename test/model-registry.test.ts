@@ -26,6 +26,7 @@ function input(): LlmRegistryInput {
             reasoningEffort: 'high',
             reasoningSummary: null,
             reasoningContext: 'all_turns',
+            toolTier: 'strong',
           },
           motor: {
             name: 'openai/gpt-5.6-mini',
@@ -33,6 +34,7 @@ function input(): LlmRegistryInput {
             reasoningEffort: 'low',
             reasoningSummary: null,
             reasoningContext: null,
+            toolTier: 'weak',
           },
           secretary: {
             name: 'openai/gpt-5.6-secretary',
@@ -74,6 +76,7 @@ test('registry resolves main, classifier, and motor without requiring distinct r
   const registry = createLlmModelRegistry(input(), { requireMotor: true });
   assert.equal(registry.targets.main.name, 'openai/gpt-5.6-sol');
   assert.equal(registry.targets.main.ref, 'openrouter/sol');
+  assert.equal(registry.targets.main.toolTier, 'strong');
   assert.equal(registry.targets.classifier.ref, registry.targets.main.ref);
   assert.equal(registry.targets.motor?.name, 'openai/gpt-5.6-mini');
   assert.equal(registry.targets.motor?.provider, registry.providers.openrouter);
@@ -144,6 +147,19 @@ test('legacy adapter has one explicit compatibility identity for every active ro
   assert.equal(legacy.roles.classifier, legacy.roles.main);
   assert.equal(legacy.roles.motor, legacy.roles.main);
   assert.equal(legacy.targets.motor?.name, 'wire-model');
+  assert.equal(legacy.targets.main.toolTier, null);
+});
+
+test('registry rejects duplicate and invalid LLM tool tiers', () => {
+  const duplicate = input();
+  duplicate.providers.openrouter.models.motor.toolTier = 'strong';
+  assert.throws(
+    () => createLlmModelRegistry(duplicate),
+    /tool tier strong is assigned to both openrouter\/sol and openrouter\/motor/,
+  );
+  const invalid = input();
+  invalid.providers.openrouter.models.motor.toolTier = 'enormous' as never;
+  assert.throws(() => createLlmModelRegistry(invalid), /tool_tier/);
 });
 
 test('registry rejects unknown refs and invalid provider/model definitions', () => {

@@ -13,12 +13,14 @@ import { BUILTIN_MODULE_IDS, type BuiltinModuleId } from './builtin-modules.js';
 import {
   createLlmModelRegistry,
   legacyLlmModelRegistry,
+  LLM_TOOL_TIERS,
   resolveLlmModelTarget,
   type LegacyLlmDefinition,
   type LlmModelRegistry,
   type LlmProviderDefinition,
   type LlmProviderType,
   type LlmRole,
+  type LlmToolTier,
   type ResolvedLlmTarget,
 } from './llm/model-registry.js';
 
@@ -839,6 +841,17 @@ function apiSurface(
   return api;
 }
 
+function llmToolTier(
+  value: string | null,
+  dotted: string,
+  file: string,
+): LlmToolTier | null {
+  if (value === null) return null;
+  if (!LLM_TOOL_TIERS.includes(value as LlmToolTier))
+    throw new Error(`${file}: '${dotted}' must be weak, medium, or strong`);
+  return value as LlmToolTier;
+}
+
 function providerBaseUrl(
   type: LlmProviderType,
   configured: string | null,
@@ -1061,6 +1074,7 @@ function parseLlmConfig(
         'reasoning_effort',
         'reasoning_summary',
         'reasoning_context',
+        'tool_tier',
       ]);
       const modelUnknown = Object.keys(model).filter(
         (key) => !modelAllowed.has(key),
@@ -1094,6 +1108,11 @@ function parseLlmConfig(
           model,
           'reasoning_context',
           `${modelDotted}.reasoning_context`,
+          file,
+        ),
+        toolTier: llmToolTier(
+          rawString(model, 'tool_tier', `${modelDotted}.tool_tier`, file),
+          `${modelDotted}.tool_tier`,
           file,
         ),
       };

@@ -27,6 +27,42 @@ The example file is the exhaustive annotated reference. This document explains t
 
 The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor` and `secretary` are optional. A configured `secretary` resolves through the same provider-local model registry and remains unused until the Kubernetes-only secretary runtime is enabled.
 
+A canonical model may set `tool_tier: weak`, `medium`, or `strong` to opt into the resident's bounded `elpis.llm` one-shot query surface. Each tier may be assigned to at most one model across the whole registry; duplicates fail configuration loading. Omitted or `null` means unavailable. The legacy flat LLM form exposes no query models.
+
+```yaml
+llm:
+  providers:
+    primary:
+      provider_type: openai-compatible
+      api_key: ${LLM_API_KEY}
+      base_url: https://api.example.com/v1
+      api: responses
+      models:
+        main:
+          name: gpt-example
+          context_size: 128000
+          tool_tier: strong
+        classifier:
+          name: gpt-example-mini
+          context_size: 32000
+    local:
+      provider_type: openai-compatible
+      api_key: local-placeholder
+      base_url: http://127.0.0.1:8080/v1
+      api: chat
+      models:
+        advisor:
+          name: local-example
+          context_size: 64000
+          tool_tier: weak
+  roles:
+    main: primary/main
+    classifier: primary/classifier
+  completion_reserve_tokens: 8192
+```
+
+`tool_tier` changes only query exposure. Role selection remains independent, so a role model is not queryable unless explicitly opted in and a query-only model need not hold a runtime role.
+
 ## `operator`
 
 `operator.name`, optional pronouns, and `discord_id` describe and authorize the human administrator. The name is display metadata; the Discord ID gates operator-only commands.

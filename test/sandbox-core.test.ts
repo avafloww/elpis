@@ -128,6 +128,7 @@ test('worker sandbox exposes workspace powers without resident capabilities', as
     sudo: typeof elpis.sudo,
     bg: typeof elpis.bg,
     ssh: typeof elpis.ssh,
+    llm: typeof elpis.llm,
   })`);
   for (const name of [
     'channel',
@@ -140,6 +141,7 @@ test('worker sandbox exposes workspace powers without resident capabilities', as
     'sudo',
     'bg',
     'ssh',
+    'llm',
   ]) {
     assert.match(absent.preview ?? '', new RegExp(`${name}: "undefined"`));
   }
@@ -149,6 +151,95 @@ test('worker sandbox exposes workspace powers without resident capabilities', as
   assert.equal((await sandbox.run('_')).preview, '42');
   const shell = await sandbox.run('(await elpis.sh("printf worker")).stdout');
   assert.match(shell.preview ?? '', /worker/);
+});
+
+test('LLM tool is full-resident-only and enforces per-run call and input budgets', async () => {
+  const fullDeps = deps('full');
+  let calls = 0;
+  fullDeps.llmTool = {
+    list: () =>
+      Object.freeze([
+        Object.freeze({
+          tier: 'weak',
+          ref: 'p/weak',
+          model: 'wire-weak',
+          providerType: 'openai-compatible',
+          contextSize: 32000,
+        }),
+      ]),
+    query: async (input) => {
+      calls++;
+      return { input } as never;
+    },
+  };
+  const full = createSandbox(fullDeps);
+  assert.match((await full.run('typeof elpis.llm')).preview ?? '', /"object"/);
+  assert.match(
+    (await full.run('Object.isFrozen(elpis.llm) && elpis.llm.list()[0].ref'))
+      .preview ?? '',
+    /p\/weak/,
+  );
+  const boundedCalls = await full.run(`(async () => {
+    const results = [];
+    for (let i = 0; i < 5; i++) {
+      try { results.push(await elpis.llm.query({ prompt: "x", model: "weak" })) }
+      catch (error) { results.push(String(error)) }
+    }
+    return results;
+  })()`);
+  assert.equal(boundedCalls.ok, true);
+  assert.match(
+    boundedCalls.preview ?? '',
+    /at most 4 calls are allowed per run/,
+  );
+  assert.equal(calls, 4);
+  const reset = await full.run(
+    'await elpis.llm.query({ prompt: "new run", model: "weak" })',
+  );
+  assert.equal(reset.ok, true);
+  assert.equal(calls, 5);
+  assert.equal(reset.operationReceipts?.length, 1);
+  assert.deepEqual(
+    {
+      kind: reset.operationReceipts?.[0]?.kind,
+      name: reset.operationReceipts?.[0]?.name,
+      command: reset.operationReceipts?.[0]?.command,
+      state: reset.operationReceipts?.[0]?.state,
+      ok: reset.operationReceipts?.[0]?.ok,
+      stdout: reset.operationReceipts?.[0]?.stdout,
+    },
+    {
+      kind: 'llm',
+      name: 'llm.query',
+      command: 'model=weak input_bytes=35',
+      state: 'completed',
+      ok: true,
+      stdout: undefined,
+    },
+  );
+  assert.doesNotMatch(JSON.stringify(reset.operationReceipts), /new run/);
+  const inputBound = await full.run(`(async () => {
+    const first = await elpis.llm.query({ prompt: "x".repeat(70000), model: "weak" });
+    try { await elpis.llm.query({ prompt: "x".repeat(70000), model: "weak" }) }
+    catch (error) { return String(error) }
+    return first;
+  })()`);
+  assert.equal(inputBound.ok, true);
+  assert.match(
+    inputBound.preview ?? '',
+    /run input exceeds 131072 UTF-8 bytes/,
+  );
+  assert.equal(calls, 6);
+
+  for (const surface of ['core', 'worker'] as const) {
+    const hiddenDeps = deps(surface);
+    hiddenDeps.llmTool = fullDeps.llmTool;
+    const hidden = createSandbox(hiddenDeps);
+    assert.match(
+      (await hidden.run('typeof elpis.llm')).preview ?? '',
+      /"undefined"/,
+    );
+  }
 });
 
 test('full sandbox retains compatibility last-value state', async () => {

@@ -157,6 +157,39 @@ test('run metadata parser accepts bounded file-read receipts', () => {
   assert.match(parsed?.operationReceipts?.[0]?.stdout ?? '', /1: hello/);
 });
 
+test('run metadata parser preserves privacy-safe LLM receipts', () => {
+  const parsed = parseRunMessageMetadata({
+    toolContractVersion: 'elpis-run-v4',
+    ok: true,
+    operationReceipts: [
+      {
+        sequence: 0,
+        kind: 'llm',
+        name: 'llm.query',
+        command: 'model=weak input_bytes=35',
+        state: 'completed',
+        startedAt: 10,
+        durationMs: 2,
+        ok: true,
+        code: 0,
+        signal: null,
+      },
+    ],
+  });
+  assert.deepEqual(parsed?.operationReceipts?.[0], {
+    sequence: 0,
+    kind: 'llm',
+    name: 'llm.query',
+    command: 'model=weak input_bytes=35',
+    state: 'completed',
+    startedAt: 10,
+    durationMs: 2,
+    ok: true,
+    code: 0,
+    signal: null,
+  });
+});
+
 test('run metadata parser rejects envelopes and drops malformed nested fields', () => {
   assert.equal(parseRunMessageMetadata(null), undefined);
   assert.equal(parseRunMessageMetadata({ ok: true }), undefined);

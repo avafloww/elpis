@@ -53,6 +53,10 @@ import {
   bskyTimeline,
 } from './bsky.js';
 import type { SshRegistry, SshHandle } from './ssh.js';
+import {
+  LLM_TOOL_MAX_CALLS_PER_RUN,
+  LLM_TOOL_MAX_RUN_INPUT_BYTES,
+} from '../llm/tool-runtime.js';
 import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
 
@@ -73,6 +77,8 @@ export interface RunScope {
   sends: { channel: string; text: string }[];
   operationReceipts: RunOperationReceipt[];
   operationReceiptsDropped: number;
+  llmToolCalls: number;
+  llmToolInputBytes: number;
   processError?: (kind: RunProcessErrorKind, error: unknown) => boolean;
 }
 export const runScope = new AsyncLocalStorage<RunScope>();
@@ -2159,6 +2165,61 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       status: (ref: string) => deps.worker!.status(ref),
       artifact: (ref: string, key?: string) => deps.worker!.artifact(ref, key),
       dismiss: (ref: string) => deps.worker!.dismiss(ref),
+    };
+  }
+
+  if (deps.llmTool && deps.surface !== 'core' && deps.surface !== 'worker') {
+    e.llm = {
+      list: () => deps.llmTool!.list(),
+      query: async (input: unknown) => {
+        const scope = runScope.getStore();
+        if (!scope)
+          throw new Error('elpis.llm.query: unavailable outside an active run');
+        scope.llmToolCalls++;
+        if (scope.llmToolCalls > LLM_TOOL_MAX_CALLS_PER_RUN)
+          throw new Error(
+            `elpis.llm.query: at most ${LLM_TOOL_MAX_CALLS_PER_RUN} calls are allowed per run`,
+          );
+        let serialized = '';
+        try {
+          serialized = JSON.stringify(input) ?? '';
+        } catch {
+          // The runtime reports the malformed value; accounting remains zero-byte.
+        }
+        const inputBytes = Buffer.byteLength(serialized, 'utf8');
+        scope.llmToolInputBytes += inputBytes;
+        if (scope.llmToolInputBytes > LLM_TOOL_MAX_RUN_INPUT_BYTES)
+          throw new Error(
+            `elpis.llm.query: run input exceeds ${LLM_TOOL_MAX_RUN_INPUT_BYTES} UTF-8 bytes`,
+          );
+        const selector =
+          input && typeof input === 'object' && !Array.isArray(input)
+            ? (input as { model?: unknown }).model
+            : undefined;
+        const selectorIsExposed =
+          typeof selector === 'string' &&
+          deps
+            .llmTool!.list()
+            .some((item) => item.tier === selector || item.ref === selector);
+        const receipt = beginOperationReceipt({
+          kind: 'llm',
+          name: 'llm.query',
+          command: `model=${selectorIsExposed ? selector : '<invalid>'} input_bytes=${inputBytes}`,
+        });
+        try {
+          const result = await deps.llmTool!.query(input);
+          completeOperationReceipt(receipt, {
+            stdout: '',
+            stderr: '',
+            code: 0,
+            signal: null,
+          });
+          return result;
+        } catch (error) {
+          failOperationReceipt(receipt, new Error('LLM query failed'));
+          throw error;
+        }
+      },
     };
   }
 

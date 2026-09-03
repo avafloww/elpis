@@ -3,7 +3,9 @@ export const LLM_PROVIDER_TYPES = [
   'anthropic-oauth',
   'codex-oauth',
 ] as const;
+export const LLM_TOOL_TIERS = ['weak', 'medium', 'strong'] as const;
 export type LlmProviderType = (typeof LLM_PROVIDER_TYPES)[number];
+export type LlmToolTier = (typeof LLM_TOOL_TIERS)[number];
 export type LlmRole = 'main' | 'classifier' | 'motor' | 'secretary';
 
 export interface LlmModelDefinition {
@@ -12,6 +14,7 @@ export interface LlmModelDefinition {
   reasoningEffort: string | null;
   reasoningSummary: string | null;
   reasoningContext: string | null;
+  toolTier?: LlmToolTier | null;
 }
 
 export interface LlmProviderDefinition {
@@ -117,6 +120,13 @@ function validateModel(model: LlmModelDefinition, path: string): void {
     if (model[key] !== null && typeof model[key] !== 'string')
       throw new Error(`${path}.${key} must be a string or null`);
   }
+  if (
+    model.toolTier !== undefined &&
+    model.toolTier !== null &&
+    !LLM_TOOL_TIERS.includes(model.toolTier)
+  ) {
+    throw new Error(`${path}.tool_tier must be weak, medium, strong, or null`);
+  }
 }
 
 function validateProvider(provider: LlmProviderDefinition, path: string): void {
@@ -196,6 +206,7 @@ export function legacyLlmModelRegistry(
               reasoningEffort: legacy.reasoningEffort,
               reasoningSummary: legacy.reasoningSummary,
               reasoningContext: legacy.reasoningContext,
+              toolTier: null,
             },
           },
         },
@@ -218,9 +229,20 @@ export function createLlmModelRegistry(
   const providers = Object.entries(input.providers ?? {});
   if (providers.length === 0)
     throw new Error('llm.providers must contain at least one provider');
+  const toolTierRefs = new Map<LlmToolTier, string>();
   for (const [providerId, provider] of providers) {
     requireId(providerId, 'llm provider id');
     validateProvider(provider, `llm.providers.${providerId}`);
+    for (const [modelId, model] of Object.entries(provider.models)) {
+      if (!model.toolTier) continue;
+      const ref = `${providerId}/${modelId}`;
+      const prior = toolTierRefs.get(model.toolTier);
+      if (prior)
+        throw new Error(
+          `llm tool tier ${model.toolTier} is assigned to both ${prior} and ${ref}`,
+        );
+      toolTierRefs.set(model.toolTier, ref);
+    }
   }
   const resolve = (
     role: LlmRole,

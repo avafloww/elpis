@@ -29,6 +29,7 @@ import type {
   ContextResources,
 } from './context-resources.js';
 import type { MotorSkills } from './motor-skills.js';
+import type { LlmToolRuntime } from './llm/tool-runtime.js';
 
 export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
@@ -125,6 +126,8 @@ export interface SandboxDeps {
   >;
   /** Boot-frozen catalog selected by the resident for bounded motor episodes. */
   motorSkills?: Pick<MotorSkills, 'inspect' | 'select'>;
+  /** Explicitly opted-in, bare standalone LLM queries for the full resident sandbox. */
+  llmTool?: LlmToolRuntime;
   send?: (
     channelId: string,
     content: string,

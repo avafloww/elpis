@@ -42,6 +42,10 @@ import { createSecretRegistry } from './lib/secrets.js';
 import { ContextResources } from './context-resources.js';
 import { MotorSkills } from './motor-skills.js';
 import {
+  createLlmToolRuntime,
+  type LlmToolRuntime,
+} from './llm/tool-runtime.js';
+import {
   createGatewayEnrollmentController,
   launchGatewayEnrollment,
   type GatewayEnrollmentController,
@@ -415,6 +419,7 @@ export async function createElpisRuntime(
   const inboundRef: { current: InboundMessage | null } = { current: null };
   let llm!: LLM;
   let llms!: LlmRoleClients;
+  let llmToolRuntime: LlmToolRuntime | null = null;
   let workerSupervisor: SandboxDeps['worker'];
   //: the TTL reaper delivers an abandon notice through the same path as
   // settle notices. `agent` is defined below; the closure is only invoked at
@@ -560,6 +565,11 @@ export async function createElpisRuntime(
     create: adapters.createLLM ?? createLLM,
   });
   llm = llms.main;
+  llmToolRuntime = createLlmToolRuntime(config, {
+    create: adapters.createLLM ?? createLLM,
+    db,
+  });
+  sandboxDeps.llmTool = llmToolRuntime ?? undefined;
   const secretaryRuntime = await startSecretarySupervisor({
     db,
     config,
@@ -655,6 +665,7 @@ export async function createElpisRuntime(
     mind,
     contextResources,
     motorSkills,
+    llmTool: llmToolRuntime ?? undefined,
     extensionPrompt: extensions.prompt,
     modules,
     profile,

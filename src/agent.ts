@@ -77,6 +77,7 @@ import {
 import type { Config } from './config.js';
 import type { ContextResources } from './context-resources.js';
 import type { MotorSkills } from './motor-skills.js';
+import type { LlmToolRuntime } from './llm/tool-runtime.js';
 import type {
   BuiltinModuleRegistry,
   RuntimeProfile,
@@ -665,6 +666,8 @@ export interface AgentDeps {
   contextResources?: ContextResources;
   /** Boot-frozen resident-selected motor-skill catalog. */
   motorSkills?: MotorSkills;
+  /** Sanitized catalog for explicitly opted-in bare standalone LLM queries. */
+  llmTool?: Pick<LlmToolRuntime, 'list'>;
   /** Boot-frozen deterministic prompt blocks from data-directory extensions. */
   extensionPrompt?: string;
   /** Boot-resolved built-in modules; also used by the sandbox. */
@@ -3216,6 +3219,7 @@ export class Agent {
       profile: this.deps.profile,
       skills: this.deps.contextResources?.catalog(),
       motorSkills: this.deps.motorSkills?.catalog(),
+      llmTools: this.deps.llmTool?.list(),
     });
     const externalThinkingHint = this.config.llm.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`

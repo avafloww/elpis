@@ -67,10 +67,12 @@ llm:
           context_size: 272000
           reasoning_effort: high
           reasoning_context: all_turns
+          tool_tier: strong
         motor:
           name: openai/gpt-5.6-mini
           context_size: 128000
           reasoning_effort: low
+          tool_tier: weak
         secretary:
           name: openai/gpt-5.6-secretary
           context_size: 64000
@@ -135,6 +137,9 @@ test('configFile: canonical provider/model registry resolves roles and projects 
   assert.equal(c.llm.contextSize, 272000);
   assert.equal(c.llm.api, 'responses');
   assert.equal(c.llm.completionReserveTokens, 4096);
+  assert.equal(c.llm.registry.targets.main.toolTier, 'strong');
+  assert.equal(c.llm.registry.targets.motor?.toolTier, 'weak');
+  assert.equal(c.llm.registry.targets.secretary?.toolTier, null);
   const motor = configForLlmRole(c, 'motor');
   assert.equal(motor.llm.model, 'openai/gpt-5.6-mini');
   assert.equal(motor.llm.reasoningEffort, 'low');
@@ -168,6 +173,27 @@ test('configFile: optional secretary role resolves and fails closed when absent'
     () => configForLlmRole(absent, 'secretary'),
     /llm\.roles\.secretary is not configured/,
   );
+});
+
+test('configFile: tool tiers are optional, strict, and unique', () => {
+  const invalid = CANONICAL_OK.replace('tool_tier: weak', 'tool_tier: enormous');
+  assert.throws(
+    () => loadConfigFile(fixture(invalid)),
+    /tool_tier.*weak, medium, or strong/,
+  );
+  const duplicate = CANONICAL_OK.replace(
+    'tool_tier: weak',
+    'tool_tier: strong',
+  );
+  assert.throws(
+    () => loadConfigFile(fixture(duplicate)),
+    /tool tier strong is assigned to both openrouter\/sol and openrouter\/motor/,
+  );
+  const omitted = loadConfigFile(
+    fixture(CANONICAL_OK.replaceAll(/\n\s+tool_tier: (?:weak|strong)/g, '')),
+  );
+  assert.equal(omitted.llm.registry.targets.main.toolTier, null);
+  assert.equal(omitted.llm.registry.targets.motor?.toolTier, null);
 });
 
 test('configFile: canonical roles reject unknown keys', () => {

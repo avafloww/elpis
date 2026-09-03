@@ -15,6 +15,7 @@ import { parseFrontmatter } from '../lib/frontmatter.js';
 import { slugify } from '../lib/slug.js';
 import type { SkillSummary } from '../context-resources.js';
 import type { MotorSkillSummary } from '../motor-skills.js';
+import type { LlmToolCatalogEntry } from './tool-runtime.js';
 import type {
   BuiltinModuleId,
   BuiltinModuleRegistry,
@@ -59,6 +60,8 @@ export interface PromptInputs {
   skills?: SkillSummary[];
   /** Boot-discovered motor skills selectable by the resident per episode. */
   motorSkills?: MotorSkillSummary[];
+  /** Sanitized catalog of explicitly opted-in standalone advisor models. */
+  llmTools?: readonly LlmToolCatalogEntry[];
 }
 
 /** One loaded `people/<slug>.md`. The agent caches these at context boundaries
@@ -135,6 +138,28 @@ export function build(input: PromptInputs): string {
   const motorSkillCatalog = (input.motorSkills ?? [])
     .map((skill) => `- \`${skill.name}\`: ${skill.description}`)
     .join('\n');
+  const llmToolCatalog = (input.llmTools ?? [])
+    .map(
+      (model) =>
+        `- \`${model.tier}\` or \`${model.ref}\`: \`${model.model}\` (${model.providerType}, context ${model.contextSize ?? 'unknown'})`,
+    )
+    .join('\n');
+  const llmToolSection = llmToolCatalog
+    ? `### \`elpis.llm\`
+Bare, bounded, one-shot LLM queries over models explicitly opted in at boot. \`list()\` returns the sanitized catalog. \`query({ prompt, model, schema? })\` accepts a tier or exact exposed model ref. Every query starts with one fresh user message and receives no SOUL, MEMORY, history, Mind, social context, tools, cache identity, or authority to act or speak as you. Reasoning fields and provider endpoints are not returned. Optional JSON Schema is appended as an exact-JSON request and validated locally; invalid JSON or schema output throws.
+
+Available models:
+${llmToolCatalog}
+\`\`\`js
+const models = elpis.llm.list()
+const answer = await elpis.llm.query({ prompt: "compare these two parsers", model: "weak" })
+const structured = await elpis.llm.query({
+  prompt: "extract the decision",
+  model: "strong",
+  schema: { type: "object", properties: { decision: { type: "string" } }, required: ["decision"] },
+})
+\`\`\``
+    : '';
   const moduleToolSections = [
     moduleActive('kagi')
       ? '### `elpis.extract(url, opts?)`\nExtract a web page as markdown. Public ChatGPT share links use the native bounded decoder; other URLs use Kagi\'s page extraction API.\n```js\nconst page = await elpis.extract("https://example.com/article")\nconsole.log(page.markdown)\n// { ok: true, url, markdown: "...", error: null, raw: {...} }\n```\n\n### `elpis.search(query, opts?)`\nSearch the web with Kagi and get structured results.\n```js\nconst res = await elpis.search("kagi api authentication", { limit: 5 })\nconsole.log(res.results[0])\n// { title, url, snippet, time }\n```'
@@ -699,6 +724,8 @@ The real Node \`process\` object (\`process.env\`, \`process.cwd()\`, ...).
 available as globals — everything a standard Node process has.
 
 ${moduleToolSections}
+
+${llmToolSection}
 
 ### \`elpis.channel(ref)\`
 Get the channel object for messaging. The reserved \`console\` target reaches the private operator console; otherwise \`ref\` is REQUIRED — a raw Discord id OR a
