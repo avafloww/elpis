@@ -50,7 +50,7 @@ test('MotorSkills discovers only dedicated package roots and inspects resources'
     const dataPath = writeSkill(
       f.dataSkills,
       'pixel-game',
-      'press one tile at a time',
+      'press one tile at a time\nResource: skill:pixel-game/TROUBLESHOOTING.md',
     );
     const resourcePath = path.join(
       f.dataSkills,
@@ -100,7 +100,11 @@ test('MotorSkills discovers only dedicated package roots and inspects resources'
 test('MotorSkills preserves selection order and freezes package resource bodies', () => {
   const f = fixture();
   try {
-    writeSkill(f.dataSkills, 'pixel-game');
+    writeSkill(
+      f.dataSkills,
+      'pixel-game',
+      'move carefully\nResource: skill:pixel-game/REFERENCE.txt',
+    );
     const resource = path.join(f.dataSkills, 'pixel-game', 'REFERENCE.txt');
     fs.writeFileSync(resource, 'frozen reference');
     writeSkill(f.bundled, 'retroarch');
@@ -150,6 +154,27 @@ test('MotorSkills preserves selection order and freezes package resource bodies'
     assert.throws(
       () => large.select(['large-a', 'large-b']),
       /aggregate limit/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('MotorSkills rejects auxiliary resources that SKILL.md cannot address', () => {
+  const f = fixture();
+  try {
+    writeSkill(f.dataSkills, 'uncited', 'main body without a handle');
+    fs.writeFileSync(
+      path.join(f.dataSkills, 'uncited', 'REFERENCE.md'),
+      'unreachable body',
+    );
+    const skills = new MotorSkills({
+      dataDirectory: f.data,
+      bundledSkillsDirectory: null,
+    });
+    assert.throws(
+      () => skills.inspect('uncited'),
+      /resource is not cited by SKILL\.md/,
     );
   } finally {
     f.cleanup();

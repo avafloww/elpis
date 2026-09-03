@@ -166,6 +166,7 @@ interface EpisodeRecord {
   counters: EpisodeCounters;
   opts: Required<Omit<MotorStartOptions, 'episodeId' | 'authority' | 'skills'>>;
   pendingGuidance: string | null;
+  pendingGuidanceId: string | null;
   recent: Array<{
     tool: string;
     arguments: string;
@@ -644,6 +645,18 @@ function parseMotorTrace(
   return events;
 }
 
+function fsyncDirectory(directory: string): void {
+  const fd = fs.openSync(
+    directory,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+  );
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function terminalTrace(file: string): boolean {
   try {
     return parseMotorTrace(file).some((event) =>
@@ -972,7 +985,8 @@ function restoreEpisode(
   let frame: string | null = null;
   let updatedAt = startedAt;
   let lastError: string | null = null;
-  let pendingRecoveredGuidance: string | null = null;
+  let pendingRecoveredGuidance: { id: string | null; text: string } | null =
+    null;
 
   for (const event of events) {
     if (typeof event.at === 'string' && Number.isFinite(Date.parse(event.at)))
@@ -994,7 +1008,30 @@ function restoreEpisode(
         typeof event.frame === 'string' && fs.existsSync(event.frame)
           ? event.frame
           : null;
-      const text = `<observation>\nGoal: ${goal}\n${pendingRecoveredGuidance ? `Supervisor guidance: ${pendingRecoveredGuidance}\n` : ''}Recovered durable interface state and authoritative tool receipt.\n`;
+      let turnGuidance = pendingRecoveredGuidance?.text ?? null;
+      let turnGuidanceId: string | null =
+        (pendingRecoveredGuidance as { id: string | null; text: string } | null)
+          ?.id ?? null;
+      if (Object.hasOwn(event, 'guidance')) {
+        if (event.guidance === null && event.guidanceId === null) {
+          turnGuidance = null;
+          turnGuidanceId = null;
+        } else if (
+          typeof event.guidance === 'string' &&
+          typeof event.guidanceId === 'string' &&
+          event.guidanceId.length <= 64
+        ) {
+          turnGuidance = boundedText(
+            event.guidance,
+            'recovered turn guidance',
+            MAX_GUIDANCE_CHARS,
+          );
+          turnGuidanceId = event.guidanceId;
+        } else {
+          return null;
+        }
+      }
+      const text = `<observation>\nGoal: ${goal}\n${turnGuidance ? `Supervisor guidance: ${turnGuidance}\n` : ''}Recovered durable interface state and authoritative tool receipt.\n`;
       const observation: ChatMessage = {
         role: 'user',
         content: `${text}${restoredFrame ? '[screenshot]' : '[screenshot unavailable]'}\n</observation>`,
@@ -1020,7 +1057,11 @@ function restoreEpisode(
         tool_call_id: call.id,
       });
       incrementRecoveredCounters(counters, call, event.receipt, motorSkills);
-      pendingRecoveredGuidance = null;
+      if (
+        !Object.hasOwn(event, 'guidance') ||
+        pendingRecoveredGuidance?.id === turnGuidanceId
+      )
+        pendingRecoveredGuidance = null;
       turns = Math.max(
         turns,
         typeof event.turn === 'number' ? event.turn + 1 : turns + 1,
@@ -1057,11 +1098,18 @@ function restoreEpisode(
     }
     if (event.type === 'guidance') {
       try {
-        pendingRecoveredGuidance = boundedText(
-          event.guidance,
-          'recovered motor guidance',
-          MAX_GUIDANCE_CHARS,
-        );
+        pendingRecoveredGuidance = {
+          id:
+            typeof event.guidanceId === 'string' &&
+            event.guidanceId.length <= 64
+              ? event.guidanceId
+              : null,
+          text: boundedText(
+            event.guidance,
+            'recovered motor guidance',
+            MAX_GUIDANCE_CHARS,
+          ),
+        };
       } catch {
         return null;
       }
@@ -1131,6 +1179,7 @@ function restoreEpisode(
     counters,
     opts,
     pendingGuidance: null,
+    pendingGuidanceId: null,
     recent: recent.slice(-4),
     abortController: null,
     loopRunning: false,
@@ -1492,7 +1541,9 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         const dimensions = pngDimensions(frame);
         episode.frame = frame;
         const guidance = episode.pendingGuidance;
+        const guidanceId = episode.pendingGuidanceId;
         episode.pendingGuidance = null;
+        episode.pendingGuidanceId = null;
         const text = `<observation>\nGoal: ${episode.goal}\n${guidance ? `Supervisor guidance: ${guidance}\n` : ''}Current interface screenshot. Continue from visible state and authoritative tool receipts.\n`;
         episode.messages.push({
           role: 'user',
@@ -1589,6 +1640,8 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
             dimensions,
             call,
             receipt: outcome.receipt,
+            guidance,
+            guidanceId,
             counters: episode.counters,
             reasoning: completion.reasoningContent ?? null,
             content: completion.content ?? '',
@@ -1668,12 +1721,17 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       );
     if (TERMINAL_STATUSES.has(episode.status))
       throw new Error(`elpis.motor: episode is terminal (${episode.status})`);
-    if (guidance !== null)
+    if (guidance !== null) {
       episode.pendingGuidance = boundedText(
         guidance,
         'motor guidance',
         MAX_GUIDANCE_CHARS,
       );
+      episode.pendingGuidanceId = randomUUID();
+    } else {
+      episode.pendingGuidance = null;
+      episode.pendingGuidanceId = null;
+    }
     episode.lastAcknowledgedTurn = episode.turns;
     episode.lastNotifiedTurn = episode.turns;
     episode.status = 'running';
@@ -1682,7 +1740,12 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
       type: guidance === null ? 'continue' : 'guidance',
       at: new Date(episode.updatedAt).toISOString(),
       checkpointSeq,
-      ...(guidance !== null ? { guidance: episode.pendingGuidance } : {}),
+      ...(guidance !== null
+        ? {
+            guidance: episode.pendingGuidance,
+            guidanceId: episode.pendingGuidanceId,
+          }
+        : {}),
     });
     queueMicrotask(() => void runEpisode(episode));
     return snapshot(episode);
@@ -1766,6 +1829,7 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         },
         opts: episodeOptions,
         pendingGuidance: null,
+        pendingGuidanceId: null,
         recent: [],
         abortController: null,
         loopRunning: false,
@@ -1773,22 +1837,36 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
         originChannelId,
         runtime,
       };
+      try {
+        append(
+          record.traceFile,
+          {
+            type: 'start',
+            at: new Date(startedAt).toISOString(),
+            episodeId,
+            goal,
+            authority: record.authority,
+            options: record.opts,
+            motorSkills: record.motorSkills,
+            originChannelId,
+          },
+          true,
+        );
+        fsyncDirectory(episodesDir);
+        secureAndPruneEpisodeFiles(episodesDir);
+      } catch (error) {
+        try {
+          fs.rmSync(record.traceFile, { force: true });
+          fsyncDirectory(episodesDir);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            'elpis.motor: start persistence and rollback both failed',
+          );
+        }
+        throw error;
+      }
       episodes.set(episodeId, record);
-      append(
-        record.traceFile,
-        {
-          type: 'start',
-          at: new Date(startedAt).toISOString(),
-          episodeId,
-          goal,
-          authority: record.authority,
-          options: record.opts,
-          motorSkills: record.motorSkills,
-          originChannelId,
-        },
-        true,
-      );
-      secureAndPruneEpisodeFiles(episodesDir);
       queueMicrotask(() => void runEpisode(record));
       return snapshot(record);
     },

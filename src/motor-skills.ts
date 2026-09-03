@@ -85,6 +85,8 @@ export interface MotorSkillsOptions {
   logger?: { warn(...args: unknown[]): void };
 }
 
+// Resolving children through a pinned directory descriptor prevents later path
+// replacement from redirecting package traversal; every child open is no-follow.
 function descriptorPath(fd: number, ...segments: string[]): string {
   return path.join('/proc/self/fd', String(fd), ...segments);
 }
@@ -396,6 +398,12 @@ export class MotorSkills {
           `motor skill metadata changed before selection: ${name}`,
         );
       const resources = snapshotResources(packageFd, record.rootPath, name);
+      for (const resource of resources) {
+        if (!body.includes(resource.handle))
+          throw new Error(
+            `motor skill resource is not cited by SKILL.md: ${resource.handle}`,
+          );
+      }
       const packageBytes =
         Buffer.byteLength(body, 'utf8') +
         resources.reduce((total, resource) => total + resource.bytes, 0);

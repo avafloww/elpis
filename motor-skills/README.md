@@ -1,6 +1,6 @@
 # Bundled motor skills
 
-Each direct child directory is one portable motor-skill package. It contains a `SKILL.md` with matching `name` and a nonempty `description` in YAML frontmatter. Optional bounded UTF-8 text resources may live beside it or in subdirectories.
+Each direct child directory is one portable motor-skill package. It contains a `SKILL.md` with matching `name` and a nonempty `description` in YAML frontmatter. Optional bounded UTF-8 text resources may live beside it or in subdirectories. Every auxiliary resource must be cited in `SKILL.md` by its exact `skill:<name>/<relative-path>` handle so the motor never needs package discovery.
 
 The build copies this directory into `dist/motor-skills/`, where the installed resident discovers it without requiring a source checkout. Inhabitant-authored motor skills belong in `elpis-data/motor-skills/`.
 

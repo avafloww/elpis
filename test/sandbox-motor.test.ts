@@ -392,6 +392,38 @@ test('motor trace custody hardens files, drops orphan frames, and prunes only te
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('failed start persistence leaves no phantom episode or reserved id', async () => {
+  const dir = tempDir();
+  const motor = fixture(dir, async () =>
+    completion('done', { summary: 'second start succeeded' }),
+  ).motor;
+  const episodesDir = path.join(resolveDataLayout(dir).motor, 'episodes');
+  fs.chmodSync(episodesDir, 0o500);
+  assert.throws(
+    () =>
+      motor.start('first start must fail cleanly', {
+        episodeId: 'start-rollback',
+        settleMs: 0,
+      }),
+    /EACCES|permission denied/i,
+  );
+  fs.chmodSync(episodesDir, 0o700);
+  assert.equal(
+    fs.existsSync(path.join(episodesDir, 'start-rollback.jsonl')),
+    false,
+  );
+  motor.start('reuse the same id', {
+    episodeId: 'start-rollback',
+    settleMs: 0,
+  });
+  await until(
+    () => motor.status('start-rollback'),
+    (value) => value.status === 'completed',
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('authority validation fails closed before an ungranted action', async () => {
   const dir = tempDir();
   const { motor, calls } = fixture(dir, async () =>
@@ -565,7 +597,11 @@ test('interrupt aborts an in-flight provider call without executing an action', 
 
 test('resident selects, reads resources, traces, and exactly restores motor packages', async () => {
   const dir = tempDir();
-  const file = writeMotorSkill(dir, 'pixel-game', 'ORIGINAL MOTOR BODY');
+  const file = writeMotorSkill(
+    dir,
+    'pixel-game',
+    'ORIGINAL MOTOR BODY\nResource: skill:pixel-game/TROUBLESHOOTING.md',
+  );
   const rootPath = path.dirname(file);
   const resourceFile = path.join(rootPath, 'TROUBLESHOOTING.md');
   fs.writeFileSync(resourceFile, 'ORIGINAL RESOURCE BODY\n');
@@ -633,7 +669,7 @@ test('resident selects, reads resources, traces, and exactly restores motor pack
   const prompt = firstSeen[0].messages[0].content;
   assert.match(prompt, /ORIGINAL MOTOR BODY/);
   assert.match(prompt, /This SKILL\.md body is already loaded/);
-  assert.doesNotMatch(prompt, /skill:pixel-game\/TROUBLESHOOTING\.md/);
+  assert.match(prompt, /skill:pixel-game\/TROUBLESHOOTING\.md/);
   assert.doesNotMatch(prompt, /ORIGINAL RESOURCE BODY/);
   assert.ok(
     prompt.indexOf('ORIGINAL MOTOR BODY') <
@@ -715,8 +751,16 @@ test('resident selects, reads resources, traces, and exactly restores motor pack
 
 test('motor resource reads cannot cross the resident-selected package boundary', async () => {
   const dir = tempDir();
-  const selectedFile = writeMotorSkill(dir, 'selected', 'SELECTED BODY');
-  const hiddenFile = writeMotorSkill(dir, 'hidden', 'HIDDEN BODY');
+  const selectedFile = writeMotorSkill(
+    dir,
+    'selected',
+    'SELECTED BODY\nResource: skill:selected/REFERENCE.md',
+  );
+  const hiddenFile = writeMotorSkill(
+    dir,
+    'hidden',
+    'HIDDEN BODY\nResource: skill:hidden/SECRET.md',
+  );
   fs.writeFileSync(
     path.join(path.dirname(selectedFile), 'REFERENCE.md'),
     'selected reference',
@@ -759,7 +803,7 @@ test('motor resource reads stop at the independent observation budget', async ()
   const file = writeMotorSkill(
     dir,
     'bounded',
-    'Read the cited reference only when needed.',
+    'Read skill:bounded/REFERENCE.md only when needed.',
   );
   fs.writeFileSync(path.join(path.dirname(file), 'REFERENCE.md'), 'small body');
   const motor = fixture(
@@ -806,7 +850,7 @@ test('motor resource byte budget charges the serialized tool receipt', async () 
   const file = writeMotorSkill(
     dir,
     'escaped',
-    'Read the cited resource only when needed.',
+    'Read skill:escaped/CONTROL.txt only when needed.',
   );
   fs.writeFileSync(
     path.join(path.dirname(file), 'CONTROL.txt'),
@@ -949,6 +993,64 @@ test('cold restart restores supervisor guidance inside prior observations', asyn
     ),
     true,
   );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('cold recovery keeps mid-flight guidance on the next observation', async () => {
+  const dir = tempDir();
+  let enterFirst!: () => void;
+  let releaseFirst!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    enterFirst = resolve;
+  });
+  const firstReleased = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let calls = 0;
+  const first = fixture(dir, async () => {
+    calls++;
+    if (calls === 1) {
+      enterFirst();
+      await firstReleased;
+      return completion('scroll', { direction: 'down', amount: 'small' });
+    }
+    return completion('needs_guidance', { reason: 'pause after guided turn' });
+  });
+  first.motor.start('bind guidance to the observation that consumed it', {
+    episodeId: 'restart-midflight-guidance',
+    settleMs: 0,
+  });
+  await firstEntered;
+  const running = first.motor.status('restart-midflight-guidance');
+  first.motor.guide(
+    'restart-midflight-guidance',
+    running.checkpointSeq,
+    'use the next lower control',
+  );
+  releaseFirst();
+  await until(
+    () => first.motor.status('restart-midflight-guidance'),
+    (value) => value.status === 'needs_guidance' && value.turns === 2,
+  );
+
+  resetResidentMotorForTest(dir);
+  const seen: ChatMessage[][] = [];
+  const second = fixture(dir, async (messages) => {
+    seen.push(structuredClone(messages));
+    return completion('done', { summary: 'history stayed ordered' });
+  });
+  const restored = second.motor.status('restart-midflight-guidance');
+  second.motor.continue('restart-midflight-guidance', restored.checkpointSeq);
+  await until(
+    () => second.motor.status('restart-midflight-guidance'),
+    (value) => value.status === 'completed',
+  );
+  const historicalObservations = seen[0].filter(
+    (message) => message.role === 'user',
+  );
+  assert.doesNotMatch(historicalObservations[0].content, /next lower control/);
+  assert.match(historicalObservations[1].content, /next lower control/);
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
 });
