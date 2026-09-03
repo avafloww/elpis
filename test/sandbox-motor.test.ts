@@ -197,6 +197,16 @@ test('native motor tool parser requires exactly one closed function call', () =>
       ]),
     /invalid JSON/,
   );
+  assert.deepEqual(
+    parseMotorToolCall([
+      {
+        id: 'gamepad-a',
+        type: 'function',
+        function: { name: 'press', arguments: '{"key":"GAMEPAD_A"}' },
+      },
+    ]).args,
+    { key: 'GAMEPAD_A' },
+  );
 });
 
 test('motor image metabolism preserves only the newest three screenshots', () => {
@@ -544,18 +554,113 @@ test('semantic gamepad keys map through the bounded press grammar', async () => 
   const pressTool = firstOptions?.tools?.find(
     (tool) => tool.type === 'function' && tool.function.name === 'press',
   );
-  assert.deepEqual(
+  const pressKeys =
     pressTool &&
-      'function' in pressTool &&
-      (
-        pressTool.function.parameters as {
-          properties: { key: { enum: string[] } };
-        }
-      ).properties.key.enum.filter((key) => key.startsWith('GAMEPAD_')),
+    'function' in pressTool &&
+    (
+      pressTool.function.parameters as {
+        properties: { key: { enum: string[] } };
+      }
+    ).properties.key.enum;
+  assert.deepEqual(
+    pressKeys && pressKeys.filter((key) => key.startsWith('GAMEPAD_')),
     ['GAMEPAD_A', 'GAMEPAD_B', 'GAMEPAD_START', 'GAMEPAD_SELECT'],
+  );
+  assert.equal(
+    pressKeys?.some((key) => ['x', 'z', 'Return', 'Shift_R'].includes(key)),
+    false,
+  );
+  const receipts = fs
+    .readFileSync(ended.traceFile, 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse)
+    .filter(
+      (event) =>
+        event.type === 'action_completed' &&
+        event.call.function.name === 'press',
+    )
+    .map((event) => JSON.parse(event.receipt));
+  assert.deepEqual(
+    receipts.map(({ action, key, dryRun }) => ({ action, key, dryRun })),
+    [
+      { action: 'press', key: 'GAMEPAD_A', dryRun: false },
+      { action: 'press', key: 'GAMEPAD_B', dryRun: false },
+      { action: 'press', key: 'GAMEPAD_START', dryRun: false },
+      { action: 'press', key: 'GAMEPAD_SELECT', dryRun: false },
+    ],
   );
   resetResidentMotorForTest(dir);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('semantic gamepad keys are accepted by a dry-run motor', async () => {
+  const dir = tempDir();
+  const outputs = [
+    completion('press', { key: 'GAMEPAD_A' }),
+    completion('press', { key: 'GAMEPAD_B' }),
+    completion('press', { key: 'GAMEPAD_START' }),
+    completion('press', { key: 'GAMEPAD_SELECT' }),
+    completion('done', { summary: 'dry-run gamepad acceptance complete' }),
+  ];
+  const { motor, calls } = fixture(dir, async () => outputs.shift()!);
+  motor.start('dry-run each semantic gamepad key once', {
+    episodeId: 'gamepad-keys-dry-run',
+    dryRun: true,
+    settleMs: 0,
+    authority: { allowedTools: ['press'], maxKeyPresses: 4 },
+  });
+  const ended = await until(
+    () => motor.status('gamepad-keys-dry-run'),
+    (value) => value.status === 'completed',
+  );
+  assert.equal(ended.counters.keyPresses, 4);
+  assert.deepEqual(calls.key, []);
+  const receipts = fs
+    .readFileSync(ended.traceFile, 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse)
+    .filter(
+      (event) =>
+        event.type === 'action_completed' &&
+        event.call.function.name === 'press',
+    )
+    .map((event) => JSON.parse(event.receipt));
+  assert.deepEqual(
+    receipts.map(({ key, dryRun }) => ({ key, dryRun })),
+    [
+      { key: 'GAMEPAD_A', dryRun: true },
+      { key: 'GAMEPAD_B', dryRun: true },
+      { key: 'GAMEPAD_START', dryRun: true },
+      { key: 'GAMEPAD_SELECT', dryRun: true },
+    ],
+  );
+  resetResidentMotorForTest(dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('press rejects inherited and raw key names outside the allowlist', async () => {
+  for (const key of ['toString', 'x']) {
+    const dir = tempDir();
+    const episodeId = `reject-${key.toLowerCase()}`;
+    const { motor, calls } = fixture(dir, async () =>
+      completion('press', { key }),
+    );
+    motor.start('reject an arbitrary key', {
+      episodeId,
+      settleMs: 0,
+      authority: { allowedTools: ['press'], maxKeyPresses: 1 },
+    });
+    const ended = await until(
+      () => motor.status(episodeId),
+      (value) => value.status === 'failed',
+    );
+    assert.match(ended.lastError, /motor key is not allowed/);
+    assert.deepEqual(calls.key, []);
+    resetResidentMotorForTest(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('authority validation fails closed before an ungranted action', async () => {

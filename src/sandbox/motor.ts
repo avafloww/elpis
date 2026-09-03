@@ -1414,8 +1414,9 @@ function buildResident(initialDeps: MotorControllerDeps): ResidentController {
     if (name === 'press') {
       const args = strictObject(argsValue, name, ['key']);
       const keyName = boundedText(args.key, 'press key', 40);
+      if (!Object.hasOwn(PRESS_KEYS, keyName))
+        throw new Error(`motor key is not allowed: ${keyName}`);
       const key = PRESS_KEYS[keyName];
-      if (!key) throw new Error(`motor key is not allowed: ${keyName}`);
       if (episode.counters.keyPresses >= episode.authority.maxKeyPresses)
         throw new Error('motor key-press authority exhausted');
       episode.counters.keyPresses++;
