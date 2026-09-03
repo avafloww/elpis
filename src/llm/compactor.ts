@@ -30,6 +30,7 @@ import {
   SUMMARIZE_TAIL_REMINDER,
 } from './llm.js';
 import type { ContextTracker } from './context-tracker.js';
+import { createHash } from 'node:crypto';
 import { serializeHistory, createGuardedSummarizer } from './summarize.js';
 
 export interface CompactorOpts {
@@ -78,6 +79,14 @@ export interface Compactor {
 }
 
 const SUMMARY_PREFIX = '=== Summary of earlier conversation';
+function prefixFingerprint(messages: ChatMessage[], boundary: number): string {
+  const hash = createHash('sha256');
+  for (let index = 0; index < boundary; index++) {
+    hash.update(JSON.stringify(messages[index]));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
 
 /** Walk backwards from the tail accumulating estimates until >= keepTokens.
  * Returns the index where the verbatim tail begins (fold = slice(0, i)). */
@@ -174,6 +183,7 @@ export function createCompactor(
   let boundaryIndex = 0;
   let startedLength = 0;
   let frozenPrefix: ChatMessage[] = [];
+  let frozenPrefixFingerprint = '';
   let resultSummary: string | null = null;
   const summarizer = createGuardedSummarizer(llm, {
     retries: 3,
@@ -222,6 +232,7 @@ export function createCompactor(
       resultSummary = null;
       startedLength = messages.length;
       frozenPrefix = messages.slice(0, boundaryIndex);
+      frozenPrefixFingerprint = prefixFingerprint(messages, boundaryIndex);
       const recent = serializeHistory(foldSlice, {
         totalCap: foldSerializeCap,
       });
@@ -253,13 +264,15 @@ export function createCompactor(
       if (summary === null) return messages;
       const prefixMatches =
         frozenPrefix.length === boundaryIndex &&
-        frozenPrefix.every((message, index) => messages[index] === message);
+        frozenPrefix.every((message, index) => messages[index] === message) &&
+        frozenPrefixFingerprint === prefixFingerprint(messages, boundaryIndex);
       if (!prefixMatches) {
         opts.log?.('compaction result discarded: frozen prefix changed');
         resultSummary = null;
         boundaryIndex = 0;
         startedLength = 0;
         frozenPrefix = [];
+        frozenPrefixFingerprint = '';
         return messages;
       }
       const oldTailEnd = Math.min(startedLength, messages.length);
@@ -281,6 +294,7 @@ export function createCompactor(
       boundaryIndex = 0;
       startedLength = 0;
       frozenPrefix = [];
+      frozenPrefixFingerprint = '';
       tracker.recompute(next);
       return next;
     },
@@ -290,6 +304,7 @@ export function createCompactor(
       boundaryIndex = 0;
       startedLength = 0;
       frozenPrefix = [];
+      frozenPrefixFingerprint = '';
       tracker.recompute([]);
     },
   };

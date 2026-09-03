@@ -330,6 +330,28 @@ test('sessions: run execution and wake metadata round-trip', () => {
   assert.deepEqual(loaded!.messages[0].run, tool.run);
 });
 
+test('sessions: failed sentinel rotation retains the old active transcript', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-sessions-'));
+  let failSentinel = true;
+  const store = createTranscriptStore(root, {
+    writeFileSync(file, data, options) {
+      if (failSentinel) throw new Error('injected sentinel failure');
+      fs.writeFileSync(file, data, options);
+    },
+  });
+  store.append('main', { role: 'user', content: 'before failed clear' });
+  assert.throws(() => store.rotate('main', true), /injected sentinel failure/);
+  failSentinel = false;
+  store.append('main', { role: 'assistant', content: 'after failed clear' });
+
+  assert.deepEqual(
+    loadMostRecentForChannel(root, 'main')?.messages.map(
+      (message) => message.content,
+    ),
+    ['before failed clear', 'after failed clear'],
+  );
+});
+
 test('sessions: rotate with sentinel writes an empty newest file (clear honored)', () => {
   const root = tmpRoot();
   const store = createTranscriptStore(root);

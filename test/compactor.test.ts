@@ -311,6 +311,25 @@ test('compactor: a changed frozen prefix discards the completed result', async (
   );
 });
 
+test('compactor: in-place frozen-prefix mutation discards the completed result', async () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const llm = fakeLLM({ summary: 'STALE-MUTATION' });
+  const c = createCompactor(llm, tracker, { keepTokens: 250 });
+  const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
+  c.start(msgs);
+  llm.resolveAll();
+  await c.done();
+  msgs[0].content = 'mutated in place';
+
+  const result = c.applyCompaction(msgs);
+  assert.equal(result, msgs);
+  assert.equal(result[0].content, 'mutated in place');
+  assert.doesNotMatch(
+    result.map((message) => message.content).join('\n'),
+    /STALE-MUTATION/,
+  );
+});
+
 test('compactor: messages appended DURING compaction survive verbatim', async () => {
   const tracker = createContextTracker(1_000_000, 2000);
   const llm = fakeLLM({ summary: 'S' });

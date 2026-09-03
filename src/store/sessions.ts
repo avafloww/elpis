@@ -93,7 +93,10 @@ export interface LoadedTranscript {
   path: string;
 }
 
-export function createTranscriptStore(sessionsRoot: string): TranscriptStore {
+export function createTranscriptStore(
+  sessionsRoot: string,
+  io: Pick<typeof fs, 'writeFileSync'> = fs,
+): TranscriptStore {
   hardenTranscriptTree(sessionsRoot);
   // channelId -> absolute path of the active transcript file
   const active = new Map<string, string>();
@@ -147,16 +150,16 @@ export function createTranscriptStore(sessionsRoot: string): TranscriptStore {
     },
     rotate(channelId, sentinel) {
       if (!channelId) return;
-      // drop the cached path so the next append mints a new timestamped file
-      active.delete(channelId);
-      if (sentinel) {
-        // Mint and durably establish an empty newest file so boot skips the
-        // pre-rotation transcript. Any failure must propagate before /clear
-        // wipes memory; otherwise restart could resurrect the cleared context.
-        const p = newFilePath(channelId);
-        fs.writeFileSync(p, '', { mode: 0o600 });
-        active.set(channelId, p);
+      if (!sentinel) {
+        active.delete(channelId);
+        return;
       }
+      // Keep the old active path until the empty newest file exists. Any
+      // failure must propagate before /clear wipes memory, and a later append
+      // must still continue the retained pre-clear transcript.
+      const p = newFilePath(channelId);
+      io.writeFileSync(p, '', { mode: 0o600 });
+      active.set(channelId, p);
     },
     adopt(channelId, filePath) {
       if (!channelId || !filePath) return;
