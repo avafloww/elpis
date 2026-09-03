@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { types as utilTypes } from 'node:util';
 import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
 import { configForLlmTarget, type Config } from '../config.js';
 import {
@@ -76,21 +77,9 @@ function boundSchema(value: unknown): {
   schema: Record<string, unknown>;
   json: string;
 } {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('elpis.llm.query: schema must be a JSON Schema object');
-  let json: string;
-  try {
-    json = JSON.stringify(value);
-  } catch {
-    throw new Error('elpis.llm.query: schema must be JSON-serializable');
-  }
-  if (utf8Bytes(json) > LLM_TOOL_MAX_SCHEMA_BYTES)
-    throw new Error(
-      `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_BYTES} UTF-8 bytes`,
-    );
-  const schema = JSON.parse(json) as Record<string, unknown>;
   let nodes = 0;
-  const visit = (node: unknown, depth: number): void => {
+  const stack = new WeakSet<object>();
+  const clone = (node: unknown, depth: number): unknown => {
     nodes++;
     if (nodes > LLM_TOOL_MAX_SCHEMA_NODES)
       throw new Error(
@@ -100,40 +89,123 @@ function boundSchema(value: unknown): {
       throw new Error(
         `elpis.llm.query: schema exceeds depth ${LLM_TOOL_MAX_SCHEMA_DEPTH}`,
       );
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, depth + 1);
-      return;
-    }
-    for (const [key, child] of Object.entries(node)) {
-      if (
-        key === '$ref' ||
-        key === '$dynamicRef' ||
-        key === '$recursiveRef' ||
-        key === 'pattern' ||
-        key === 'patternProperties'
-      )
+    if (node === null || typeof node === 'string' || typeof node === 'boolean')
+      return node;
+    if (typeof node === 'number' && Number.isFinite(node)) return node;
+    if (typeof node !== 'object')
+      throw new Error(
+        'elpis.llm.query: schema values must contain only JSON-compatible data',
+      );
+    if (utilTypes.isProxy(node))
+      throw new Error('elpis.llm.query: schema proxies are not supported');
+    if (stack.has(node))
+      throw new Error('elpis.llm.query: schema must not contain cycles');
+    stack.add(node);
+    try {
+      let descriptors: PropertyDescriptorMap;
+      try {
+        descriptors = Object.getOwnPropertyDescriptors(node);
+      } catch {
         throw new Error(
-          `elpis.llm.query: schema keyword ${key} is not supported`,
+          'elpis.llm.query: schema values must use own enumerable data properties',
         );
-      if (
-        key === '$schema' &&
-        child !== 'http://json-schema.org/draft-07/schema#' &&
-        child !== 'https://json-schema.org/draft-07/schema#'
-      )
+      }
+      const keys = Reflect.ownKeys(descriptors);
+      if (Array.isArray(node)) {
+        const length = descriptors.length?.value;
+        if (!Number.isSafeInteger(length) || length < 0)
+          throw new Error(
+            'elpis.llm.query: schema arrays must be dense JSON arrays',
+          );
+        const elementKeys = keys.filter((key) => key !== 'length');
+        if (
+          elementKeys.length !== length ||
+          elementKeys.some(
+            (key) =>
+              typeof key !== 'string' ||
+              !/^(0|[1-9][0-9]*)$/.test(key) ||
+              Number(key) >= length,
+          )
+        )
+          throw new Error(
+            'elpis.llm.query: schema arrays must be dense JSON arrays',
+          );
+        const result: unknown[] = [];
+        for (let index = 0; index < length; index++) {
+          const descriptor = descriptors[String(index)];
+          if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value'))
+            throw new Error(
+              'elpis.llm.query: schema values must use own enumerable data properties',
+            );
+          result.push(clone(descriptor.value, depth + 1));
+        }
+        return Object.freeze(result);
+      }
+      const prototype = Object.getPrototypeOf(node);
+      const constructor =
+        prototype === null
+          ? Object
+          : Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value;
+      const constructorName =
+        typeof constructor === 'function' && !utilTypes.isProxy(constructor)
+          ? Object.getOwnPropertyDescriptor(constructor, 'name')?.value
+          : undefined;
+      if (constructorName !== 'Object')
         throw new Error(
-          'elpis.llm.query: only JSON Schema draft-07 is supported',
+          'elpis.llm.query: schema values must be plain objects or arrays',
         );
-      visit(child, depth + 1);
+      const result = Object.create(null) as Record<string, unknown>;
+      for (const key of keys) {
+        const descriptor =
+          typeof key === 'string' ? descriptors[key] : undefined;
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value'))
+          throw new Error(
+            'elpis.llm.query: schema values must use own enumerable data properties',
+          );
+        if (
+          key === '$ref' ||
+          key === '$dynamicRef' ||
+          key === '$recursiveRef' ||
+          key === 'pattern' ||
+          key === 'patternProperties'
+        )
+          throw new Error(
+            `elpis.llm.query: schema keyword ${key} is not supported`,
+          );
+        if (
+          key === '$schema' &&
+          descriptor.value !== 'http://json-schema.org/draft-07/schema#' &&
+          descriptor.value !== 'https://json-schema.org/draft-07/schema#'
+        )
+          throw new Error(
+            'elpis.llm.query: only JSON Schema draft-07 is supported',
+          );
+        Object.defineProperty(result, key, {
+          value: clone(descriptor.value, depth + 1),
+          enumerable: true,
+        });
+      }
+      return Object.freeze(result);
+    } finally {
+      stack.delete(node);
     }
   };
-  visit(schema, 0);
-  return { schema, json };
+  const schema = clone(value, 0);
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema))
+    throw new Error('elpis.llm.query: schema must be a JSON Schema object');
+  const json = JSON.stringify(schema);
+  if (utf8Bytes(json) > LLM_TOOL_MAX_SCHEMA_BYTES)
+    throw new Error(
+      `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_BYTES} UTF-8 bytes`,
+    );
+  return { schema: schema as Record<string, unknown>, json };
 }
 
 function prepareQuery(input: unknown): PreparedLlmToolQuery {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new Error('elpis.llm.query: expected { prompt, model, schema? }');
+  if (utilTypes.isProxy(input))
+    throw new Error('elpis.llm.query: query option proxies are not supported');
   let descriptors: PropertyDescriptorMap;
   try {
     descriptors = Object.getOwnPropertyDescriptors(input);
@@ -227,6 +299,19 @@ function freezeJson(value: unknown): unknown {
   return Object.freeze(value);
 }
 
+function expectedApiSurfaces(
+  providerType: LlmProviderType,
+  api: 'auto' | 'responses' | 'chat',
+): ReadonlySet<ApiSurface> {
+  if (providerType === 'anthropic-oauth')
+    return new Set<ApiSurface>(['anthropic-messages']);
+  if (providerType === 'codex-oauth')
+    return new Set<ApiSurface>(['codex-responses']);
+  if (api === 'responses') return new Set<ApiSurface>(['responses']);
+  if (api === 'chat') return new Set<ApiSurface>(['chat-completions']);
+  return new Set<ApiSurface>(['responses', 'chat-completions']);
+}
+
 function sanitizedApiSurface(value: unknown): ApiSurface | null {
   if (value === undefined || value === null) return null;
   if (
@@ -242,6 +327,7 @@ function sanitizedApiSurface(value: unknown): ApiSurface | null {
 function assertBoundedResult(
   result: StandaloneCompleteResult,
   entry: LlmToolCatalogEntry,
+  expectedSurfaces: ReadonlySet<ApiSurface>,
 ): void {
   if (typeof result.content !== 'string')
     throw new Error('elpis.llm.query: provider returned invalid text');
@@ -257,15 +343,20 @@ function assertBoundedResult(
     throw new Error(
       `elpis.llm.query: output exceeds ${LLM_TOOL_MAX_OUTPUT_BYTES} UTF-8 bytes`,
     );
-  sanitizedApiSurface(result.apiSurface);
+  const apiSurface = sanitizedApiSurface(result.apiSurface);
+  if (apiSurface && !expectedSurfaces.has(apiSurface))
+    throw new Error(
+      'elpis.llm.query: provider API surface provenance mismatch',
+    );
 }
 
 function sanitizedResult(
   result: StandaloneCompleteResult,
   entry: LlmToolCatalogEntry,
+  expectedSurfaces: ReadonlySet<ApiSurface>,
   parsed?: unknown,
 ): LlmToolQueryResult {
-  assertBoundedResult(result, entry);
+  assertBoundedResult(result, entry, expectedSurfaces);
   return Object.freeze({
     text: result.content,
     ...(parsed === undefined ? {} : { parsed: freezeJson(parsed) }),
@@ -288,6 +379,7 @@ export function createLlmToolRuntime(
   const maxTokens = options.maxTokens ?? LLM_TOOL_MAX_TOKENS;
   const entries: LlmToolCatalogEntry[] = [];
   const clients = new Map<string, LLM>();
+  const expectedSurfacesByRef = new Map<string, ReadonlySet<ApiSurface>>();
   const selectors = new Map<string, LlmToolCatalogEntry>();
   for (const tier of LLM_TOOL_TIERS) {
     for (const [providerId, provider] of Object.entries(
@@ -316,6 +408,13 @@ export function createLlmToolRuntime(
         clients.set(
           ref,
           create(configForLlmTarget(config, target), undefined, options.db),
+        );
+        expectedSurfacesByRef.set(
+          ref,
+          expectedApiSurfaces(
+            target.provider.providerType,
+            target.provider.api,
+          ),
         );
       }
     }
@@ -349,7 +448,8 @@ export function createLlmToolRuntime(
         `elpis.llm.query: model must be an exposed tier or ref (${catalog.map((item) => `${item.tier}|${item.ref}`).join(', ')})`,
       );
     const client = clients.get(entry.ref);
-    if (!client?.completeStandalone)
+    const expectedSurfaces = expectedSurfacesByRef.get(entry.ref);
+    if (!client?.completeStandalone || !expectedSurfaces)
       throw new Error(
         `elpis.llm.query: configured model ${entry.ref} has no standalone completion path`,
       );
@@ -380,13 +480,12 @@ export function createLlmToolRuntime(
         reject(new Error(`elpis.llm.query: timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });
-    const completion = client.completeStandalone(
-      [{ role: 'user', content: prompt }],
-      {
+    const completion = Promise.resolve().then(() =>
+      client.completeStandalone!([{ role: 'user', content: prompt }], {
         maxTokens,
         maxOutputBytes: LLM_TOOL_MAX_OUTPUT_BYTES,
         signal: controller.signal,
-      },
+      }),
     );
     void completion.catch(() => {});
     let result: StandaloneCompleteResult;
@@ -405,8 +504,8 @@ export function createLlmToolRuntime(
     } finally {
       if (timer) clearTimeout(timer);
     }
-    assertBoundedResult(result, entry);
-    if (!validate) return sanitizedResult(result, entry);
+    assertBoundedResult(result, entry, expectedSurfaces);
+    if (!validate) return sanitizedResult(result, entry, expectedSurfaces);
     let parsed: unknown;
     try {
       parsed = JSON.parse(result.content);
@@ -417,7 +516,7 @@ export function createLlmToolRuntime(
       throw new Error(
         `elpis.llm.query: model output failed schema validation: ${validationError(ajv, validate.errors)}`,
       );
-    return sanitizedResult(result, entry, parsed);
+    return sanitizedResult(result, entry, expectedSurfaces, parsed);
   };
   return Object.freeze({
     list: () => catalog,

@@ -183,6 +183,8 @@ test('LLM tool runtime prepares one canonical semantic snapshot', async () => {
   );
   input.prompt = 'after';
   schema.type = 'number';
+  assert.equal(Reflect.set(prepared.schema ?? {}, 'type', 'number'), false);
+  assert.equal(prepared.schema?.type, 'string');
   await runtime.queryPrepared(prepared);
   assert.match(prompts[0] ?? '', /^before\n\n/);
   assert.match(prompts[0] ?? '', /"type":"string"/);
@@ -289,6 +291,21 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     runtime.query({ prompt: 'x', model: 'weak', extra: true }),
     /unknown option/,
   );
+  let queryProxyTrapCalls = 0;
+  const queryProxy = new Proxy(
+    { prompt: 'x', model: 'weak' },
+    {
+      ownKeys(target) {
+        queryProxyTrapCalls++;
+        return Reflect.ownKeys(target);
+      },
+    },
+  );
+  await assert.rejects(
+    runtime.query(queryProxy),
+    /query option proxies are not supported/,
+  );
+  assert.equal(queryProxyTrapCalls, 0);
   const hiddenPrompt = { model: 'weak' } as Record<string, unknown>;
   Object.defineProperty(hiddenPrompt, 'prompt', {
     value: 'x',
@@ -299,14 +316,83 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /own enumerable data properties/,
   );
   const getterPrompt = { model: 'weak' } as Record<string, unknown>;
+  let topLevelGetterCalls = 0;
   Object.defineProperty(getterPrompt, 'prompt', {
     enumerable: true,
-    get: () => 'x',
+    get: () => {
+      topLevelGetterCalls++;
+      return 'x';
+    },
   });
   await assert.rejects(
     runtime.query(getterPrompt),
     /own enumerable data properties/,
   );
+  assert.equal(topLevelGetterCalls, 0);
+  let nestedGetterCalls = 0;
+  const getterSchema = {};
+  Object.defineProperty(getterSchema, 'type', {
+    enumerable: true,
+    get: () => {
+      nestedGetterCalls++;
+      return 'string';
+    },
+  });
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak', schema: getterSchema }),
+    /schema values must use own enumerable data properties/,
+  );
+  assert.equal(nestedGetterCalls, 0);
+  let toJsonCalls = 0;
+  await assert.rejects(
+    runtime.query({
+      prompt: 'x',
+      model: 'weak',
+      schema: {
+        type: 'string',
+        toJSON: () => {
+          toJsonCalls++;
+          return { type: 'number' };
+        },
+      },
+    }),
+    /schema values must contain only JSON-compatible data/,
+  );
+  assert.equal(toJsonCalls, 0);
+  let proxyTrapCalls = 0;
+  const proxySchema = new Proxy(
+    { type: 'string' },
+    {
+      ownKeys(target) {
+        proxyTrapCalls++;
+        return Reflect.ownKeys(target);
+      },
+    },
+  );
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak', schema: proxySchema }),
+    /schema proxies are not supported/,
+  );
+  assert.equal(proxyTrapCalls, 0);
+  let constructorProxyTrapCalls = 0;
+  const constructorProxy = new Proxy(function Object() {}, {
+    get(target, property, receiver) {
+      constructorProxyTrapCalls++;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const maliciousPrototype = Object.create(null);
+  Object.defineProperty(maliciousPrototype, 'constructor', {
+    value: constructorProxy,
+  });
+  const exoticSchema = Object.assign(Object.create(maliciousPrototype), {
+    type: 'string',
+  });
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak', schema: exoticSchema }),
+    /schema values must be plain objects or arrays/,
+  );
+  assert.equal(constructorProxyTrapCalls, 0);
   await assert.rejects(
     runtime.query({
       prompt: 'x'.repeat(LLM_TOOL_MAX_PROMPT_BYTES + 1),
@@ -338,6 +424,7 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
     | 'hostile-error'
     | 'model'
     | 'surface'
+    | 'wrong-surface'
     | 'tools' = 'timeout';
   let timeoutAborted = false;
   const runtime = createLlmToolRuntime(canonicalConfig(), {
@@ -345,7 +432,7 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
     create(config) {
       return makeStubLLM({
         model: config.llm.model,
-        async completeStandalone(_messages, options) {
+        completeStandalone(_messages, options) {
           if (mode === 'timeout') {
             options?.signal?.addEventListener(
               'abort',
@@ -354,7 +441,7 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
               },
               { once: true },
             );
-            return await new Promise<StandaloneCompleteResult>(() => {});
+            return new Promise<StandaloneCompleteResult>(() => {});
           }
           if (mode === 'provider')
             throw new Error(
@@ -377,18 +464,28 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
           }
           if (mode === 'model') return result('x', 'wrong-model');
           if (mode === 'surface')
-            return result('x', config.llm.model, {
-              apiSurface: 'https://private-endpoint.example' as never,
-            });
-          return result('x', config.llm.model, {
-            toolCalls: [
-              {
-                id: 'unexpected',
-                type: 'function',
-                function: { name: 'act', arguments: '{}' },
-              },
-            ],
-          });
+            return Promise.resolve(
+              result('x', config.llm.model, {
+                apiSurface: 'https://private-endpoint.example' as never,
+              }),
+            );
+          if (mode === 'wrong-surface')
+            return Promise.resolve(
+              result('x', config.llm.model, {
+                apiSurface: 'anthropic-messages',
+              }),
+            );
+          return Promise.resolve(
+            result('x', config.llm.model, {
+              toolCalls: [
+                {
+                  id: 'unexpected',
+                  type: 'function',
+                  function: { name: 'act', arguments: '{}' },
+                },
+              ],
+            }),
+          );
         },
       });
     },
@@ -432,6 +529,11 @@ test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-cal
     /model provenance mismatch/,
   );
   mode = 'surface';
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak' }),
+    /API surface provenance mismatch/,
+  );
+  mode = 'wrong-surface';
   await assert.rejects(
     runtime.query({ prompt: 'x', model: 'weak' }),
     /API surface provenance mismatch/,

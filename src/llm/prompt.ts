@@ -146,7 +146,7 @@ export function build(input: PromptInputs): string {
     .join('\n');
   const llmToolSection = llmToolCatalog
     ? `### \`elpis.llm\`
-Bare, bounded, one-shot LLM queries over models explicitly opted in at boot. \`list()\` returns the sanitized catalog. \`query({ prompt, model, schema? })\` accepts a tier or exact exposed model ref; options must be ordinary own enumerable data properties. Every query starts with one fresh user message and receives no SOUL, MEMORY, history, Mind, social context, tools, cache identity, or authority to act or speak as you. Reasoning fields and provider endpoints are not returned. Optional JSON Schema uses a bounded draft-07 subset with no reference or regex keywords; formats are annotations. It is appended as an exact-JSON request and validated locally, and invalid JSON or schema output throws.
+Bare, bounded, one-shot LLM queries over models explicitly opted in at boot. \`list()\` returns the sanitized catalog. \`query({ prompt, model, schema? })\` accepts a tier or exact exposed model ref; options must be plain own enumerable data properties, never proxies or accessors. Every query starts with one fresh user message and receives no SOUL, MEMORY, history, Mind, social context, tools, cache identity, or authority to act or speak as you. Reasoning fields and provider endpoints are not returned. Optional JSON Schema uses a bounded draft-07 subset with no reference or regex keywords; formats are annotations. It is appended as an exact-JSON request and validated locally, and invalid JSON or schema output throws.
 
 Available models:
 ${llmToolCatalog}
