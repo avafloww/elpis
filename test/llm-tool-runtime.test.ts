@@ -11,6 +11,7 @@ import {
   createLlmToolRuntime,
   LLM_TOOL_MAX_OUTPUT_BYTES,
   LLM_TOOL_MAX_PROMPT_BYTES,
+  LLM_TOOL_MAX_SCHEMA_BYTES,
 } from '../src/llm/tool-runtime.js';
 import { makeConfig, makeStubLLM } from './helpers.js';
 
@@ -374,6 +375,27 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /schema proxies are not supported/,
   );
   assert.equal(proxyTrapCalls, 0);
+  let prototypeProxyTrapCalls = 0;
+  const prototypeProxy = new Proxy(Object.prototype, {
+    getOwnPropertyDescriptor(target, property) {
+      prototypeProxyTrapCalls++;
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+  const prototypeProxySchema = Object.create(prototypeProxy);
+  Object.defineProperty(prototypeProxySchema, 'type', {
+    value: 'string',
+    enumerable: true,
+  });
+  await assert.rejects(
+    runtime.query({
+      prompt: 'x',
+      model: 'weak',
+      schema: prototypeProxySchema,
+    }),
+    /schema prototype proxies are not supported/,
+  );
+  assert.equal(prototypeProxyTrapCalls, 0);
   let constructorProxyTrapCalls = 0;
   const constructorProxy = new Proxy(function Object() {}, {
     get(target, property, receiver) {
@@ -393,6 +415,39 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /schema values must be plain objects or arrays/,
   );
   assert.equal(constructorProxyTrapCalls, 0);
+  const laterProxy = new Proxy(
+    { type: 'number' },
+    {
+      ownKeys() {
+        throw new Error('late proxy was visited');
+      },
+    },
+  );
+  await assert.rejects(
+    runtime.query({
+      prompt: 'x',
+      model: 'weak',
+      schema: {
+        description: 'x'.repeat(LLM_TOOL_MAX_SCHEMA_BYTES + 1),
+        later: laterProxy,
+      },
+    }),
+    /schema exceeds 16384 UTF-8 bytes/,
+  );
+  const oversizedKeySchema: Record<string, unknown> = {};
+  Object.defineProperty(
+    oversizedKeySchema,
+    'k'.repeat(LLM_TOOL_MAX_SCHEMA_BYTES + 1),
+    { value: true, enumerable: true },
+  );
+  Object.defineProperty(oversizedKeySchema, 'later', {
+    value: laterProxy,
+    enumerable: true,
+  });
+  await assert.rejects(
+    runtime.query({ prompt: 'x', model: 'weak', schema: oversizedKeySchema }),
+    /schema exceeds 16384 UTF-8 bytes/,
+  );
   await assert.rejects(
     runtime.query({
       prompt: 'x'.repeat(LLM_TOOL_MAX_PROMPT_BYTES + 1),
@@ -414,6 +469,32 @@ test('LLM tool runtime rejects unexposed models, malformed input, and byte overf
     /output exceeds/,
   );
   assert.equal(calls, 2);
+});
+
+test('LLM tool runtime bounds parsed JSON traversal before freezing', async () => {
+  const outputs = [
+    `${'['.repeat(10_000)}0${']'.repeat(10_000)}`,
+    JSON.stringify(Array.from({ length: 5_000 }, () => 0)),
+  ];
+  const runtime = createLlmToolRuntime(canonicalConfig(), {
+    create(config) {
+      return makeStubLLM({
+        model: config.llm.model,
+        async completeStandalone() {
+          return result(outputs.shift() ?? 'null', config.llm.model);
+        },
+      });
+    },
+  });
+  assert(runtime);
+  await assert.rejects(
+    runtime.query({ prompt: 'deep', model: 'weak', schema: {} }),
+    /model output JSON exceeds depth/,
+  );
+  await assert.rejects(
+    runtime.query({ prompt: 'wide', model: 'weak', schema: {} }),
+    /model output JSON exceeds [0-9]+ nodes/,
+  );
 });
 
 test('LLM tool runtime aborts timed-out calls and rejects provenance or tool-call drift', async () => {

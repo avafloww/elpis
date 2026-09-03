@@ -23,6 +23,8 @@ export const LLM_TOOL_MAX_SCHEMA_BYTES = 16 * 1024;
 export const LLM_TOOL_MAX_COMBINED_INPUT_BYTES = 80 * 1024;
 export const LLM_TOOL_MAX_RUN_INPUT_BYTES = 128 * 1024;
 export const LLM_TOOL_MAX_OUTPUT_BYTES = 64 * 1024;
+export const LLM_TOOL_MAX_OUTPUT_JSON_DEPTH = 64;
+export const LLM_TOOL_MAX_OUTPUT_JSON_NODES = 4096;
 export const LLM_TOOL_MAX_SCHEMA_DEPTH = 12;
 export const LLM_TOOL_MAX_SCHEMA_NODES = 512;
 export const LLM_TOOL_MAX_TOKENS = 4096;
@@ -78,7 +80,35 @@ function boundSchema(value: unknown): {
   json: string;
 } {
   let nodes = 0;
+  let encodedStringBytes = 0;
   const stack = new WeakSet<object>();
+  const sizeError = (): Error =>
+    new Error(
+      `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_BYTES} UTF-8 bytes`,
+    );
+  const chargeString = (text: string): void => {
+    if (utf8Bytes(text) > LLM_TOOL_MAX_SCHEMA_BYTES) throw sizeError();
+    encodedStringBytes += utf8Bytes(JSON.stringify(text));
+    if (encodedStringBytes > LLM_TOOL_MAX_SCHEMA_BYTES) throw sizeError();
+  };
+  const dataDescriptor = (
+    node: object,
+    key: PropertyKey,
+  ): PropertyDescriptor => {
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(node, key);
+    } catch {
+      throw new Error(
+        'elpis.llm.query: schema values must use own enumerable data properties',
+      );
+    }
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value'))
+      throw new Error(
+        'elpis.llm.query: schema values must use own enumerable data properties',
+      );
+    return descriptor;
+  };
   const clone = (node: unknown, depth: number): unknown => {
     nodes++;
     if (nodes > LLM_TOOL_MAX_SCHEMA_NODES)
@@ -89,8 +119,11 @@ function boundSchema(value: unknown): {
       throw new Error(
         `elpis.llm.query: schema exceeds depth ${LLM_TOOL_MAX_SCHEMA_DEPTH}`,
       );
-    if (node === null || typeof node === 'string' || typeof node === 'boolean')
+    if (node === null || typeof node === 'boolean') return node;
+    if (typeof node === 'string') {
+      chargeString(node);
       return node;
+    }
     if (typeof node === 'number' && Number.isFinite(node)) return node;
     if (typeof node !== 'object')
       throw new Error(
@@ -102,17 +135,20 @@ function boundSchema(value: unknown): {
       throw new Error('elpis.llm.query: schema must not contain cycles');
     stack.add(node);
     try {
-      let descriptors: PropertyDescriptorMap;
+      let keys: PropertyKey[];
       try {
-        descriptors = Object.getOwnPropertyDescriptors(node);
+        keys = Reflect.ownKeys(node);
       } catch {
         throw new Error(
           'elpis.llm.query: schema values must use own enumerable data properties',
         );
       }
-      const keys = Reflect.ownKeys(descriptors);
+      if (keys.length > LLM_TOOL_MAX_SCHEMA_NODES)
+        throw new Error(
+          `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_NODES} nodes`,
+        );
       if (Array.isArray(node)) {
-        const length = descriptors.length?.value;
+        const length = Object.getOwnPropertyDescriptor(node, 'length')?.value;
         if (!Number.isSafeInteger(length) || length < 0)
           throw new Error(
             'elpis.llm.query: schema arrays must be dense JSON arrays',
@@ -130,18 +166,29 @@ function boundSchema(value: unknown): {
           throw new Error(
             'elpis.llm.query: schema arrays must be dense JSON arrays',
           );
+        if (nodes + length > LLM_TOOL_MAX_SCHEMA_NODES)
+          throw new Error(
+            `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_NODES} nodes`,
+          );
         const result: unknown[] = [];
-        for (let index = 0; index < length; index++) {
-          const descriptor = descriptors[String(index)];
-          if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value'))
-            throw new Error(
-              'elpis.llm.query: schema values must use own enumerable data properties',
-            );
-          result.push(clone(descriptor.value, depth + 1));
-        }
+        for (let index = 0; index < length; index++)
+          result.push(
+            clone(dataDescriptor(node, String(index)).value, depth + 1),
+          );
         return Object.freeze(result);
       }
-      const prototype = Object.getPrototypeOf(node);
+      let prototype: object | null;
+      try {
+        prototype = Object.getPrototypeOf(node);
+      } catch {
+        throw new Error(
+          'elpis.llm.query: schema values must be plain objects or arrays',
+        );
+      }
+      if (prototype !== null && utilTypes.isProxy(prototype))
+        throw new Error(
+          'elpis.llm.query: schema prototype proxies are not supported',
+        );
       const constructor =
         prototype === null
           ? Object
@@ -154,14 +201,18 @@ function boundSchema(value: unknown): {
         throw new Error(
           'elpis.llm.query: schema values must be plain objects or arrays',
         );
+      if (nodes + keys.length > LLM_TOOL_MAX_SCHEMA_NODES)
+        throw new Error(
+          `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_NODES} nodes`,
+        );
       const result = Object.create(null) as Record<string, unknown>;
       for (const key of keys) {
-        const descriptor =
-          typeof key === 'string' ? descriptors[key] : undefined;
-        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value'))
+        if (typeof key !== 'string')
           throw new Error(
             'elpis.llm.query: schema values must use own enumerable data properties',
           );
+        chargeString(key);
+        const descriptor = dataDescriptor(node, key);
         if (
           key === '$ref' ||
           key === '$dynamicRef' ||
@@ -194,10 +245,7 @@ function boundSchema(value: unknown): {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema))
     throw new Error('elpis.llm.query: schema must be a JSON Schema object');
   const json = JSON.stringify(schema);
-  if (utf8Bytes(json) > LLM_TOOL_MAX_SCHEMA_BYTES)
-    throw new Error(
-      `elpis.llm.query: schema exceeds ${LLM_TOOL_MAX_SCHEMA_BYTES} UTF-8 bytes`,
-    );
+  if (utf8Bytes(json) > LLM_TOOL_MAX_SCHEMA_BYTES) throw sizeError();
   return { schema: schema as Record<string, unknown>, json };
 }
 
@@ -293,12 +341,49 @@ function validationError(
   return ajv.errorsText(errors, { separator: '; ' }).slice(0, 1000);
 }
 
-function freezeJson(value: unknown): unknown {
+function boundAndFreezeJson(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
-  for (const child of Object.values(value)) freezeJson(child);
-  return Object.freeze(value);
+  const work: Array<{
+    value: object;
+    depth: number;
+    freeze: boolean;
+  }> = [{ value, depth: 0, freeze: false }];
+  let nodes = 1;
+  while (work.length > 0) {
+    const current = work.pop();
+    if (!current) break;
+    if (current.freeze) {
+      Object.freeze(current.value);
+      continue;
+    }
+    const values = Object.values(current.value);
+    if (values.length === 0) {
+      Object.freeze(current.value);
+      continue;
+    }
+    const childDepth = current.depth + 1;
+    if (childDepth > LLM_TOOL_MAX_OUTPUT_JSON_DEPTH)
+      throw new Error(
+        `elpis.llm.query: model output JSON exceeds depth ${LLM_TOOL_MAX_OUTPUT_JSON_DEPTH}`,
+      );
+    if (nodes + values.length > LLM_TOOL_MAX_OUTPUT_JSON_NODES)
+      throw new Error(
+        `elpis.llm.query: model output JSON exceeds ${LLM_TOOL_MAX_OUTPUT_JSON_NODES} nodes`,
+      );
+    nodes += values.length;
+    const children = values.filter(
+      (child): child is object => typeof child === 'object' && child !== null,
+    );
+    if (children.length === 0) {
+      Object.freeze(current.value);
+      continue;
+    }
+    work.push({ ...current, freeze: true });
+    for (let index = children.length - 1; index >= 0; index--)
+      work.push({ value: children[index], depth: childDepth, freeze: false });
+  }
+  return value;
 }
-
 function expectedApiSurfaces(
   providerType: LlmProviderType,
   api: 'auto' | 'responses' | 'chat',
@@ -359,7 +444,7 @@ function sanitizedResult(
   assertBoundedResult(result, entry, expectedSurfaces);
   return Object.freeze({
     text: result.content,
-    ...(parsed === undefined ? {} : { parsed: freezeJson(parsed) }),
+    ...(parsed === undefined ? {} : { parsed }),
     model: entry,
     provenance: Object.freeze({
       providerType: entry.providerType,
@@ -512,6 +597,7 @@ export function createLlmToolRuntime(
     } catch {
       throw new Error('elpis.llm.query: model output was not exact JSON');
     }
+    parsed = boundAndFreezeJson(parsed);
     if (!validate(parsed))
       throw new Error(
         `elpis.llm.query: model output failed schema validation: ${validationError(ajv, validate.errors)}`,
