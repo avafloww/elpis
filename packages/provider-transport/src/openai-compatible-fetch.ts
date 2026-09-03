@@ -129,7 +129,6 @@ async function releaseRequestBody(request: Request): Promise<void> {
       request.body.cancel().catch(() => undefined),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, 100);
-        timer.unref();
       }),
     ]);
   } catch {
