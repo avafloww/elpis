@@ -117,49 +117,71 @@ test('unified workflow publishes both images while pull requests only build', ()
   assert.match(smoke, /\/readyz/);
 });
 
-test('resident image owns exactly the protocol workspace dependency', () => {
+test('resident image owns exactly the shared resident workspace dependencies', () => {
   const docker = read('Dockerfile');
   const dockerignore = read('.dockerignore');
+  const workflow = read('.github/workflows/release.yml');
   const rootPackage = JSON.parse(read('package.json'));
   const gatewayPackage = JSON.parse(read('packages/gateway/package.json'));
   const lock = JSON.parse(read('package-lock.json'));
 
-  assert.equal(rootPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
+  for (const workspace of ['gateway-protocol', 'provider-transport']) {
+    const name = `@elpis/${workspace}`;
+    assert.equal(rootPackage.dependencies[name], '1.0.0');
+    assert.equal(
+      JSON.parse(read(`packages/${workspace}/package.json`)).engines.node,
+      rootPackage.engines.node,
+    );
+    assert.equal(lock.packages[`packages/${workspace}`].version, '1.0.0');
+    assert.deepEqual(lock.packages[`node_modules/${name}`], {
+      resolved: `packages/${workspace}`,
+      link: true,
+    });
+    assert.match(
+      docker,
+      new RegExp(
+        `COPY packages/${workspace}/package\\.json \\.?/packages/${workspace}/package\\.json`,
+      ),
+    );
+    assert.match(
+      docker,
+      new RegExp(
+        `COPY packages/${workspace}/src \\.?/packages/${workspace}/src`,
+      ),
+    );
+    assert.match(
+      docker,
+      new RegExp(
+        `COPY --from=build[^\\n]+packages/${workspace}/dist \\.?/packages/${workspace}/dist`,
+      ),
+    );
+    assert.match(
+      dockerignore,
+      new RegExp(`^!packages/${workspace}/src/\\*\\*$`, 'm'),
+    );
+  }
+  assert.match(
+    rootPackage.scripts['test:unit'],
+    /^npm run test:provider-transport && /,
+  );
+  assert.match(workflow, /await import\('@elpis\/provider-transport'\)/);
   assert.equal(gatewayPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
   assert.equal(
     gatewayPackage.scripts.pretest,
     'npm run build --workspace @elpis/gateway-protocol',
   );
-  assert.equal(
-    JSON.parse(read('packages/gateway-protocol/package.json')).engines.node,
-    rootPackage.engines.node,
-  );
-  assert.equal(lock.packages['packages/gateway-protocol'].version, '1.0.0');
-  assert.deepEqual(lock.packages['node_modules/@elpis/gateway-protocol'], {
-    resolved: 'packages/gateway-protocol',
-    link: true,
-  });
   assert.match(
     docker,
-    /COPY packages\/gateway-protocol\/package\.json \.\/packages\/gateway-protocol\/package\.json/,
+    /npm ci --legacy-peer-deps[\s\\]+--workspace @elpis\/gateway-protocol[\s\\]+--workspace @elpis\/provider-transport[\s\\]+--include-workspace-root/,
   );
   assert.match(
     docker,
-    /npm ci --legacy-peer-deps --workspace @elpis\/gateway-protocol --include-workspace-root/,
-  );
-  assert.match(
-    docker,
-    /npm prune --omit=dev --legacy-peer-deps --workspace @elpis\/gateway-protocol --include-workspace-root/,
-  );
-  assert.match(
-    docker,
-    /COPY --from=build[^\n]+packages\/gateway-protocol\/dist \.\/packages\/gateway-protocol\/dist/,
+    /npm prune --omit=dev --legacy-peer-deps[\s\\]+--workspace @elpis\/gateway-protocol[\s\\]+--workspace @elpis\/provider-transport[\s\\]+--include-workspace-root/,
   );
   assert.doesNotMatch(
     docker,
     /COPY (?:--from=build[^\n]+ )?packages\/gateway(?:\s|\/)/,
   );
-  assert.match(dockerignore, /^!packages\/gateway-protocol\/src\/\*\*$/m);
   assert.match(dockerignore, /^!packages\/gateway\/src\/\*\*$/m);
   const gatewayDocker = read('Dockerfile.gateway');
   assert.match(

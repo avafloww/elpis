@@ -88,6 +88,65 @@ test('store: refreshes near expiry, persists rotated token, merges over stored',
   assert.equal(persisted?.authorizedAt, 1000);
 });
 
+test('store: newer login beats an older refresh across store instances', async () => {
+  const db = freshDb();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const refreshing = new OAuthStore(db, 'anthropic', async () => {
+    await gate;
+    return {
+      access: 'stale-access',
+      refresh: 'stale-refresh',
+      expires: Date.now() + 3_600_000,
+    };
+  });
+  refreshing.write({ ...base, expires: Date.now() + 1000 });
+
+  const pending = refreshing.getAccessToken();
+  await Promise.resolve();
+  const login = new OAuthStore(db, 'anthropic', async () => base);
+  login.write({
+    ...base,
+    access: 'new-login-access',
+    refresh: 'new-login-refresh',
+    expires: Date.now() + 3_600_000,
+  });
+  release();
+
+  assert.equal(await pending, 'new-login-access');
+  assert.equal(login.read()?.access, 'new-login-access');
+  assert.equal(login.read()?.refresh, 'new-login-refresh');
+});
+
+test('store: credential deletion during refresh is never resurrected', async () => {
+  const db = freshDb();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const store = new OAuthStore(db, 'anthropic', async () => {
+    await gate;
+    return {
+      access: 'stale-access',
+      refresh: 'stale-refresh',
+      expires: Date.now() + 3_600_000,
+    };
+  });
+  store.write({ ...base, expires: Date.now() + 1000 });
+
+  const pending = store.getAccessToken();
+  await Promise.resolve();
+  db.prepare('DELETE FROM oauth_credentials WHERE provider = ?').run(
+    'anthropic',
+  );
+  release();
+
+  await assert.rejects(pending, /changed while refresh was in flight/);
+  assert.equal(store.read(), undefined);
+});
+
 test('store: concurrent getAccessToken single-flights the refresh', async () => {
   const db = freshDb();
   const expiring: OAuthCredentials = { ...base, expires: Date.now() + 1000 };

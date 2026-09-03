@@ -2,16 +2,25 @@ FROM node:24-trixie-slim AS build
 WORKDIR /opt/elpis
 COPY package.json package-lock.json ./
 COPY packages/gateway-protocol/package.json ./packages/gateway-protocol/package.json
-RUN npm ci --legacy-peer-deps --workspace @elpis/gateway-protocol --include-workspace-root
+COPY packages/provider-transport/package.json ./packages/provider-transport/package.json
+RUN npm ci --legacy-peer-deps \
+  --workspace @elpis/gateway-protocol \
+  --workspace @elpis/provider-transport \
+  --include-workspace-root
 COPY tsconfig.json tsconfig.console.json ./
 COPY packages/gateway-protocol/tsconfig.json ./packages/gateway-protocol/tsconfig.json
 COPY packages/gateway-protocol/src ./packages/gateway-protocol/src
+COPY packages/provider-transport/tsconfig.json ./packages/provider-transport/tsconfig.json
+COPY packages/provider-transport/src ./packages/provider-transport/src
 COPY scripts/build-console.mjs ./scripts/build-console.mjs
 COPY skills ./skills
 COPY motor-skills ./motor-skills
 COPY src ./src
 RUN npm run build \
-  && npm prune --omit=dev --legacy-peer-deps --workspace @elpis/gateway-protocol --include-workspace-root
+  && npm prune --omit=dev --legacy-peer-deps \
+    --workspace @elpis/gateway-protocol \
+    --workspace @elpis/provider-transport \
+    --include-workspace-root
 
 FROM node:24-trixie-slim AS runtime
 ARG ELPIS_BUILD_REVISION
@@ -29,6 +38,8 @@ COPY --from=build --chown=root:root /opt/elpis/package.json /opt/elpis/package-l
 COPY --from=build --chown=root:root /opt/elpis/node_modules ./node_modules
 COPY --from=build --chown=root:root /opt/elpis/packages/gateway-protocol/package.json ./packages/gateway-protocol/package.json
 COPY --from=build --chown=root:root /opt/elpis/packages/gateway-protocol/dist ./packages/gateway-protocol/dist
+COPY --from=build --chown=root:root /opt/elpis/packages/provider-transport/package.json ./packages/provider-transport/package.json
+COPY --from=build --chown=root:root /opt/elpis/packages/provider-transport/dist ./packages/provider-transport/dist
 COPY --from=build --chown=root:root /opt/elpis/dist ./dist
 COPY --chown=root:root deploy/container-entrypoint.sh /usr/local/bin/elpis-container-entrypoint
 RUN chmod 0555 /usr/local/bin/elpis-container-entrypoint \

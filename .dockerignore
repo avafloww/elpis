@@ -9,6 +9,11 @@
 !packages/gateway-protocol/tsconfig.json
 !packages/gateway-protocol/src/
 !packages/gateway-protocol/src/**
+!packages/provider-transport/
+!packages/provider-transport/package.json
+!packages/provider-transport/tsconfig.json
+!packages/provider-transport/src/
+!packages/provider-transport/src/**
 !packages/gateway/
 !packages/gateway/package.json
 !packages/gateway/tsconfig.json
