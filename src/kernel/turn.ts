@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../llm/llm.js';
+import type { ContextResourceDescriptor } from '../context-resources.js';
 
 export interface KernelToolContext {
   callIndex: number;
@@ -9,6 +10,7 @@ export interface KernelToolOutput {
   content: string;
   sends?: ChatMessage['sends'];
   run?: ChatMessage['run'];
+  contextResources?: ContextResourceDescriptor[];
 }
 
 export type KernelToolHandler = (
@@ -71,6 +73,9 @@ export async function dispatchKernelTools(
       content: output.content,
       ...(output.sends ? { sends: output.sends } : {}),
       ...(output.run ? { run: output.run } : {}),
+      ...(output.contextResources
+        ? { contextResources: output.contextResources }
+        : {}),
     };
     await append(message, context);
     messages.push(message);

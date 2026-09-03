@@ -4,7 +4,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
-import { RUN_TOOL, THINK_TOOL, externalThinkingJuice } from '../src/llm/llm.js';
+import {
+  RUN_TOOL,
+  SKILL_TOOL,
+  THINK_TOOL,
+  activeModelTools,
+  externalThinkingJuice,
+} from '../src/llm/llm.js';
 import { buildTestAgent, EMPTY_WAKE, makeConfig } from './helpers.js';
 import type {
   LLM,
@@ -29,6 +35,26 @@ test('RUN_TOOL requires code/detail and keeps sandbox/wake optional', () => {
   assert.deepEqual(params.required, ['code', 'detail']);
   assert.equal(params.properties.code.type, 'string');
   assert.equal(params.properties.detail.maxLength, 120);
+});
+
+test('SKILL_TOOL requires one bounded array and stays resident-only', () => {
+  const params = SKILL_TOOL.function.parameters;
+  assert.deepEqual(params.required, ['names']);
+  assert.equal(params.properties.names.type, 'array');
+  assert.equal(params.properties.names.minItems, 1);
+  assert.equal(params.properties.names.maxItems, 8);
+  assert.equal(params.properties.names.items.maxLength, 64);
+  assert.deepEqual(
+    activeModelTools(false, RUN_TOOL, SKILL_TOOL).map(
+      (tool) => tool.function.name,
+    ),
+    ['run', 'skill'],
+  );
+  assert.deepEqual(
+    activeModelTools(true, RUN_TOOL).map((tool) => tool.function.name),
+    ['run', 'think'],
+    'custom worker and secretary lanes do not inherit resident skill',
+  );
 });
 
 test('external-thinking JUICE preserves the chosen effort after native reasoning is disabled', () => {

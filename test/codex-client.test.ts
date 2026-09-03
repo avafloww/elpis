@@ -17,7 +17,7 @@ import {
 } from '../src/llm/codex-client.js';
 import type { Config } from '../src/config.js';
 import { noopLogger } from '../src/lib/log.js';
-import { SOCIAL_SUMMARIZE_PROMPT } from '../src/llm/llm.js';
+import { SKILL_TOOL, SOCIAL_SUMMARIZE_PROMPT } from '../src/llm/llm.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 
 function codexConfig(model = 'gpt-test-codex'): Config {
@@ -569,11 +569,17 @@ test('Codex LLM defaults to required tools, permits auto, and rotates cache iden
       },
     };
   };
-  await llm.complete([{ role: 'user', content: 'one' }]);
+  await llm.complete([{ role: 'user', content: 'one' }], {
+    skillTool: SKILL_TOOL,
+  });
   const firstKey = bodies[0].prompt_cache_key;
   assert.equal(bodies[0].stream, true);
   assert.equal(bodies[0].parallel_tool_calls, false);
   assert.equal(bodies[0].tool_choice, 'required');
+  assert.deepEqual(
+    (bodies[0].tools as Array<{ name: string }>).map((tool) => tool.name),
+    ['run', 'skill'],
+  );
   assert.equal('max_output_tokens' in bodies[0], false);
   assert.equal(typeof firstKey, 'string');
   llm.resetSession?.();

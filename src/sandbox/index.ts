@@ -20,6 +20,7 @@ import {
 import { transform } from './transform.js';
 import { preview, capLines } from './preview.js';
 import { parseFailureHints } from './parse-hints.js';
+import { isContextResourceInterrupt } from '../context-resources.js';
 import type {
   RunResult,
   SandboxDeps,
@@ -316,11 +317,16 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       if (!guardedPromise) processErrorTrap.fail();
       return {
         ok: false,
-        failureKind: 'runtime',
-        error: friendlyRunError(err),
+        failureKind: isContextResourceInterrupt(err) ? 'context' : 'runtime',
+        error: isContextResourceInterrupt(err)
+          ? err.message
+          : friendlyRunError(err),
         logs: capLines(runLogbuf.join('\n'), deps.config.sandbox.logMaxBytes),
         operationReceipts: structuredClone(scope.operationReceipts),
         operationReceiptsDropped: scope.operationReceiptsDropped || undefined,
+        ...(isContextResourceInterrupt(err)
+          ? { contextResources: [err.resource] }
+          : {}),
       };
     }
 

@@ -9,7 +9,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 ## Core model
 
 - **One agent, one thread.** Inputs from configured Discord rooms and the console enter one causally ordered history. Every message retains room provenance.
-- **One tool, many capabilities.** The model receives `run(code)`. JavaScript can call namespaced capabilities such as `elpis.channel`, `elpis.schedule`, `elpis.mind`, `elpis.browser`, and `elpis.computer`.
+- **Programmable action with scoped context.** The resident model receives `run(code)` plus an on-demand `skill(names)` loader. JavaScript can call namespaced capabilities such as `elpis.channel`, `elpis.schedule`, `elpis.mind`, `elpis.browser`, and `elpis.computer`; nearest-scope `AGENTS.md` instructions interrupt supported file tools before first access.
 - **Persistent working state.** Top-level JavaScript bindings survive tool calls within the process. Long-lived state belongs in the data directory.
 - **Durable identity and memory.** `SOUL.md`, `MEMORY.md`, `people/`, `ponder/`, transcripts, and `elpis-data/elpis.db` survive restarts and model changes.
 - **Context without silent deletion.** Provider requests are projections of the durable record: completed-turn display reasoning and untrusted opaque state may be omitted, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
@@ -65,7 +65,7 @@ npm run build
 npm start
 ```
 
-Configuration reference: [`docs/config.md`](docs/config.md). Extensions: [`docs/extensions.md`](docs/extensions.md). Coding-agent MCP: [`docs/mcp.md`](docs/mcp.md).
+Configuration reference: [`docs/config.md`](docs/config.md). Context resources: [`docs/context-resources.md`](docs/context-resources.md). Extensions: [`docs/extensions.md`](docs/extensions.md). Coding-agent MCP: [`docs/mcp.md`](docs/mcp.md).
 
 ## Minimal configuration
 

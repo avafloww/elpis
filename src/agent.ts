@@ -41,6 +41,7 @@ import {
   toApiMessage,
   activeModelTools,
   externalThinkingJuice,
+  SKILL_TOOL,
 } from './llm/llm.js';
 import { createCacheStats, type CacheStats } from './llm/cache-stats.js';
 import {
@@ -74,6 +75,7 @@ import {
   compactionEscalationNudge,
 } from './llm/prompt.js';
 import type { Config } from './config.js';
+import type { ContextResources } from './context-resources.js';
 import type {
   BuiltinModuleRegistry,
   RuntimeProfile,
@@ -658,6 +660,8 @@ export interface AgentDeps {
   /** Dependency-aware external cortex. Optional so focused Agent tests and
    * embedders can omit it; production always wires the canonical service. */
   mind?: MindService;
+  /** Shared current-window skill and AGENTS.md context state. */
+  contextResources?: ContextResources;
   /** Boot-frozen deterministic prompt blocks from data-directory extensions. */
   extensionPrompt?: string;
   /** Boot-resolved built-in modules; also used by the sandbox. */
@@ -914,6 +918,8 @@ export class Agent {
       for (const msg of this.messages) {
         if (msg.personContext?.kind === 'memory')
           this.injectedPeople.add(msg.personContext.authorId);
+        if (msg.contextResources)
+          deps.contextResources?.restore(msg.contextResources);
       }
       deps.tracker.recompute(this.messages);
       // A prior conversation existed, so heartbeats should fire after a restart
@@ -1836,6 +1842,7 @@ export class Agent {
     this.epoch++;
     this.messages = [];
     this.injectedPeople.clear();
+    this.deps.contextResources?.resetContext();
     this.tracker.reset();
     this.deps.llm.resetSession?.();
     this.cacheStats.reset();
@@ -2186,6 +2193,7 @@ export class Agent {
           try {
             const completion = this.llm.complete(requestMessages, {
               forceThink: forceThinkForRequest,
+              skillTool: SKILL_TOOL,
               signal: callController.signal,
             });
             if (this.config.llm.callTimeoutMs <= 0) {
@@ -2341,12 +2349,52 @@ export class Agent {
 
       let yieldedByWake = false;
       const calls = resp.message.tool_calls ?? [];
+      const invalidSkillBatch =
+        calls.some((call) => call.function.name === 'skill') &&
+        calls.length !== 1;
       if (calls.length > 0)
         this.logger.info('[agent] tool dispatch | count=', calls.length);
       await applyKernelTurn(
         resp.message,
         async (tc, { callIndex }) => {
           yieldedByWake = false;
+          if (invalidSkillBatch) {
+            return {
+              content:
+                '[skill load rejected: skill must be the only tool call in its response. No tool calls in this batch were executed. Call skill alone, inspect the returned instructions, then act in a later response.]',
+            };
+          }
+          if (tc.function.name === 'skill') {
+            try {
+              if (!this.deps.contextResources) {
+                throw new Error('skill loading is unavailable in this runtime');
+              }
+              const parsed = JSON.parse(tc.function.arguments || '{}') as {
+                names?: unknown;
+              };
+              const loaded = this.deps.contextResources.loadSkillContext(
+                parsed.names,
+              );
+              const content = redactSecrets(
+                loaded.content,
+                this.secretRegistry,
+              );
+              this.logger.info(
+                '[agent] tool call | skill | count=',
+                loaded.resources.length,
+              );
+              return {
+                content,
+                contextResources: loaded.resources,
+              };
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              return {
+                content: `[skill FAILED]\n${redactSecrets(message, this.secretRegistry)}`,
+              };
+            }
+          }
           if (tc.function.name === 'think') {
             let thoughts = '';
             try {
@@ -2368,7 +2416,7 @@ export class Agent {
             return {
               content: formatRunResult({
                 ok: false,
-                error: `unknown tool: ${tc.function.name} — available tools are run(code) and think(thoughts)`,
+                error: `unknown tool: ${tc.function.name} — available tools are skill(names), run(code), and think(thoughts)`,
               }),
             };
           }
@@ -2558,6 +2606,9 @@ export class Agent {
             ...(result.sends && result.sends.length > 0
               ? { sends: result.sends }
               : {}),
+            ...(result.contextResources
+              ? { contextResources: result.contextResources }
+              : {}),
           };
         },
         {
@@ -2567,6 +2618,15 @@ export class Agent {
           appendTool: (toolMsg) => {
             this.pushMessage(toolMsg, this.turnChannel);
             this.tracker.estimateAppended(toolMsg.content);
+            if (toolMsg.contextResources) {
+              if (callEpoch === this.epoch) {
+                this.deps.contextResources?.acknowledge(
+                  toolMsg.contextResources,
+                );
+              } else {
+                this.deps.contextResources?.discardPending();
+              }
+            }
           },
         },
       );
@@ -2686,6 +2746,17 @@ export class Agent {
     if (this.compactor.hasCompletedResult()) {
       const replaced = this.compactor.boundaryIndex;
       this.messages = this.compactor.applyCompaction(this.messages);
+      const resourceReminder =
+        this.deps.contextResources?.takeCompactionReminder() ?? null;
+      this.messages = this.messages.map((message) => {
+        if (!message.contextResources) return message;
+        const { contextResources: _drop, ...rest } = message;
+        return rest;
+      });
+      if (resourceReminder) {
+        const notice = this.messages.at(-1);
+        if (notice) notice.content = `${notice.content}\n\n${resourceReminder}`;
+      }
       this.cacheStats.rebaseline();
       this.onCompaction();
       this.compactingSince = null;
@@ -3132,6 +3203,7 @@ export class Agent {
       extensionPrompt: this.deps.extensionPrompt,
       modules: this.deps.modules,
       profile: this.deps.profile,
+      skills: this.deps.contextResources?.catalog(),
     });
     const externalThinkingHint = this.config.llm.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`
@@ -3158,7 +3230,11 @@ export class Agent {
     const prepared = prepareForApi(this.buildRequestMessages());
     const snap: ContextSnapshot = {
       model: this.config.llm.model,
-      tools: activeModelTools(this.config.llm.externalThinking),
+      tools: activeModelTools(
+        this.config.llm.externalThinking,
+        this.llm.runTool,
+        SKILL_TOOL,
+      ),
       messages: prepared.map((m) => elideLargeImageUrls(toApiMessage(m))),
     };
     if (this.config.llm.externalThinking) snap.reasoning_effort = 'none';

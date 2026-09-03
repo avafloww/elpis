@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseFrontmatter } from '../lib/frontmatter.js';
 import { slugify } from '../lib/slug.js';
+import type { SkillSummary } from '../context-resources.js';
 import type {
   BuiltinModuleId,
   BuiltinModuleRegistry,
@@ -53,6 +54,8 @@ export interface PromptInputs {
   modules?: BuiltinModuleRegistry;
   /** Boot-frozen host/container authority profile. */
   profile?: RuntimeProfile;
+  /** Boot-discovered resident skill catalog. Full bodies load only on demand. */
+  skills?: SkillSummary[];
 }
 
 /** One loaded `people/<slug>.md`. The agent caches these at context boundaries
@@ -145,6 +148,27 @@ export function build(input: PromptInputs): string {
   ]
     .filter(Boolean)
     .join('\n\n');
+  const skillCatalog = (input.skills ?? [])
+    .map((skill) => `- \`${skill.name}\`: ${skill.description}`)
+    .join('\n');
+  const contextResourceSection = `
+### Model-facing context resources
+
+\`skill\` is a top-level model tool, not a JavaScript global. Call it with one or more names to load
+full SKILL.md instructions into this context. A skill call must be the only tool call in its response:
+load it, inspect the returned body, then use \`run\` in a later response.
+
+Available skills:
+${skillCatalog || '- (none discovered at boot)'}
+
+On the first supported \`elpis.read\`, \`elpis.edit\`, \`elpis.grep\`, or \`elpis.git\` access inside a
+directory governed by an AGENTS.md file, the run fails with the nearest file's full instructions.
+Read that result, then retry the operation in a new run call. Catching the interruption cannot approve it;
+it will recur until the instructions have reached model-visible context. Raw \`fs\`, shell, and privilege
+surfaces can bypass this best-effort guidance; do not use them merely to evade it.
+
+Loaded skills and AGENTS.md files apply only to the current context window. After compaction, follow the
+single reload reminder: deliberately reload only resources still relevant to the work ahead.`;
   const externalThinkingSection = input.externalThinking
     ? `
 When \`think\` is present, it is a second model-facing tool for intermediate cognition, not a sandbox.
@@ -405,6 +429,8 @@ Do **not** put the current date inside text passed to \`elpis.remember\` or
 When in doubt, \`elpis.remember(...)\`.
 
 ## Tools
+${contextResourceSection}
+
 You act through \`run\`, which executes JavaScript in a PERSISTENT sandbox that survives
 across calls within this process. State persists across \`run\` calls: top-level
 \`let\`/\`const\`/\`var\`, functions, classes, and imports remain available next time.

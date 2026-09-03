@@ -697,6 +697,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
       );
     }
     const where = opts.path ?? path.join(deps.config.paths.harnessRoot, 'src');
+    deps.contextResources?.beforeFileAccess(where, 'auto');
     const flags = ['-rn', '--color=never'];
     if (opts.ignoreCase) flags.push('-i');
     // Extended regex by default: a bare `|` in BRE is a literal, which made
@@ -798,6 +799,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     newString: string,
     opts?: { replaceAll?: boolean },
   ) => {
+    deps.contextResources?.beforeFileAccess(p, 'file');
     const src = fs.readFileSync(p, 'utf8');
     const r = editor.replace(src, oldString, newString, {
       all: opts?.replaceAll,
@@ -832,6 +834,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     p: string,
     opts: { from?: number; to?: number; numbers?: boolean } = {},
   ) => {
+    deps.contextResources?.beforeFileAccess(p, 'file');
     const receipt = beginOperationReceipt({
       kind: 'file',
       name: 'read',
@@ -1423,10 +1426,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   async function gitRun(args: string, opts: GitOpts = {}): Promise<ShResult> {
     const command = `git ${args}`;
     const action = args.trim().split(/\s+/, 1)[0] || 'command';
+    const cwd = opts.cwd ?? deps.config.paths.dataDirectory;
+    deps.contextResources?.beforeFileAccess(cwd, 'directory');
     return shImpl(
       command,
       {
-        cwd: opts.cwd ?? deps.config.paths.dataDirectory,
+        cwd,
         timeout: opts.timeout ?? 60_000,
       },
       { kind: 'git', name: action, command },

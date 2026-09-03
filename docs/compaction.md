@@ -38,7 +38,7 @@ If no candidate is accepted, the original history remains live and an operator-v
 
 ## Application
 
-An accepted summary replaces only the selected in-memory prefix. The transcript remains append-only and still contains every original message plus the compaction record. Recent messages and the current open tool chain remain verbatim.
+An accepted summary replaces only the selected in-memory prefix. The transcript remains append-only and still contains every original message plus the compaction record. Recent messages and the current open tool chain remain verbatim except for transient skill and `AGENTS.md` instruction bodies: those are excluded from the summary and retained tail, then named in the single compaction notice for deliberate reload.
 
 `compaction.keep_tokens` controls how much recent history stays outside the fold.
 

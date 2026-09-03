@@ -54,6 +54,10 @@ import {
   type ProviderType,
 } from './provenance.js';
 import type { RunMessageMetadata } from '../sandbox/metadata.js';
+import {
+  MAX_SKILLS_PER_CALL,
+  type ContextResourceDescriptor,
+} from '../context-resources.js';
 import { isPolicyDenial } from './policy-flight-recorder.js';
 
 export type { GenerationProvenance } from './provenance.js';
@@ -139,6 +143,8 @@ export interface ChatMessage {
   /** Harness-only run execution/wake attribution for tool results. Persisted and
    * restored for replay/console/diagnostics; provider translators ignore it. */
   run?: RunMessageMetadata;
+  /** Harness-only loaded resource descriptors. Content is already in this message. */
+  contextResources?: ContextResourceDescriptor[];
 }
 
 export interface LLMUsage {
@@ -539,6 +545,51 @@ export const RUN_TOOL: RunTool = {
   },
 };
 
+export interface SkillTool {
+  type: 'function';
+  function: {
+    name: 'skill';
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: {
+        names: {
+          type: 'array';
+          description: string;
+          items: { type: 'string'; maxLength: 64 };
+          minItems: 1;
+          maxItems: number;
+        };
+      };
+      required: ['names'];
+      additionalProperties: false;
+    };
+  };
+}
+
+export const SKILL_TOOL: SkillTool = {
+  type: 'function',
+  function: {
+    name: 'skill',
+    description:
+      'Load one or more named SKILL.md instruction bodies into the current model context. This must be the only tool call in the response: load first, inspect the returned instructions, then call run in a later response.',
+    parameters: {
+      type: 'object',
+      properties: {
+        names: {
+          type: 'array',
+          description: 'Skill names to load before taking further action.',
+          items: { type: 'string', maxLength: 64 },
+          minItems: 1,
+          maxItems: MAX_SKILLS_PER_CALL,
+        },
+      },
+      required: ['names'],
+      additionalProperties: false,
+    },
+  },
+};
+
 export interface ThinkTool {
   type: 'function';
   function: {
@@ -578,8 +629,13 @@ export const THINK_TOOL: ThinkTool = {
 export function activeModelTools(
   externalThinking: boolean,
   runTool: RunTool = RUN_TOOL,
-): Array<RunTool | ThinkTool> {
-  return externalThinking ? [runTool, THINK_TOOL] : [runTool];
+  skillTool?: SkillTool,
+): Array<RunTool | SkillTool | ThinkTool> {
+  return [
+    runTool,
+    ...(skillTool ? [skillTool] : []),
+    ...(externalThinking ? [THINK_TOOL] : []),
+  ];
 }
 
 const EXTERNAL_THINKING_JUICE: Record<string, number> = {
@@ -607,8 +663,9 @@ export function computeCharsSent(
   messages: ChatMessage[],
   includeReasoningItems = true,
   externalThinking = false,
+  tools: readonly unknown[] = activeModelTools(externalThinking),
 ): number {
-  let chars = JSON.stringify(activeModelTools(externalThinking)).length;
+  let chars = JSON.stringify(tools).length;
   for (const m of messages) chars += sentChars(m, includeReasoningItems);
   return chars;
 }
@@ -831,6 +888,8 @@ export interface CompleteOptions {
   forceThink?: boolean;
   /** Override the run schema for this bounded execution lane. */
   runTool?: RunTool;
+  /** Optional resident-only skill loader. Custom worker/secretary lanes omit it. */
+  skillTool?: SkillTool;
   /** Override whether a model-facing tool call is required. Provider defaults remain unchanged when omitted. */
   toolChoice?: 'required' | 'auto';
   /** Caller cancellation for the whole completion, including provider setup. */
@@ -979,13 +1038,14 @@ export async function streamComplete(
         once: true,
       });
     const prepared = prepareForApi(messages);
-    const charsSent = computeCharsSent(prepared, false);
     if (options.toolFree && options.tools?.length)
       throw new Error('tool-free completion cannot declare tools');
+    const modelTools = options.toolFree ? [] : (options.tools ?? [RUN_TOOL]);
+    const charsSent = computeCharsSent(prepared, false, false, modelTools);
     const base = {
       model: config.llm.model,
       messages: prepared.map(toApiMessage),
-      ...(options.toolFree ? {} : { tools: options.tools ?? [RUN_TOOL] }),
+      ...(options.toolFree ? {} : { tools: modelTools }),
       ...(options.toolChoice !== undefined
         ? { tool_choice: options.toolChoice }
         : {}),
@@ -1307,11 +1367,12 @@ export function createLLM(
     options: CompleteOptions = {},
   ): Promise<CompleteResult> {
     return streamComplete(client, config, messages, hub, {
-      ...(options.runTool
+      ...(options.runTool || options.skillTool
         ? {
             tools: activeModelTools(
               config.llm.externalThinking,
-              options.runTool,
+              options.runTool ?? RUN_TOOL,
+              options.skillTool,
             ),
             ...(options.toolChoice !== undefined
               ? { toolChoice: options.toolChoice }
@@ -1446,6 +1507,7 @@ export function createLLM(
             undefined,
             options.signal,
             options.runTool,
+            options.skillTool,
           );
           stampGeneration(result.message, {
             providerType: 'openai-compatible',

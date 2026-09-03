@@ -39,6 +39,7 @@ import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
 import { createSecretRegistry } from './lib/secrets.js';
+import { ContextResources } from './context-resources.js';
 import {
   createGatewayEnrollmentController,
   launchGatewayEnrollment,
@@ -462,8 +463,15 @@ export async function createElpisRuntime(
       return () => {};
     },
   });
+  const contextResources = new ContextResources({
+    dataDirectory: config.paths.dataDirectory,
+    harnessRoot: config.paths.harnessRoot,
+    homeDirectory: process.env.HOME,
+    logger: config.logger,
+  });
   const sandboxDeps: SandboxDeps = {
     config,
+    contextResources,
     replayIdentity: modules.isActive('motor')
       ? replayIdentityForConfig(configForLlmRole(config, 'motor'))
       : null,
@@ -639,6 +647,7 @@ export async function createElpisRuntime(
     sandbox: sandboxManager,
     memory,
     mind,
+    contextResources,
     extensionPrompt: extensions.prompt,
     modules,
     profile,

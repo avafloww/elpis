@@ -35,7 +35,7 @@ export interface WorkerRunResult {
   savedAs?: '_';
   logs?: string;
   error?: string;
-  failureKind?: 'preparse' | 'runtime';
+  failureKind?: 'preparse' | 'runtime' | 'context';
   detached?: boolean;
   bgId?: string;
   note?: string;

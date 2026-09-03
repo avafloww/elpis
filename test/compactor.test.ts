@@ -101,6 +101,53 @@ test('compaction prompt requires a first-person note to the future self at both 
   assert.match(SUMMARIZE_TAIL_REMINDER, /"I…", never "you…"/);
 });
 
+test('compaction excludes transient resource bodies from both summary input and kept tail', async () => {
+  const llm = fakeLLM();
+  const tracker = createContextTracker(100000, 0);
+  const compactor = createCompactor(llm, tracker, {
+    keepTokens: 1,
+    ratio: () => 4,
+  });
+  const descriptor = {
+    kind: 'skill' as const,
+    key: 'private-skill',
+    display: 'private-skill',
+    version: 'a'.repeat(64),
+  };
+  const messages = [
+    mk('user', `SECRET FOLD INSTRUCTIONS ${'x'.repeat(400)}`, {
+      contextResources: [descriptor],
+    }),
+    mk('user', `SECRET KEPT INSTRUCTIONS ${'y'.repeat(400)}`, {
+      contextResources: [descriptor],
+    }),
+  ];
+
+  compactor.start(messages);
+  await Promise.resolve();
+  assert.equal(llm.inputs.length, 1);
+  assert.doesNotMatch(llm.inputs[0], /SECRET FOLD INSTRUCTIONS/);
+  assert.match(llm.inputs[0], /context resource body removed/);
+  llm.resolveAll();
+  await compactor.done();
+  const applied = compactor.applyCompaction(messages);
+  assert.doesNotMatch(
+    applied.map((message) => message.content).join('\n'),
+    /SECRET (?:FOLD|KEPT) INSTRUCTIONS/,
+  );
+  const resourceMessages = applied.filter((message) =>
+    /context resource body removed/.test(message.content),
+  );
+  assert.ok(resourceMessages.length > 0);
+  assert.ok(
+    resourceMessages.every(
+      (message) =>
+        message.contextResources === undefined &&
+        /context resource body removed/.test(message.content),
+    ),
+  );
+});
+
 // ---------- walkKeepBoundary ----------
 
 test('walkKeepBoundary: keeps ~keepTokens verbatim tail', () => {

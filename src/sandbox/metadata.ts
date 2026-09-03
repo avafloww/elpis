@@ -66,7 +66,7 @@ export interface RunMessageMetadata {
   toolContractVersion: string;
   ok: boolean;
   detail?: string;
-  failureKind?: 'preparse' | 'runtime';
+  failureKind?: 'preparse' | 'runtime' | 'context';
   execution?: SandboxExecutionMetadata;
   detached?: boolean;
   bgId?: string;
@@ -196,7 +196,11 @@ export function parseRunMessageMetadata(
     detail.trim().split(/\s+/).length <= 10
   )
     parsed.detail = detail.trim();
-  if (value.failureKind === 'preparse' || value.failureKind === 'runtime')
+  if (
+    value.failureKind === 'preparse' ||
+    value.failureKind === 'runtime' ||
+    value.failureKind === 'context'
+  )
     parsed.failureKind = value.failureKind;
   if (typeof value.detached === 'boolean') parsed.detached = value.detached;
   const bgId = boundedString(value.bgId, 128);

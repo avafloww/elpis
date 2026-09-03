@@ -135,6 +135,21 @@ function summaryMessage(text: string, replaced: number): ChatMessage {
   };
 }
 
+const CONTEXT_RESOURCE_EVICTED =
+  '[context resource body removed at the compaction boundary; reload it only if the compaction notice says it is still relevant]';
+
+function evictContextResourceBodies(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) =>
+    message.contextResources && message.contextResources.length > 0
+      ? {
+          ...message,
+          content: CONTEXT_RESOURCE_EVICTED,
+          contextResources: undefined,
+        }
+      : message,
+  );
+}
+
 /** In-the-moment compaction notice appended at the TAIL of the rebuilt history. */
 function compactionNotice(replaced: number): ChatMessage {
   return {
@@ -193,7 +208,9 @@ export function createCompactor(
         priorSummary = head.content;
         foldStart = 1;
       }
-      const foldSlice = messages.slice(foldStart, boundaryIndex);
+      const foldSlice = evictContextResourceBodies(
+        messages.slice(foldStart, boundaryIndex),
+      );
       // Skip-guard: nothing worth summarizing (e.g. one giant message forms the
       // whole tail, or only the prior summary would be folded).
       if (foldSlice.length === 0) {
@@ -230,7 +247,7 @@ export function createCompactor(
     applyCompaction(messages: ChatMessage[]): ChatMessage[] {
       const summary = resultSummary;
       if (summary === null) return messages;
-      const kept = messages.slice(boundaryIndex);
+      const kept = evictContextResourceBodies(messages.slice(boundaryIndex));
       opts.log?.(
         `compaction applied | replaced=${boundaryIndex} | summary_chars=${summary.length}`,
       );

@@ -38,6 +38,23 @@ test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   assert.ok(!segs[0].text.includes('MEMORY_MARKER_XYZ'));
 });
 
+test('build: catalogs skills and explains the dedicated context-load round', () => {
+  const full = build({
+    ...inputs,
+    skills: [
+      {
+        name: 'release-check',
+        description: 'Verify a candidate before publication',
+        path: '/catalog/path-must-not-render/SKILL.md',
+      },
+    ],
+  });
+  assert.match(full, /`release-check`: Verify a candidate before publication/);
+  assert.match(full, /skill call must be the only tool call/i);
+  assert.match(full, /Catching the interruption cannot approve it/);
+  assert.doesNotMatch(full, /catalog\/path-must-not-render/);
+});
+
 test('segmentSystemPrompt: no content is lost (every non-marker line survives)', () => {
   const full = build(inputs);
   const segs = segmentSystemPrompt(full);

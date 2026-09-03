@@ -3,6 +3,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   COMPACTION_RETRY_BASE_MS,
   COMPACTION_RETRY_MAX_MS,
@@ -18,6 +20,7 @@ import { createContextTracker } from '../src/llm/context-tracker.js';
 // — a response with no run call is no longer an ending — so the loop
 // never reached the wake-gate and `onIdle` never fired.
 import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
+import { ContextResourceInterrupt } from '../src/context-resources.js';
 
 /** LLM whose complete() always yields with a wake; summarize() is controllable. */
 function stubLLM(summarize: () => Promise<string>): LLM {
@@ -110,7 +113,7 @@ test('compaction checkpoint: crossing the trigger pushes the memory-flush nudge'
 });
 
 test('compaction checkpoint: successful apply pushes a compacted notice', async () => {
-  const { agent } = buildTestAgent({
+  const { agent, contextResources, tmpDir } = buildTestAgent({
     llm: stubLLM(() => Promise.resolve(SUMMARY_OK)),
     config: {
       compaction: { triggerTokens: 500, keepTokens: 20000 },
@@ -126,6 +129,20 @@ test('compaction checkpoint: successful apply pushes a compacted notice', async 
     compactorOpts: { keepTokens: 100 },
     tmpPrefix: 'harness-compact-notice-',
   });
+  const agentsPath = path.join(tmpDir, 'AGENTS.md');
+  const targetPath = path.join(tmpDir, 'file.ts');
+  fs.writeFileSync(agentsPath, 'local compacted contract\n');
+  fs.writeFileSync(targetPath, 'value\n');
+  let interrupted: ContextResourceInterrupt | null = null;
+  assert.throws(
+    () => contextResources.beforeFileAccess(targetPath, 'file'),
+    (error: unknown) => {
+      assert.ok(error instanceof ContextResourceInterrupt);
+      interrupted = error;
+      return true;
+    },
+  );
+  contextResources.acknowledge([interrupted!.resource]);
   const { promise: idle, resolve: onIdle } = Promise.withResolvers<void>();
   agent['deps'].onIdle = () => onIdle();
 
@@ -161,6 +178,15 @@ test('compaction checkpoint: successful apply pushes a compacted notice', async 
     1,
     'exactly one compaction-applied notice, not a duplicate',
   );
+  const notice = users.find((message) =>
+    message.content.includes('context compacted'),
+  );
+  assert.match(notice?.content ?? '', /context resources were present/);
+  assert.match(notice?.content ?? '', new RegExp(agentsPath));
+  assert.deepEqual(contextResources.snapshot(), {
+    skills: [],
+    agentsFiles: [],
+  });
   agent.stop();
 });
 

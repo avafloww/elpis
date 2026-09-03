@@ -44,6 +44,7 @@ import {
   type CompleteResult,
   type LLMUsage,
   type RunTool,
+  type SkillTool,
   type LLM,
   type AnthropicThinkingBlock,
   type StandaloneCompleteOptions,
@@ -290,18 +291,16 @@ export function translate(messages: ChatMessage[]): {
   return { system, wire };
 }
 
-/** The `run` tool in Anthropic's `{name, description, input_schema}` shape.
- * Derived lazily: llm.ts ⇄ anthropic-client.ts import each other, so reading
- * RUN_TOOL at this module's load time could hit the TDZ (matches responses.ts). */
-function anthropicRunTool(runTool: RunTool = RUN_TOOL): {
+/** Convert an Elpis function schema to Anthropic's native tool shape. */
+export function anthropicModelTool(tool: RunTool | SkillTool): {
   name: string;
   description: string;
   input_schema: unknown;
 } {
   return {
-    name: runTool.function.name,
-    description: runTool.function.description,
-    input_schema: runTool.function.parameters,
+    name: tool.function.name,
+    description: tool.function.description,
+    input_schema: tool.function.parameters,
   };
 }
 
@@ -388,6 +387,7 @@ async function anthropicComplete(
     toolFree?: boolean;
     signal?: AbortSignal;
     runTool?: RunTool;
+    skillTool?: SkillTool;
     toolChoice?: 'required' | 'auto';
   } = {},
 ): Promise<CompleteResult> {
@@ -399,7 +399,11 @@ async function anthropicComplete(
     }
 
     const prepared = prepareForApi(messages);
-    const charsSent = computeCharsSent(prepared, false);
+    const modelTools = [
+      anthropicModelTool(options.runTool ?? RUN_TOOL),
+      ...(options.skillTool ? [anthropicModelTool(options.skillTool)] : []),
+    ];
+    const charsSent = computeCharsSent(prepared, false, false, modelTools);
     const { system, wire } = translate(prepared);
     const body: Record<string, unknown> = {
       model: config.llm.model,
@@ -409,7 +413,7 @@ async function anthropicComplete(
       ...(options.toolFree
         ? {}
         : {
-            tools: [anthropicRunTool(options.runTool)],
+            tools: modelTools,
             tool_choice: {
               type: options.toolChoice === 'required' ? 'any' : 'auto',
               disable_parallel_tool_use: true,
@@ -737,6 +741,7 @@ export function createAnthropicOAuthLLM(
       const result = await anthropicComplete(config, store, messages, hub, {
         signal: options.signal,
         runTool: options.runTool,
+        skillTool: options.skillTool,
         toolChoice: options.toolChoice,
       });
       stampGeneration(result.message, {

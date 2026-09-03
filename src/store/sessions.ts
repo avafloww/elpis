@@ -33,6 +33,7 @@ import {
   type ReplayIdentity,
 } from '../llm/provenance.js';
 import { parseRunMessageMetadata } from '../sandbox/metadata.js';
+import type { ContextResourceDescriptor } from '../context-resources.js';
 
 /** Reserved transcript id for the single monocontext stream. */
 export const MAIN_TRANSCRIPT_ID = 'main';
@@ -253,6 +254,53 @@ export function loadMostRecentMain(
   return loadMostRecentForChannel(sessionsRoot, MAIN_TRANSCRIPT_ID, options);
 }
 
+function parseContextResourceDescriptors(
+  raw: unknown,
+): ContextResourceDescriptor[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ContextResourceDescriptor[] = [];
+  for (const value of raw.slice(0, 32)) {
+    if (typeof value !== 'object' || value === null) continue;
+    const item = value as Record<string, unknown>;
+    if (item.kind !== 'skill' && item.kind !== 'agents') continue;
+    if (
+      typeof item.key !== 'string' ||
+      item.key.length === 0 ||
+      item.key.length > 4096 ||
+      typeof item.display !== 'string' ||
+      item.display.length === 0 ||
+      item.display.length > 4096 ||
+      typeof item.version !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(item.version)
+    ) {
+      continue;
+    }
+    if (
+      item.kind === 'skill' &&
+      (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item.key) ||
+        item.display !== item.key)
+    ) {
+      continue;
+    }
+    if (
+      item.kind === 'agents' &&
+      (!path.isAbsolute(item.key) ||
+        path.basename(item.key) !== 'AGENTS.md' ||
+        !path.isAbsolute(item.display) ||
+        path.basename(item.display) !== 'AGENTS.md')
+    ) {
+      continue;
+    }
+    out.push({
+      kind: item.kind,
+      key: item.key,
+      display: item.display,
+      version: item.version,
+    });
+  }
+  return out;
+}
+
 /** Parse a JSONL transcript file into ChatMessage[]. Skips malformed lines. */
 export function parseTranscriptFile(
   filePath: string,
@@ -399,6 +447,10 @@ function parseChatMessage(
   if (role === 'tool') {
     const run = parseRunMessageMetadata(obj.run);
     if (run) msg.run = run;
+    const contextResources = parseContextResourceDescriptors(
+      obj.contextResources,
+    );
+    if (contextResources.length > 0) msg.contextResources = contextResources;
   }
   if (Array.isArray(obj.sends)) {
     const sends: { channel: string; text: string }[] = [];

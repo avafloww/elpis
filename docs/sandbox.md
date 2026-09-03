@@ -1,6 +1,6 @@
 # JavaScript sandbox
 
-The model receives one tool, `run(code)`. Elpis evaluates the code in one persistent `node:vm` context and injects a capability namespace.
+The resident model receives `run(code)` for action and an on-demand `skill(names)` context loader. Elpis evaluates run code in one persistent `node:vm` context and injects a capability namespace; worker and secretary lanes keep their custom run-only tool sets.
 
 ## Persistence
 
@@ -45,7 +45,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 
 ### Files and code
 
-- `elpis.read`, `elpis.grep`, `elpis.edit`, `elpis.fill`;
+- `elpis.read`, `elpis.grep`, `elpis.edit`, `elpis.fill`; supported read/grep/edit/git entry points interrupt once with the nearest unseen `AGENTS.md` before access;
 - `elpis.sh`, `elpis.sudo`, `elpis.ssh`;
 - `elpis.git`, `elpis.deploy`, `elpis.restart`;
 - `elpis.preview`.

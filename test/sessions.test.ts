@@ -112,6 +112,46 @@ test('sessions: round-trips tool_calls and tool_call_id', () => {
   assert.equal(t.tool_call_id, 'tc1');
 });
 
+test('sessions: round-trips bounded context resource descriptors', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  const version = 'a'.repeat(64);
+  store.append('ch1', {
+    role: 'tool',
+    tool_call_id: 'skill-1',
+    content: 'loaded instructions',
+    contextResources: [
+      { kind: 'skill', key: 'alpha', display: 'alpha', version },
+      {
+        kind: 'agents',
+        key: '/real/AGENTS.md',
+        display: '/AGENTS.md',
+        version,
+      },
+    ],
+  });
+  const loaded = loadMostRecentForChannel(root, 'ch1');
+  assert.deepEqual(loaded?.messages[0].contextResources, [
+    { kind: 'skill', key: 'alpha', display: 'alpha', version },
+    { kind: 'agents', key: '/real/AGENTS.md', display: '/AGENTS.md', version },
+  ]);
+
+  const file = loaded!.path;
+  fs.appendFileSync(
+    file,
+    `${JSON.stringify({
+      role: 'tool',
+      content: 'bad metadata',
+      contextResources: [
+        { kind: 'agents', key: '/x', display: '/x', version: 'not-a-hash' },
+        { kind: 'other', key: 'x', display: 'x', version },
+      ],
+    })}\n`,
+  );
+  const reparsed = parseTranscriptFile(file);
+  assert.equal(reparsed.at(-1)?.contextResources, undefined);
+});
+
 test('sessions: round-trips Anthropic thinking_blocks (signed + redacted)', () => {
   const root = tmpRoot();
   const store = createTranscriptStore(root);

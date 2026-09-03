@@ -24,6 +24,10 @@ import type {
   WorkerArtifactFile,
   WorkerArtifactReceipt,
 } from './worker/workspace.js';
+import type {
+  ContextResourceDescriptor,
+  ContextResources,
+} from './context-resources.js';
 
 export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
@@ -55,7 +59,7 @@ export interface RunResult {
   logs?: string;
   error?: string;
   /** Harness-only execution classification; omitted from provider requests. */
-  failureKind?: 'preparse' | 'runtime';
+  failureKind?: 'preparse' | 'runtime' | 'context';
   /** Harness-only sandbox attribution. Provider wire translation must omit it. */
   execution?: SandboxExecutionMetadata;
   /** Present when the run detached a still-pending promise into the bg registry (A5). */
@@ -69,6 +73,8 @@ export interface RunResult {
   /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
   operationReceipts?: RunOperationReceipt[];
   operationReceiptsDropped?: number;
+  /** Resource content made visible by this result, for restart reconstruction. */
+  contextResources?: ContextResourceDescriptor[];
 }
 
 export interface SandboxLateProcessError {
@@ -111,6 +117,8 @@ export interface SandboxDeps {
     append(text: string): unknown;
     overwrite(text: string): unknown;
   };
+  /** Best-effort repository instruction gate for supported elpis file verbs. */
+  contextResources?: Pick<ContextResources, 'beforeFileAccess'>;
   send?: (
     channelId: string,
     content: string,

@@ -16,6 +16,7 @@ import {
   mapResponsesUsage,
   isResponsesUnsupported,
   responsesRunTool,
+  responsesSkillTool,
   responsesSummarize,
   failureToError,
   type ReasoningItemParam,
@@ -27,6 +28,7 @@ import {
   computeCharsSent,
   reasoningItemChars,
   NonRetriableError,
+  SKILL_TOOL,
   type ChatMessage,
 } from '../src/llm/llm.js';
 import {
@@ -439,6 +441,19 @@ test('isResponsesUnsupported: explicit 404/405/501 raw and classify-wrapped; oth
 });
 
 // ─── run tool shape ──────────────────────────────────────────────────────────
+
+test('responsesSkillTool: flattened strict tool preserves the array schema', () => {
+  const tool = responsesSkillTool(SKILL_TOOL);
+  assert.equal(tool.name, 'skill');
+  assert.equal(tool.strict, true);
+  const parameters = tool.parameters as {
+    required: string[];
+    properties: { names: { type: string; maxItems: number } };
+  };
+  assert.deepEqual(parameters.required, ['names']);
+  assert.equal(parameters.properties.names.type, 'array');
+  assert.equal(parameters.properties.names.maxItems, 8);
+});
 
 test('responsesRunTool: flattened FunctionTool with the same schema, strict off', () => {
   const t = responsesRunTool();

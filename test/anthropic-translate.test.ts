@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   translate,
+  anthropicModelTool,
   createBillingHeader,
   patchCch,
 } from '../src/llm/anthropic-client.js';
 import { build } from '../src/llm/prompt.js';
-import type { ChatMessage } from '../src/llm/llm.js';
+import { RUN_TOOL, SKILL_TOOL, type ChatMessage } from '../src/llm/llm.js';
 
 const sys = (): ChatMessage => ({
   role: 'system',
@@ -18,6 +19,14 @@ const sys = (): ChatMessage => ({
     dataDirectory: '/DD',
     guildCount: 1,
   }),
+});
+
+test('anthropicModelTool preserves run and skill input schemas', () => {
+  const run = anthropicModelTool(RUN_TOOL);
+  const skill = anthropicModelTool(SKILL_TOOL);
+  assert.equal(run.name, 'run');
+  assert.equal(skill.name, 'skill');
+  assert.equal(skill.input_schema, SKILL_TOOL.function.parameters);
 });
 
 test('translate: system blocks lead with billing + CC identity, then tiered body', () => {

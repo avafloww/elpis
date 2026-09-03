@@ -28,9 +28,10 @@ import { MindService } from '../src/store/mind.js';
 import { Scheduler } from '../src/store/scheduler.js';
 import type { Config } from '../src/config.js';
 import { legacyLlmModelRegistry } from '../src/llm/model-registry.js';
-import type { LLM, CompleteResult } from '../src/llm/llm.js';
+import { RUN_TOOL, type LLM, type CompleteResult } from '../src/llm/llm.js';
 import { CONSOLE_CHANNEL_ID, type SandboxDeps } from '../src/types.js';
 import { noopLogger } from '../src/lib/log.js';
+import { ContextResources } from '../src/context-resources.js';
 
 /** A minimal explicit yield: successful empty code plus a long one-shot wake. */
 export const EMPTY_WAKE: CompleteResult = {
@@ -204,7 +205,7 @@ export function makeStubLLM(overrides: Partial<LLM> = {}): LLM {
   return {
     client: {} as unknown as LLM['client'],
     model: 'test',
-    runTool: {} as unknown as LLM['runTool'],
+    runTool: RUN_TOOL,
     complete: () => Promise.resolve(EMPTY_WAKE),
     summarize: () => Promise.resolve('SUMMARY'),
     ...overrides,
@@ -278,6 +279,12 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     },
   });
   const llm = opts.llm ?? makeStubLLM();
+  const contextResources = new ContextResources({
+    dataDirectory: config.paths.dataDirectory,
+    harnessRoot: config.paths.harnessRoot,
+    homeDirectory: null,
+    logger: config.logger,
+  });
   const sent: { channelId: string; text: string }[] = [];
   const agentRef: { current: Agent | null } = { current: null };
   const inboundRef: { current: InboundMessage | null } = { current: null };
@@ -304,6 +311,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
   const sandbox = createSandbox({
     config,
     memory,
+    contextResources,
     logbuf: [],
     get inbound() {
       return inboundRef.current;
@@ -340,6 +348,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     sandbox: { run: ({ code }) => sandbox.run(code) },
     memory,
     mind,
+    contextResources,
     llm,
     tracker,
     compactor,
@@ -370,6 +379,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     config,
     llm,
     memory,
+    contextResources,
     db,
     scheduler,
     mind,

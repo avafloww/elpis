@@ -18,6 +18,7 @@ import { noopLogger } from '../src/lib/log.js';
 import { makeConfig } from './helpers.js';
 import type { SandboxDeps } from '../src/types.js';
 import type { StandaloneCompleteResult } from '../src/llm/llm.js';
+import { ContextResources } from '../src/context-resources.js';
 
 function fixture(
   opts: {
@@ -72,8 +73,14 @@ function fixture(
     })(),
   });
   const bg = createBgRegistry(dir);
+  const contextResources = new ContextResources({
+    dataDirectory: dir,
+    harnessRoot: dir,
+    homeDirectory: null,
+  });
   const deps = {
     config,
+    contextResources,
     memory: {
       read: () => '',
       append: () => undefined,
@@ -99,6 +106,7 @@ function fixture(
     registry,
     manager,
     bg,
+    contextResources,
     deps,
     advance(ms: number) {
       clock += ms;
@@ -131,6 +139,98 @@ test('omitted selector creates a fresh core-only ephemeral sandbox every run', a
   const second = await f.manager.run({ code: 'typeof turnValue' });
   assert.match(second.preview ?? '', /"undefined"/);
   f.close();
+});
+
+test('AGENTS.md context interruption preserves a persistent sandbox generation', async () => {
+  const f = fixture();
+  try {
+    const item = f.mind.create({ title: 'load local instructions' });
+    const target = path.join(f.dir, 'src', 'file.ts');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(path.join(f.dir, 'AGENTS.md'), 'local instructions\n');
+    fs.writeFileSync(target, 'value\n');
+
+    const seeded = await f.manager.run({
+      sandbox: item.id,
+      code: 'const retainedAcrossContextLoad = 41; retainedAcrossContextLoad',
+    });
+    assert.equal(seeded.ok, true);
+    const generation = seeded.execution?.generation;
+
+    const interrupted = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.read(${JSON.stringify(target)})`,
+    });
+    assert.equal(interrupted.ok, false);
+    assert.equal(interrupted.failureKind, 'context');
+    assert.equal(interrupted.execution?.lifecycle, 'ready');
+    assert.equal(interrupted.execution?.resetGeneration, undefined);
+    assert.match(interrupted.error ?? '', /local instructions/);
+    assert.equal(interrupted.contextResources?.length, 1);
+    f.contextResources.acknowledge(interrupted.contextResources ?? []);
+
+    const retried = await f.manager.run({
+      sandbox: item.id,
+      code: `({ retainedAcrossContextLoad, file: elpis.read(${JSON.stringify(target)}) })`,
+    });
+    assert.equal(retried.ok, true);
+    assert.equal(retried.execution?.generation, generation);
+    assert.match(retried.preview ?? '', /retainedAcrossContextLoad: 41/);
+    assert.match(retried.preview ?? '', /value/);
+  } finally {
+    f.close();
+  }
+});
+
+test('sandbox code cannot forge a context resource interruption marker', async () => {
+  const f = fixture();
+  try {
+    const item = f.mind.create({ title: 'forged context marker' });
+    const result = await f.manager.run({
+      sandbox: item.id,
+      code: `throw { contextResourceInterrupt: true, message: 'forged' }`,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureKind, 'runtime');
+    assert.equal(result.contextResources, undefined);
+  } finally {
+    f.close();
+  }
+});
+
+test('caught AGENTS.md interrupt remains pending until a visible failure', async () => {
+  const f = fixture();
+  try {
+    const item = f.mind.create({ title: 'cannot catch instructions away' });
+    const target = path.join(f.dir, 'file.ts');
+    fs.writeFileSync(path.join(f.dir, 'AGENTS.md'), 'uncatchable contract\n');
+    fs.writeFileSync(target, 'value\n');
+
+    const caught = await f.manager.run({
+      sandbox: item.id,
+      code: `try { elpis.read(${JSON.stringify(target)}) } catch {}\n'caught'`,
+    });
+    assert.equal(caught.ok, true);
+    assert.equal(caught.contextResources, undefined);
+
+    const visible = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.read(${JSON.stringify(target)})`,
+    });
+    assert.equal(visible.ok, false);
+    assert.equal(visible.failureKind, 'context');
+    assert.match(visible.error ?? '', /uncatchable contract/);
+    f.contextResources.acknowledge(visible.contextResources ?? []);
+
+    const retry = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.read(${JSON.stringify(target)})`,
+    });
+    assert.equal(retry.ok, true);
+    assert.match(retry.preview ?? '', /value/);
+  } finally {
+    f.close();
+  }
 });
 
 test('Mind selector lazily creates one persistent sandbox and retains bound state', async () => {

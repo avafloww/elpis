@@ -729,6 +729,7 @@ export function createCodexOAuthLLM(
         responsesLite ? shapeCodexResponsesLiteRequest : undefined,
         options.signal,
         options.runTool,
+        options.skillTool,
       );
       stampGeneration(result.message, {
         providerType: 'codex-oauth',

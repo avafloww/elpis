@@ -54,6 +54,7 @@ import {
   type CompleteResult,
   type LLMUsage,
   type RunTool,
+  type SkillTool,
 } from './llm.js';
 
 /** The subset of the Responses `reasoning` item shape we store and replay.
@@ -76,6 +77,21 @@ export interface ReasoningItemParam {
  * run schema's optional `end` doesn't fit strict mode's all-required rule). */
 let cachedRunTool: OpenAI.Responses.FunctionTool | null = null;
 let cachedThinkTool: OpenAI.Responses.FunctionTool | null = null;
+
+export function responsesSkillTool(
+  skillTool: SkillTool,
+): OpenAI.Responses.FunctionTool {
+  return {
+    type: 'function',
+    name: skillTool.function.name,
+    description: skillTool.function.description,
+    parameters: skillTool.function.parameters as unknown as Record<
+      string,
+      unknown
+    >,
+    strict: true,
+  };
+}
 export function responsesRunTool(
   runTool: RunTool = RUN_TOOL,
 ): OpenAI.Responses.FunctionTool {
@@ -125,10 +141,13 @@ export function responsesThinkTool(): OpenAI.Responses.FunctionTool {
 export function responsesModelTools(
   config: Config,
   runTool: RunTool = RUN_TOOL,
+  skillTool?: SkillTool,
 ): OpenAI.Responses.FunctionTool[] {
-  return config.llm.externalThinking
-    ? [responsesRunTool(runTool), responsesThinkTool()]
-    : [responsesRunTool(runTool)];
+  return [
+    responsesRunTool(runTool),
+    ...(skillTool ? [responsesSkillTool(skillTool)] : []),
+    ...(config.llm.externalThinking ? [responsesThinkTool()] : []),
+  ];
 }
 
 /** Convert chat-completions multimodal content parts (the shape Discord ingest
@@ -381,12 +400,13 @@ export function failureToError(error: unknown): Error {
 function buildResponsesParams(
   config: Config,
   prepared: ChatMessage[],
-  runTool: RunTool,
+  tools: OpenAI.Responses.FunctionTool[],
 ): OpenAI.Responses.ResponseCreateParamsNonStreaming {
   const params: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
     model: config.llm.model,
     input: toResponsesInput(prepared),
-    tools: responsesModelTools(config, runTool),
+    tools,
+    parallel_tool_calls: false,
     store: false,
     include: ['reasoning.encrypted_content'],
   };
@@ -442,6 +462,7 @@ export async function streamResponsesComplete(
   transformRequest?: ResponsesRequestTransform,
   outerSignal?: AbortSignal,
   runTool: RunTool = RUN_TOOL,
+  skillTool?: SkillTool,
 ): Promise<CompleteResult> {
   try {
     try {
@@ -458,10 +479,12 @@ export async function streamResponsesComplete(
     config.logger.info(`[llm/responses] stage=enter`);
     const prepareStart = Date.now();
     const prepared = prepareForApi(messages);
+    const modelTools = responsesModelTools(config, runTool, skillTool);
     const charsSent = computeCharsSent(
       prepared,
       true,
       config.llm.externalThinking,
+      modelTools,
     );
     config.logger.info(
       `[llm/responses] stage=prepared | duration=${Date.now() - prepareStart}ms | messages=${prepared.length}`,
@@ -517,7 +540,7 @@ export async function streamResponsesComplete(
 
     try {
       const baseRequest = {
-        ...buildResponsesParams(config, prepared, runTool),
+        ...buildResponsesParams(config, prepared, modelTools),
         ...extraBody,
         stream: true,
       } as unknown as Record<string, unknown>;
