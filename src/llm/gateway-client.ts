@@ -155,13 +155,14 @@ function safeResponseBody(
   return null;
 }
 
-function cancelBody(response: Response): void {
+function cancelBody(response: Response, signal?: AbortSignal): void {
   try {
     const body = safeResponseBody(response);
     if (body !== null) observePromise(intrinsicStreamCancel.call(body));
   } catch {
     // Cancellation is an observation/cleanup path and must not replace the failure.
   }
+  throwIfAborted(signal);
 }
 
 function cancelReader(
@@ -172,12 +173,20 @@ function cancelReader(
   } catch {}
 }
 
+function cancelReaderAndCheckAbort(
+  reader: Pick<ReadableStreamDefaultReader<Uint8Array>, 'cancel'>,
+  signal: AbortSignal | undefined,
+): void {
+  cancelReader(reader);
+  throwIfAborted(signal);
+}
+
 function throwIfResponseAborted(
   response: Response,
   signal: AbortSignal | undefined,
 ): void {
   if (signal?.aborted) {
-    cancelBody(response);
+    cancelBody(response, signal);
     throw abortReason(signal);
   }
 }
@@ -290,7 +299,7 @@ function validateHttpResponse(
       (response.url !== '' && response.url !== target) ||
       response.headers.get('content-encoding') !== null
     ) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throwIfResponseAborted(response, signal);
       boundaryFailure();
     }
@@ -299,7 +308,7 @@ function validateHttpResponse(
   } catch (error) {
     throwIfResponseAborted(response, signal);
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
-    cancelBody(response);
+    cancelBody(response, signal);
     boundaryFailure();
   }
 }
@@ -314,12 +323,12 @@ async function readBoundedBody(
     announced = exactContentLength(response.headers.get('content-length'));
   } catch {
     throwIfResponseAborted(response, signal);
-    cancelBody(response);
+    cancelBody(response, signal);
     return { ok: false };
   }
   if (announced === -1 || (announced !== null && announced > maximum)) {
     throwIfResponseAborted(response, signal);
-    cancelBody(response);
+    cancelBody(response, signal);
     return { ok: false };
   }
 
@@ -332,7 +341,7 @@ async function readBoundedBody(
     throwIfResponseAborted(response, signal);
   } catch {
     throwIfResponseAborted(response, signal);
-    cancelBody(response);
+    cancelBody(response, signal);
     return { ok: false };
   }
 
@@ -359,7 +368,7 @@ async function readBoundedBody(
       try {
         pendingRead = toNativePromise(reader.read());
       } catch {
-        cancelReader(reader);
+        cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
       }
       let item: ReadableStreamReadResult<Uint8Array>;
@@ -369,7 +378,7 @@ async function readBoundedBody(
           : Promise.race([pendingRead, aborted]));
       } catch {
         if (signal?.aborted) throw abortReason(signal);
-        cancelReader(reader);
+        cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
       }
       if (signal?.aborted) throw abortReason(signal);
@@ -377,40 +386,40 @@ async function readBoundedBody(
         const done = item.done;
         if (signal?.aborted) throw abortReason(signal);
         if (done !== true && done !== false) {
-          cancelReader(reader);
+          cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         if (done) break;
         const chunk = item.value;
         if (signal?.aborted) throw abortReason(signal);
         if (!(chunk instanceof Uint8Array)) {
-          cancelReader(reader);
+          cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         const byteLength = chunk.byteLength;
         if (signal?.aborted) throw abortReason(signal);
         if (!Number.isSafeInteger(byteLength) || byteLength > maximum - size) {
-          cancelReader(reader);
+          cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         const copy = Uint8Array.from(chunk);
         if (signal?.aborted) throw abortReason(signal);
         if (copy.byteLength !== byteLength) {
-          cancelReader(reader);
+          cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         size += byteLength;
         chunks.push(copy);
       } catch {
         if (signal?.aborted) throw abortReason(signal);
-        cancelReader(reader);
+        cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
       }
     }
     if (signal?.aborted) throw abortReason(signal);
     if (announced !== null && announced !== size) {
       framingMismatch = true;
-      cancelReader(reader);
+      cancelReaderAndCheckAbort(reader, signal);
     }
   } finally {
     try {
@@ -442,7 +451,7 @@ function requireGatewayErrorHttpShape(
       status < 400 ||
       response.headers.get('content-type') !== 'application/json; charset=utf-8'
     ) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throwIfResponseAborted(response, signal);
       boundaryFailure();
     }
@@ -450,7 +459,7 @@ function requireGatewayErrorHttpShape(
   } catch (error) {
     throwIfResponseAborted(response, signal);
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
-    cancelBody(response);
+    cancelBody(response, signal);
     boundaryFailure();
   }
 }
@@ -609,12 +618,12 @@ export class GatewayLlmClient {
     }
     const response = await fetchOnce(pending, signal);
     if (signal?.aborted) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throw abortReason(signal);
     }
     const status = validateHttpResponse(response, target, signal);
     if (signal?.aborted) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throw abortReason(signal);
     }
     if (status !== 200) return gatewayError(response, status, signal);
@@ -624,13 +633,13 @@ export class GatewayLlmClient {
         response.headers.get('content-type') !==
           'application/json; charset=utf-8'
       ) {
-        cancelBody(response);
+        cancelBody(response, signal);
         boundaryFailure();
       }
     } catch (error) {
       throwIfResponseAborted(response, signal);
       if (error instanceof GatewayLlmClientBoundaryError) throw error;
-      cancelBody(response);
+      cancelBody(response, signal);
       boundaryFailure();
     }
     const result = await readBoundedBody(
@@ -702,12 +711,12 @@ export class GatewayLlmClient {
     }
     const response = await fetchOnce(pending, signal);
     if (signal?.aborted) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throw abortReason(signal);
     }
     const status = validateHttpResponse(response, target, signal);
     if (signal?.aborted) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throw abortReason(signal);
     }
 
@@ -716,11 +725,11 @@ export class GatewayLlmClient {
       encodedProvenance = response.headers.get(LLM_PROXY_HEADERS.provenance);
     } catch {
       throwIfResponseAborted(response, signal);
-      cancelBody(response);
+      cancelBody(response, signal);
       boundaryFailure();
     }
     if (signal?.aborted) {
-      cancelBody(response);
+      cancelBody(response, signal);
       throw abortReason(signal);
     }
     if (encodedProvenance === null)
@@ -730,7 +739,7 @@ export class GatewayLlmClient {
     try {
       provenance = decodeLlmResponseProvenance(encodedProvenance);
     } catch {
-      cancelBody(response);
+      cancelBody(response, signal);
       boundaryFailure();
     }
     if (
@@ -740,7 +749,7 @@ export class GatewayLlmClient {
       provenance.route !== exact.route ||
       provenance.status !== status
     ) {
-      cancelBody(response);
+      cancelBody(response, signal);
       boundaryFailure();
     }
 
@@ -750,7 +759,7 @@ export class GatewayLlmClient {
         headers.append(header.name, header.value);
       const body = response.body;
       if (signal?.aborted) {
-        cancelBody(response);
+        cancelBody(response, signal);
         throw abortReason(signal);
       }
       return new Response(body, {
@@ -759,10 +768,10 @@ export class GatewayLlmClient {
       });
     } catch {
       if (signal?.aborted) {
-        cancelBody(response);
+        cancelBody(response, signal);
         throw abortReason(signal);
       }
-      cancelBody(response);
+      cancelBody(response, signal);
       boundaryFailure();
     }
   }

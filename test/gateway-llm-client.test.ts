@@ -413,6 +413,32 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('makes abort during native body cancellation outrank boundary failure', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('abort during cancellation', 'AbortError');
+    let cancelled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled += 1;
+        controller.abort(reason);
+      },
+    });
+    const boundary = client(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: {
+            [LLM_PROXY_HEADERS.provenance]: 'not+base64url',
+          },
+        }),
+    );
+    await assert.rejects(
+      boundary.dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(cancelled, 1);
+  });
+
   it('rejects malformed redirect and response type metadata before decoding errors', async () => {
     for (const metadata of [
       { redirected: 'false', type: 'basic' },
