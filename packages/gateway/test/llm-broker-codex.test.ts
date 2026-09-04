@@ -33,11 +33,38 @@ test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one sess
   let randomByte = 0x21;
   let hostileCleanup:
     { controller: AbortController; cancellation: Error } | undefined;
+  let refreshStarted!: () => void;
+  let releaseRefresh!: () => void;
+  const started = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  let refreshCalls = 0;
   const store = openGatewayStore(directory, {
     now: () => 1000,
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
     llmFetch: async (input, init) => {
       const request = new Request(input, init);
+      if (request.url === 'https://auth.openai.com/oauth/token') {
+        refreshCalls += 1;
+        refreshStarted();
+        await release;
+        const form = new URLSearchParams(await request.text());
+        assert.equal(
+          form.get('refresh_token'),
+          'synthetic-codex-refresh-cas-expired',
+        );
+        return new Response(
+          JSON.stringify({
+            access_token: 'synthetic-codex-access-cas-refreshed',
+            refresh_token: 'synthetic-codex-refresh-cas-refreshed',
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
       calls.push(request);
       if (hostileCleanup) {
         return new Response(
@@ -205,6 +232,68 @@ test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one sess
     calls[4].headers.get('authorization'),
     'Bearer synthetic-codex-access-rotated',
   );
+
+  store.providers.refreshOAuthCredential({
+    credentialId: credential.credentialId,
+    expectedSecretRevision: 1,
+    accessToken: 'synthetic-codex-access-expired',
+    refreshToken: 'synthetic-codex-refresh-expired',
+    expiresAt: 1000,
+  });
+  const expiredBeforeRotation = dispatchGet(
+    'models',
+    'egr1.VVVVVVVVVVVVVVVVVVVVVV',
+  );
+  store.providers.refreshOAuthCredential({
+    credentialId: credential.credentialId,
+    expectedSecretRevision: 2,
+    accessToken: 'synthetic-codex-access-after-revoke',
+    refreshToken: 'synthetic-codex-refresh-after-revoke',
+    expiresAt: 3000000,
+  });
+  store.providers.revokeModelFromInstance({
+    instanceId,
+    modelRef: model.modelRef,
+  });
+  await assert.rejects(
+    expiredBeforeRotation,
+    /gateway LLM provider dispatch failed/,
+  );
+  assert.equal(refreshCalls, 0);
+  assert.equal(calls.length, 5);
+  store.providers.grantModelToInstance({
+    instanceId,
+    modelRef: model.modelRef,
+  });
+
+  store.providers.refreshOAuthCredential({
+    credentialId: credential.credentialId,
+    expectedSecretRevision: 3,
+    accessToken: 'synthetic-codex-access-cas-expired',
+    refreshToken: 'synthetic-codex-refresh-cas-expired',
+    expiresAt: 1000,
+  });
+  const losesCas = dispatchGet('models', 'egr1.WWWWWWWWWWWWWWWWWWWWWW');
+  await started;
+  store.providers.refreshOAuthCredential({
+    credentialId: credential.credentialId,
+    expectedSecretRevision: 4,
+    accessToken: 'synthetic-codex-access-cas-winner',
+    refreshToken: 'synthetic-codex-refresh-cas-winner',
+    expiresAt: 4000000,
+  });
+  store.providers.revokeModelFromInstance({
+    instanceId,
+    modelRef: model.modelRef,
+  });
+  releaseRefresh();
+  await assert.rejects(losesCas, /gateway LLM provider dispatch failed/);
+  assert.equal(refreshCalls, 1);
+  assert.equal(calls.length, 5);
+  store.providers.grantModelToInstance({
+    instanceId,
+    modelRef: model.modelRef,
+  });
 
   assert.throws(
     () =>

@@ -478,34 +478,35 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
     this.#dispatcher = options.dispatcher;
   }
 
-  #readOAuthSnapshot(
+  #readOAuthRevision(
     credentialId: string,
     providerType: OAuthProviderType,
-  ): OAuthSnapshot {
+  ): number {
     const row = this.#database
       .prepare(
-        `SELECT id AS credential_id, auth_kind, provider_type, oauth_access,
-                oauth_refresh, oauth_expires, oauth_secret_revision,
-                account_identity_json
+        `SELECT oauth_secret_revision
          FROM gateway_provider_credentials
          WHERE id = ? AND provider_type = ? AND auth_kind = 'oauth'`,
       )
-      .get(credentialId, providerType) as AuthorizedRow | undefined;
+      .get(credentialId, providerType) as
+      { oauth_secret_revision: unknown } | undefined;
     if (!row) refused();
-    return oauthSnapshotFromRow(row, providerType);
+    return integer(row.oauth_secret_revision);
   }
 
   #refreshOAuth(snapshot: OAuthSnapshot): Promise<OAuthSnapshot> {
-    const existing = this.#refreshes.get(snapshot.credentialId);
+    const refreshKey = `${snapshot.credentialId}:${snapshot.secretRevision}`;
+    const existing = this.#refreshes.get(refreshKey);
     if (existing) return existing;
     if (this.#draining)
       return Promise.reject(new Error('gateway LLM broker is draining'));
-    const latest = this.#readOAuthSnapshot(
-      snapshot.credentialId,
-      snapshot.providerType,
-    );
-    if (latest.secretRevision !== snapshot.secretRevision)
-      return Promise.resolve(latest);
+    if (
+      this.#readOAuthRevision(snapshot.credentialId, snapshot.providerType) !==
+      snapshot.secretRevision
+    )
+      return Promise.reject(
+        new Error('gateway OAuth authorized revision is stale'),
+      );
 
     let tracked!: Promise<OAuthSnapshot>;
     const refresh = (async () => {
@@ -533,23 +534,15 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
           secretRevision: receipt.secretRevision,
           credentials: Object.freeze(credentials),
         });
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message === 'gateway provider OAuth refresh conflict'
-        )
-          return this.#readOAuthSnapshot(
-            snapshot.credentialId,
-            snapshot.providerType,
-          );
+      } catch {
         throw new Error('gateway OAuth credential update failed');
       }
     })();
     tracked = refresh.finally(() => {
-      if (this.#refreshes.get(snapshot.credentialId) === tracked)
-        this.#refreshes.delete(snapshot.credentialId);
+      if (this.#refreshes.get(refreshKey) === tracked)
+        this.#refreshes.delete(refreshKey);
     });
-    this.#refreshes.set(snapshot.credentialId, tracked);
+    this.#refreshes.set(refreshKey, tracked);
     void tracked.catch(() => undefined);
     return tracked;
   }
