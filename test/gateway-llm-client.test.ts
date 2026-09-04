@@ -1831,6 +1831,49 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('rejects unknown error codes despite stream Set poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Set.prototype, 'has');
+    assert.ok(descriptor && 'value' in descriptor);
+    const nativeHas = descriptor.value as Set<unknown>['has'];
+    let hostileCalls = 0;
+    const malformed = `{"format":"${LLM_PROXY_FORMATS.error}","code":"evil"}`;
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(Set.prototype, 'has', {
+              ...descriptor,
+              value(this: Set<unknown>, value: unknown) {
+                if (value === 'evil') {
+                  hostileCalls += 1;
+                  Object.defineProperty(Set.prototype, 'has', descriptor);
+                  return true;
+                }
+                return Reflect.apply(nativeHas, this, [value]);
+              },
+            });
+            controller.enqueue(Buffer.from(malformed));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Set.prototype, 'has', descriptor);
+    }
+  });
+
   it('strictly exposes canonical Gateway errors and rejects oversized errors', async () => {
     const canonical = client(async (_target, init) => {
       const request = decodeLlmProxyRequest(init.body as string);

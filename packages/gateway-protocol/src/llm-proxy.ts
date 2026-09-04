@@ -21,6 +21,12 @@ const intrinsicJsonStringify = JSON.stringify;
 const intrinsicObjectCreate = Object.create;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectKeys = Object.keys;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicSetHas = Set.prototype.has;
+
+function setHas(set: Set<unknown>, value: unknown): boolean {
+  return intrinsicReflectApply(intrinsicSetHas, set, [value]);
+}
 
 export const LLM_PROXY_FORMATS = Object.freeze({
   catalog: 'elpis-gateway-llm-catalog-v1',
@@ -320,7 +326,7 @@ function generationValue(value: unknown): LlmTargetGeneration {
   return value;
 }
 function routeValue(value: unknown): LlmProxyRoute {
-  if (typeof value !== 'string' || !routeSet.has(value)) invalid();
+  if (typeof value !== 'string' || !setHas(routeSet, value)) invalid();
   return value as LlmProxyRoute;
 }
 function bodyText(body: LlmProxyBody, maximum: number): string {
@@ -451,7 +457,7 @@ function normalizeMemoryRequest(value: unknown): LlmProxyRequest {
     invalid();
   if (payloadDigest(payload) !== input.sha256) invalid();
   const route = routeValue(input.route);
-  if (getRouteSet.has(route) && payload.byteLength !== 0) invalid();
+  if (setHas(getRouteSet, route) && payload.byteLength !== 0) invalid();
   const transport = normalizeTransport(input.transport);
   const codexRoute =
     route === 'codex/responses' ||
@@ -586,12 +592,12 @@ function normalizeCatalogModel(value: unknown): LlmProxyCatalogModel {
   ]);
   if (
     typeof input.providerType !== 'string' ||
-    !providerTypeSet.has(input.providerType)
+    !setHas(providerTypeSet, input.providerType)
   )
     invalid();
   if (
     input.toolTier !== null &&
-    (typeof input.toolTier !== 'string' || !toolTierSet.has(input.toolTier))
+    (typeof input.toolTier !== 'string' || !setHas(toolTierSet, input.toolTier))
   )
     invalid();
   if (typeof input.externalThinking !== 'boolean') invalid();
@@ -671,7 +677,7 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
     providerTypes.set(providerId, models[i].providerType);
     const tier = models[i].toolTier;
     if (tier !== null) {
-      if (toolTiers.has(tier)) invalid();
+      if (setHas(toolTiers, tier)) invalid();
       toolTiers.add(tier);
     }
   }
@@ -737,7 +743,7 @@ export function authorizeLlmProxyRequest(
     if (!model.allowedRoutes.includes(normalizedRequest.route))
       return authorizationFailure('route_not_allowed');
     if (
-      !getRouteSet.has(normalizedRequest.route) &&
+      !setHas(getRouteSet, normalizedRequest.route) &&
       canonicalPayloadModel(normalizedRequest.payload) !== model.model
     )
       return authorizationFailure('forbidden');
@@ -754,7 +760,7 @@ function normalizeError(value: unknown): LlmProxyErrorEnvelope {
       : ['format', 'code', 'requestId'],
   );
   exactFormat(input.format, LLM_PROXY_FORMATS.error);
-  if (typeof input.code !== 'string' || !errorCodeSet.has(input.code))
+  if (typeof input.code !== 'string' || !setHas(errorCodeSet, input.code))
     invalid();
   if (input.requestId === undefined)
     return Object.freeze({
@@ -796,7 +802,7 @@ export function decodeLlmProxyStaleTarget(
 export function isSafeLlmResponseHeader(
   value: unknown,
 ): value is SafeLlmResponseHeader {
-  return typeof value === 'string' && safeResponseHeaderSet.has(value);
+  return typeof value === 'string' && setHas(safeResponseHeaderSet, value);
 }
 function normalizeResponseHeaders(
   value: unknown,
