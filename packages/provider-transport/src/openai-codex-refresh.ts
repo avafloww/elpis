@@ -149,7 +149,7 @@ async function readBoundedResponse(
     /^\d+$/.test(declaredLength) &&
     Number(declaredLength) > OPENAI_CODEX_TOKEN_RESPONSE_MAX_BYTES
   ) {
-    await response.body?.cancel(RESPONSE_TOO_LARGE).catch(() => undefined);
+    void response.body?.cancel(RESPONSE_TOO_LARGE).catch(() => undefined);
     throw RESPONSE_TOO_LARGE;
   }
 

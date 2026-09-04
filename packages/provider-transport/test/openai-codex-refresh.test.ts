@@ -161,6 +161,43 @@ test('refresh releases an oversized declared response before rejecting it', asyn
   assert.equal(cancelled, true);
 });
 
+test('non-settling response cancellation cannot defeat the refresh timeout', async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const controller = new AbortController();
+  let cancellationStarted = false;
+  AbortSignal.timeout = () => controller.signal;
+  try {
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancellationStarted = true;
+        return new Promise<void>(() => {});
+      },
+    });
+    const pending = refreshOpenAICodexToken('refresh-secret', {
+      fetch: async () =>
+        new Response(body, { headers: { 'content-length': '1048577' } }),
+      now: () => 0,
+    });
+    for (let index = 0; index < 10 && !cancellationStarted; index += 1)
+      await Promise.resolve();
+    assert.equal(cancellationStarted, true);
+    controller.abort();
+    const outcome = await Promise.race([
+      pending.then(
+        () => 'resolved',
+        (error: unknown) =>
+          error instanceof Error ? error.message : String(error),
+      ),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('still-pending'), 50),
+      ),
+    ]);
+    assert.equal(outcome, 'OpenAI Codex token refresh timed out');
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
 test('refresh validates JSON, tokens, expiry, and optional identity', async (t) => {
   const invalid: Array<[string, string]> = [
     ['not JSON', 'not-json'],
