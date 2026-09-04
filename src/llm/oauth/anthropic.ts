@@ -16,15 +16,14 @@
 // refresh health (ANTHROPIC_OAUTH_GRANT_TTL_MS) — matching Claude Code's
 // monthly re-login. Only a fresh login recovers it.
 
+import {
+  ANTHROPIC_OAUTH_CLIENT_ID,
+  refreshAnthropicToken as refreshAnthropicTokenTransport,
+} from '@elpis/provider-transport';
 import { generatePkce, randomState, type Pkce } from './pkce.js';
 import type { OAuthCredentials } from './store.js';
 
-// Claude Code's public OAuth client id (base64 to keep it out of plain grep,
-// matching upstream; it is not a secret — it ships in every Claude Code build).
-const CLIENT_ID = Buffer.from(
-  'OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl',
-  'base64',
-).toString('utf8');
+const CLIENT_ID = ANTHROPIC_OAUTH_CLIENT_ID;
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 const TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
 const BOOTSTRAP_URL = 'https://api.anthropic.com/api/claude_cli/bootstrap';
@@ -36,9 +35,8 @@ export const ANTHROPIC_REDIRECT_URI =
 // account/session management. Byte-identical to Claude Code's request.
 const SCOPES =
   'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
-/** Refresh sends these; the initial code exchange omits them (matches CC). */
-const REFRESH_BETA = 'oauth-2025-04-20';
-const REFRESH_USER_AGENT = 'anthropic-sdk-typescript/0.94.0 userOAuthProvider';
+/** Bootstrap identity lookup metadata; the code exchange omits it. */
+const BOOTSTRAP_BETA = 'oauth-2025-04-20';
 const BOOTSTRAP_MODEL = 'claude-opus-4-8';
 
 /** Absolute lifetime of an Anthropic OAuth grant family, anchored at the
@@ -106,7 +104,7 @@ async function fetchBootstrapIdentity(
     headers: {
       Accept: 'application/json, text/plain, */*',
       Authorization: `Bearer ${accessToken}`,
-      'anthropic-beta': REFRESH_BETA,
+      'anthropic-beta': BOOTSTRAP_BETA,
     },
     signal: AbortSignal.timeout(30_000),
   });
@@ -218,23 +216,11 @@ export async function exchangeAnthropicCode(
 /** Refresh an access token. The org is fixed at login and deliberately not
  * re-resolved here (the store merges this over the stored record, preserving
  * org/authorizedAt). */
-export async function refreshAnthropicToken(
+export function refreshAnthropicToken(
   refreshToken: string,
 ): Promise<OAuthCredentials> {
-  const data = await postJson(
-    {
-      grant_type: 'refresh_token',
-      client_id: CLIENT_ID,
-      refresh_token: refreshToken,
-    },
-    { 'anthropic-beta': REFRESH_BETA, 'User-Agent': REFRESH_USER_AGENT },
-  );
-  const id = await resolveIdentity(data, false);
-  return {
-    access: data.access_token,
-    refresh: data.refresh_token || refreshToken,
-    expires: expiresAt(data.expires_in),
-    accountId: id.accountId,
-    email: id.email,
-  };
+  return refreshAnthropicTokenTransport(refreshToken, {
+    fetch,
+    now: () => Date.now(),
+  });
 }
