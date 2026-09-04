@@ -8,9 +8,11 @@ import {
 import {
   OAuthCredentialManager,
   createAnthropicOAuthTransport,
+  createCodexOAuthFetch,
   createOpenAICompatibleFetch,
   oauthCredentialsEqual,
   refreshAnthropicToken,
+  refreshOpenAICodexToken,
   type OAuthCredentials,
   type OAuthCredentialStorage,
 } from '@elpis/provider-transport';
@@ -28,6 +30,9 @@ export const GATEWAY_LLM_WIRE_GRAMMARS = Object.freeze({
   responses: 'openai-compatible-responses-v1',
   'chat/completions': 'openai-compatible-chat-completions-v1',
   messages: 'anthropic-oauth-messages-v1',
+  codexResponses: 'codex-oauth-responses-v1',
+  codexModels: 'codex-oauth-backend-models-v1',
+  models: 'codex-oauth-models-v1',
 } as const);
 
 type BrokerFetch = typeof globalThis.fetch;
@@ -219,6 +224,39 @@ function assertAnthropicGrammar(
     refused();
 }
 
+function assertCodexGrammar(
+  row: AuthorizedRow,
+  model: LlmProxyCatalogModel,
+): void {
+  let grammar: unknown;
+  try {
+    grammar = JSON.parse(text(row.wire_grammar_json)) as unknown;
+  } catch {
+    refused();
+  }
+  if (grammar === null || typeof grammar !== 'object' || Array.isArray(grammar))
+    refused();
+  const record = grammar as Record<string, unknown>;
+  const keys = Object.keys(record).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const routes = [...model.allowedRoutes].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  if (!arraysEqual(routes, keys)) refused();
+  for (const route of routes) {
+    const expected =
+      route === 'codex/responses'
+        ? GATEWAY_LLM_WIRE_GRAMMARS.codexResponses
+        : route === 'codex/models'
+          ? GATEWAY_LLM_WIRE_GRAMMARS.codexModels
+          : route === 'models'
+            ? GATEWAY_LLM_WIRE_GRAMMARS.models
+            : null;
+    if (expected === null || record[route] !== expected) refused();
+  }
+}
+
 function identityFields(value: unknown): Partial<OAuthCredentials> {
   let parsed: unknown;
   try {
@@ -384,13 +422,16 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
         credentialId,
         providerType,
       ),
-      refresh: (refreshToken) => {
-        if (providerType !== 'anthropic-oauth') refused();
-        return refreshAnthropicToken(refreshToken, {
-          fetch: this.#fetch,
-          now: this.#now,
-        });
-      },
+      refresh: (refreshToken) =>
+        providerType === 'anthropic-oauth'
+          ? refreshAnthropicToken(refreshToken, {
+              fetch: this.#fetch,
+              now: this.#now,
+            })
+          : refreshOpenAICodexToken(refreshToken, {
+              fetch: this.#fetch,
+              now: this.#now,
+            }),
       now: this.#now,
     });
     this.#oauthManagers.set(credentialId, manager);
@@ -418,14 +459,26 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
     let row: AuthorizedRow;
     try {
       row = authorize(this.#database, instanceId, request, model);
-      if (request.transport.kind !== 'none') refused();
       if (row.provider_type === 'openai-compatible') {
-        if (row.auth_kind !== 'api-key') refused();
+        if (row.auth_kind !== 'api-key' || request.transport.kind !== 'none')
+          refused();
         assertOpenAiGrammar(row, model);
       } else if (row.provider_type === 'anthropic-oauth') {
-        if (row.auth_kind !== 'oauth' || request.route !== 'messages')
+        if (
+          row.auth_kind !== 'oauth' ||
+          request.transport.kind !== 'none' ||
+          request.route !== 'messages'
+        )
           refused();
         assertAnthropicGrammar(row, model);
+      } else if (row.provider_type === 'codex-oauth') {
+        if (
+          row.auth_kind !== 'oauth' ||
+          request.transport.kind !== 'codex' ||
+          row.base_url !== 'https://chatgpt.com/backend-api'
+        )
+          refused();
+        assertCodexGrammar(row, model);
       } else {
         refused();
       }
@@ -454,16 +507,48 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
           }),
         );
       }
-      const transport = createAnthropicOAuthTransport({
-        baseUrl,
-        credentials: this.#oauthManager(row, 'anthropic-oauth'),
+      if (row.provider_type === 'anthropic-oauth') {
+        const transport = createAnthropicOAuthTransport({
+          baseUrl,
+          credentials: this.#oauthManager(row, 'anthropic-oauth'),
+          fetch: this.#fetch,
+          dispatcher: this.#dispatcher,
+        });
+        return exchangeFromResponse(
+          await transport({
+            body: payload,
+            stream: streamFromPayload(payload),
+            signal,
+          }),
+        );
+      }
+      if (request.transport.kind !== 'codex') refused();
+      const sessionId = request.transport.sessionId;
+      const route = request.route;
+      const target =
+        route === 'codex/responses'
+          ? 'https://chatgpt.com/backend-api/codex/responses'
+          : route === 'codex/models'
+            ? 'https://chatgpt.com/backend-api/codex/models'
+            : route === 'models'
+              ? 'https://chatgpt.com/backend-api/models'
+              : null;
+      if (target === null) refused();
+      const providerFetch = createCodexOAuthFetch({
+        credentials: this.#oauthManager(row, 'codex-oauth'),
+        sessionId: () => sessionId,
+        preserveTransportHeaders: false,
         fetch: this.#fetch,
         dispatcher: this.#dispatcher,
       });
       return exchangeFromResponse(
-        await transport({
-          body: payload,
-          stream: streamFromPayload(payload),
+        await providerFetch(target, {
+          method: route === 'codex/responses' ? 'POST' : 'GET',
+          headers:
+            route === 'codex/responses'
+              ? { 'content-type': 'application/json' }
+              : undefined,
+          body: route === 'codex/responses' ? Buffer.from(payload) : undefined,
           signal,
         }),
       );
