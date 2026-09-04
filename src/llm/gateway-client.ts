@@ -73,6 +73,11 @@ export class GatewayLlmClientBoundaryError extends Error {
 type ActiveAuthority = Readonly<{ endpoint: string; authorization: string }>;
 type BodyRead =
   { readonly ok: true; readonly body: Uint8Array } | { readonly ok: false };
+type ValidatedHttpResponse = Readonly<{
+  status: number;
+  headers: Headers;
+  body: ReadableStream<Uint8Array> | null;
+}>;
 
 function boundaryFailure(): never {
   throw new GatewayLlmClientBoundaryError();
@@ -90,13 +95,36 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicHeadersGet = Headers.prototype.get;
 const intrinsicReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
+const intrinsicReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReaderReleaseLock =
   ReadableStreamDefaultReader.prototype.releaseLock;
 const intrinsicStreamCancel = ReadableStream.prototype.cancel;
+const intrinsicStreamGetReader = ReadableStream.prototype.getReader;
 const intrinsicResponseBody = Object.getOwnPropertyDescriptor(
   Response.prototype,
   'body',
+)?.get;
+const intrinsicResponseHeaders = Object.getOwnPropertyDescriptor(
+  Response.prototype,
+  'headers',
+)?.get;
+const intrinsicResponseRedirected = Object.getOwnPropertyDescriptor(
+  Response.prototype,
+  'redirected',
+)?.get;
+const intrinsicResponseStatus = Object.getOwnPropertyDescriptor(
+  Response.prototype,
+  'status',
+)?.get;
+const intrinsicResponseType = Object.getOwnPropertyDescriptor(
+  Response.prototype,
+  'type',
+)?.get;
+const intrinsicResponseUrl = Object.getOwnPropertyDescriptor(
+  Response.prototype,
+  'url',
 )?.get;
 
 function toNativePromise<T>(value: T | PromiseLike<T>): Promise<T> {
@@ -165,6 +193,28 @@ function cancelBody(response: Response, signal?: AbortSignal): void {
   throwIfAborted(signal);
 }
 
+function cancelHttpResponse(
+  response: ValidatedHttpResponse,
+  signal?: AbortSignal,
+): void {
+  try {
+    if (response.body !== null)
+      observePromise(intrinsicStreamCancel.call(response.body));
+  } catch {}
+  throwIfAborted(signal);
+}
+
+function throwIfHttpResponseAborted(
+  response: ValidatedHttpResponse,
+  signal: AbortSignal | undefined,
+): void {
+  if (signal?.aborted) cancelHttpResponse(response, signal);
+}
+
+function header(response: ValidatedHttpResponse, name: string): string | null {
+  return intrinsicHeadersGet.call(response.headers, name);
+}
+
 function cancelReader(
   reader: Pick<ReadableStreamDefaultReader<Uint8Array>, 'cancel'>,
 ): void {
@@ -186,7 +236,7 @@ function throwIfResponseAborted(
   signal: AbortSignal | undefined,
 ): void {
   if (signal?.aborted) {
-    cancelBody(response, signal);
+    cancelHttpResponse(response, signal);
     throw abortReason(signal);
   }
 }
@@ -284,11 +334,26 @@ function validateHttpResponse(
   response: Response,
   target: string,
   signal: AbortSignal | undefined,
-): number {
+): ValidatedHttpResponse {
   try {
-    const status = response.status;
-    const redirected = response.redirected;
-    const type = response.type;
+    if (
+      intrinsicResponseBody === undefined ||
+      intrinsicResponseHeaders === undefined ||
+      intrinsicResponseRedirected === undefined ||
+      intrinsicResponseStatus === undefined ||
+      intrinsicResponseType === undefined ||
+      intrinsicResponseUrl === undefined
+    )
+      boundaryFailure();
+    const status = intrinsicResponseStatus.call(response) as number;
+    const redirected = intrinsicResponseRedirected.call(response) as boolean;
+    const type = intrinsicResponseType.call(response) as ResponseType;
+    const url = intrinsicResponseUrl.call(response) as string;
+    const headers = intrinsicResponseHeaders.call(response) as Headers;
+    const body = intrinsicResponseBody.call(
+      response,
+    ) as ReadableStream<Uint8Array> | null;
+    const validated = Object.freeze({ status, headers, body });
     if (
       !Number.isInteger(status) ||
       status < 200 ||
@@ -296,15 +361,14 @@ function validateHttpResponse(
       typeof redirected !== 'boolean' ||
       redirected ||
       (type !== 'basic' && type !== 'cors' && type !== 'default') ||
-      (response.url !== '' && response.url !== target) ||
-      response.headers.get('content-encoding') !== null
+      (url !== '' && url !== target) ||
+      header(validated, 'content-encoding') !== null
     ) {
-      cancelBody(response, signal);
-      throwIfResponseAborted(response, signal);
+      cancelHttpResponse(validated, signal);
       boundaryFailure();
     }
-    throwIfResponseAborted(response, signal);
-    return status;
+    throwIfHttpResponseAborted(validated, signal);
+    return validated;
   } catch (error) {
     throwIfResponseAborted(response, signal);
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
@@ -314,34 +378,36 @@ function validateHttpResponse(
 }
 
 async function readBoundedBody(
-  response: Response,
+  response: ValidatedHttpResponse,
   maximum: number,
   signal: AbortSignal | undefined,
 ): Promise<BodyRead> {
   let announced: number | null;
   try {
-    announced = exactContentLength(response.headers.get('content-length'));
+    announced = exactContentLength(header(response, 'content-length'));
   } catch {
-    throwIfResponseAborted(response, signal);
-    cancelBody(response, signal);
+    throwIfHttpResponseAborted(response, signal);
+    cancelHttpResponse(response, signal);
     return { ok: false };
   }
   if (announced === -1 || (announced !== null && announced > maximum)) {
-    throwIfResponseAborted(response, signal);
-    cancelBody(response, signal);
+    throwIfHttpResponseAborted(response, signal);
+    cancelHttpResponse(response, signal);
     return { ok: false };
   }
 
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
     const body = response.body;
-    throwIfResponseAborted(response, signal);
+    throwIfHttpResponseAborted(response, signal);
     if (body === null) return { ok: false };
-    reader = body.getReader();
-    throwIfResponseAborted(response, signal);
+    reader = intrinsicStreamGetReader.call(
+      body,
+    ) as ReadableStreamDefaultReader<Uint8Array>;
+    throwIfHttpResponseAborted(response, signal);
   } catch {
-    throwIfResponseAborted(response, signal);
-    cancelBody(response, signal);
+    throwIfHttpResponseAborted(response, signal);
+    cancelHttpResponse(response, signal);
     return { ok: false };
   }
 
@@ -366,7 +432,7 @@ async function readBoundedBody(
       if (signal?.aborted) throw abortReason(signal);
       let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>>;
       try {
-        pendingRead = toNativePromise(reader.read());
+        pendingRead = toNativePromise(intrinsicReaderRead.call(reader));
       } catch {
         cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
@@ -442,30 +508,30 @@ async function readBoundedBody(
 }
 
 function requireGatewayErrorHttpShape(
-  response: Response,
+  response: ValidatedHttpResponse,
   status: number,
   signal: AbortSignal | undefined,
 ): void {
   try {
     if (
       status < 400 ||
-      response.headers.get('content-type') !== 'application/json; charset=utf-8'
+      header(response, 'content-type') !== 'application/json; charset=utf-8'
     ) {
-      cancelBody(response, signal);
-      throwIfResponseAborted(response, signal);
+      cancelHttpResponse(response, signal);
+      throwIfHttpResponseAborted(response, signal);
       boundaryFailure();
     }
-    throwIfResponseAborted(response, signal);
+    throwIfHttpResponseAborted(response, signal);
   } catch (error) {
-    throwIfResponseAborted(response, signal);
+    throwIfHttpResponseAborted(response, signal);
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
-    cancelBody(response, signal);
+    cancelHttpResponse(response, signal);
     boundaryFailure();
   }
 }
 
 async function gatewayError(
-  response: Response,
+  response: ValidatedHttpResponse,
   status: number,
   signal: AbortSignal | undefined,
   expectedRequestId?: RequestId,
@@ -477,7 +543,7 @@ async function gatewayError(
     signal,
   );
   if (!result.ok) {
-    throwIfResponseAborted(response, signal);
+    throwIfHttpResponseAborted(response, signal);
     boundaryFailure();
   }
   try {
@@ -616,30 +682,27 @@ export class GatewayLlmClient {
       if (signal?.aborted) throw abortReason(signal);
       boundaryFailure();
     }
-    const response = await fetchOnce(pending, signal);
+    const fetched = await fetchOnce(pending, signal);
     if (signal?.aborted) {
-      cancelBody(response, signal);
+      cancelBody(fetched, signal);
       throw abortReason(signal);
     }
-    const status = validateHttpResponse(response, target, signal);
-    if (signal?.aborted) {
-      cancelBody(response, signal);
-      throw abortReason(signal);
-    }
-    if (status !== 200) return gatewayError(response, status, signal);
+    const response = validateHttpResponse(fetched, target, signal);
+    throwIfHttpResponseAborted(response, signal);
+    if (response.status !== 200)
+      return gatewayError(response, response.status, signal);
     try {
       if (
-        response.headers.get(LLM_PROXY_HEADERS.provenance) !== null ||
-        response.headers.get('content-type') !==
-          'application/json; charset=utf-8'
+        header(response, LLM_PROXY_HEADERS.provenance) !== null ||
+        header(response, 'content-type') !== 'application/json; charset=utf-8'
       ) {
-        cancelBody(response, signal);
+        cancelHttpResponse(response, signal);
         boundaryFailure();
       }
     } catch (error) {
-      throwIfResponseAborted(response, signal);
+      throwIfHttpResponseAborted(response, signal);
       if (error instanceof GatewayLlmClientBoundaryError) throw error;
-      cancelBody(response, signal);
+      cancelHttpResponse(response, signal);
       boundaryFailure();
     }
     const result = await readBoundedBody(
@@ -648,7 +711,7 @@ export class GatewayLlmClient {
       signal,
     );
     if (!result.ok) {
-      throwIfResponseAborted(response, signal);
+      throwIfHttpResponseAborted(response, signal);
       boundaryFailure();
     }
     try {
@@ -709,37 +772,34 @@ export class GatewayLlmClient {
       if (signal?.aborted) throw abortReason(signal);
       boundaryFailure();
     }
-    const response = await fetchOnce(pending, signal);
+    const fetched = await fetchOnce(pending, signal);
     if (signal?.aborted) {
-      cancelBody(response, signal);
+      cancelBody(fetched, signal);
       throw abortReason(signal);
     }
-    const status = validateHttpResponse(response, target, signal);
-    if (signal?.aborted) {
-      cancelBody(response, signal);
-      throw abortReason(signal);
-    }
+    const response = validateHttpResponse(fetched, target, signal);
+    throwIfHttpResponseAborted(response, signal);
 
     let encodedProvenance: string | null;
     try {
-      encodedProvenance = response.headers.get(LLM_PROXY_HEADERS.provenance);
+      encodedProvenance = header(response, LLM_PROXY_HEADERS.provenance);
     } catch {
-      throwIfResponseAborted(response, signal);
-      cancelBody(response, signal);
+      throwIfHttpResponseAborted(response, signal);
+      cancelHttpResponse(response, signal);
       boundaryFailure();
     }
     if (signal?.aborted) {
-      cancelBody(response, signal);
+      cancelHttpResponse(response, signal);
       throw abortReason(signal);
     }
     if (encodedProvenance === null)
-      return gatewayError(response, status, signal, rid);
+      return gatewayError(response, response.status, signal, rid);
 
     let provenance: ReturnType<typeof decodeLlmResponseProvenance>;
     try {
       provenance = decodeLlmResponseProvenance(encodedProvenance);
     } catch {
-      cancelBody(response, signal);
+      cancelHttpResponse(response, signal);
       boundaryFailure();
     }
     if (
@@ -747,9 +807,9 @@ export class GatewayLlmClient {
       provenance.modelRef !== model.modelRef ||
       provenance.targetGeneration !== model.targetGeneration ||
       provenance.route !== exact.route ||
-      provenance.status !== status
+      provenance.status !== response.status
     ) {
-      cancelBody(response, signal);
+      cancelHttpResponse(response, signal);
       boundaryFailure();
     }
 
@@ -759,7 +819,7 @@ export class GatewayLlmClient {
         headers.append(header.name, header.value);
       const body = response.body;
       if (signal?.aborted) {
-        cancelBody(response, signal);
+        cancelHttpResponse(response, signal);
         throw abortReason(signal);
       }
       return new Response(body, {
@@ -768,10 +828,10 @@ export class GatewayLlmClient {
       });
     } catch {
       if (signal?.aborted) {
-        cancelBody(response, signal);
+        cancelHttpResponse(response, signal);
         throw abortReason(signal);
       }
-      cancelBody(response, signal);
+      cancelHttpResponse(response, signal);
       boundaryFailure();
     }
   }

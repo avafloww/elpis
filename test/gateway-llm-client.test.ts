@@ -413,6 +413,108 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('decodes Gateway errors from the intrinsic Response body, not an own override', async () => {
+    const actual = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          Buffer.from(proxyError('internal_error', REQUEST_ID)),
+        );
+        controller.close();
+      },
+    });
+    const spoof = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          Buffer.from(proxyError('upstream_unavailable', REQUEST_ID)),
+        );
+        controller.close();
+      },
+    });
+    const response = new Response(actual, {
+      status: 500,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+    Object.defineProperty(response, 'body', { value: spoof });
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof GatewayLlmClientError);
+        assert.equal(error.code, 'internal_error');
+        return true;
+      },
+    );
+  });
+
+  it('relays the intrinsic Response body, not an own override', async () => {
+    const actualBytes = Buffer.from('actual provider bytes');
+    const spoofBytes = Buffer.from('spoof provider bytes');
+    const actual = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(actualBytes);
+        controller.close();
+      },
+    });
+    const spoof = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(spoofBytes);
+        controller.close();
+      },
+    });
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const response = new Response(actual, {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        },
+      });
+      Object.defineProperty(response, 'body', { value: spoof });
+      return response;
+    });
+    const relayed = await boundary.dispatch(dispatchInput());
+    assert.deepEqual(Buffer.from(await relayed.arrayBuffer()), actualBytes);
+  });
+
+  it('ignores an own body override on a body-forbidden native Response', async () => {
+    let spoofCancelled = 0;
+    const spoof = new ReadableStream<Uint8Array>({
+      cancel() {
+        spoofCancelled += 1;
+      },
+    });
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const response = new Response(null, {
+        status: 204,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 204,
+            headers: [],
+          }),
+        },
+      });
+      Object.defineProperty(response, 'body', { value: spoof });
+      return response;
+    });
+    const relayed = await boundary.dispatch(dispatchInput());
+    assert.equal(relayed.status, 204);
+    assert.equal(relayed.body, null);
+    assert.equal(spoofCancelled, 0);
+  });
+
   it('makes abort during native body cancellation outrank boundary failure', async () => {
     const controller = new AbortController();
     const reason = new DOMException('abort during cancellation', 'AbortError');
@@ -548,30 +650,16 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(nanCancelled, 1);
   });
 
-  it('makes an abort during response status inspection win and cancel the body', async () => {
+  it('uses intrinsic status instead of an own Response override', async () => {
     const controller = new AbortController();
-    const reason = new DOMException(
-      'cancelled during response inspection',
-      'AbortError',
-    );
+    const reason = new DOMException('own status getter ran', 'AbortError');
     const secret = firstCredential.token + '@' + ENDPOINT;
-    let cancelled = 0;
+    let getterCalls = 0;
     const boundary = client(async (_target, init) => {
       const request = decodeLlmProxyRequest(init.body as string);
-      const body = new ReadableStream<Uint8Array>({
-        cancel() {
-          cancelled += 1;
-        },
-      });
-      return {
-        redirected: false,
-        type: 'basic',
-        url: '',
-        get status() {
-          controller.abort(reason);
-          throw new Error(secret);
-        },
-        headers: new Headers({
+      const response = new Response('actual provider bytes', {
+        status: 200,
+        headers: {
           [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
             format: LLM_PROXY_FORMATS.responseProvenance,
             requestId: request.requestId,
@@ -581,41 +669,51 @@ describe('GatewayLlmClient request boundary', () => {
             status: 200,
             headers: [],
           }),
-        }),
-        body,
-      } as unknown as Response;
+        },
+      });
+      Object.defineProperty(response, 'status', {
+        get() {
+          getterCalls += 1;
+          controller.abort(reason);
+          throw new Error(secret);
+        },
+      });
+      return response;
     });
-    await assert.rejects(
-      boundary.dispatch(dispatchInput(), controller.signal),
-      (error) => error === reason,
+    const response = await boundary.dispatch(
+      dispatchInput(),
+      controller.signal,
     );
-    await Promise.resolve();
-    assert.equal(cancelled, 1);
+    assert.equal(await response.text(), 'actual provider bytes');
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(getterCalls, 0);
   });
 
-  it('makes an abort from a null body getter outrank boundary failure', async () => {
+  it('uses intrinsic body instead of an own Response getter', async () => {
     const controller = new AbortController();
-    const reason = new DOMException(
-      'cancelled during body inspection',
-      'AbortError',
-    );
-    const response = {
-      redirected: false,
-      type: 'basic',
-      url: '',
+    const reason = new DOMException('own body getter ran', 'AbortError');
+    let getterCalls = 0;
+    const response = new Response(proxyError('internal_error', REQUEST_ID), {
       status: 500,
-      headers: new Headers({
-        'content-type': 'application/json; charset=utf-8',
-      }),
-      get body() {
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+    Object.defineProperty(response, 'body', {
+      get() {
+        getterCalls += 1;
         controller.abort(reason);
         return null;
       },
-    } as unknown as Response;
+    });
     await assert.rejects(
       client(async () => response).dispatch(dispatchInput(), controller.signal),
-      (error) => error === reason,
+      (error: unknown) => {
+        assert.ok(error instanceof GatewayLlmClientError);
+        assert.equal(error.code, 'internal_error');
+        return true;
+      },
     );
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(getterCalls, 0);
   });
 
   it('rejects non-boolean completion and safely assimilates cancellation', async () => {
@@ -663,90 +761,71 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(constructorReads, 0);
   });
 
-  it('makes a synchronous read abort win over fulfilled read results', async () => {
-    const controller = new AbortController();
-    const reason = new DOMException('cancelled during read', 'AbortError');
-    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
-    let reads = 0;
-    let cancelled = 0;
-    const reader = {
-      read() {
-        reads += 1;
-        if (reads === 1) {
-          controller.abort(reason);
-          return Promise.resolve({ done: false, value: canonical });
-        }
-        return Promise.resolve({ done: true, value: undefined });
-      },
-      cancel() {
-        cancelled += 1;
-        return Promise.resolve();
-      },
-      releaseLock() {},
-    };
-    const response = {
-      redirected: false,
-      type: 'basic',
-      url: '',
-      status: 500,
-      headers: new Headers({
-        'content-type': 'application/json; charset=utf-8',
-      }),
-      body: { getReader: () => reader },
-    } as unknown as Response;
-    await assert.rejects(
-      client(async () => response).dispatch(dispatchInput(), controller.signal),
-      (error) => error === reason,
-    );
-    assert.equal(cancelled, 0);
-  });
-
-  it('makes an abort from the completion getter win over buffered bytes', async () => {
+  it('makes abort during intrinsic stream pull win over delivered bytes', async () => {
     const controller = new AbortController();
     const reason = new DOMException(
-      'cancelled during completion',
+      'cancelled during stream pull',
       'AbortError',
     );
     const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
-    let reads = 0;
     let cancelled = 0;
-    const reader = {
-      read() {
-        reads += 1;
-        if (reads === 1)
-          return Promise.resolve({ done: false, value: canonical });
-        return Promise.resolve({
-          get done() {
-            controller.abort(reason);
-            return true;
-          },
-          value: undefined,
-        });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(streamController) {
+          controller.abort(reason);
+          streamController.enqueue(canonical);
+          streamController.close();
+        },
+        cancel() {
+          cancelled += 1;
+        },
       },
-      cancel() {
-        cancelled += 1;
-        return Promise.resolve();
-      },
-      releaseLock() {},
-    };
-    const response = {
-      redirected: false,
-      type: 'basic',
-      url: '',
+      { highWaterMark: 0 },
+    );
+    const response = new Response(body, {
       status: 500,
-      headers: new Headers({
-        'content-type': 'application/json; charset=utf-8',
-      }),
-      body: { getReader: () => reader },
-    } as unknown as Response;
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
     await assert.rejects(
       client(async () => response).dispatch(dispatchInput(), controller.signal),
       (error) => error === reason,
     );
-    assert.equal(cancelled, 0);
+    assert.equal(cancelled, 1);
   });
 
-  it('uses intrinsic releaseLock instead of a branded reader override', async () => {
+  it('makes abort during intrinsic chunk inspection win over buffered bytes', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled during chunk inspection',
+      'AbortError',
+    );
+    let cancelled = 0;
+    const chunk = new Proxy(new Uint8Array([1]), {
+      get(target, key) {
+        if (key === 'byteLength') controller.abort(reason);
+        return Reflect.get(target, key, target);
+      },
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(chunk);
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    });
+    const response = new Response(body, {
+      status: 500,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(cancelled, 1);
+  });
+
+  it('uses intrinsic getReader instead of a stream override', async () => {
     const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -754,33 +833,26 @@ describe('GatewayLlmClient request boundary', () => {
         controller.close();
       },
     });
-    const reader = stream.getReader();
-    let releaseCalls = 0;
-    Object.defineProperty(reader, 'releaseLock', {
+    const response = new Response(stream, {
+      status: 500,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+    let getReaderCalls = 0;
+    Object.defineProperty(stream, 'getReader', {
       value() {
-        releaseCalls += 1;
-        return Promise.resolve();
+        getReaderCalls += 1;
+        throw new Error(firstCredential.token + '@' + ENDPOINT);
       },
     });
-    Object.defineProperty(stream, 'getReader', {
-      value: () => reader,
-    });
-    const response = {
-      redirected: false,
-      type: 'basic',
-      url: '',
-      status: 500,
-      headers: new Headers({
-        'content-type': 'application/json; charset=utf-8',
-      }),
-      body: stream,
-    } as unknown as Response;
     await assert.rejects(
       client(async () => response).dispatch(dispatchInput()),
-      GatewayLlmClientError,
+      (error: unknown) => {
+        assert.ok(error instanceof GatewayLlmClientError);
+        assert.equal(error.code, 'internal_error');
+        return true;
+      },
     );
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(releaseCalls, 0);
+    assert.equal(getReaderCalls, 0);
   });
 
   it('rejects content-length mismatch after a complete reader sequence', async () => {
