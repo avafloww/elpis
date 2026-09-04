@@ -263,21 +263,37 @@ async function readBoundedBody(
         } catch {}
         return { ok: false };
       }
-      if (item.done) break;
-      if (!(item.value instanceof Uint8Array)) {
+      try {
+        if (item.done) break;
+        const chunk = item.value;
+        if (!(chunk instanceof Uint8Array)) {
+          try {
+            void reader.cancel().catch(() => undefined);
+          } catch {}
+          return { ok: false };
+        }
+        const byteLength = chunk.byteLength;
+        if (!Number.isSafeInteger(byteLength) || byteLength > maximum - size) {
+          try {
+            void reader.cancel().catch(() => undefined);
+          } catch {}
+          return { ok: false };
+        }
+        const copy = Uint8Array.from(chunk);
+        if (copy.byteLength !== byteLength) {
+          try {
+            void reader.cancel().catch(() => undefined);
+          } catch {}
+          return { ok: false };
+        }
+        size += byteLength;
+        chunks.push(copy);
+      } catch {
         try {
           void reader.cancel().catch(() => undefined);
         } catch {}
         return { ok: false };
       }
-      if (item.value.byteLength > maximum - size) {
-        try {
-          void reader.cancel().catch(() => undefined);
-        } catch {}
-        return { ok: false };
-      }
-      size += item.value.byteLength;
-      chunks.push(Uint8Array.from(item.value));
     }
   } finally {
     signal?.removeEventListener('abort', onAbort);
@@ -447,16 +463,18 @@ export class GatewayLlmClient {
     const target = authority.endpoint + LLM_PROXY_PATHS.catalog;
     let pending: Promise<Response>;
     try {
-      pending = this.#fetch(target, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'accept-encoding': 'identity',
-          authorization: authority.authorization,
-        },
-        redirect: 'error',
-        signal,
-      });
+      pending = Promise.resolve(
+        this.#fetch(target, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'accept-encoding': 'identity',
+            authorization: authority.authorization,
+          },
+          redirect: 'error',
+          signal,
+        }),
+      );
     } catch {
       boundaryFailure();
     }
@@ -527,18 +545,20 @@ export class GatewayLlmClient {
     const target = authority.endpoint + LLM_PROXY_PATHS.request;
     let pending: Promise<Response>;
     try {
-      pending = this.#fetch(target, {
-        method: 'POST',
-        headers: {
-          accept: 'application/octet-stream, application/json',
-          'accept-encoding': 'identity',
-          authorization: authority.authorization,
-          'content-type': 'application/json',
-        },
-        body,
-        redirect: 'error',
-        signal,
-      });
+      pending = Promise.resolve(
+        this.#fetch(target, {
+          method: 'POST',
+          headers: {
+            accept: 'application/octet-stream, application/json',
+            'accept-encoding': 'identity',
+            authorization: authority.authorization,
+            'content-type': 'application/json',
+          },
+          body,
+          redirect: 'error',
+          signal,
+        }),
+      );
     } catch {
       boundaryFailure();
     }

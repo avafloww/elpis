@@ -488,6 +488,44 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(nanCancelled, 1);
   });
 
+  it('cancels malformed body chunks without reflecting property errors', async () => {
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let cancelled = 0;
+    const malformedChunk = new Proxy(new Uint8Array([1]), {
+      get(target, key) {
+        if (key === 'byteLength') throw new Error(secret);
+        return Reflect.get(target, key, target);
+      },
+    });
+    const boundary = client(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(malformedChunk);
+            },
+            cancel() {
+              cancelled += 1;
+            },
+          }),
+          {
+            status: 500,
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+          },
+        ),
+    );
+    await assert.rejects(
+      boundary.dispatch(dispatchInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof GatewayLlmClientBoundaryError);
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      },
+    );
+    await Promise.resolve();
+    assert.equal(cancelled, 1);
+  });
+
   it('strictly exposes canonical Gateway errors and rejects oversized errors', async () => {
     const canonical = client(async (_target, init) => {
       const request = decodeLlmProxyRequest(init.body as string);
@@ -536,6 +574,28 @@ describe('GatewayLlmClient request boundary', () => {
     );
     await Promise.resolve();
     assert.equal(cancelled, 1);
+  });
+
+  it('preserves the caller abort when fetch returns a throwing thenable', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled at fetch handoff', 'AbortError');
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let calls = 0;
+    const hostileFetch = ((_target: string, init: RequestInit) => {
+      calls += 1;
+      assert.strictEqual(init.signal, controller.signal);
+      controller.abort(reason);
+      return {
+        then() {
+          throw new Error(secret);
+        },
+      };
+    }) as unknown as GatewayLlmFetch;
+    await assert.rejects(
+      client(hostileFetch).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(calls, 1);
   });
 
   it('propagates abort, performs no retries, and does not reflect transport secrets', async () => {
