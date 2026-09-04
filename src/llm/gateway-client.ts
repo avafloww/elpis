@@ -1,4 +1,5 @@
 import { createHash, randomBytes as systemRandomBytes } from 'node:crypto';
+import { types as nodeTypes } from 'node:util';
 import {
   LLM_PROXY_FORMATS,
   LLM_PROXY_HEADERS,
@@ -85,15 +86,20 @@ function boundaryFailure(): never {
   throw new GatewayLlmClientBoundaryError();
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason;
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw abortReason(signal);
-}
-
-const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicAbortSignalAborted = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
+const intrinsicAbortSignalReason = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'reason',
+)?.get;
+const intrinsicEventTargetAddEventListener =
+  EventTarget.prototype.addEventListener;
+const intrinsicEventTargetRemoveEventListener =
+  EventTarget.prototype.removeEventListener;
+const intrinsicPromiseConstructor = Promise;
+const intrinsicPromisePrototype = Promise.prototype;
 const intrinsicHeadersGet = Headers.prototype.get;
 const intrinsicReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
 const intrinsicReaderRead = ReadableStreamDefaultReader.prototype.read;
@@ -146,46 +152,92 @@ const intrinsicTypedArrayTag = Object.getOwnPropertyDescriptor(
 )?.get;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 
-function toNativePromise<T>(value: T | PromiseLike<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    try {
-      if (value instanceof Promise) {
-        const constructor = Object.getOwnPropertyDescriptor(
-          value,
-          'constructor',
-        );
-        if (
-          constructor !== undefined &&
-          (!('value' in constructor) ||
-            (constructor.value !== Promise && constructor.value !== undefined))
-        ) {
-          reject(new GatewayLlmClientBoundaryError());
-          return;
-        }
-      }
-      void intrinsicPromiseThen.call(value, resolve, reject);
-      return;
-    } catch {}
-    let normalized: Promise<T>;
-    try {
-      normalized = Promise.resolve(value);
-    } catch (error) {
-      reject(error);
-      return;
+function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
+  if (signal === undefined) return false;
+  try {
+    if (intrinsicAbortSignalAborted === undefined) boundaryFailure();
+    const aborted = intrinsicAbortSignalAborted.call(signal) as boolean;
+    if (typeof aborted !== 'boolean') boundaryFailure();
+    return aborted;
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  try {
+    if (intrinsicAbortSignalReason === undefined) boundaryFailure();
+    return intrinsicAbortSignalReason.call(signal);
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
+function addAbortListener(signal: AbortSignal, listener: () => void): void {
+  try {
+    intrinsicEventTargetAddEventListener.call(signal, 'abort', listener, {
+      once: true,
+    });
+  } catch {
+    boundaryFailure();
+  }
+}
+
+function removeAbortListener(signal: AbortSignal, listener: () => void): void {
+  try {
+    intrinsicEventTargetRemoveEventListener.call(signal, 'abort', listener);
+  } catch {}
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signalAborted(signal)) throw abortReason(signal);
+}
+
+async function toNativePromise<T>(value: unknown): Promise<T> {
+  try {
+    if (
+      !nodeTypes.isPromise(value) ||
+      Object.getPrototypeOf(value) !== intrinsicPromisePrototype
+    )
+      boundaryFailure();
+    const ownConstructor = Object.getOwnPropertyDescriptor(
+      value,
+      'constructor',
+    );
+    if (ownConstructor === undefined) {
+      const inheritedConstructor = Object.getOwnPropertyDescriptor(
+        intrinsicPromisePrototype,
+        'constructor',
+      );
+      if (
+        inheritedConstructor === undefined ||
+        !('value' in inheritedConstructor) ||
+        inheritedConstructor.value !== intrinsicPromiseConstructor
+      )
+        boundaryFailure();
+    } else if (
+      !('value' in ownConstructor) ||
+      ownConstructor.value !== intrinsicPromiseConstructor
+    ) {
+      boundaryFailure();
     }
-    try {
-      void intrinsicPromiseThen.call(normalized, resolve, reject);
-    } catch (error) {
-      reject(error);
-    }
-  });
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+  return await (value as Promise<T>);
+}
+
+async function consumePromise(value: unknown): Promise<void> {
+  try {
+    await toNativePromise(value);
+  } catch {}
 }
 
 function observePromise(value: unknown): void {
-  const normalized = toNativePromise(value);
-  try {
-    void intrinsicPromiseThen.call(normalized, undefined, () => undefined);
-  } catch {}
+  void consumePromise(value);
 }
 
 function safeResponseBody(
@@ -234,7 +286,7 @@ function throwIfHttpResponseAborted(
   response: ValidatedHttpResponse,
   signal: AbortSignal | undefined,
 ): void {
-  if (signal?.aborted) cancelHttpResponse(response, signal);
+  if (signalAborted(signal)) cancelHttpResponse(response, signal);
 }
 
 function header(response: ValidatedHttpResponse, name: string): string | null {
@@ -291,7 +343,7 @@ function throwIfResponseAborted(
   response: Response,
   signal: AbortSignal | undefined,
 ): void {
-  if (signal?.aborted) {
+  if (signalAborted(signal)) {
     cancelBody(response, signal);
     throw abortReason(signal);
   }
@@ -349,6 +401,12 @@ function activeAuthority(store: GatewayLlmResidentStore): ActiveAuthority {
   return Object.freeze({ endpoint, authorization });
 }
 
+async function cancelLateResponse(request: Promise<Response>): Promise<void> {
+  try {
+    cancelBody(await request);
+  } catch {}
+}
+
 async function fetchOnce(
   request: Promise<Response>,
   signal: AbortSignal | undefined,
@@ -365,24 +423,24 @@ async function fetchOnce(
     rejectAbort = reject;
   });
   const onAbort = (): void => rejectAbort?.(abortReason(signal));
-  signal.addEventListener('abort', onAbort, { once: true });
+  addAbortListener(signal, onAbort);
   try {
-    if (signal.aborted) {
-      request.then(cancelBody, () => undefined);
+    if (signalAborted(signal)) {
+      void cancelLateResponse(request);
       throw abortReason(signal);
     }
     try {
       return await Promise.race([request, aborted]);
     } catch (error) {
-      if (signal.aborted) {
-        request.then(cancelBody, () => undefined);
+      if (signalAborted(signal)) {
+        void cancelLateResponse(request);
         throw abortReason(signal);
       }
       void error;
       return boundaryFailure();
     }
   } finally {
-    signal.removeEventListener('abort', onAbort);
+    removeAbortListener(signal, onAbort);
   }
 }
 
@@ -483,14 +541,14 @@ async function readBoundedBody(
     cancelReader(reader);
     if (signal !== undefined) rejectAbort?.(abortReason(signal));
   };
-  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal !== undefined) addAbortListener(signal, onAbort);
   try {
-    if (signal?.aborted) {
+    if (signalAborted(signal)) {
       cancelReader(reader);
       throw abortReason(signal);
     }
     for (;;) {
-      if (signal?.aborted) throw abortReason(signal);
+      if (signalAborted(signal)) throw abortReason(signal);
       let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>>;
       try {
         pendingRead = toNativePromise(intrinsicReaderRead.call(reader));
@@ -504,23 +562,23 @@ async function readBoundedBody(
           ? pendingRead
           : Promise.race([pendingRead, aborted]));
       } catch {
-        if (signal?.aborted) throw abortReason(signal);
+        if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
       }
-      if (signal?.aborted) throw abortReason(signal);
+      if (signalAborted(signal)) throw abortReason(signal);
       try {
         const done = item.done;
-        if (signal?.aborted) throw abortReason(signal);
+        if (signalAborted(signal)) throw abortReason(signal);
         if (done !== true && done !== false) {
           cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         if (done) break;
         const chunk = item.value;
-        if (signal?.aborted) throw abortReason(signal);
+        if (signalAborted(signal)) throw abortReason(signal);
         const copy = copyUint8Array(chunk);
-        if (signal?.aborted) throw abortReason(signal);
+        if (signalAborted(signal)) throw abortReason(signal);
         const byteLength = copy.byteLength;
         if (byteLength > maximum - size) {
           cancelReaderAndCheckAbort(reader, signal);
@@ -529,12 +587,12 @@ async function readBoundedBody(
         size += byteLength;
         chunks.push(copy);
       } catch {
-        if (signal?.aborted) throw abortReason(signal);
+        if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
       }
     }
-    if (signal?.aborted) throw abortReason(signal);
+    if (signalAborted(signal)) throw abortReason(signal);
     if (announced !== null && announced !== size) {
       framingMismatch = true;
       cancelReaderAndCheckAbort(reader, signal);
@@ -543,9 +601,9 @@ async function readBoundedBody(
     try {
       intrinsicReaderReleaseLock.call(reader);
     } catch {}
-    signal?.removeEventListener('abort', onAbort);
+    if (signal !== undefined) removeAbortListener(signal, onAbort);
   }
-  if (signal?.aborted) {
+  if (signalAborted(signal)) {
     cancelReader(reader);
     throw abortReason(signal);
   }
@@ -730,11 +788,11 @@ export class GatewayLlmClient {
         }),
       );
     } catch {
-      if (signal?.aborted) throw abortReason(signal);
+      if (signalAborted(signal)) throw abortReason(signal);
       boundaryFailure();
     }
     const fetched = await fetchOnce(pending, signal);
-    if (signal?.aborted) {
+    if (signalAborted(signal)) {
       cancelBody(fetched, signal);
       throw abortReason(signal);
     }
@@ -820,11 +878,11 @@ export class GatewayLlmClient {
         }),
       );
     } catch {
-      if (signal?.aborted) throw abortReason(signal);
+      if (signalAborted(signal)) throw abortReason(signal);
       boundaryFailure();
     }
     const fetched = await fetchOnce(pending, signal);
-    if (signal?.aborted) {
+    if (signalAborted(signal)) {
       cancelBody(fetched, signal);
       throw abortReason(signal);
     }
@@ -839,7 +897,7 @@ export class GatewayLlmClient {
       cancelHttpResponse(response, signal);
       boundaryFailure();
     }
-    if (signal?.aborted) {
+    if (signalAborted(signal)) {
       cancelHttpResponse(response, signal);
       throw abortReason(signal);
     }
@@ -869,7 +927,7 @@ export class GatewayLlmClient {
       for (const header of provenance.headers)
         headers.append(header.name, header.value);
       const body = response.body;
-      if (signal?.aborted) {
+      if (signalAborted(signal)) {
         cancelHttpResponse(response, signal);
         throw abortReason(signal);
       }
@@ -878,7 +936,7 @@ export class GatewayLlmClient {
         headers,
       });
     } catch {
-      if (signal?.aborted) {
+      if (signalAborted(signal)) {
         cancelHttpResponse(response, signal);
         throw abortReason(signal);
       }

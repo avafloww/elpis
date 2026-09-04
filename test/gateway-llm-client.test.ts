@@ -1071,6 +1071,24 @@ describe('GatewayLlmClient request boundary', () => {
     );
   });
 
+  it('rejects Promise subclasses without consulting Symbol.species', async () => {
+    let speciesReads = 0;
+    class HostilePromise<T> extends Promise<T> {
+      static override get [Symbol.species](): PromiseConstructor {
+        speciesReads += 1;
+        throw new Error(firstCredential.token + '@' + ENDPOINT);
+      }
+    }
+    const pending = new HostilePromise<Response>((resolve) => {
+      resolve(new Response());
+    });
+    await assert.rejects(
+      client((() => pending) as GatewayLlmFetch).fetchCatalog(),
+      GatewayLlmClientBoundaryError,
+    );
+    assert.equal(speciesReads, 0);
+  });
+
   it('observes a native fetch Promise with a safe own constructor', async () => {
     const controller = new AbortController();
     const reason = new DOMException('cancelled at safe handoff', 'AbortError');
@@ -1184,6 +1202,49 @@ describe('GatewayLlmClient request boundary', () => {
       (error) => error === reason,
     );
     assert.equal(calls, 1);
+  });
+
+  it('uses intrinsic AbortSignal state instead of own overrides', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('native abort reason', 'AbortError');
+    controller.abort(reason);
+    Object.defineProperty(controller.signal, 'aborted', { value: false });
+    Object.defineProperty(controller.signal, 'reason', {
+      value: firstCredential.token + '@' + ENDPOINT,
+    });
+    let fetchCalls = 0;
+    await assert.rejects(
+      client(async () => {
+        fetchCalls += 1;
+        return jsonResponse(serializeLlmProxyCatalog(catalog));
+      }).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(fetchCalls, 0);
+  });
+
+  it('uses intrinsic AbortSignal listeners instead of own overrides', async () => {
+    const controller = new AbortController();
+    let addCalls = 0;
+    let removeCalls = 0;
+    Object.defineProperty(controller.signal, 'addEventListener', {
+      value() {
+        addCalls += 1;
+        throw new Error(firstCredential.token + '@' + ENDPOINT);
+      },
+    });
+    Object.defineProperty(controller.signal, 'removeEventListener', {
+      value() {
+        removeCalls += 1;
+        throw new Error(firstCredential.token + '@' + ENDPOINT);
+      },
+    });
+    const result = await client(async () =>
+      jsonResponse(serializeLlmProxyCatalog(catalog)),
+    ).fetchCatalog(controller.signal);
+    assert.equal(result.revision, catalog.revision);
+    assert.equal(addCalls, 0);
+    assert.equal(removeCalls, 0);
   });
 
   it('preserves an exact null abort reason before fetch', async () => {
