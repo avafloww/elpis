@@ -82,6 +82,15 @@ function refusedRequest(): TypeError {
   return new TypeError('refusing Codex OAuth credential request');
 }
 
+function cancelRejectedResponse(response: Response): void {
+  try {
+    const cleanup = response.body?.cancel();
+    if (cleanup) void cleanup.catch(() => undefined);
+  } catch {
+    // Rejected-response cleanup must not hold refresh, cancellation, or shutdown.
+  }
+}
+
 function headerValue(value: unknown, name: string): string {
   if (
     typeof value !== 'string' ||
@@ -427,11 +436,13 @@ export function createCodexOAuthFetch(
 
     let response = await send(1);
     if (response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
+      cancelRejectedResponse(response);
+      throwIfAborted(snapshot.signal);
       await awaitWithAbort(
         () => options.credentials.forceRefresh(),
         snapshot.signal,
       );
+      throwIfAborted(snapshot.signal);
       response = await send(2);
     }
     return response;

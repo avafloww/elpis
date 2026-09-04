@@ -17,6 +17,7 @@ export function assertGatewayProviderTarget(input: {
   readonly baseUrl: string;
   readonly routes: readonly LlmProxyRoute[];
   readonly wireGrammar: Readonly<Record<string, string>>;
+  readonly accountIdentity?: unknown;
 }): void {
   if (new URL(input.baseUrl).protocol !== 'https:')
     throw new Error('provider target requires HTTPS');
@@ -54,6 +55,14 @@ export function assertGatewayProviderTarget(input: {
   }
   if (input.baseUrl !== 'https://chatgpt.com/backend-api')
     throw new Error('Codex target base URL is not pinned');
+  const accountId =
+    input.accountIdentity !== null &&
+    typeof input.accountIdentity === 'object' &&
+    !Array.isArray(input.accountIdentity)
+      ? (input.accountIdentity as Record<string, unknown>).accountId
+      : undefined;
+  if (typeof accountId !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(accountId))
+    throw new Error('Codex target requires an executable account identity');
   for (const route of routes) {
     const expected =
       route === 'codex/responses'

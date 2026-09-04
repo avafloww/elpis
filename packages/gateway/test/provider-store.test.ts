@@ -56,6 +56,24 @@ test('provider target generations and grants produce exact secret-free catalogs'
     refreshToken: 'synthetic-provider-refresh',
     expiresAt: 9000,
   });
+  const oauthWithoutAccount = store.providers.installOAuthCredential({
+    providerId: 'codex',
+    providerType: 'codex-oauth',
+    accountRef: 'missing-account-ref',
+    accountIdentity: { accountId: null },
+    accessToken: 'synthetic-provider-access-without-account',
+    refreshToken: 'synthetic-provider-refresh-without-account',
+    expiresAt: 9000,
+  });
+  const oauthWithInvalidAccount = store.providers.installOAuthCredential({
+    providerId: 'codex',
+    providerType: 'codex-oauth',
+    accountRef: 'invalid-account-ref',
+    accountIdentity: { accountId: 'account with space' },
+    accessToken: 'synthetic-provider-access-invalid-account',
+    refreshToken: 'synthetic-provider-refresh-invalid-account',
+    expiresAt: 9000,
+  });
   const hiddenOpenAiBase = 'https://private-openai-endpoint.example/v1';
   const hiddenCodexBase = 'https://chatgpt.com/backend-api';
   const weakConfig = {
@@ -137,6 +155,16 @@ test('provider target generations and grants produce exact secret-free catalogs'
       ...codexConfig,
       modelRef: 'codex/deceptive',
       baseUrl: 'https://provider.example/backend-api',
+    },
+    {
+      ...codexConfig,
+      credentialId: oauthWithoutAccount.credentialId,
+      modelRef: 'codex/missing-account',
+    },
+    {
+      ...codexConfig,
+      credentialId: oauthWithInvalidAccount.credentialId,
+      modelRef: 'codex/invalid-account',
     },
   ]) {
     assert.throws(

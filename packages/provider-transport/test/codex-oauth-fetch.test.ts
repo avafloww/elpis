@@ -546,3 +546,50 @@ test('an aborting 401 response does not start credential refresh', async () => {
   assert.equal(networkCalls, 1);
   assert.equal(refreshes, 0);
 });
+
+test('non-settling 401 cleanup cannot hide abort or start refresh', async () => {
+  const controller = new AbortController();
+  const cancellation = new Error('synthetic cancellation during cleanup');
+  let refreshes = 0;
+  let retries = 0;
+  const transport = createCodexOAuthFetch({
+    credentials: {
+      location: 'refresh credential',
+      read: () => ({ accountId: 'acct-1' }),
+      getAccessToken: async () => 'access-1',
+      forceRefresh: async () => {
+        refreshes += 1;
+      },
+    },
+    sessionId: () => 'session-1',
+    fetch: async () => {
+      retries += 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          cancel: () => {
+            controller.abort(cancellation);
+            return new Promise<void>(() => undefined);
+          },
+        }),
+        { status: 401 },
+      );
+    },
+  });
+
+  const result = await Promise.race([
+    transport(responsesUrl, {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal,
+    }).then(
+      () => ({ kind: 'resolved' as const }),
+      (error: unknown) => ({ kind: 'rejected' as const, error }),
+    ),
+    new Promise<{ kind: 'timed-out' }>((resolve) =>
+      setTimeout(() => resolve({ kind: 'timed-out' }), 100),
+    ),
+  ]);
+  assert.deepEqual(result, { kind: 'rejected', error: cancellation });
+  assert.equal(retries, 1);
+  assert.equal(refreshes, 0);
+});

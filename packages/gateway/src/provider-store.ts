@@ -549,6 +549,7 @@ function catalogFromRows(
         string,
         string
       >,
+      accountIdentity: JSON.parse(String(row.account_identity_json)) as unknown,
     });
     return {
       modelRef: row.model_ref,
@@ -789,6 +790,7 @@ export class GatewayProviderStore {
         baseUrl,
         routes: normalized.allowedRoutes,
         wireGrammar: JSON.parse(wireGrammarJson) as Record<string, string>,
+        accountIdentity: JSON.parse(credential.accountIdentityJson) as unknown,
       });
       const snapshotSha256 = targetSnapshotSha256(
         credential,
@@ -1154,7 +1156,7 @@ export class GatewayProviderStore {
       .prepare(
         `SELECT
            t.model_ref, t.target_generation, t.provider_type,
-           t.base_url, t.upstream_model, t.allowed_routes_json,
+           t.account_identity_json, t.base_url, t.upstream_model, t.allowed_routes_json,
            t.wire_grammar_json, t.context_size,
            t.reasoning_effort, t.reasoning_summary, t.reasoning_context,
            t.tool_tier, t.external_thinking, t.tool_contract_version,

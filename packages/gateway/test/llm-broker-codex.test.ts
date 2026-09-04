@@ -15,6 +15,15 @@ import {
 } from '../src/index.js';
 import { GATEWAY_LLM_WIRE_GRAMMARS } from '../src/llm-broker.js';
 
+function codexJwt(accountId: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+    }),
+  ).toString('base64url');
+  return `eyJhbGciOiJub25lIn0.${payload}.signature`;
+}
+
 test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one session identity', async (t) => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'elpis-gateway-codex-broker-'),
@@ -22,12 +31,25 @@ test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one sess
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const calls: Request[] = [];
   let randomByte = 0x21;
+  let hostileCleanup:
+    { controller: AbortController; cancellation: Error } | undefined;
   const store = openGatewayStore(directory, {
     now: () => 1000,
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
     llmFetch: async (input, init) => {
       const request = new Request(input, init);
       calls.push(request);
+      if (hostileCleanup) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            cancel: () => {
+              hostileCleanup?.controller.abort(hostileCleanup.cancellation);
+              return new Promise<void>(() => undefined);
+            },
+          }),
+          { status: 401 },
+        );
+      }
       return new Response(new Uint8Array([0x63, 0x6f, 0x64, 0x65, 0x78]), {
         status: 206,
         headers: { 'content-type': 'text/event-stream' },
@@ -215,6 +237,40 @@ test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one sess
   );
   assert.equal(calls.length, 5);
 
+  const hostileController = new AbortController();
+  const cancellation = new Error('synthetic broker cleanup cancellation');
+  hostileCleanup = { controller: hostileController, cancellation };
+  const hostileResult = await Promise.race([
+    store.llmProxy
+      .dispatch({
+        instanceId,
+        model,
+        request: {
+          ...request,
+          requestId: 'egr1.UUUUUUUUUUUUUUUUUUUUUU',
+        },
+        signal: hostileController.signal,
+      })
+      .then(
+        () => ({ kind: 'resolved' as const }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      ),
+    new Promise<{ kind: 'timed-out' }>((resolve) => {
+      const timer = setTimeout(() => resolve({ kind: 'timed-out' }), 500);
+      timer.unref();
+    }),
+  ]);
+  assert.deepEqual(hostileResult, { kind: 'rejected', error: cancellation });
+  const drainResult = await Promise.race([
+    store.llmProxy.drain().then(() => 'drained' as const),
+    new Promise<'timed-out'>((resolve) => {
+      const timer = setTimeout(() => resolve('timed-out'), 500);
+      timer.unref();
+    }),
+  ]);
+  assert.equal(drainResult, 'drained');
+  assert.equal(calls.length, 6);
+
   const visible = JSON.stringify({
     keys: Object.keys(store.llmProxy),
     catalog: store.llmProxy.catalogForInstance(instanceId),
@@ -238,6 +294,8 @@ test('Codex 401 performs one pinned refresh, persists it, and retries once', asy
   let randomByte = 0x51;
   let providerCalls = 0;
   let refreshCalls = 0;
+  const accessAfter = codexJwt('codex-account-id');
+  const driftedAccess = codexJwt('different-account-id');
   const store = openGatewayStore(directory, {
     now: () => 1000,
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
@@ -247,11 +305,17 @@ test('Codex 401 performs one pinned refresh, persists it, and retries once', asy
         refreshCalls += 1;
         sequence.push('refresh');
         const form = new URLSearchParams(await request.text());
-        assert.equal(form.get('refresh_token'), 'codex-refresh-before');
+        assert.equal(
+          form.get('refresh_token'),
+          refreshCalls === 1 ? 'codex-refresh-before' : 'codex-refresh-after',
+        );
         return new Response(
           JSON.stringify({
-            access_token: 'codex-access-after',
-            refresh_token: 'codex-refresh-after',
+            access_token: refreshCalls === 1 ? accessAfter : driftedAccess,
+            refresh_token:
+              refreshCalls === 1
+                ? 'codex-refresh-after'
+                : 'codex-refresh-drifted',
             expires_in: 3600,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -270,16 +334,26 @@ test('Codex 401 performs one pinned refresh, persists it, and retries once', asy
         );
         return new Response('expired', { status: 401 });
       }
-      sequence.push('provider-after');
       assert.equal(
         request.headers.get('authorization'),
-        'Bearer codex-access-after',
+        `Bearer ${accessAfter}`,
       );
       assert.equal(
         request.headers.get('chatgpt-account-id'),
         'codex-account-id',
       );
-      return new Response(new Uint8Array([0x6f, 0x6b]), { status: 200 });
+      if (providerCalls === 2) {
+        sequence.push('provider-after');
+        return new Response(new Uint8Array([0x6f, 0x6b]), { status: 200 });
+      }
+      if (providerCalls === 3) {
+        sequence.push('provider-before-drift');
+        return new Response('expired-again', { status: 401 });
+      }
+      sequence.push('provider-preserved');
+      return new Response(new Uint8Array([0x73, 0x61, 0x66, 0x65]), {
+        status: 200,
+      });
     },
   });
   const enrollment = store.credentials.createEnrollmentGrant();
@@ -360,4 +434,49 @@ test('Codex 401 performs one pinned refresh, persists it, and retries once', asy
       .filter((event) => event.action === 'provider.oauth.refresh').length,
     1,
   );
+
+  await assert.rejects(
+    store.llmProxy.dispatch({
+      instanceId,
+      model,
+      request: {
+        ...request,
+        requestId: 'egr1.OOOOOOOOOOOOOOOOOOOOOO',
+      },
+      signal: new AbortController().signal,
+    }),
+    /gateway LLM provider dispatch failed/,
+  );
+  assert.equal(providerCalls, 3);
+  assert.equal(refreshCalls, 2);
+  assert.equal(
+    store
+      .audit(100)
+      .filter((event) => event.action === 'provider.oauth.refresh').length,
+    1,
+  );
+
+  const preserved = await store.llmProxy.dispatch({
+    instanceId,
+    model,
+    request: {
+      ...request,
+      requestId: 'egr1.PPPPPPPPPPPPPPPPPPPPPP',
+    },
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(
+    new Uint8Array(await new Response(preserved.body).arrayBuffer()),
+    new Uint8Array([0x73, 0x61, 0x66, 0x65]),
+  );
+  assert.equal(providerCalls, 4);
+  assert.equal(refreshCalls, 2);
+  assert.deepEqual(sequence, [
+    'provider-before',
+    'refresh',
+    'provider-after',
+    'provider-before-drift',
+    'refresh',
+    'provider-preserved',
+  ]);
 });

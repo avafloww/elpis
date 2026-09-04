@@ -298,7 +298,16 @@ function identityFields(value: unknown): Partial<OAuthCredentials> {
   const record = parsed as Record<string, unknown>;
   const result: Partial<OAuthCredentials> = {};
   for (const key of Object.keys(record)) {
+    if (
+      key !== 'accountId' &&
+      key !== 'email' &&
+      key !== 'orgId' &&
+      key !== 'orgName' &&
+      key !== 'authorizedAt'
+    )
+      refused();
     const value = record[key];
+    if (value === null) continue;
     if (key === 'authorizedAt') {
       if (!Number.isSafeInteger(value) || (value as number) < 0) refused();
       result.authorizedAt = value as number;
@@ -325,6 +334,35 @@ function oauthCredentialsFromRow(row: AuthorizedRow): OAuthCredentials {
     expires: integer(row.oauth_expires),
     ...identityFields(row.account_identity_json),
   };
+}
+
+const OAUTH_IDENTITY_FIELDS = [
+  'accountId',
+  'email',
+  'orgId',
+  'orgName',
+  'authorizedAt',
+] as const;
+
+function refreshCredentials(
+  authorized: OAuthCredentials,
+  refreshed: OAuthCredentials,
+): OAuthCredentials {
+  const candidate = validateOAuthCredentials(refreshed);
+  const identity: Partial<OAuthCredentials> = {};
+  for (const field of OAUTH_IDENTITY_FIELDS) {
+    const reported = candidate[field];
+    const expected = authorized[field];
+    if (reported !== undefined && reported !== expected)
+      throw new Error('gateway OAuth refreshed identity mismatch');
+    if (expected !== undefined) Object.assign(identity, { [field]: expected });
+  }
+  return validateOAuthCredentials({
+    access: candidate.access,
+    refresh: candidate.refresh,
+    expires: candidate.expires,
+    ...identity,
+  });
 }
 
 const OAUTH_REFRESH_SKEW_MS = 60_000;
@@ -481,10 +519,7 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
               fetch: this.#fetch,
               now: this.#now,
             });
-      const credentials = validateOAuthCredentials({
-        ...snapshot.credentials,
-        ...fresh,
-      });
+      const credentials = refreshCredentials(snapshot.credentials, fresh);
       try {
         const receipt = this.#providers.refreshOAuthCredential({
           credentialId: snapshot.credentialId,
