@@ -444,6 +444,186 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('verifies the serialized route before network', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(JSON, 'stringify');
+    assert.ok(descriptor && 'value' in descriptor);
+    const original = descriptor.value as typeof JSON.stringify;
+    let fetchCalls = 0;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        Object.defineProperty(JSON, 'stringify', {
+          ...descriptor,
+          value(value: unknown, replacer?: unknown, space?: unknown) {
+            if (
+              value !== null &&
+              typeof value === 'object' &&
+              (value as { format?: unknown }).format ===
+                LLM_PROXY_FORMATS.request
+            ) {
+              Object.defineProperty(JSON, 'stringify', descriptor);
+              return Reflect.apply(original, JSON, [
+                { ...(value as object), route: 'chat/completions' },
+                replacer,
+                space,
+              ]);
+            }
+            return Reflect.apply(original, JSON, [value, replacer, space]);
+          },
+        });
+        return ['responses'] as const;
+      },
+    };
+    try {
+      await assert.rejects(
+        client(async (_target, init) => {
+          fetchCalls += 1;
+          const request = decodeLlmProxyRequest(init.body as string);
+          assert.equal(request.route, 'chat/completions');
+          throw new Error('mutated wire reached network');
+        }).dispatch({ ...dispatchInput(), model: hostileModel }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+    } finally {
+      Object.defineProperty(JSON, 'stringify', descriptor);
+    }
+  });
+
+  it('does not use ambient Promise race for fetch arbitration', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Promise, 'race');
+    assert.ok(descriptor && 'value' in descriptor);
+    const nativeRace = descriptor.value as typeof Promise.race;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        Object.defineProperty(Promise, 'race', {
+          ...descriptor,
+          value() {
+            Object.defineProperty(Promise, 'race', descriptor);
+            return new Promise<never>(() => undefined);
+          },
+        });
+        return ['responses'] as const;
+      },
+    };
+    try {
+      const attempt = client(async (_target, init) => {
+        const request = decodeLlmProxyRequest(init.body as string);
+        return new Response('ok', {
+          status: 200,
+          headers: {
+            [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+              format: LLM_PROXY_FORMATS.responseProvenance,
+              requestId: request.requestId,
+              modelRef: request.modelRef,
+              targetGeneration: request.targetGeneration,
+              route: request.route,
+              status: 200,
+              headers: [],
+            }),
+          },
+        });
+      }).dispatch({ ...dispatchInput(), model: hostileModel });
+      const outcome = await Reflect.apply(nativeRace, Promise, [
+        [
+          attempt.then(
+            () => 'resolved' as const,
+            () => 'rejected' as const,
+          ),
+          new Promise<'timeout'>((resolve) =>
+            setTimeout(() => resolve('timeout'), 50),
+          ),
+        ],
+      ]);
+      assert.equal(outcome, 'resolved');
+    } finally {
+      Object.defineProperty(Promise, 'race', descriptor);
+    }
+  });
+
+  it('relays approved headers without ambient Headers append', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Headers.prototype,
+      'append',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    let appendCalls = 0;
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const response = new Response('actual', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [{ name: 'content-type', value: 'text/plain' }],
+          }),
+        },
+      });
+      Object.defineProperty(Headers.prototype, 'append', {
+        ...descriptor,
+        value(this: Headers, _name: string, value: string) {
+          appendCalls += 1;
+          Object.defineProperty(Headers.prototype, 'append', descriptor);
+          return Reflect.apply(descriptor.value as Headers['append'], this, [
+            'set-cookie',
+            value,
+          ]);
+        },
+      });
+      return response;
+    });
+    try {
+      const response = await boundary.dispatch(dispatchInput());
+      assert.equal(response.headers.get('content-type'), 'text/plain');
+      assert.equal(response.headers.get('set-cookie'), null);
+      assert.equal(appendCalls, 0);
+    } finally {
+      Object.defineProperty(Headers.prototype, 'append', descriptor);
+    }
+  });
+
+  it('relays through the captured Response constructor', async () => {
+    const NativeResponse = Response;
+    let constructorCalls = 0;
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const response = new NativeResponse('actual', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        },
+      });
+      globalThis.Response = function () {
+        constructorCalls += 1;
+        globalThis.Response = NativeResponse;
+        return new NativeResponse('spoof', { status: 201 });
+      } as unknown as typeof Response;
+      return response;
+    });
+    try {
+      const response = await boundary.dispatch(dispatchInput());
+      assert.equal(response.status, 200);
+      assert.equal(await response.text(), 'actual');
+      assert.equal(constructorCalls, 0);
+    } finally {
+      globalThis.Response = NativeResponse;
+    }
+  });
+
   it('returns the original raw body stream with only provenance-safe status and headers', async () => {
     const raw = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -1256,6 +1436,44 @@ describe('GatewayLlmClient request boundary', () => {
     );
     await Promise.resolve();
     assert.equal(cancelled, 1);
+  });
+
+  it('observes cancellation promises without ambient Object prototype lookup', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Object,
+      'getPrototypeOf',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    let lookupCalls = 0;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          Object.defineProperty(Object, 'getPrototypeOf', {
+            ...descriptor,
+            value() {
+              lookupCalls += 1;
+              Object.defineProperty(Object, 'getPrototypeOf', descriptor);
+              return Object.prototype;
+            },
+          });
+          return Promise.resolve();
+        },
+      }),
+      {
+        status: 200,
+        headers: { [LLM_PROXY_HEADERS.provenance]: 'malformed' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(lookupCalls, 0);
+    } finally {
+      Object.defineProperty(Object, 'getPrototypeOf', descriptor);
+    }
   });
 
   it('strictly exposes canonical Gateway errors and rejects oversized errors', async () => {

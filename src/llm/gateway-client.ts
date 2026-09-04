@@ -7,6 +7,7 @@ import {
   LLM_PROXY_PATHS,
   decodeLlmProxyCatalog,
   decodeLlmProxyError,
+  decodeLlmProxyRequest,
   decodeLlmResponseProvenance,
   formatNodeBearerAuthorization,
   isRequestId,
@@ -101,6 +102,9 @@ const intrinsicEventTargetRemoveEventListener =
 const intrinsicArrayIncludes = Array.prototype.includes;
 const intrinsicArrayPush = Array.prototype.push;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const intrinsicIsPromise = nodeTypes.isPromise;
 const hashPrototype = Object.getPrototypeOf(createHash('sha256')) as {
   update: (...args: unknown[]) => unknown;
   digest: (...args: unknown[]) => unknown;
@@ -109,7 +113,10 @@ const intrinsicHashUpdate = hashPrototype.update;
 const intrinsicHashDigest = hashPrototype.digest;
 const intrinsicPromiseConstructor = Promise;
 const intrinsicPromisePrototype = Promise.prototype;
+const intrinsicHeadersAppend = Headers.prototype.append;
+const intrinsicHeadersConstructor = Headers;
 const intrinsicHeadersGet = Headers.prototype.get;
+const intrinsicResponseConstructor = Response;
 const intrinsicReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
 const intrinsicReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReaderReleaseLock =
@@ -217,16 +224,16 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 async function toNativePromise<T>(value: unknown): Promise<T> {
   try {
     if (
-      !nodeTypes.isPromise(value) ||
-      Object.getPrototypeOf(value) !== intrinsicPromisePrototype
+      !intrinsicIsPromise(value) ||
+      intrinsicObjectGetPrototypeOf(value) !== intrinsicPromisePrototype
     )
       boundaryFailure();
-    const ownConstructor = Object.getOwnPropertyDescriptor(
+    const ownConstructor = intrinsicObjectGetOwnPropertyDescriptor(
       value,
       'constructor',
     );
     if (ownConstructor === undefined) {
-      const inheritedConstructor = Object.getOwnPropertyDescriptor(
+      const inheritedConstructor = intrinsicObjectGetOwnPropertyDescriptor(
         intrinsicPromisePrototype,
         'constructor',
       );
@@ -259,6 +266,51 @@ function observePromise(value: unknown): void {
   void consumePromise(value);
 }
 
+async function settlePromise<T>(
+  pending: Promise<T>,
+  resolve: (value: T) => void,
+  reject: (reason: unknown) => void,
+): Promise<void> {
+  try {
+    resolve(await pending);
+  } catch (error) {
+    reject(error);
+  }
+}
+
+async function waitForPromiseOrAbort<T>(
+  pending: Promise<T>,
+  signal: AbortSignal | undefined,
+  onAbort?: () => void,
+): Promise<T> {
+  if (signal === undefined) return await pending;
+  let resolveOutcome!: (value: T) => void;
+  let rejectOutcome!: (reason: unknown) => void;
+  const outcome = new intrinsicPromiseConstructor<T>((resolve, reject) => {
+    resolveOutcome = resolve;
+    rejectOutcome = reject;
+  });
+  const handleAbort = (): void => {
+    try {
+      onAbort?.();
+    } catch {}
+    rejectOutcome(abortReason(signal));
+  };
+  addAbortListener(signal, handleAbort);
+  try {
+    if (signalAborted(signal)) {
+      try {
+        onAbort?.();
+      } catch {}
+      throw abortReason(signal);
+    }
+    void settlePromise(pending, resolveOutcome, rejectOutcome);
+    return await outcome;
+  } finally {
+    removeAbortListener(signal, handleAbort);
+  }
+}
+
 function safeResponseBody(
   response: Response,
 ): ReadableStream<Uint8Array> | null {
@@ -271,7 +323,10 @@ function safeResponseBody(
       ) as ReadableStream<Uint8Array> | null;
   } catch {}
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(response, 'body');
+    const descriptor = intrinsicObjectGetOwnPropertyDescriptor(
+      response,
+      'body',
+    );
     if (
       descriptor !== undefined &&
       'value' in descriptor &&
@@ -469,36 +524,15 @@ async function fetchOnce(
   request: Promise<Response>,
   signal: AbortSignal | undefined,
 ): Promise<Response> {
-  if (signal === undefined) {
-    try {
-      return await request;
-    } catch {
-      return boundaryFailure();
-    }
-  }
-  let rejectAbort: ((reason: unknown) => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const onAbort = (): void => rejectAbort?.(abortReason(signal));
-  addAbortListener(signal, onAbort);
   try {
+    return await waitForPromiseOrAbort(request, signal);
+  } catch (error) {
     if (signalAborted(signal)) {
       void cancelLateResponse(request);
       throw abortReason(signal);
     }
-    try {
-      return await Promise.race([request, aborted]);
-    } catch (error) {
-      if (signalAborted(signal)) {
-        void cancelLateResponse(request);
-        throw abortReason(signal);
-      }
-      void error;
-      return boundaryFailure();
-    }
-  } finally {
-    removeAbortListener(signal, onAbort);
+    void error;
+    return boundaryFailure();
   }
 }
 
@@ -615,14 +649,7 @@ async function readBoundedBody(
   const chunks: Uint8Array[] = [];
   let size = 0;
   let framingMismatch = false;
-  let rejectAbort: ((reason: unknown) => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const onAbort = (): void => {
-    cancelReader(reader);
-    if (signal !== undefined) rejectAbort?.(abortReason(signal));
-  };
+  const onAbort = (): void => cancelReader(reader);
   if (signal !== undefined) addAbortListener(signal, onAbort);
   try {
     if (signalAborted(signal)) {
@@ -642,9 +669,7 @@ async function readBoundedBody(
       }
       let item: ReadableStreamReadResult<Uint8Array>;
       try {
-        item = await (signal === undefined
-          ? pendingRead
-          : Promise.race([pendingRead, aborted]));
+        item = await waitForPromiseOrAbort(pendingRead, signal);
       } catch {
         if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
@@ -766,6 +791,23 @@ async function gatewayError(
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     boundaryFailure();
   }
+}
+
+function sameTransport(
+  left: LlmProxyTransportMetadata,
+  right: LlmProxyTransportMetadata,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'none') return true;
+  return right.kind === 'codex' && left.sessionId === right.sessionId;
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  const byteLength = uint8ArrayByteLength(left);
+  if (byteLength !== uint8ArrayByteLength(right)) return false;
+  for (let index = 0; index < byteLength; index += 1)
+    if (left[index] !== right[index]) return false;
+  return true;
 }
 
 function payloadSha256(payload: Uint8Array): string {
@@ -955,6 +997,7 @@ export class GatewayLlmClient {
     let body: string;
     try {
       const sha256 = payloadSha256(payload);
+      const byteLength = uint8ArrayByteLength(payload);
       body = serializeLlmProxyRequest({
         format: LLM_PROXY_FORMATS.request,
         requestId: rid,
@@ -962,10 +1005,22 @@ export class GatewayLlmClient {
         targetGeneration: model.targetGeneration,
         route: exact.route,
         transport: exact.transport,
-        byteLength: uint8ArrayByteLength(payload),
+        byteLength,
         sha256,
         payload,
       });
+      const wire = decodeLlmProxyRequest(body);
+      if (
+        wire.requestId !== rid ||
+        wire.modelRef !== model.modelRef ||
+        wire.targetGeneration !== model.targetGeneration ||
+        wire.route !== exact.route ||
+        !sameTransport(wire.transport, exact.transport) ||
+        wire.byteLength !== byteLength ||
+        wire.sha256 !== sha256 ||
+        !sameBytes(wire.payload, payload)
+      )
+        boundaryFailure();
     } catch (error) {
       if (error instanceof GatewayLlmClientBoundaryError) throw error;
       boundaryFailure();
@@ -1034,15 +1089,20 @@ export class GatewayLlmClient {
     }
 
     try {
-      const headers = new Headers();
-      for (const header of provenance.headers)
-        headers.append(header.name, header.value);
+      const headers = new intrinsicHeadersConstructor();
+      for (let index = 0; index < provenance.headers.length; index += 1) {
+        const approved = provenance.headers[index];
+        intrinsicReflectApply(intrinsicHeadersAppend, headers, [
+          approved.name,
+          approved.value,
+        ]);
+      }
       const body = response.body;
       if (signalAborted(signal)) {
         cancelHttpResponse(response, signal);
         throw abortReason(signal);
       }
-      return new Response(body, {
+      return new intrinsicResponseConstructor(body, {
         status: provenance.status,
         headers,
       });
