@@ -73,7 +73,9 @@ export class GatewayLlmClientBoundaryError extends Error {
 type ActiveAuthority = Readonly<{ endpoint: string; authorization: string }>;
 type BodyRead =
   { readonly ok: true; readonly body: Uint8Array } | { readonly ok: false };
+const validatedHttpResponseBrand: unique symbol = Symbol();
 type ValidatedHttpResponse = Readonly<{
+  [validatedHttpResponseBrand]: true;
   status: number;
   headers: Headers;
   body: ReadableStream<Uint8Array> | null;
@@ -233,7 +235,7 @@ function throwIfResponseAborted(
   signal: AbortSignal | undefined,
 ): void {
   if (signal?.aborted) {
-    cancelHttpResponse(response, signal);
+    cancelBody(response, signal);
     throw abortReason(signal);
   }
 }
@@ -350,7 +352,12 @@ function validateHttpResponse(
     const body = intrinsicResponseBody.call(
       response,
     ) as ReadableStream<Uint8Array> | null;
-    const validated = Object.freeze({ status, headers, body });
+    const validated = Object.freeze({
+      [validatedHttpResponseBrand]: true as const,
+      status,
+      headers,
+      body,
+    });
     if (
       !Number.isInteger(status) ||
       status < 200 ||

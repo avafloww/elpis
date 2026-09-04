@@ -515,6 +515,42 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(spoofCancelled, 0);
   });
 
+  it('keeps raw abort cleanup on the intrinsic body after cancellation aborts', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('abort during cancellation', 'AbortError');
+    let actualCancelled = 0;
+    let spoofCancelled = 0;
+    let ownBodyReads = 0;
+    const actual = new ReadableStream<Uint8Array>({
+      cancel() {
+        actualCancelled += 1;
+        controller.abort(reason);
+      },
+    });
+    const spoof = new ReadableStream<Uint8Array>({
+      cancel() {
+        spoofCancelled += 1;
+      },
+    });
+    const response = new Response(actual, {
+      status: 200,
+      headers: { 'content-encoding': 'gzip' },
+    });
+    Object.defineProperty(response, 'body', {
+      get() {
+        ownBodyReads += 1;
+        return spoof;
+      },
+    });
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(actualCancelled, 1);
+    assert.equal(ownBodyReads, 0);
+    assert.equal(spoofCancelled, 0);
+  });
+
   it('makes abort during native body cancellation outrank boundary failure', async () => {
     const controller = new AbortController();
     const reason = new DOMException('abort during cancellation', 'AbortError');
