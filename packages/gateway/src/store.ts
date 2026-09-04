@@ -270,6 +270,7 @@ export class GatewayStore {
       database,
       credentials: this.credentials,
       providers: this.providers,
+      now,
       fetch: llmFetch,
       dispatcher: llmDispatcher,
     });

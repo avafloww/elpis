@@ -5,7 +5,15 @@ import {
   type LlmProxyCatalogModel,
   type LlmProxyRequest,
 } from '@elpis/gateway-protocol';
-import { createOpenAICompatibleFetch } from '@elpis/provider-transport';
+import {
+  OAuthCredentialManager,
+  createAnthropicOAuthTransport,
+  createOpenAICompatibleFetch,
+  oauthCredentialsEqual,
+  refreshAnthropicToken,
+  type OAuthCredentials,
+  type OAuthCredentialStorage,
+} from '@elpis/provider-transport';
 import type {
   AuthenticatedNode,
   GatewayCredentialStore,
@@ -19,6 +27,7 @@ import type { GatewayProviderStore } from './provider-store.js';
 export const GATEWAY_LLM_WIRE_GRAMMARS = Object.freeze({
   responses: 'openai-compatible-responses-v1',
   'chat/completions': 'openai-compatible-chat-completions-v1',
+  messages: 'anthropic-oauth-messages-v1',
 } as const);
 
 type BrokerFetch = typeof globalThis.fetch;
@@ -29,6 +38,7 @@ export interface CreateGatewayLlmProxyApiOptions {
   readonly database: DatabaseSync;
   readonly credentials: GatewayCredentialStore;
   readonly providers: GatewayProviderStore;
+  readonly now?: () => number;
   readonly fetch?: BrokerFetch;
   readonly dispatcher?: unknown;
 }
@@ -153,7 +163,9 @@ function authorize(
          t.context_size, t.reasoning_effort, t.reasoning_summary,
          t.reasoning_context, t.tool_tier, t.external_thinking,
          t.tool_contract_version, t.call_timeout_ms, t.stream_idle_timeout_ms,
-         c.auth_kind, c.api_key
+         c.id AS credential_id, c.auth_kind, c.api_key,
+         c.oauth_access, c.oauth_refresh, c.oauth_expires,
+         c.oauth_secret_revision, c.account_identity_json
        FROM gateway_instances AS i
        JOIN gateway_instance_model_grants AS g
          ON g.instance_id = i.id
@@ -181,19 +193,208 @@ function authorize(
   return row;
 }
 
+function assertAnthropicGrammar(
+  row: AuthorizedRow,
+  model: LlmProxyCatalogModel,
+): void {
+  let grammar: unknown;
+  try {
+    grammar = JSON.parse(text(row.wire_grammar_json)) as unknown;
+  } catch {
+    refused();
+  }
+  if (
+    model.allowedRoutes.length !== 1 ||
+    model.allowedRoutes[0] !== 'messages' ||
+    grammar === null ||
+    typeof grammar !== 'object' ||
+    Array.isArray(grammar)
+  )
+    refused();
+  const record = grammar as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 1 ||
+    record.messages !== GATEWAY_LLM_WIRE_GRAMMARS.messages
+  )
+    refused();
+}
+
+function identityFields(value: unknown): Partial<OAuthCredentials> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text(value)) as unknown;
+  } catch {
+    refused();
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    refused();
+  const record = parsed as Record<string, unknown>;
+  const result: Partial<OAuthCredentials> = {};
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (key === 'authorizedAt') {
+      if (!Number.isSafeInteger(value) || (value as number) < 0) refused();
+      result.authorizedAt = value as number;
+    } else if (
+      key === 'accountId' ||
+      key === 'email' ||
+      key === 'orgId' ||
+      key === 'orgName'
+    ) {
+      if (typeof value !== 'string') refused();
+      result[key] = value;
+    } else {
+      refused();
+    }
+  }
+  return result;
+}
+
+function oauthCredentialsFromRow(row: AuthorizedRow): OAuthCredentials {
+  if (row.auth_kind !== 'oauth') refused();
+  return {
+    access: secret(row.oauth_access),
+    refresh: secret(row.oauth_refresh),
+    expires: integer(row.oauth_expires),
+    ...identityFields(row.account_identity_json),
+  };
+}
+
+class GatewayOAuthStorage implements OAuthCredentialStorage {
+  readonly location = 'gateway OAuth credential';
+  readonly #database: DatabaseSync;
+  readonly #providers: GatewayProviderStore;
+  readonly #credentialId: string;
+  readonly #providerType: 'anthropic-oauth' | 'codex-oauth';
+
+  constructor(
+    database: DatabaseSync,
+    providers: GatewayProviderStore,
+    credentialId: string,
+    providerType: 'anthropic-oauth' | 'codex-oauth',
+  ) {
+    this.#database = database;
+    this.#providers = providers;
+    this.#credentialId = credentialId;
+    this.#providerType = providerType;
+  }
+
+  #row(): AuthorizedRow | undefined {
+    return this.#database
+      .prepare(
+        `SELECT auth_kind, provider_type, oauth_access, oauth_refresh,
+                oauth_expires, oauth_secret_revision, account_identity_json
+         FROM gateway_provider_credentials
+         WHERE id = ? AND provider_type = ? AND auth_kind = 'oauth'`,
+      )
+      .get(this.#credentialId, this.#providerType) as AuthorizedRow | undefined;
+  }
+
+  read(): OAuthCredentials | undefined {
+    const row = this.#row();
+    return row ? oauthCredentialsFromRow(row) : undefined;
+  }
+
+  write(_credentials: OAuthCredentials): void {
+    throw new Error('gateway OAuth credential direct write refused');
+  }
+
+  compareAndWrite(
+    expected: OAuthCredentials,
+    replacement: OAuthCredentials,
+  ): boolean {
+    const row = this.#row();
+    if (!row || !oauthCredentialsEqual(oauthCredentialsFromRow(row), expected))
+      return false;
+    try {
+      this.#providers.refreshOAuthCredential({
+        credentialId: this.#credentialId,
+        expectedSecretRevision: integer(row.oauth_secret_revision),
+        accessToken: replacement.access,
+        refreshToken: replacement.refresh,
+        expiresAt: replacement.expires,
+      });
+      return true;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'gateway provider OAuth refresh conflict'
+      )
+        return false;
+      throw new Error('gateway OAuth credential update failed');
+    }
+  }
+}
+
+function streamFromPayload(payload: Uint8Array): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fatalUtf8.decode(payload)) as unknown;
+  } catch {
+    refused();
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    refused();
+  const stream = (parsed as Record<string, unknown>).stream;
+  if (typeof stream !== 'boolean') refused();
+  return stream;
+}
+
+function exchangeFromResponse(response: Response): GatewayLlmProxyExchange {
+  const headers: (readonly [string, string])[] = [];
+  response.headers.forEach((value, name) => {
+    headers.push(Object.freeze([name, value] as const));
+  });
+  return Object.freeze({
+    status: response.status,
+    headers: Object.freeze(headers),
+    body: response.body,
+  });
+}
+
 class GatewayLlmBroker implements GatewayLlmProxyApi {
   readonly #database: DatabaseSync;
   readonly #credentials: GatewayCredentialStore;
   readonly #providers: GatewayProviderStore;
+  readonly #now: () => number;
   readonly #fetch: BrokerFetch;
   readonly #dispatcher: unknown;
+  readonly #oauthManagers = new Map<string, OAuthCredentialManager>();
 
   constructor(options: CreateGatewayLlmProxyApiOptions) {
     this.#database = options.database;
     this.#credentials = options.credentials;
     this.#providers = options.providers;
+    this.#now = options.now ?? Date.now;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#dispatcher = options.dispatcher;
+  }
+
+  #oauthManager(
+    row: AuthorizedRow,
+    providerType: 'anthropic-oauth' | 'codex-oauth',
+  ): OAuthCredentialManager {
+    const credentialId = text(row.credential_id);
+    const cached = this.#oauthManagers.get(credentialId);
+    if (cached) return cached;
+    const manager = new OAuthCredentialManager({
+      storage: new GatewayOAuthStorage(
+        this.#database,
+        this.#providers,
+        credentialId,
+        providerType,
+      ),
+      refresh: (refreshToken) => {
+        if (providerType !== 'anthropic-oauth') refused();
+        return refreshAnthropicToken(refreshToken, {
+          fetch: this.#fetch,
+          now: this.#now,
+        });
+      },
+      now: this.#now,
+    });
+    this.#oauthManagers.set(credentialId, manager);
+    return manager;
   }
 
   authenticateNode(token: unknown): AuthenticatedNode | null {
@@ -217,44 +418,55 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
     let row: AuthorizedRow;
     try {
       row = authorize(this.#database, instanceId, request, model);
-      if (
-        row.provider_type !== 'openai-compatible' ||
-        row.auth_kind !== 'api-key' ||
-        request.transport.kind !== 'none'
-      )
+      if (request.transport.kind !== 'none') refused();
+      if (row.provider_type === 'openai-compatible') {
+        if (row.auth_kind !== 'api-key') refused();
+        assertOpenAiGrammar(row, model);
+      } else if (row.provider_type === 'anthropic-oauth') {
+        if (row.auth_kind !== 'oauth' || request.route !== 'messages')
+          refused();
+        assertAnthropicGrammar(row, model);
+      } else {
         refused();
-      assertOpenAiGrammar(row, model);
+      }
     } catch {
       refused();
     }
     if (signal.aborted) throw abortReason(signal);
     const baseUrl = text(row.base_url);
-    const apiKey = secret(row.api_key);
-    const route = request.route;
-    if (route !== 'responses' && route !== 'chat/completions') refused();
-    const target = `${baseUrl.replace(/\/+$/, '')}/${route}`;
     try {
-      const providerFetch = createOpenAICompatibleFetch({
+      if (row.provider_type === 'openai-compatible') {
+        const route = request.route;
+        if (route !== 'responses' && route !== 'chat/completions') refused();
+        const apiKey = secret(row.api_key);
+        const providerFetch = createOpenAICompatibleFetch({
+          baseUrl,
+          apiKey: async () => apiKey,
+          fetch: this.#fetch,
+          dispatcher: this.#dispatcher,
+        });
+        return exchangeFromResponse(
+          await providerFetch(`${baseUrl.replace(/\/+$/, '')}/${route}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: Buffer.from(payload),
+            signal,
+          }),
+        );
+      }
+      const transport = createAnthropicOAuthTransport({
         baseUrl,
-        apiKey: async () => apiKey,
+        credentials: this.#oauthManager(row, 'anthropic-oauth'),
         fetch: this.#fetch,
         dispatcher: this.#dispatcher,
       });
-      const response = await providerFetch(target, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: Buffer.from(payload),
-        signal,
-      });
-      const headers: (readonly [string, string])[] = [];
-      response.headers.forEach((value, name) => {
-        headers.push(Object.freeze([name, value] as const));
-      });
-      return Object.freeze({
-        status: response.status,
-        headers: Object.freeze(headers),
-        body: response.body,
-      });
+      return exchangeFromResponse(
+        await transport({
+          body: payload,
+          stream: streamFromPayload(payload),
+          signal,
+        }),
+      );
     } catch {
       if (signal.aborted) throw abortReason(signal);
       throw new Error('gateway LLM provider dispatch failed');
