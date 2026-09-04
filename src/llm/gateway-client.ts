@@ -84,10 +84,7 @@ function boundaryFailure(): never {
 }
 
 function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException('This operation was aborted', 'AbortError')
-  );
+  return signal.reason;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

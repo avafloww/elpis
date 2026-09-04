@@ -1067,6 +1067,23 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(calls, 1);
   });
 
+  it('preserves an exact null abort reason before fetch', async () => {
+    const controller = new AbortController();
+    controller.abort(null);
+    let caught: unknown = Symbol('unset');
+    let fetchCalls = 0;
+    try {
+      await client(async () => {
+        fetchCalls += 1;
+        return new Response();
+      }).fetchCatalog(controller.signal);
+    } catch (error) {
+      caught = error;
+    }
+    assert.strictEqual(caught, null);
+    assert.equal(fetchCalls, 0);
+  });
+
   it('propagates abort, performs no retries, and does not reflect transport secrets', async () => {
     const controller = new AbortController();
     let calls = 0;
