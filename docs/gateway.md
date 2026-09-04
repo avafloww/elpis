@@ -37,14 +37,20 @@ Gateway serves plain HTTP and expects an authenticated TLS reverse proxy in fron
 
 The proxy owns human authentication for browser routes, including `/`, `/api/v1/*` browser APIs, and `/api/v1/browser/relay`. Gateway has no application users, passwords, sessions, passkeys, or RBAC. Do not expose those routes around the authenticated proxy. Preserve Gateway's exact Origin and CSRF checks.
 
-Four resident routes bypass human login because residents cannot answer a browser authentication challenge:
+Six resident routes bypass human login because residents cannot answer a browser authentication challenge:
 
 - `POST /api/v1/resident/enrollment`
 - `POST /api/v1/resident/rotation`
 - `POST /api/v1/resident/rotation/activate`
 - `GET /api/v1/resident/link` (WebSocket upgrade)
+- `GET /api/v1/resident/llm/catalog`
+- `POST /api/v1/resident/llm/request`
 
 Expose those routes only through TLS. Preserve their request `Authorization` header without logging it; Gateway still requires the one-use enrollment grant or per-resident bearer credential. Clear the proxy's own browser-authentication header before forwarding ordinary browser routes.
+
+The LLM routes accept only an active resident node bearer; browser authentication and CSRF credentials grant no access. Exact route and method checks, direct-peer fixed-memory rate admission, and a bounded global concurrency permit happen before bearer verification, body reads, catalog access, or upstream effects. The catalog exposes only that instance's current exact-generation grants. Requests are authorized atomically against the model reference, target generation, logical route, transport metadata, and embedded provider model before one upstream dispatch.
+
+Gateway returns provider status and body bytes without parsing them. Response provenance is a bounded safe-header projection; unsafe, duplicate, accessor-backed, or oversized adapter metadata fails closed. Streaming is backpressured, capped at 32 MiB, and governed by call and per-read idle deadlines. Client disconnect and shutdown propagate cancellation. A failure before response commitment uses the canonical Gateway error codec; after any provider bytes are committed, failure destroys the response instead of appending JSON or retrying.
 
 Set Gateway's canonical public URL to the exact external HTTPS origin. Browser Origin checks and the resident WSS target derive from that value; path, query, fragment, embedded credentials, and noncanonical forms are rejected.
 

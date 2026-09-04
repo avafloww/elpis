@@ -5,18 +5,25 @@ import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import {
+  LLM_PROXY_LIMITS,
+  LLM_PROXY_PATHS,
   RESIDENT_CONTROL_FORMATS,
   RESIDENT_CONTROL_HEADERS,
   RESIDENT_CONTROL_LIMITS,
   RESIDENT_CONTROL_PATHS,
   LIMITS,
-  isConnectionId,
-  parseNodeBearerAuthorization,
+  authorizeLlmProxyRequest,
+  decodeLlmProxyRequest,
   decodeResidentEnrollmentResult,
   decodeResidentRotationResult,
+  isConnectionId,
+  isLlmProxyCodecError,
+  parseNodeBearerAuthorization,
+  serializeLlmProxyCatalog,
   serializeResidentControlError,
   serializeResidentEnrollmentResult,
   serializeResidentRotationResult,
+  type LlmProxyRequest,
   type ResidentControlErrorCode,
 } from '@elpis/gateway-protocol';
 import {
@@ -31,6 +38,19 @@ import {
   validateRequestBodyFraming,
   type BrowserOriginGuard,
 } from './http-guards.js';
+import {
+  BoundedGatewayLlmProxyRateLimiter,
+  GatewayLlmAbort,
+  GatewayLlmHttpError,
+  abortLlmRequest,
+  raceLlmAbort,
+  readLlmBody,
+  sendLlmError,
+  streamLlmExchange,
+  type GatewayLlmProxyApi,
+  type GatewayLlmProxyExchange,
+  type GatewayLlmProxyRateLimiter,
+} from './llm-proxy-http.js';
 import {
   BoundedResidentControlRateLimiter,
   ResidentControlApiError,
@@ -71,6 +91,8 @@ export const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 const UPGRADE_FAILURE_BODY = 'WebSocket upgrade rejected\n';
 const DEFAULT_MAX_BROWSER_RELAYS = 128;
 const MAX_BROWSER_RELAYS = 1024;
+const DEFAULT_MAX_LLM_REQUESTS = 32;
+const MAX_LLM_REQUESTS = 1024;
 const UPGRADE_STATUS_TEXT: Readonly<Record<number, string>> = Object.freeze({
   400: 'Bad Request',
   401: 'Unauthorized',
@@ -311,6 +333,14 @@ export interface GatewayHttpServiceOptions {
   residentLinkRegistry?: GatewayResidentLinkRegistry;
   /** Optional bounded limiter seam; defaults to direct-peer fixed windows. */
   residentRateLimiter?: ResidentControlRateLimiter;
+  /** Resident-node-authenticated catalog and one-dispatch raw streaming adapter. */
+  llmProxy?: GatewayLlmProxyApi;
+  /** Optional direct-peer fixed-memory admission seam. */
+  llmRateLimiter?: GatewayLlmProxyRateLimiter;
+  /** Deterministic time source for LLM admission. */
+  llmNow?: () => number;
+  /** Global no-queue LLM request ceiling; defaults to 32 and cannot exceed 1024. */
+  llmMaxConcurrent?: number;
   /** Deterministic time source for resident rate limiting. */
   residentNow?: () => number;
   maxBodyBytes?: number;
@@ -369,6 +399,21 @@ function sendJson(
     'application/json; charset=utf-8',
     head,
   );
+}
+
+function llmProxyNamespaceTarget(rawUrl: string): boolean {
+  const query = rawUrl.search(/[?#]/);
+  const pathname = query < 0 ? rawUrl : rawUrl.slice(0, query);
+  return (
+    pathname === '/api/v1/resident/llm' ||
+    pathname.startsWith('/api/v1/resident/llm/')
+  );
+}
+
+function exactLlmProxyRoute(rawUrl: string): 'catalog' | 'request' | null {
+  if (rawUrl === LLM_PROXY_PATHS.catalog) return 'catalog';
+  if (rawUrl === LLM_PROXY_PATHS.request) return 'request';
+  return null;
 }
 
 function residentNamespaceTarget(rawUrl: string): boolean {
@@ -834,9 +879,13 @@ export class GatewayHttpService {
   readonly #root: string;
   readonly #server: http.Server;
   readonly #residentRateLimiter: ResidentControlRateLimiter;
+  readonly #llmRateLimiter: GatewayLlmProxyRateLimiter;
+  readonly #llmMaxConcurrent: number;
   readonly #webSocketServer: WebSocketServer;
   readonly #browserRelays = new Set<GatewayBrowserRelayConnection>();
+  readonly #activeLlmRequests = new Set<AbortController>();
   readonly #maxBrowserRelays: number;
+  #activeLlmAdmissions = 0;
   #stopping: Promise<void> | null = null;
   #initialized = false;
   #starting: Promise<GatewayListenAddress> | null = null;
@@ -853,6 +902,10 @@ export class GatewayHttpService {
       options.browserRelayMaxConnections ?? DEFAULT_MAX_BROWSER_RELAYS;
     this.#residentRateLimiter =
       options.residentRateLimiter ?? new BoundedResidentControlRateLimiter();
+    this.#llmRateLimiter =
+      options.llmRateLimiter ?? new BoundedGatewayLlmProxyRateLimiter();
+    this.#llmMaxConcurrent =
+      options.llmMaxConcurrent ?? DEFAULT_MAX_LLM_REQUESTS;
     const hasResidentCredentials =
       options.residentCredentialStore !== undefined;
     const hasResidentRegistry = options.residentLinkRegistry !== undefined;
@@ -866,6 +919,24 @@ export class GatewayHttpService {
         typeof options.residentCredentialStore.authenticateNode !== 'function')
     )
       throw new Error('residentCredentialStore must provide authenticateNode');
+    if (
+      options.llmProxy !== undefined &&
+      (!options.llmProxy ||
+        typeof options.llmProxy.authenticateNode !== 'function' ||
+        typeof options.llmProxy.catalogForInstance !== 'function' ||
+        typeof options.llmProxy.dispatch !== 'function')
+    )
+      throw new Error(
+        'llmProxy must provide authentication, catalog, and dispatch',
+      );
+    if (options.llmNow !== undefined && typeof options.llmNow !== 'function')
+      throw new Error('llmNow must be a function');
+    if (
+      options.llmRateLimiter !== undefined &&
+      (!options.llmRateLimiter ||
+        typeof options.llmRateLimiter.allow !== 'function')
+    )
+      throw new Error('llmRateLimiter must provide allow');
     if (
       options.residentNow !== undefined &&
       typeof options.residentNow !== 'function'
@@ -882,6 +953,7 @@ export class GatewayHttpService {
       ['maxStaticBytes', options.maxStaticBytes],
       ['bodyTimeoutMs', options.bodyTimeoutMs],
       ['shutdownGraceMs', options.shutdownGraceMs],
+      ['llmMaxConcurrent', options.llmMaxConcurrent],
       ['browserRelayMaxBufferedAmount', options.browserRelayMaxBufferedAmount],
       ['browserRelayMaxConnections', options.browserRelayMaxConnections],
     ] as const) {
@@ -893,6 +965,12 @@ export class GatewayHttpService {
         value > LIMITS.frameBytes
       )
         throw new Error('browserRelayMaxBufferedAmount exceeds the wire bound');
+      if (
+        label === 'llmMaxConcurrent' &&
+        value !== undefined &&
+        value > MAX_LLM_REQUESTS
+      )
+        throw new Error('llmMaxConcurrent exceeds the hard bound');
       if (
         label === 'browserRelayMaxConnections' &&
         value !== undefined &&
@@ -912,6 +990,10 @@ export class GatewayHttpService {
       (request, response) => void this.#handle(request, response),
     );
     this.#server.maxRequestsPerSocket = 100;
+    this.#server.on(
+      'checkContinue',
+      (request, response) => void this.#handle(request, response, true),
+    );
     this.#server.on('clientError', (_error, socket) => {
       if (socket.writable)
         socket.end(
@@ -979,6 +1061,8 @@ export class GatewayHttpService {
 
   async #stop(): Promise<void> {
     this.#initialized = false;
+    for (const controller of this.#activeLlmRequests)
+      abortLlmRequest(controller, 'shutdown');
     // Browser brokers must close their exact remote viewers while the resident
     // registry can still deliver viewer.close.
     for (const relay of [...this.#browserRelays]) relay.stop();
@@ -1231,6 +1315,7 @@ export class GatewayHttpService {
   async #handle(
     request: http.IncomingMessage,
     response: http.ServerResponse,
+    expectContinue = false,
   ): Promise<void> {
     securityHeaders(response);
     try {
@@ -1238,8 +1323,19 @@ export class GatewayHttpService {
       if (!rawUrl) throw new HttpBoundaryError(400, 'invalid_request');
       const method = request.method ?? '';
 
-      // Resident control is a separate non-browser boundary. Dispatch it
-      // before generic API/body policy so every failure uses its wire codec.
+      // LLM proxy and resident control are separate non-browser boundaries.
+      // Dispatch them before generic API/body policy so failures use their codecs.
+      if (llmProxyNamespaceTarget(rawUrl)) {
+        await this.#handleLlmProxy(
+          request,
+          response,
+          rawUrl,
+          method,
+          expectContinue,
+        );
+        return;
+      }
+      if (expectContinue) response.writeContinue();
       if (residentNamespaceTarget(rawUrl)) {
         await this.#handleResidentControl(request, response, rawUrl, method);
         return;
@@ -1333,6 +1429,208 @@ export class GatewayHttpService {
         return;
       }
       sendError(request, response, 404, 'not_found');
+    }
+  }
+
+  async #handleLlmProxy(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    rawUrl: string,
+    method: string,
+    expectContinue: boolean,
+  ): Promise<void> {
+    let requestId: LlmProxyRequest['requestId'] | undefined;
+    let controller: AbortController | null = null;
+    let admitted = false;
+    try {
+      if (Buffer.byteLength(rawUrl) > MAX_REQUEST_TARGET_BYTES)
+        throw new GatewayLlmHttpError(400, 'invalid_request');
+      const route = exactLlmProxyRoute(rawUrl);
+      if (route === null || !this.#options.llmProxy)
+        throw new GatewayLlmHttpError(404, 'not_found');
+      if (
+        (route === 'catalog' && method !== 'GET') ||
+        (route === 'request' && method !== 'POST')
+      )
+        throw new GatewayLlmHttpError(405, 'invalid_request');
+
+      let now: number;
+      try {
+        now = (this.#options.llmNow ?? Date.now)();
+      } catch {
+        throw new GatewayLlmHttpError(500, 'internal_error');
+      }
+      if (!Number.isSafeInteger(now))
+        throw new GatewayLlmHttpError(500, 'internal_error');
+      let rateAllowed: boolean;
+      try {
+        rateAllowed = this.#llmRateLimiter.allow(
+          Object.freeze({
+            peerAddress: request.socket.remoteAddress ?? '<unknown>',
+            route,
+            now,
+          }),
+        );
+      } catch {
+        throw new GatewayLlmHttpError(500, 'internal_error');
+      }
+      if (
+        rateAllowed !== true ||
+        this.#activeLlmAdmissions >= this.#llmMaxConcurrent
+      )
+        throw new GatewayLlmHttpError(429, 'rate_limited');
+      this.#activeLlmAdmissions += 1;
+      admitted = true;
+
+      const api = this.#options.llmProxy;
+      const token = parseNodeBearerAuthorization(
+        singleRequestHeader(request, 'authorization'),
+      );
+      if (token === null) throw new GatewayLlmHttpError(401, 'unauthorized');
+      let binding: AuthenticatedNode | null;
+      try {
+        binding = api.authenticateNode(token);
+      } catch {
+        throw new GatewayLlmHttpError(500, 'internal_error');
+      }
+      if (binding === null) throw new GatewayLlmHttpError(401, 'unauthorized');
+
+      if (route === 'catalog') {
+        if (validateRequestBodyFraming(request, 0) !== 0)
+          throw new GatewayLlmHttpError(400, 'invalid_request');
+        const body = serializeLlmProxyCatalog(
+          api.catalogForInstance(binding.instanceId),
+        );
+        send(response, 200, body, 'application/json; charset=utf-8');
+        return;
+      }
+
+      if (expectContinue) {
+        requireJsonContentType(request);
+        validateRequestBodyFraming(request, LLM_PROXY_LIMITS.requestBodyBytes);
+        response.writeContinue();
+      }
+      controller = new AbortController();
+      this.#activeLlmRequests.add(controller);
+      const onRequestAbort = (): void => abortLlmRequest(controller!, 'client');
+      const onResponseClose = (): void => {
+        if (!response.writableFinished) onRequestAbort();
+      };
+      request.once('aborted', onRequestAbort);
+      request.once('error', onRequestAbort);
+      response.once('error', onRequestAbort);
+      response.once('close', onResponseClose);
+      try {
+        const body = await readLlmBody(
+          request,
+          controller.signal,
+          this.#options.bodyTimeoutMs ?? 10_000,
+        );
+        let decoded: LlmProxyRequest;
+        try {
+          decoded = decodeLlmProxyRequest(body);
+        } catch (error) {
+          if (isLlmProxyCodecError(error))
+            throw new GatewayLlmHttpError(400, 'invalid_request');
+          throw error;
+        }
+        requestId = decoded.requestId;
+        const catalog = api.catalogForInstance(binding.instanceId);
+        const authorization = authorizeLlmProxyRequest(catalog, decoded);
+        if (!authorization.ok) {
+          const status =
+            authorization.code === 'stale_target'
+              ? 409
+              : authorization.code === 'not_found'
+                ? 404
+                : 403;
+          throw new GatewayLlmHttpError(
+            status,
+            authorization.code,
+            decoded.requestId,
+          );
+        }
+        const timer =
+          authorization.model.callTimeoutMs === 0
+            ? null
+            : setTimeout(
+                () => abortLlmRequest(controller!, 'call_timeout'),
+                authorization.model.callTimeoutMs,
+              );
+        timer?.unref();
+        let upstream: GatewayLlmProxyExchange;
+        try {
+          upstream = await raceLlmAbort(
+            Promise.resolve(
+              api.dispatch({
+                instanceId: binding.instanceId,
+                request: decoded,
+                model: authorization.model,
+                signal: controller.signal,
+              }),
+            ),
+            controller.signal,
+          );
+        } catch {
+          const reason = controller.signal.reason;
+          if (reason instanceof GatewayLlmAbort) {
+            throw new GatewayLlmHttpError(
+              reason.kind === 'call_timeout' ? 504 : 503,
+              reason.kind === 'call_timeout' ? 'upstream_timeout' : 'cancelled',
+              decoded.requestId,
+            );
+          }
+          throw new GatewayLlmHttpError(
+            502,
+            'upstream_unavailable',
+            decoded.requestId,
+          );
+        } finally {
+          if (timer !== null) clearTimeout(timer);
+        }
+        await streamLlmExchange(
+          response,
+          upstream,
+          decoded,
+          controller,
+          authorization.model.streamIdleTimeoutMs,
+        );
+      } finally {
+        request.off('aborted', onRequestAbort);
+        request.off('error', onRequestAbort);
+        response.off('error', onRequestAbort);
+        response.off('close', onResponseClose);
+      }
+    } catch (error) {
+      if (response.destroyed || response.writableEnded) return;
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
+      if (error instanceof GatewayLlmHttpError) {
+        sendLlmError(
+          request,
+          response,
+          error.status,
+          error.code,
+          error.requestId ?? requestId,
+        );
+        return;
+      }
+      if (error instanceof HttpBoundaryError) {
+        sendLlmError(
+          request,
+          response,
+          error.statusCode,
+          error.statusCode === 413 ? 'payload_too_large' : 'invalid_request',
+          requestId,
+        );
+        return;
+      }
+      sendLlmError(request, response, 500, 'internal_error', requestId);
+    } finally {
+      if (controller !== null) this.#activeLlmRequests.delete(controller);
+      if (admitted) this.#activeLlmAdmissions -= 1;
     }
   }
 
