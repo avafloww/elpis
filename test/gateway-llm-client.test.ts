@@ -413,6 +413,40 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('rejects malformed redirect and response type metadata before decoding errors', async () => {
+    for (const metadata of [
+      { redirected: 'false', type: 'basic' },
+      { redirected: false, type: 'mystery' },
+    ]) {
+      let cancelled = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            Buffer.from(proxyError('internal_error', REQUEST_ID)),
+          );
+        },
+        cancel() {
+          cancelled += 1;
+        },
+      });
+      const response = {
+        ...metadata,
+        url: '',
+        status: 500,
+        headers: new Headers({
+          'content-type': 'application/json; charset=utf-8',
+        }),
+        body,
+      } as unknown as Response;
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+      await Promise.resolve();
+      assert.equal(cancelled, 1);
+    }
+  });
+
   it('rejects malformed response status without leaking or accepting an error envelope', async () => {
     const secret = firstCredential.token + '@' + ENDPOINT;
     let throwingCancelled = 0;
@@ -488,11 +522,55 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(nanCancelled, 1);
   });
 
+  it('makes an abort during response status inspection win and cancel the body', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled during response inspection',
+      'AbortError',
+    );
+    let cancelled = 0;
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled += 1;
+        },
+      });
+      return {
+        redirected: false,
+        type: 'basic',
+        url: '',
+        get status() {
+          controller.abort(reason);
+          return 200;
+        },
+        headers: new Headers({
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        }),
+        body,
+      } as unknown as Response;
+    });
+    await assert.rejects(
+      boundary.dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    await Promise.resolve();
+    assert.equal(cancelled, 1);
+  });
+
   it('rejects non-boolean completion and safely assimilates cancellation', async () => {
     const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
     let reads = 0;
     let cancelled = 0;
-    let hostileCatchCalls = 0;
+    let constructorReads = 0;
     const reader = {
       read() {
         reads += 1;
@@ -502,11 +580,12 @@ describe('GatewayLlmClient request boundary', () => {
       },
       cancel() {
         cancelled += 1;
-        const result = Promise.resolve();
-        Object.defineProperty(result, 'catch', {
-          value() {
-            hostileCatchCalls += 1;
-            return Promise.resolve();
+        const result = new Promise<void>(() => undefined);
+        Object.defineProperty(result, 'constructor', {
+          configurable: false,
+          get() {
+            constructorReads += 1;
+            throw new Error(firstCredential.token + '@' + ENDPOINT);
           },
         });
         return result;
@@ -528,8 +607,8 @@ describe('GatewayLlmClient request boundary', () => {
       GatewayLlmClientBoundaryError,
     );
     await Promise.resolve();
-    assert.equal(cancelled, 1);
-    assert.equal(hostileCatchCalls, 0);
+    assert.equal(cancelled, 0);
+    assert.equal(constructorReads, 0);
   });
 
   it('makes a synchronous read abort win over fulfilled read results', async () => {
@@ -567,7 +646,7 @@ describe('GatewayLlmClient request boundary', () => {
       client(async () => response).dispatch(dispatchInput(), controller.signal),
       (error) => error === reason,
     );
-    assert.equal(cancelled, 1);
+    assert.equal(cancelled, 0);
   });
 
   it('makes an abort from the completion getter win over buffered bytes', async () => {
@@ -612,7 +691,69 @@ describe('GatewayLlmClient request boundary', () => {
       client(async () => response).dispatch(dispatchInput(), controller.signal),
       (error) => error === reason,
     );
-    assert.equal(cancelled, 1);
+    assert.equal(cancelled, 0);
+  });
+
+  it('makes release cleanup abort outrank buffered bytes', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled during release', 'AbortError');
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    let reads = 0;
+    const reader = {
+      read() {
+        reads += 1;
+        return Promise.resolve(
+          reads === 1
+            ? { done: false, value: canonical }
+            : { done: true, value: undefined },
+        );
+      },
+      cancel() {
+        throw new Error('untrusted cancel must not run');
+      },
+      releaseLock() {
+        controller.abort(reason);
+      },
+    };
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+      }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+  });
+
+  it('rejects content-length mismatch after a complete reader sequence', async () => {
+    const reader = {
+      read: () => Promise.resolve({ done: true, value: undefined }),
+      cancel() {
+        throw new Error('untrusted cancel must not run');
+      },
+      releaseLock() {},
+    };
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': '1',
+      }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput()),
+      GatewayLlmClientBoundaryError,
+    );
   });
 
   it('cancels malformed body chunks without reflecting property errors', async () => {
@@ -701,6 +842,32 @@ describe('GatewayLlmClient request boundary', () => {
     );
     await Promise.resolve();
     assert.equal(cancelled, 1);
+  });
+
+  it('rejects a native fetch Promise with poisoned constructor without invoking it', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled at poisoned handoff',
+      'AbortError',
+    );
+    let constructorReads = 0;
+    const responsePromise = Promise.resolve(new Response('late'));
+    Object.defineProperty(responsePromise, 'constructor', {
+      configurable: false,
+      get() {
+        constructorReads += 1;
+        throw new Error(firstCredential.token + '@' + ENDPOINT);
+      },
+    });
+    const hostileFetch = (() => {
+      controller.abort(reason);
+      return responsePromise;
+    }) as unknown as GatewayLlmFetch;
+    await assert.rejects(
+      client(hostileFetch).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(constructorReads, 0);
   });
 
   it('preserves abort and cancellation for a native Promise with hostile then', async () => {
