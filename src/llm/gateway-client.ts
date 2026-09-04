@@ -100,11 +100,19 @@ const intrinsicEventTargetAddEventListener =
 const intrinsicEventTargetRemoveEventListener =
   EventTarget.prototype.removeEventListener;
 const intrinsicArrayIncludes = Array.prototype.includes;
+const intrinsicArrayIsArray = Array.isArray;
+const intrinsicArrayPrototype = Array.prototype;
 const intrinsicArrayPush = Array.prototype.push;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicReflectOwnKeys = Reflect.ownKeys;
+const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const intrinsicObjectGetOwnPropertyDescriptors =
+  Object.getOwnPropertyDescriptors;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const intrinsicObjectPrototype = Object.prototype;
 const intrinsicIsPromise = nodeTypes.isPromise;
+const intrinsicIsProxy = nodeTypes.isProxy;
 const hashPrototype = Object.getPrototypeOf(createHash('sha256')) as {
   update: (...args: unknown[]) => unknown;
   digest: (...args: unknown[]) => unknown;
@@ -835,6 +843,169 @@ function requestId(bytes: (size: number) => Uint8Array): RequestId {
   }
 }
 
+const dispatchKeys = ['model', 'payload', 'route', 'transport'] as const;
+const modelKeys = [
+  'modelRef',
+  'targetGeneration',
+  'providerType',
+  'model',
+  'allowedRoutes',
+  'contextSize',
+  'reasoningEffort',
+  'reasoningSummary',
+  'reasoningContext',
+  'toolTier',
+  'externalThinking',
+  'toolContractVersion',
+  'callTimeoutMs',
+  'streamIdleTimeoutMs',
+] as const;
+const transportNoneKeys = ['kind'] as const;
+const transportCodexKeys = ['kind', 'sessionId'] as const;
+
+function ownDataDescriptors(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Record<string, PropertyDescriptor> {
+  try {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      intrinsicIsProxy(value) ||
+      intrinsicObjectGetPrototypeOf(value) !== intrinsicObjectPrototype
+    )
+      boundaryFailure();
+    const keys = intrinsicReflectOwnKeys(value);
+    if (keys.length !== expectedKeys.length) boundaryFailure();
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      if (typeof key !== 'string') boundaryFailure();
+      let expected = false;
+      for (let candidate = 0; candidate < expectedKeys.length; candidate += 1)
+        if (key === expectedKeys[candidate]) expected = true;
+      if (!expected) boundaryFailure();
+    }
+    const descriptors = intrinsicObjectGetOwnPropertyDescriptors(value);
+    for (let index = 0; index < expectedKeys.length; index += 1) {
+      const descriptor = descriptors[expectedKeys[index]];
+      if (
+        descriptor === undefined ||
+        !('value' in descriptor) ||
+        descriptor.enumerable !== true
+      )
+        boundaryFailure();
+    }
+    return descriptors;
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
+function snapshotRoutes(value: unknown): readonly LlmProxyRoute[] {
+  try {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      !intrinsicArrayIsArray(value) ||
+      intrinsicIsProxy(value) ||
+      intrinsicObjectGetPrototypeOf(value) !== intrinsicArrayPrototype
+    )
+      boundaryFailure();
+    const descriptors = intrinsicObjectGetOwnPropertyDescriptors(
+      value,
+    ) as unknown as Record<PropertyKey, PropertyDescriptor>;
+    const lengthDescriptor = descriptors['length'];
+    const lengthValue =
+      lengthDescriptor !== undefined && 'value' in lengthDescriptor
+        ? lengthDescriptor.value
+        : undefined;
+    if (
+      typeof lengthValue !== 'number' ||
+      !Number.isSafeInteger(lengthValue) ||
+      lengthValue < 0
+    )
+      boundaryFailure();
+    const length = lengthValue;
+    const keys = intrinsicReflectOwnKeys(value);
+    if (keys.length !== length + 1) boundaryFailure();
+    const routes: LlmProxyRoute[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (
+        descriptor === undefined ||
+        !('value' in descriptor) ||
+        descriptor.enumerable !== true
+      )
+        boundaryFailure();
+      intrinsicReflectApply(intrinsicArrayPush, routes, [
+        descriptor.value as LlmProxyRoute,
+      ]);
+    }
+    return intrinsicObjectFreeze(routes);
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
+function snapshotModel(value: unknown): LlmProxyCatalogModel {
+  const descriptors = ownDataDescriptors(value, modelKeys);
+  return intrinsicObjectFreeze({
+    modelRef: descriptors.modelRef.value as string,
+    targetGeneration: descriptors.targetGeneration
+      .value as LlmProxyCatalogModel['targetGeneration'],
+    providerType: descriptors.providerType
+      .value as LlmProxyCatalogModel['providerType'],
+    model: descriptors.model.value as string,
+    allowedRoutes: snapshotRoutes(descriptors.allowedRoutes.value),
+    contextSize: descriptors.contextSize.value as number | null,
+    reasoningEffort: descriptors.reasoningEffort.value as string | null,
+    reasoningSummary: descriptors.reasoningSummary.value as string | null,
+    reasoningContext: descriptors.reasoningContext.value as string | null,
+    toolTier: descriptors.toolTier.value as LlmProxyCatalogModel['toolTier'],
+    externalThinking: descriptors.externalThinking.value as boolean,
+    toolContractVersion: descriptors.toolContractVersion.value as string,
+    callTimeoutMs: descriptors.callTimeoutMs.value as number,
+    streamIdleTimeoutMs: descriptors.streamIdleTimeoutMs.value as number,
+  });
+}
+
+function snapshotTransport(value: unknown): LlmProxyTransportMetadata {
+  try {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      intrinsicIsProxy(value) ||
+      intrinsicObjectGetPrototypeOf(value) !== intrinsicObjectPrototype
+    )
+      boundaryFailure();
+    const kindDescriptor = intrinsicObjectGetOwnPropertyDescriptor(
+      value,
+      'kind',
+    );
+    if (
+      kindDescriptor === undefined ||
+      !('value' in kindDescriptor) ||
+      kindDescriptor.enumerable !== true
+    )
+      boundaryFailure();
+    if (kindDescriptor.value === 'none') {
+      ownDataDescriptors(value, transportNoneKeys);
+      return intrinsicObjectFreeze({ kind: 'none' });
+    }
+    if (kindDescriptor.value !== 'codex') boundaryFailure();
+    const descriptors = ownDataDescriptors(value, transportCodexKeys);
+    return intrinsicObjectFreeze({
+      kind: 'codex',
+      sessionId: descriptors.sessionId.value as string,
+    });
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
 function normalizedModel(value: LlmProxyCatalogModel): LlmProxyCatalogModel {
   try {
     const catalog = decodeLlmProxyCatalog(
@@ -854,38 +1025,12 @@ function exactDispatch(
   value: GatewayLlmDispatchInput,
 ): GatewayLlmDispatchInput {
   try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
-      boundaryFailure();
-    const keys = Reflect.ownKeys(value).sort();
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (
-      keys.length !== 4 ||
-      keys[0] !== 'model' ||
-      keys[1] !== 'payload' ||
-      keys[2] !== 'route' ||
-      keys[3] !== 'transport'
-    )
-      boundaryFailure();
-    const model = descriptors.model;
-    const payload = descriptors.payload;
-    const route = descriptors.route;
-    const transport = descriptors.transport;
-    if (
-      model === undefined ||
-      !('value' in model) ||
-      payload === undefined ||
-      !('value' in payload) ||
-      route === undefined ||
-      !('value' in route) ||
-      transport === undefined ||
-      !('value' in transport)
-    )
-      boundaryFailure();
-    return Object.freeze({
-      model: model.value as LlmProxyCatalogModel,
-      payload: copyUint8Array(payload.value),
-      route: route.value as LlmProxyRoute,
-      transport: transport.value as LlmProxyTransportMetadata,
+    const descriptors = ownDataDescriptors(value, dispatchKeys);
+    return intrinsicObjectFreeze({
+      model: snapshotModel(descriptors.model.value),
+      payload: copyUint8Array(descriptors.payload.value),
+      route: descriptors.route.value as LlmProxyRoute,
+      transport: snapshotTransport(descriptors.transport.value),
     });
   } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;

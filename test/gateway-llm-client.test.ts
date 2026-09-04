@@ -271,6 +271,43 @@ describe('GatewayLlmClient request boundary', () => {
     );
   });
 
+  it('snapshots valid Codex transport metadata', async () => {
+    const codexModel: LlmProxyCatalogModel = Object.freeze({
+      ...model,
+      providerType: 'codex-oauth',
+      allowedRoutes: Object.freeze(['codex/responses']),
+    });
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      assert.equal(request.route, 'codex/responses');
+      assert.deepEqual(request.transport, {
+        kind: 'codex',
+        sessionId: 'session-aster-1',
+      });
+      return new Response('ok', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        },
+      });
+    });
+    const response = await boundary.dispatch({
+      model: codexModel,
+      route: 'codex/responses',
+      transport: { kind: 'codex', sessionId: 'session-aster-1' },
+      payload: Buffer.from('{}'),
+    });
+    assert.equal(response.status, 200);
+  });
+
   it('owns one route snapshot and rejects accessor-backed dispatch input', async () => {
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => {
@@ -449,9 +486,11 @@ describe('GatewayLlmClient request boundary', () => {
     assert.ok(descriptor && 'value' in descriptor);
     const original = descriptor.value as typeof JSON.stringify;
     let fetchCalls = 0;
+    let getterReads = 0;
     const hostileModel = {
       ...model,
       get allowedRoutes() {
+        getterReads += 1;
         Object.defineProperty(JSON, 'stringify', {
           ...descriptor,
           value(value: unknown, replacer?: unknown, space?: unknown) {
@@ -485,8 +524,43 @@ describe('GatewayLlmClient request boundary', () => {
         GatewayLlmClientBoundaryError,
       );
       assert.equal(fetchCalls, 0);
+      assert.equal(getterReads, 0);
     } finally {
       Object.defineProperty(JSON, 'stringify', descriptor);
+    }
+  });
+
+  it('does not let model normalization expand returned routes', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'map');
+    assert.ok(descriptor && 'value' in descriptor);
+    let fetchCalls = 0;
+    let getterReads = 0;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        getterReads += 1;
+        Object.defineProperty(Array.prototype, 'map', {
+          ...descriptor,
+          value() {
+            Object.defineProperty(Array.prototype, 'map', descriptor);
+            return ['chat/completions', 'responses'];
+          },
+        });
+        return ['chat/completions'] as const;
+      },
+    };
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          throw new Error('must not run');
+        }).dispatch({ ...dispatchInput(), model: hostileModel }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+      assert.equal(getterReads, 0);
+    } finally {
+      Object.defineProperty(Array.prototype, 'map', descriptor);
     }
   });
 
@@ -494,23 +568,10 @@ describe('GatewayLlmClient request boundary', () => {
     const descriptor = Object.getOwnPropertyDescriptor(Promise, 'race');
     assert.ok(descriptor && 'value' in descriptor);
     const nativeRace = descriptor.value as typeof Promise.race;
-    const hostileModel = {
-      ...model,
-      get allowedRoutes() {
-        Object.defineProperty(Promise, 'race', {
-          ...descriptor,
-          value() {
-            Object.defineProperty(Promise, 'race', descriptor);
-            return new Promise<never>(() => undefined);
-          },
-        });
-        return ['responses'] as const;
-      },
-    };
     try {
       const attempt = client(async (_target, init) => {
         const request = decodeLlmProxyRequest(init.body as string);
-        return new Response('ok', {
+        const response = new Response('ok', {
           status: 200,
           headers: {
             [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
@@ -524,7 +585,15 @@ describe('GatewayLlmClient request boundary', () => {
             }),
           },
         });
-      }).dispatch({ ...dispatchInput(), model: hostileModel });
+        Object.defineProperty(Promise, 'race', {
+          ...descriptor,
+          value() {
+            Object.defineProperty(Promise, 'race', descriptor);
+            return new Promise<never>(() => undefined);
+          },
+        });
+        return response;
+      }).dispatch(dispatchInput());
       const outcome = await Reflect.apply(nativeRace, Promise, [
         [
           attempt.then(
