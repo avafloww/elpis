@@ -108,7 +108,7 @@ function proxyError(
 }
 
 function dispatchInput(
-  payload = Buffer.from('{"model":"aster-1","input":"hello"}'),
+  payload: Uint8Array = Buffer.from('{"model":"aster-1","input":"hello"}'),
 ) {
   return {
     model,
@@ -829,36 +829,36 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(cancelled, 1);
   });
 
-  it('makes abort during intrinsic chunk inspection win over buffered bytes', async () => {
+  it('uses intrinsic byte length instead of a chunk override', async () => {
     const controller = new AbortController();
-    const reason = new DOMException(
-      'cancelled during chunk inspection',
-      'AbortError',
+    const reason = new DOMException('own byteLength getter ran', 'AbortError');
+    let getterCalls = 0;
+    const chunk = new Uint8Array([0]);
+    Object.defineProperty(chunk, 'byteLength', {
+      get() {
+        getterCalls += 1;
+        controller.abort(reason);
+        return 1;
+      },
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(chunk);
+          streamController.close();
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
     );
-    let cancelled = 0;
-    const chunk = new Proxy(new Uint8Array([1]), {
-      get(target, key) {
-        if (key === 'byteLength') controller.abort(reason);
-        return Reflect.get(target, key, target);
-      },
-    });
-    const body = new ReadableStream<Uint8Array>({
-      start(streamController) {
-        streamController.enqueue(chunk);
-      },
-      cancel() {
-        cancelled += 1;
-      },
-    });
-    const response = new Response(body, {
-      status: 500,
-      headers: { 'content-type': 'application/json; charset=utf-8' },
-    });
     await assert.rejects(
       client(async () => response).dispatch(dispatchInput(), controller.signal),
-      (error) => error === reason,
+      GatewayLlmClientBoundaryError,
     );
-    assert.equal(cancelled, 1);
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(getterCalls, 0);
   });
 
   it('uses intrinsic getReader instead of a stream override', async () => {
@@ -910,6 +910,59 @@ describe('GatewayLlmClient request boundary', () => {
       }),
       body: { getReader: () => reader },
     } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput()),
+      GatewayLlmClientBoundaryError,
+    );
+  });
+
+  it('copies owned request payload bytes without invoking its iterator', async () => {
+    const actual = new Uint8Array(4);
+    const spoof = Buffer.from('evil');
+    Object.defineProperty(actual, Symbol.iterator, {
+      value: () => spoof.values(),
+    });
+    let received: Uint8Array | undefined;
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      received = request.payload;
+      return new Response('ok', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        },
+      });
+    });
+    await boundary.dispatch(dispatchInput(actual));
+    assert.deepEqual(received, new Uint8Array(4));
+  });
+
+  it('copies response chunk bytes without invoking its iterator', async () => {
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    const chunk = new Uint8Array(canonical.byteLength);
+    Object.defineProperty(chunk, Symbol.iterator, {
+      value: () => canonical.values(),
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
     await assert.rejects(
       client(async () => response).dispatch(dispatchInput()),
       GatewayLlmClientBoundaryError,

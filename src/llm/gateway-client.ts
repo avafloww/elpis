@@ -125,6 +125,26 @@ const intrinsicResponseUrl = Object.getOwnPropertyDescriptor(
   Response.prototype,
   'url',
 )?.get;
+const typedArrayPrototype = Object.getPrototypeOf(
+  Uint8Array.prototype,
+) as object;
+const intrinsicTypedArrayBuffer = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'buffer',
+)?.get;
+const intrinsicTypedArrayByteLength = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteLength',
+)?.get;
+const intrinsicTypedArrayByteOffset = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteOffset',
+)?.get;
+const intrinsicTypedArrayTag = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  Symbol.toStringTag,
+)?.get;
+const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 
 function toNativePromise<T>(value: T | PromiseLike<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -212,6 +232,36 @@ function throwIfHttpResponseAborted(
 
 function header(response: ValidatedHttpResponse, name: string): string | null {
   return intrinsicHeadersGet.call(response.headers, name);
+}
+
+function copyUint8Array(value: unknown): Uint8Array {
+  try {
+    if (
+      intrinsicTypedArrayBuffer === undefined ||
+      intrinsicTypedArrayByteLength === undefined ||
+      intrinsicTypedArrayByteOffset === undefined ||
+      intrinsicTypedArrayTag === undefined ||
+      intrinsicTypedArrayTag.call(value) !== 'Uint8Array'
+    )
+      boundaryFailure();
+    const buffer = intrinsicTypedArrayBuffer.call(value) as ArrayBufferLike;
+    const byteLength = intrinsicTypedArrayByteLength.call(value) as number;
+    const byteOffset = intrinsicTypedArrayByteOffset.call(value) as number;
+    if (
+      !Number.isSafeInteger(byteLength) ||
+      byteLength < 0 ||
+      !Number.isSafeInteger(byteOffset) ||
+      byteOffset < 0
+    )
+      boundaryFailure();
+    const source = new Uint8Array(buffer, byteOffset, byteLength);
+    const copy = new Uint8Array(byteLength);
+    intrinsicUint8ArraySet.call(copy, source);
+    return copy;
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
 }
 
 function cancelReader(
@@ -462,19 +512,10 @@ async function readBoundedBody(
         if (done) break;
         const chunk = item.value;
         if (signal?.aborted) throw abortReason(signal);
-        if (!(chunk instanceof Uint8Array)) {
-          cancelReaderAndCheckAbort(reader, signal);
-          return { ok: false };
-        }
-        const byteLength = chunk.byteLength;
+        const copy = copyUint8Array(chunk);
         if (signal?.aborted) throw abortReason(signal);
-        if (!Number.isSafeInteger(byteLength) || byteLength > maximum - size) {
-          cancelReaderAndCheckAbort(reader, signal);
-          return { ok: false };
-        }
-        const copy = Uint8Array.from(chunk);
-        if (signal?.aborted) throw abortReason(signal);
-        if (copy.byteLength !== byteLength) {
+        const byteLength = copy.byteLength;
+        if (byteLength > maximum - size) {
           cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
@@ -624,13 +665,12 @@ function exactDispatch(
       route === undefined ||
       !('value' in route) ||
       transport === undefined ||
-      !('value' in transport) ||
-      !(payload.value instanceof Uint8Array)
+      !('value' in transport)
     )
       boundaryFailure();
     return Object.freeze({
       model: model.value as LlmProxyCatalogModel,
-      payload: Uint8Array.from(payload.value),
+      payload: copyUint8Array(payload.value),
       route: route.value as LlmProxyRoute,
       transport: transport.value as LlmProxyTransportMetadata,
     });
