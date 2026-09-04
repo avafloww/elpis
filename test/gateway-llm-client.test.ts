@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   LLM_PROXY_FORMATS,
@@ -365,6 +366,81 @@ describe('GatewayLlmClient request boundary', () => {
       assert.equal(fetchCalls, 0);
     } finally {
       Object.defineProperty(Array.prototype, 'includes', descriptor);
+    }
+  });
+
+  it('authorizes routes without a captured includes call override', async () => {
+    const includes = Array.prototype.includes;
+    const previousCall = Object.getOwnPropertyDescriptor(includes, 'call');
+    let fetchCalls = 0;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        Object.defineProperty(includes, 'call', {
+          configurable: true,
+          value() {
+            if (previousCall === undefined)
+              delete (includes as { call?: unknown }).call;
+            else Object.defineProperty(includes, 'call', previousCall);
+            return true;
+          },
+        });
+        return ['responses'] as const;
+      },
+    };
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          throw new Error('must not run');
+        }).dispatch({
+          ...dispatchInput(),
+          model: hostileModel,
+          route: 'messages',
+        }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+    } finally {
+      if (previousCall === undefined)
+        delete (includes as { call?: unknown }).call;
+      else Object.defineProperty(includes, 'call', previousCall);
+    }
+  });
+
+  it('rejects digest prototype poisoning before network', async () => {
+    const hashPrototype = Object.getPrototypeOf(createHash('sha256')) as object;
+    const descriptor = Object.getOwnPropertyDescriptor(hashPrototype, 'update');
+    assert.ok(descriptor && 'value' in descriptor);
+    let skipped = 0;
+    let fetchCalls = 0;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        Object.defineProperty(hashPrototype, 'update', {
+          ...descriptor,
+          value(this: unknown) {
+            skipped += 1;
+            if (skipped === 2)
+              Object.defineProperty(hashPrototype, 'update', descriptor);
+            return this;
+          },
+        });
+        return ['responses'] as const;
+      },
+    };
+    try {
+      await assert.rejects(
+        client(async (_target, init) => {
+          fetchCalls += 1;
+          decodeLlmProxyRequest(init.body as string);
+          throw new Error('malformed envelope reached network');
+        }).dispatch({ ...dispatchInput(), model: hostileModel }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+    } finally {
+      Object.defineProperty(hashPrototype, 'update', descriptor);
     }
   });
 
@@ -985,6 +1061,42 @@ describe('GatewayLlmClient request boundary', () => {
     });
     await boundary.dispatch(dispatchInput(actual));
     assert.deepEqual(received, new Uint8Array(4));
+  });
+
+  it('copies response bytes without a captured set call override', async () => {
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    const actual = new Uint8Array(canonical.byteLength);
+    const set = Uint8Array.prototype.set;
+    const previousCall = Object.getOwnPropertyDescriptor(set, 'call');
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(actual);
+          controller.close();
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    Object.defineProperty(set, 'call', {
+      configurable: true,
+      value(target: Uint8Array) {
+        if (previousCall === undefined) delete (set as { call?: unknown }).call;
+        else Object.defineProperty(set, 'call', previousCall);
+        Reflect.apply(set, target, [canonical, 0]);
+      },
+    });
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+    } finally {
+      if (previousCall === undefined) delete (set as { call?: unknown }).call;
+      else Object.defineProperty(set, 'call', previousCall);
+    }
   });
 
   it('assembles response bytes without ambient typed-array set', async () => {

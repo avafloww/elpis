@@ -100,6 +100,13 @@ const intrinsicEventTargetRemoveEventListener =
   EventTarget.prototype.removeEventListener;
 const intrinsicArrayIncludes = Array.prototype.includes;
 const intrinsicArrayPush = Array.prototype.push;
+const intrinsicReflectApply = Reflect.apply;
+const hashPrototype = Object.getPrototypeOf(createHash('sha256')) as {
+  update: (...args: unknown[]) => unknown;
+  digest: (...args: unknown[]) => unknown;
+};
+const intrinsicHashUpdate = hashPrototype.update;
+const intrinsicHashDigest = hashPrototype.digest;
 const intrinsicPromiseConstructor = Promise;
 const intrinsicPromisePrototype = Promise.prototype;
 const intrinsicHeadersGet = Headers.prototype.get;
@@ -159,7 +166,11 @@ function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
   if (signal === undefined) return false;
   try {
     if (intrinsicAbortSignalAborted === undefined) boundaryFailure();
-    const aborted = intrinsicAbortSignalAborted.call(signal) as boolean;
+    const aborted = intrinsicReflectApply(
+      intrinsicAbortSignalAborted,
+      signal,
+      [],
+    ) as boolean;
     if (typeof aborted !== 'boolean') boundaryFailure();
     return aborted;
   } catch (error) {
@@ -171,7 +182,7 @@ function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
 function abortReason(signal: AbortSignal): unknown {
   try {
     if (intrinsicAbortSignalReason === undefined) boundaryFailure();
-    return intrinsicAbortSignalReason.call(signal);
+    return intrinsicReflectApply(intrinsicAbortSignalReason, signal, []);
   } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     boundaryFailure();
@@ -180,9 +191,11 @@ function abortReason(signal: AbortSignal): unknown {
 
 function addAbortListener(signal: AbortSignal, listener: () => void): void {
   try {
-    intrinsicEventTargetAddEventListener.call(signal, 'abort', listener, {
-      once: true,
-    });
+    intrinsicReflectApply(intrinsicEventTargetAddEventListener, signal, [
+      'abort',
+      listener,
+      { once: true },
+    ]);
   } catch {
     boundaryFailure();
   }
@@ -190,7 +203,10 @@ function addAbortListener(signal: AbortSignal, listener: () => void): void {
 
 function removeAbortListener(signal: AbortSignal, listener: () => void): void {
   try {
-    intrinsicEventTargetRemoveEventListener.call(signal, 'abort', listener);
+    intrinsicReflectApply(intrinsicEventTargetRemoveEventListener, signal, [
+      'abort',
+      listener,
+    ]);
   } catch {}
 }
 
@@ -248,8 +264,10 @@ function safeResponseBody(
 ): ReadableStream<Uint8Array> | null {
   try {
     if (intrinsicResponseBody !== undefined)
-      return intrinsicResponseBody.call(
+      return intrinsicReflectApply(
+        intrinsicResponseBody,
         response,
+        [],
       ) as ReadableStream<Uint8Array> | null;
   } catch {}
   try {
@@ -267,7 +285,8 @@ function safeResponseBody(
 function cancelBody(response: Response, signal?: AbortSignal): void {
   try {
     const body = safeResponseBody(response);
-    if (body !== null) observePromise(intrinsicStreamCancel.call(body));
+    if (body !== null)
+      observePromise(intrinsicReflectApply(intrinsicStreamCancel, body, []));
   } catch {
     // Cancellation is an observation/cleanup path and must not replace the failure.
   }
@@ -280,7 +299,9 @@ function cancelHttpResponse(
 ): void {
   try {
     if (response.body !== null)
-      observePromise(intrinsicStreamCancel.call(response.body));
+      observePromise(
+        intrinsicReflectApply(intrinsicStreamCancel, response.body, []),
+      );
   } catch {}
   throwIfAborted(signal);
 }
@@ -293,13 +314,19 @@ function throwIfHttpResponseAborted(
 }
 
 function header(response: ValidatedHttpResponse, name: string): string | null {
-  return intrinsicHeadersGet.call(response.headers, name);
+  return intrinsicReflectApply(intrinsicHeadersGet, response.headers, [
+    name,
+  ]) as string | null;
 }
 
 function uint8ArrayByteLength(value: Uint8Array): number {
   try {
     if (intrinsicTypedArrayByteLength === undefined) boundaryFailure();
-    const byteLength = intrinsicTypedArrayByteLength.call(value) as number;
+    const byteLength = intrinsicReflectApply(
+      intrinsicTypedArrayByteLength,
+      value,
+      [],
+    ) as number;
     if (!Number.isSafeInteger(byteLength) || byteLength < 0) boundaryFailure();
     return byteLength;
   } catch (error) {
@@ -315,12 +342,24 @@ function copyUint8Array(value: unknown): Uint8Array {
       intrinsicTypedArrayByteLength === undefined ||
       intrinsicTypedArrayByteOffset === undefined ||
       intrinsicTypedArrayTag === undefined ||
-      intrinsicTypedArrayTag.call(value) !== 'Uint8Array'
+      intrinsicReflectApply(intrinsicTypedArrayTag, value, []) !== 'Uint8Array'
     )
       boundaryFailure();
-    const buffer = intrinsicTypedArrayBuffer.call(value) as ArrayBufferLike;
-    const byteLength = intrinsicTypedArrayByteLength.call(value) as number;
-    const byteOffset = intrinsicTypedArrayByteOffset.call(value) as number;
+    const buffer = intrinsicReflectApply(
+      intrinsicTypedArrayBuffer,
+      value,
+      [],
+    ) as ArrayBufferLike;
+    const byteLength = intrinsicReflectApply(
+      intrinsicTypedArrayByteLength,
+      value,
+      [],
+    ) as number;
+    const byteOffset = intrinsicReflectApply(
+      intrinsicTypedArrayByteOffset,
+      value,
+      [],
+    ) as number;
     if (
       !Number.isSafeInteger(byteLength) ||
       byteLength < 0 ||
@@ -334,7 +373,7 @@ function copyUint8Array(value: unknown): Uint8Array {
       byteLength,
     );
     const copy = new intrinsicUint8ArrayConstructor(byteLength);
-    intrinsicUint8ArraySet.call(copy, source);
+    intrinsicReflectApply(intrinsicUint8ArraySet, copy, [source]);
     return copy;
   } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
@@ -346,7 +385,7 @@ function cancelReader(
   reader: Pick<ReadableStreamDefaultReader<Uint8Array>, 'cancel'>,
 ): void {
   try {
-    observePromise(intrinsicReaderCancel.call(reader));
+    observePromise(intrinsicReflectApply(intrinsicReaderCancel, reader, []));
   } catch {}
 }
 
@@ -478,13 +517,35 @@ function validateHttpResponse(
       intrinsicResponseUrl === undefined
     )
       boundaryFailure();
-    const status = intrinsicResponseStatus.call(response) as number;
-    const redirected = intrinsicResponseRedirected.call(response) as boolean;
-    const type = intrinsicResponseType.call(response) as ResponseType;
-    const url = intrinsicResponseUrl.call(response) as string;
-    const headers = intrinsicResponseHeaders.call(response) as Headers;
-    const body = intrinsicResponseBody.call(
+    const status = intrinsicReflectApply(
+      intrinsicResponseStatus,
       response,
+      [],
+    ) as number;
+    const redirected = intrinsicReflectApply(
+      intrinsicResponseRedirected,
+      response,
+      [],
+    ) as boolean;
+    const type = intrinsicReflectApply(
+      intrinsicResponseType,
+      response,
+      [],
+    ) as ResponseType;
+    const url = intrinsicReflectApply(
+      intrinsicResponseUrl,
+      response,
+      [],
+    ) as string;
+    const headers = intrinsicReflectApply(
+      intrinsicResponseHeaders,
+      response,
+      [],
+    ) as Headers;
+    const body = intrinsicReflectApply(
+      intrinsicResponseBody,
+      response,
+      [],
     ) as ReadableStream<Uint8Array> | null;
     const validated = Object.freeze({
       [validatedHttpResponseBrand]: true as const,
@@ -539,8 +600,10 @@ async function readBoundedBody(
     const body = response.body;
     throwIfHttpResponseAborted(response, signal);
     if (body === null) return { ok: false };
-    reader = intrinsicStreamGetReader.call(
+    reader = intrinsicReflectApply(
+      intrinsicStreamGetReader,
       body,
+      [],
     ) as ReadableStreamDefaultReader<Uint8Array>;
     throwIfHttpResponseAborted(response, signal);
   } catch {
@@ -570,7 +633,9 @@ async function readBoundedBody(
       if (signalAborted(signal)) throw abortReason(signal);
       let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>>;
       try {
-        pendingRead = toNativePromise(intrinsicReaderRead.call(reader));
+        pendingRead = toNativePromise(
+          intrinsicReflectApply(intrinsicReaderRead, reader, []),
+        );
       } catch {
         cancelReaderAndCheckAbort(reader, signal);
         return { ok: false };
@@ -604,7 +669,7 @@ async function readBoundedBody(
           return { ok: false };
         }
         size += byteLength;
-        intrinsicArrayPush.call(chunks, copy);
+        intrinsicReflectApply(intrinsicArrayPush, chunks, [copy]);
       } catch {
         if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
@@ -618,7 +683,7 @@ async function readBoundedBody(
     }
   } finally {
     try {
-      intrinsicReaderReleaseLock.call(reader);
+      intrinsicReflectApply(intrinsicReaderReleaseLock, reader, []);
     } catch {}
     if (signal !== undefined) removeAbortListener(signal, onAbort);
   }
@@ -633,7 +698,7 @@ async function readBoundedBody(
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
       const byteLength = uint8ArrayByteLength(chunk);
-      intrinsicUint8ArraySet.call(body, chunk, offset);
+      intrinsicReflectApply(intrinsicUint8ArraySet, body, [chunk, offset]);
       if (signalAborted(signal)) throw abortReason(signal);
       offset += byteLength;
     }
@@ -698,6 +763,17 @@ async function gatewayError(
     throw new GatewayLlmClientError(decoded.code, decoded.requestId);
   } catch (error) {
     if (error instanceof GatewayLlmClientError) throw error;
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
+function payloadSha256(payload: Uint8Array): string {
+  try {
+    const hash = createHash('sha256');
+    intrinsicReflectApply(intrinsicHashUpdate, hash, [payload]);
+    return intrinsicReflectApply(intrinsicHashDigest, hash, ['hex']) as string;
+  } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     boundaryFailure();
   }
@@ -868,13 +944,17 @@ export class GatewayLlmClient {
     throwIfAborted(signal);
     const exact = exactDispatch(input);
     const model = normalizedModel(exact.model);
-    if (!intrinsicArrayIncludes.call(model.allowedRoutes, exact.route))
+    if (
+      !intrinsicReflectApply(intrinsicArrayIncludes, model.allowedRoutes, [
+        exact.route,
+      ])
+    )
       boundaryFailure();
     const payload = exact.payload;
     const rid = requestId(this.#randomBytes);
     let body: string;
     try {
-      const sha256 = createHash('sha256').update(payload).digest('hex');
+      const sha256 = payloadSha256(payload);
       body = serializeLlmProxyRequest({
         format: LLM_PROXY_FORMATS.request,
         requestId: rid,
