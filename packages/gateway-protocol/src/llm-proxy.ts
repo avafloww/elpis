@@ -15,6 +15,9 @@ export const LLM_PROXY_HEADERS = Object.freeze({
   provenance: 'x-elpis-llm-provenance',
 } as const);
 
+const intrinsicJsonParse = JSON.parse;
+const intrinsicJsonStringify = JSON.stringify;
+
 export const LLM_PROXY_FORMATS = Object.freeze({
   catalog: 'elpis-gateway-llm-catalog-v1',
   request: 'elpis-gateway-llm-request-v1',
@@ -327,7 +330,7 @@ function bodyText(body: LlmProxyBody, maximum: number): string {
   return fatalUtf8.decode(body);
 }
 function serializeBounded(value: unknown, maximum: number): string {
-  const encoded = JSON.stringify(value);
+  const encoded = intrinsicJsonStringify(value);
   if (typeof encoded !== 'string' || utf8.encode(encoded).byteLength > maximum)
     invalid();
   return encoded;
@@ -464,7 +467,7 @@ function decodeWirePayload(
 export function decodeLlmProxyRequest(body: LlmProxyBody): LlmProxyRequest {
   return guarded(() => {
     const text = bodyText(body, LLM_PROXY_LIMITS.requestBodyBytes);
-    const input = record(JSON.parse(text) as unknown);
+    const input = record(intrinsicJsonParse(text) as unknown);
     exact(input, [
       'format',
       'requestId',
@@ -637,7 +640,9 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
 export function decodeLlmProxyCatalog(body: LlmProxyBody): LlmProxyCatalog {
   return guarded(() => {
     const text = bodyText(body, LLM_PROXY_LIMITS.catalogBodyBytes);
-    const normalized = normalizeCatalog(record(JSON.parse(text) as unknown));
+    const normalized = normalizeCatalog(
+      record(intrinsicJsonParse(text) as unknown),
+    );
     if (
       serializeBounded(normalized, LLM_PROXY_LIMITS.catalogBodyBytes) !== text
     )
@@ -662,8 +667,11 @@ function authorizationFailure(
 
 function canonicalPayloadModel(payload: Uint8Array): string {
   const text = fatalUtf8.decode(payload);
-  const parsed = record(JSON.parse(text) as unknown);
-  if (JSON.stringify(parsed) !== text || typeof parsed.model !== 'string')
+  const parsed = record(intrinsicJsonParse(text) as unknown);
+  if (
+    intrinsicJsonStringify(parsed) !== text ||
+    typeof parsed.model !== 'string'
+  )
     invalid();
   return parsed.model;
 }
@@ -718,7 +726,9 @@ function normalizeError(value: unknown): LlmProxyErrorEnvelope {
 export function decodeLlmProxyError(body: LlmProxyBody): LlmProxyErrorEnvelope {
   return guarded(() => {
     const text = bodyText(body, LLM_PROXY_LIMITS.errorBodyBytes);
-    const normalized = normalizeError(record(JSON.parse(text) as unknown));
+    const normalized = normalizeError(
+      record(intrinsicJsonParse(text) as unknown),
+    );
     if (serializeBounded(normalized, LLM_PROXY_LIMITS.errorBodyBytes) !== text)
       invalid();
     return normalized;
@@ -817,7 +827,7 @@ export function decodeLlmResponseProvenance(
     const bytes = Buffer.from(value, 'base64url');
     if (bytes.toString('base64url') !== value) invalid();
     const decoded = normalizeProvenance(
-      record(JSON.parse(fatalUtf8.decode(bytes)) as unknown),
+      record(intrinsicJsonParse(fatalUtf8.decode(bytes)) as unknown),
     );
     // Require the one canonical field order and representation emitted above.
     if (encodeLlmResponseProvenance(decoded) !== value) invalid();

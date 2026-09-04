@@ -271,6 +271,34 @@ describe('GatewayLlmClient request boundary', () => {
     );
   });
 
+  it('prioritizes abort during request ID generation before fetch', async () => {
+    const reason = new DOMException(
+      'aborted while generating request ID',
+      'AbortError',
+    );
+    for (const throws of [false, true]) {
+      const controller = new AbortController();
+      let fetchCalls = 0;
+      const boundary = new GatewayLlmClient({
+        store: store(),
+        fetch: async () => {
+          fetchCalls += 1;
+          throw new Error('must not run');
+        },
+        randomBytes: () => {
+          controller.abort(reason);
+          if (throws) throw new Error(firstCredential.token + '@' + ENDPOINT);
+          return Buffer.alloc(16);
+        },
+      });
+      await assert.rejects(
+        boundary.dispatch(dispatchInput(), controller.signal),
+        (error) => error === reason,
+      );
+      assert.equal(fetchCalls, 0);
+    }
+  });
+
   it('snapshots valid Codex transport metadata', async () => {
     const codexModel: LlmProxyCatalogModel = Object.freeze({
       ...model,
@@ -561,6 +589,98 @@ describe('GatewayLlmClient request boundary', () => {
       assert.equal(getterReads, 0);
     } finally {
       Object.defineProperty(Array.prototype, 'map', descriptor);
+    }
+  });
+
+  it('keeps request codecs independent of randomBytes JSON poisoning', async () => {
+    const parseDescriptor = Object.getOwnPropertyDescriptor(JSON, 'parse');
+    const stringifyDescriptor = Object.getOwnPropertyDescriptor(
+      JSON,
+      'stringify',
+    );
+    assert.ok(parseDescriptor && 'value' in parseDescriptor);
+    assert.ok(stringifyDescriptor && 'value' in stringifyDescriptor);
+    const nativeParse = parseDescriptor.value as typeof JSON.parse;
+    const nativeStringify = stringifyDescriptor.value as typeof JSON.stringify;
+    let parseCalls = 0;
+    let stringifyCalls = 0;
+    let fetchedRoute: string | undefined;
+    const boundary = new GatewayLlmClient({
+      store: store(),
+      fetch: async (_target, init) => {
+        const request = decodeLlmProxyRequest(init.body as string);
+        fetchedRoute = request.route;
+        return new Response('ok', {
+          status: 200,
+          headers: {
+            [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+              format: LLM_PROXY_FORMATS.responseProvenance,
+              requestId: request.requestId,
+              modelRef: request.modelRef,
+              targetGeneration: request.targetGeneration,
+              route: request.route,
+              status: 200,
+              headers: [],
+            }),
+          },
+        });
+      },
+      randomBytes: () => {
+        Object.defineProperty(JSON, 'parse', {
+          ...parseDescriptor,
+          value(text: string) {
+            const parsed = Reflect.apply(nativeParse, JSON, [text]) as unknown;
+            if (
+              parsed !== null &&
+              typeof parsed === 'object' &&
+              (parsed as { format?: unknown }).format ===
+                LLM_PROXY_FORMATS.request
+            ) {
+              parseCalls += 1;
+              Object.defineProperty(JSON, 'parse', parseDescriptor);
+              return { ...(parsed as object), route: 'responses' };
+            }
+            return parsed;
+          },
+        });
+        Object.defineProperty(JSON, 'stringify', {
+          ...stringifyDescriptor,
+          value(value: unknown, replacer?: unknown, space?: unknown) {
+            if (
+              value !== null &&
+              typeof value === 'object' &&
+              (value as { format?: unknown }).format ===
+                LLM_PROXY_FORMATS.request
+            ) {
+              stringifyCalls += 1;
+              if (stringifyCalls === 2) {
+                Object.defineProperty(JSON, 'stringify', stringifyDescriptor);
+              }
+              return Reflect.apply(nativeStringify, JSON, [
+                { ...(value as object), route: 'chat/completions' },
+                replacer,
+                space,
+              ]);
+            }
+            return Reflect.apply(nativeStringify, JSON, [
+              value,
+              replacer,
+              space,
+            ]);
+          },
+        });
+        return Buffer.alloc(16);
+      },
+    });
+    try {
+      const response = await boundary.dispatch(dispatchInput());
+      assert.equal(response.status, 200);
+      assert.equal(fetchedRoute, 'responses');
+      assert.equal(parseCalls, 0);
+      assert.equal(stringifyCalls, 0);
+    } finally {
+      Object.defineProperty(JSON, 'parse', parseDescriptor);
+      Object.defineProperty(JSON, 'stringify', stringifyDescriptor);
     }
   });
 
@@ -1542,6 +1662,58 @@ describe('GatewayLlmClient request boundary', () => {
       assert.equal(lookupCalls, 0);
     } finally {
       Object.defineProperty(Object, 'getPrototypeOf', descriptor);
+    }
+  });
+
+  it('rejects malformed error bytes despite stream JSON poisoning', async () => {
+    const parseDescriptor = Object.getOwnPropertyDescriptor(JSON, 'parse');
+    const stringifyDescriptor = Object.getOwnPropertyDescriptor(
+      JSON,
+      'stringify',
+    );
+    assert.ok(parseDescriptor && 'value' in parseDescriptor);
+    assert.ok(stringifyDescriptor && 'value' in stringifyDescriptor);
+    const malformed = '{"evil":true}';
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(JSON, 'parse', {
+              ...parseDescriptor,
+              value() {
+                Object.defineProperty(JSON, 'parse', parseDescriptor);
+                return {
+                  format: LLM_PROXY_FORMATS.error,
+                  code: 'internal_error',
+                };
+              },
+            });
+            Object.defineProperty(JSON, 'stringify', {
+              ...stringifyDescriptor,
+              value() {
+                Object.defineProperty(JSON, 'stringify', stringifyDescriptor);
+                return malformed;
+              },
+            });
+            controller.enqueue(Buffer.from(malformed));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+    } finally {
+      Object.defineProperty(JSON, 'parse', parseDescriptor);
+      Object.defineProperty(JSON, 'stringify', stringifyDescriptor);
     }
   });
 

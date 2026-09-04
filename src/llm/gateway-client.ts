@@ -829,15 +829,20 @@ function payloadSha256(payload: Uint8Array): string {
   }
 }
 
-function requestId(bytes: (size: number) => Uint8Array): RequestId {
+function requestId(
+  bytes: (size: number) => Uint8Array,
+  signal: AbortSignal | undefined,
+): RequestId {
   try {
     const generated = bytes(16);
+    throwIfAborted(signal);
     if (!(generated instanceof Uint8Array) || generated.byteLength !== 16)
       boundaryFailure();
     const value = 'egr1.' + Buffer.from(generated).toString('base64url');
     if (!isRequestId(value)) boundaryFailure();
     return value;
   } catch (error) {
+    if (signalAborted(signal)) throw abortReason(signal);
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     boundaryFailure();
   }
@@ -1138,7 +1143,8 @@ export class GatewayLlmClient {
     )
       boundaryFailure();
     const payload = exact.payload;
-    const rid = requestId(this.#randomBytes);
+    const rid = requestId(this.#randomBytes, signal);
+    throwIfAborted(signal);
     let body: string;
     try {
       const sha256 = payloadSha256(payload);
