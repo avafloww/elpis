@@ -449,7 +449,7 @@ apt-get install -y -qq \
   build-essential python3 \
   sudo dbus-user-session dbus-x11 locales \
   xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-video-fbdev xinit \
-  openbox tint2 xdotool wmctrl scrot xclip x11-utils x11-xserver-utils xauth \
+  openbox tint2 xdotool wmctrl scrot xclip x11-utils x11-xserver-utils xauth kbd \
   firefox-esr xterm fonts-dejavu-core fonts-noto-color-emoji \
   >/dev/null
 # The root-owned Xorg system service creates the per-agent authority file, but

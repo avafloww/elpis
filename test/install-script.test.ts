@@ -85,3 +85,18 @@ test('installer rejects ambiguous generated and authored SOUL inputs before sudo
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('installer includes the runtime package for Xorg chvt hooks', () => {
+  const source = fs.readFileSync(installer, 'utf8');
+  const unit = fs.readFileSync(
+    path.join(root, 'deploy', 'elpis-xorg.service'),
+    'utf8',
+  );
+  assert.match(unit, /^ExecStartPost=\/usr\/bin\/chvt 7$/m);
+  assert.match(unit, /^ExecStopPost=-\/usr\/bin\/chvt 1$/m);
+  const packages = source.match(
+    /apt-get install -y -qq \\\n([\s\S]*?)  >\/dev\/null/,
+  );
+  assert.ok(packages);
+  assert.match(packages[1], /(?:^|\s)kbd(?:\s|\\|$)/);
+});
