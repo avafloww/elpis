@@ -82,8 +82,10 @@ function denialText(value: unknown, depth = 0): string {
 
 export function isPolicyDenial(value: unknown): boolean {
   const text = denialText(value);
-  return /flagged[\s\S]{0,240}usage policy|usage policy[\s\S]{0,240}flagged/i.test(
-    text,
+  return (
+    /flagged[\s\S]{0,240}usage policy|usage policy[\s\S]{0,240}flagged/i.test(
+      text,
+    ) || /\bflagged\s+for\s+possible\s+cybersecurity\s+risk\b/i.test(text)
   );
 }
 

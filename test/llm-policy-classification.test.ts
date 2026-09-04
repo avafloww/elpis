@@ -20,3 +20,22 @@ test('unknown non-policy errors retain the retriable fallback', () => {
     classifyError(new Error('socket weather')) instanceof RetriableError,
   );
 });
+
+test('cybersecurity denials are terminal without an HTTP status', () => {
+  const denial = new Error(
+    'This content was flagged for possible cybersecurity risk.',
+  );
+  assert.ok(classifyError(denial) instanceof NonRetriableError);
+  assert.ok(
+    classifyError(new Error('transport error', { cause: denial })) instanceof
+      NonRetriableError,
+  );
+});
+
+test('cybersecurity discussion alone does not classify a transport error as policy denial', () => {
+  assert.ok(
+    classifyError(
+      new Error('connection lost while reviewing cybersecurity risk'),
+    ) instanceof RetriableError,
+  );
+});

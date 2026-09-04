@@ -43,6 +43,7 @@ import {
   externalThinkingJuice,
   SKILL_TOOL,
 } from './llm/llm.js';
+import { isPolicyDenial } from './llm/policy-flight-recorder.js';
 import { createCacheStats, type CacheStats } from './llm/cache-stats.js';
 import {
   SecretRegistry,
@@ -2231,6 +2232,17 @@ export class Agent {
             continue turn;
           }
           this.logger.warn('LLM call failed:', e);
+          if (isPolicyDenial(e)) {
+            // A provider policy block is not evidence of malformed history.
+            // Keep the denied input and stop this turn without transport retries.
+            this.consecutive400 = 0;
+            await this.sendError(
+              `(provider policy denial; automatic retries stopped and history preserved: ${e instanceof Error ? e.message : String(e)})`,
+            );
+            this.hasNewInput = false;
+            this.finishTurn();
+            continue turn;
+          }
           const retriable = e instanceof RetriableError;
           if (retriable && transientRetries < this.llmRetryDelays.length) {
             const delay = this.llmRetryDelays[transientRetries++];

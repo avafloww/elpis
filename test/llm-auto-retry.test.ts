@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
-import { RetriableError } from '../src/llm/llm.js';
+import { RetriableError, classifyError } from '../src/llm/llm.js';
 import { buildTestAgent, makeConfig } from './helpers.js';
 
 /** LLM stub whose complete() rejects with RetriableError `failures` times, then
@@ -236,4 +236,39 @@ test('auto-retry: retries exhausted — error surfaced once, user message kept i
   );
   assert.equal(users.length, 1, 'the user message is kept in history');
   agent.stop();
+});
+
+test('policy denials stop retries and preserve inputs across repeated turns', async () => {
+  const llm = flakyLLM(0, [emptyEnd]);
+  let calls = 0;
+  llm.complete = async () => {
+    calls++;
+    throw classifyError(
+      new Error('This content was flagged for possible cybersecurity risk.'),
+    );
+  };
+  const { agent, sent } = buildAgentWith(llm);
+  agent.llmRetryDelays = [1, 1];
+  const running = agent.loop();
+  try {
+    for (let n = 1; n <= 2; n++) {
+      agent.enqueue({ ...userMsg(), id: `policy-input-${n}` });
+      for (let i = 0; i < 100 && sent.length < n; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(calls, n, 'one attempt per explicit input');
+      assert.equal(sent.length, n);
+      assert.match(sent[n - 1].text, /provider policy denial/);
+      assert.doesNotMatch(sent[n - 1].text, /corrupted|\/clear|internal error/);
+      assert.equal(
+        agent.messagesForTest.filter(
+          (m) => m.role === 'user' && m.personContext?.kind === 'inbound',
+        ).length,
+        n,
+        'denied inputs remain in history',
+      );
+    }
+  } finally {
+    agent.stop();
+    await running;
+  }
 });

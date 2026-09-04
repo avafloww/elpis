@@ -4,7 +4,13 @@ The Codex transport can preserve an exact private request/response specimen when
 
 ## Capture condition
 
-A bundle is sealed only when the stream contains both denial wording and an error-shaped envelope such as `event: error` or `response.failed`. Ordinary generated text that discusses policy is not a denial.
+A bundle is sealed only when the stream contains both denial wording and an error-shaped envelope such as `event: error` or `response.failed`. Ordinary generated text that discusses policy is not a denial. Recognized
+provider wording includes both “flagged … usage policy” and “flagged for
+possible cybersecurity risk.” These denials are terminal even without an HTTP
+error status; the runtime must not treat them as transient transport failures
+and automatically retry them. The denied input stays in history, and the error
+notice identifies a provider policy denial instead of suggesting history
+corruption or a conversation clear.
 
 Bundles are written under:
 

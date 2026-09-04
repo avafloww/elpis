@@ -1255,6 +1255,20 @@ test('Codex fetch ignores policy words in ordinary output and tool-argument even
         delta: '{"note":"flagged by usage policy"}',
       },
     ],
+    [
+      'response.output_text.delta',
+      {
+        type: 'response.output_text.delta',
+        delta: 'This content was flagged for possible cybersecurity risk.',
+      },
+    ],
+    [
+      'response.function_call_arguments.delta',
+      {
+        type: 'response.function_call_arguments.delta',
+        delta: 'This content was flagged for possible cybersecurity risk.',
+      },
+    ],
   ] as const;
   for (const [event, payload] of phrases) {
     const { store } = fakeStore();
@@ -1290,34 +1304,38 @@ test('Codex fetch ignores policy words in ordinary output and tool-argument even
   }
 });
 
-test('Codex fetch recognizes response.failed policy envelopes', async () => {
-  const { store } = fakeStore();
-  const dataDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'elpis-codex-failed-policy-'),
-  );
-  const config = {
-    ...codexConfig('gpt-5.6-sol'),
-    paths: { dataDirectory, soulPath: '', memoryPath: '', harnessRoot: '' },
-  } as Config;
-  const failed =
-    'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"Invalid prompt: flagged as potentially violating our usage policy"}}}\n\n';
-  const authenticated = createCodexFetch(
-    store,
-    () => 'failed-policy-session',
-    (async () => new Response(failed, { status: 200 })) as typeof fetch,
-    true,
-    config,
-  );
-  const response = await authenticated(
-    'https://chatgpt.com/backend-api/codex/responses',
-    {
-      method: 'POST',
-      body: '{"model":"gpt-5.6-sol","stream":true,"input":[]}',
-    },
-  );
-  assert.equal(await response.text(), failed);
-  const root = resolveDataLayout(dataDirectory).policyDenials;
-  for (let i = 0; i < 100 && !fs.existsSync(root); i++)
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(fs.existsSync(root), true);
-});
+for (const message of [
+  'Invalid prompt: flagged as potentially violating our usage policy',
+  'This content was flagged for possible cybersecurity risk.',
+]) {
+  test(`Codex fetch captures response.failed: ${message}`, async () => {
+    const { store } = fakeStore();
+    const dataDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'elpis-codex-failed-policy-'),
+    );
+    const config = {
+      ...codexConfig('gpt-5.6-sol'),
+      paths: { dataDirectory, soulPath: '', memoryPath: '', harnessRoot: '' },
+    } as Config;
+    const failed = `event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', response: { error: { message } } })}\n\n`;
+    const authenticated = createCodexFetch(
+      store,
+      () => 'failed-policy-session',
+      (async () => new Response(failed, { status: 200 })) as typeof fetch,
+      true,
+      config,
+    );
+    const response = await authenticated(
+      'https://chatgpt.com/backend-api/codex/responses',
+      {
+        method: 'POST',
+        body: '{"model":"gpt-5.6-sol","stream":true,"input":[]}',
+      },
+    );
+    assert.equal(await response.text(), failed);
+    const root = resolveDataLayout(dataDirectory).policyDenials;
+    for (let i = 0; i < 100 && !fs.existsSync(root); i++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(fs.existsSync(root), true);
+  });
+}
