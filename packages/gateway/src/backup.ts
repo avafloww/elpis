@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { backup, DatabaseSync } from 'node:sqlite';
@@ -10,9 +10,6 @@ import {
 
 export interface GatewayBackupReceipt {
   readonly path: string;
-  readonly pages: number;
-  readonly bytes: number;
-  readonly sha256: string;
 }
 
 function pragmaNumber(database: DatabaseSync, name: string): number {
@@ -67,10 +64,6 @@ function fsyncDirectory(directory: string): void {
   } finally {
     fs.closeSync(descriptor);
   }
-}
-
-function sha256File(file: string): string {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
 export function verifyGatewayBackup(file: string): void {
@@ -152,9 +145,9 @@ export async function backupGatewayDatabase(
 
   let published = false;
   try {
-    const pages = await backup(source, temporary);
+    await backup(source, temporary);
     fs.chmodSync(temporary, 0o600);
-    const stat = regularFile(temporary, 'temporary backup');
+    regularFile(temporary, 'temporary backup');
     fsyncFile(temporary);
     verifyGatewayBackup(temporary);
     for (const suffix of ['-wal', '-shm']) {
@@ -168,12 +161,7 @@ export async function backupGatewayDatabase(
     const finalStat = regularFile(resolved, 'published backup');
     if ((finalStat.mode & 0o777) !== 0o600)
       throw new Error('published backup permissions are not 0600');
-    return Object.freeze({
-      path: resolved,
-      pages,
-      bytes: stat.size,
-      sha256: sha256File(resolved),
-    });
+    return Object.freeze({ path: resolved });
   } catch (error) {
     if (published) {
       try {

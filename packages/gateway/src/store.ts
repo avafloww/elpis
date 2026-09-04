@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
+import { GatewayProviderStore } from './provider-store.js';
 import {
   isCredentialId,
   isGatewayInstanceId,
@@ -228,6 +229,7 @@ export class GatewayStore {
   readonly dataDirectory: string;
   readonly databasePath: string;
   readonly credentials: GatewayCredentialStore;
+  readonly providers: GatewayProviderStore;
   readonly #database: DatabaseSync;
   readonly #now: () => number;
   #closed = false;
@@ -244,6 +246,13 @@ export class GatewayStore {
     this.#database = database;
     this.#now = now;
     this.credentials = new GatewayCredentialStore(
+      database,
+      now,
+      (input, at) => this.insertAudit(input, at),
+      () => hardenDatabaseFiles(this.databasePath),
+      randomBytes,
+    );
+    this.providers = new GatewayProviderStore(
       database,
       now,
       (input, at) => this.insertAudit(input, at),

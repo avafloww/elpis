@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   GATEWAY_APPLICATION_ID,
   GATEWAY_MIGRATIONS,
+  GatewayProviderStore,
   createNodeCredential,
   newGatewayInstanceId,
   openGatewayStore,
@@ -781,5 +782,326 @@ test('provider heads and grants advance monotonically and never carry authority 
     /active head|revoked/,
   );
   assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  database.close();
+});
+
+test('provider credentials expose secret-free receipts while OAuth refresh is exact-revision', async (t) => {
+  const directory = fixture();
+  const backupPath = path.join(fixture(), 'gateway-provider-backup.db');
+  t.after(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(path.dirname(backupPath), { recursive: true, force: true });
+  });
+  let now = 1000;
+  let randomByte = 0x11;
+  const store = openGatewayStore(directory, {
+    now: () => now,
+    randomBytes: (size) => Buffer.alloc(size, randomByte++),
+  });
+  const apiKey = 'synthetic-api-secret-A';
+  const access1 = 'synthetic-access-secret-A';
+  const refresh1 = 'synthetic-refresh-secret-A';
+  const access2 = 'synthetic-access-secret-B';
+  const refresh2 = 'synthetic-refresh-secret-B';
+  const hiddenAccountRef = 'private-account-ref-should-stay-hidden';
+  const hiddenAccountId = 'private-account-id-should-stay-hidden';
+
+  const apiReceipt = store.providers.installApiKeyCredential({
+    providerId: 'shared-provider',
+    accountRef: hiddenAccountRef,
+    apiKey,
+  });
+  assert.deepEqual(apiReceipt, {
+    credentialId: `epc1.${Buffer.alloc(16, 0x11).toString('base64url')}`,
+    providerId: 'shared-provider',
+    providerType: 'openai-compatible',
+    authKind: 'api-key',
+    secretRevision: 0,
+    createdAt: 1000,
+    updatedAt: 1000,
+  });
+
+  now = 2000;
+  const oauthReceipt = store.providers.installOAuthCredential({
+    providerId: 'codex',
+    providerType: 'codex-oauth',
+    accountRef: hiddenAccountRef,
+    accountIdentity: {
+      accountId: hiddenAccountId,
+      email: 'private-account-email-should-stay-hidden@example.com',
+      authorizedAt: 1500,
+    },
+    accessToken: access1,
+    refreshToken: refresh1,
+    expiresAt: 9000,
+  });
+  assert.deepEqual(oauthReceipt, {
+    credentialId: `epc1.${Buffer.alloc(16, 0x12).toString('base64url')}`,
+    providerId: 'codex',
+    providerType: 'codex-oauth',
+    authKind: 'oauth',
+    secretRevision: 0,
+    createdAt: 2000,
+    updatedAt: 2000,
+  });
+
+  const errors: string[] = [];
+  assert.throws(
+    () =>
+      store.providers.installOAuthCredential({
+        providerId: 'shared-provider',
+        providerType: 'codex-oauth',
+        accountRef: 'other-hidden-account',
+        accountIdentity: {},
+        accessToken: 'synthetic-conflict-access',
+        refreshToken: 'synthetic-conflict-refresh',
+        expiresAt: 9000,
+      }),
+    (error) => {
+      errors.push(String(error));
+      return /namespace type is immutable/.test(String(error));
+    },
+  );
+
+  now = 3000;
+  const refreshed = store.providers.refreshOAuthCredential({
+    credentialId: oauthReceipt.credentialId,
+    expectedSecretRevision: 0,
+    accessToken: access2,
+    refreshToken: refresh2,
+    expiresAt: 12000,
+  });
+  assert.deepEqual(refreshed, {
+    ...oauthReceipt,
+    secretRevision: 1,
+    updatedAt: 3000,
+  });
+  assert.throws(
+    () =>
+      store.providers.refreshOAuthCredential({
+        credentialId: oauthReceipt.credentialId,
+        expectedSecretRevision: 0,
+        accessToken: 'synthetic-stale-access-should-not-land',
+        refreshToken: 'synthetic-stale-refresh-should-not-land',
+        expiresAt: 13000,
+      }),
+    (error) => {
+      errors.push(String(error));
+      return /OAuth refresh conflict/.test(String(error));
+    },
+  );
+
+  const backupReceipt = await store.backup(backupPath);
+  const externallyVisible = JSON.stringify({
+    apiReceipt,
+    oauthReceipt,
+    refreshed,
+    audit: store.audit(),
+    errors,
+    backupReceipt,
+  });
+  for (const hidden of [
+    apiKey,
+    access1,
+    refresh1,
+    access2,
+    refresh2,
+    hiddenAccountRef,
+    hiddenAccountId,
+    'private-account-email-should-stay-hidden@example.com',
+    'synthetic-stale-access-should-not-land',
+    'synthetic-stale-refresh-should-not-land',
+  ])
+    assert.equal(externallyVisible.includes(hidden), false, hidden);
+  assert.equal('getCredential' in store.providers, false);
+  assert.equal('readCredential' in store.providers, false);
+
+  store.close();
+  const backup = new DatabaseSync(backupPath, {
+    enableForeignKeyConstraints: true,
+    readOnly: true,
+  });
+  const rows = backup
+    .prepare(
+      `SELECT id, account_ref, account_identity_json, api_key,
+              oauth_access, oauth_refresh, oauth_expires, oauth_secret_revision
+       FROM gateway_provider_credentials ORDER BY created_at, id`,
+    )
+    .all() as unknown as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].account_ref, hiddenAccountRef);
+  assert.equal(
+    Buffer.from(rows[0].api_key as Uint8Array).toString('utf8'),
+    apiKey,
+  );
+  assert.equal(rows[1].account_ref, hiddenAccountRef);
+  assert.equal(
+    String(rows[1].account_identity_json).includes(hiddenAccountId),
+    true,
+  );
+  assert.equal(
+    Buffer.from(rows[1].oauth_access as Uint8Array).toString('utf8'),
+    access2,
+  );
+  assert.equal(
+    Buffer.from(rows[1].oauth_refresh as Uint8Array).toString('utf8'),
+    refresh2,
+  );
+  assert.equal(rows[1].oauth_expires, 12000);
+  assert.equal(rows[1].oauth_secret_revision, 1);
+  assert.deepEqual(backup.prepare('PRAGMA foreign_key_check').all(), []);
+  backup.close();
+});
+
+test('provider credential mutations harden before commit and OAuth CAS wins once', () => {
+  const database = new DatabaseSync(':memory:', {
+    enableForeignKeyConstraints: true,
+  });
+  database.exec(`PRAGMA application_id = ${GATEWAY_APPLICATION_ID}`);
+  let now = 1000;
+  runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => now);
+  let hardenFails = false;
+  let randomByte = 0x31;
+  const provider = new GatewayProviderStore(
+    database,
+    () => now,
+    (input, at) =>
+      Number(
+        database
+          .prepare(
+            `INSERT INTO gateway_audit_events (
+              at, actor_kind, actor_id, action, target_kind, target_id,
+              outcome, request_id, detail_json
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?)`,
+          )
+          .run(
+            at,
+            input.actorKind,
+            input.action,
+            input.targetKind,
+            input.targetId,
+            input.outcome,
+            JSON.stringify(input.detail),
+          ).lastInsertRowid,
+      ),
+    () => {
+      if (hardenFails) throw new Error('synthetic-hardening-failure');
+    },
+    (size) => Buffer.alloc(size, randomByte++),
+  );
+
+  hardenFails = true;
+  assert.throws(
+    () =>
+      provider.installApiKeyCredential({
+        providerId: 'rollback-provider',
+        accountRef: 'rollback-account',
+        apiKey: 'synthetic-api-key-must-rollback',
+      }),
+    /credential installation failed/,
+  );
+  assert.equal(
+    database
+      .prepare('SELECT count(*) AS count FROM gateway_provider_credentials')
+      .get().count,
+    0,
+  );
+  assert.equal(
+    database.prepare('SELECT count(*) AS count FROM gateway_audit_events').get()
+      .count,
+    0,
+  );
+
+  hardenFails = false;
+  now = 2000;
+  const installed = provider.installOAuthCredential({
+    providerId: 'cas-provider',
+    providerType: 'codex-oauth',
+    accountRef: 'fixed-account-ref',
+    accountIdentity: { accountId: 'fixed-account-id', authorizedAt: 1900 },
+    accessToken: 'synthetic-cas-access-A',
+    refreshToken: 'synthetic-cas-refresh-A',
+    expiresAt: 9000,
+  });
+  const identityBefore = database
+    .prepare(
+      `SELECT provider_id, provider_type, account_ref, account_identity_json
+       FROM gateway_provider_credentials WHERE id = ?`,
+    )
+    .get(installed.credentialId);
+
+  now = 3000;
+  const won = provider.refreshOAuthCredential({
+    credentialId: installed.credentialId,
+    expectedSecretRevision: 0,
+    accessToken: 'synthetic-cas-access-B',
+    refreshToken: 'synthetic-cas-refresh-B',
+    expiresAt: 10000,
+  });
+  assert.equal(won.secretRevision, 1);
+  assert.throws(
+    () =>
+      provider.refreshOAuthCredential({
+        credentialId: installed.credentialId,
+        expectedSecretRevision: 0,
+        accessToken: 'synthetic-stale-access-must-not-land',
+        refreshToken: 'synthetic-stale-refresh-must-not-land',
+        expiresAt: 11000,
+      }),
+    /OAuth refresh conflict/,
+  );
+
+  hardenFails = true;
+  now = 4000;
+  assert.throws(
+    () =>
+      provider.refreshOAuthCredential({
+        credentialId: installed.credentialId,
+        expectedSecretRevision: 1,
+        accessToken: 'synthetic-harden-access-must-rollback',
+        refreshToken: 'synthetic-harden-refresh-must-rollback',
+        expiresAt: 12000,
+      }),
+    /OAuth refresh failed/,
+  );
+  const final = database
+    .prepare(
+      `SELECT provider_id, provider_type, account_ref, account_identity_json,
+              oauth_access, oauth_refresh, oauth_expires, oauth_secret_revision
+       FROM gateway_provider_credentials WHERE id = ?`,
+    )
+    .get(installed.credentialId) as Record<string, unknown>;
+  assert.deepEqual(
+    {
+      provider_id: final.provider_id,
+      provider_type: final.provider_type,
+      account_ref: final.account_ref,
+      account_identity_json: final.account_identity_json,
+    },
+    { ...identityBefore },
+  );
+  assert.equal(
+    Buffer.from(final.oauth_access as Uint8Array).toString('utf8'),
+    'synthetic-cas-access-B',
+  );
+  assert.equal(
+    Buffer.from(final.oauth_refresh as Uint8Array).toString('utf8'),
+    'synthetic-cas-refresh-B',
+  );
+  assert.equal(final.oauth_expires, 10000);
+  assert.equal(final.oauth_secret_revision, 1);
+  assert.equal(
+    database.prepare('SELECT count(*) AS count FROM gateway_audit_events').get()
+      .count,
+    2,
+  );
+  assert.equal(
+    database
+      .prepare(
+        'SELECT revision FROM gateway_provider_catalog WHERE singleton_id = 1',
+      )
+      .get().revision,
+    0,
+  );
   database.close();
 });

@@ -1,6 +1,6 @@
 # Elpis Gateway
 
-Elpis Gateway is an optional control plane for several independent Elpis residents. It presents the existing Console dashboard for one selected resident at a time. Gateway is not a resident: it has no agent loop, provider access, SOUL, memory, transcripts, Mind database, worker runtime, scheduler, or access to resident data directories.
+Elpis Gateway is an optional control plane for several independent Elpis residents. It presents the existing Console dashboard for one selected resident at a time. Gateway is not a resident: it has no agent loop, SOUL, memory, transcripts, Mind database, worker runtime, scheduler, or access to resident data directories. It can custody provider credentials for explicit model routes without acquiring a resident's history or agency.
 
 Each resident remains independently operable through its local Console. Residents dial Gateway outbound over WSS; browsers never connect directly to residents. Selecting a resident opens one bounded remote viewer, requests a fresh ordinary Console snapshot, and withholds later deltas until that snapshot completes. Switching closes the old viewer before opening the new one. Media requests are scoped to the selected resident and checked for route, size, canonical base64, and SHA-256.
 
@@ -70,9 +70,9 @@ A configured but unavailable Gateway never blocks resident boot or the local Con
 
 ## State, backup, and restore
 
-Gateway keeps configuration, instance identity, credential verifiers, and audit receipts in `gateway.db` under its data directory. The live database, WAL, and SHM files are mode `0600`; the parent directory is mode `0700`.
+Gateway keeps configuration, instance identity, credential verifiers, provider API keys and OAuth credentials, immutable provider target history, instance grants, and audit receipts in `gateway.db` under its data directory. Provider credential install and OAuth refresh return secret-free receipts; refresh uses an exact secret revision, and there is no general credential readback API. The live database, WAL, and SHM files are mode `0600`; the parent directory is mode `0700`.
 
-Back up a running Gateway with SQLite's online backup API and verify the resulting standalone database with `PRAGMA quick_check`, application ID, schema version, migration prefix, and foreign keys in a separate process. Do not copy a live database file and its sidecars and call that a backup. An offline copy is valid only after Gateway has stopped cleanly and the database has been reopened and verified. Keep backups private: credential verifiers and control-plane audit data are not public artifacts.
+Back up a running Gateway with SQLite's online backup API and verify the resulting standalone database with `PRAGMA quick_check`, application ID, schema version, migration prefix, and foreign keys in a separate process. Do not copy a live database file and its sidecars and call that a backup. An offline copy is valid only after Gateway has stopped cleanly and the database has been reopened and verified. Keep backups private: they contain provider secrets, credential verifiers, target history, grants, and control-plane audit data.
 
 A single restored `gateway.db` restores Gateway identity and control-plane state. Residents keep their own usable credentials; Gateway never stores resident bearer secrets.
 
@@ -80,6 +80,6 @@ A single restored `gateway.db` restores Gateway identity and control-plane state
 
 - Gateway is single-replica and uses one RWO PVC. It does not provide active/active failover.
 - The instance picker shows bounded public identity and connection state. Inactive residents do not stream full Console state.
-- Gateway does not centralize resident databases, filesystems, transcripts, or secrets.
+- Gateway does not centralize resident databases, filesystems, transcripts, or resident bearer secrets. Provider credentials are a separate, explicit centralized custody surface.
 - Human multi-user authorization and RBAC are not implemented; the reverse proxy's authenticated audience shares one operator surface.
 - TLS termination, browser authentication, DNS, certificates, firewall rules, image distribution, and backup scheduling remain operator responsibilities.

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,10 +13,6 @@ import {
 
 function fixture(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function hash(file: string): string {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
 test('online backup captures live WAL state and restores from one isolated DB', async (t) => {
@@ -51,10 +46,7 @@ test('online backup captures live WAL state and restores from one isolated DB', 
 
   const artifact = path.join(backupDirectory, 'gateway-backup.db');
   const receipt = await store.backup(artifact);
-  assert.equal(receipt.path, artifact);
-  assert.ok(receipt.pages > 0);
-  assert.equal(receipt.bytes, fs.statSync(artifact).size);
-  assert.equal(receipt.sha256, hash(artifact));
+  assert.deepEqual(receipt, { path: artifact });
   assert.equal(fs.statSync(artifact).mode & 0o777, 0o600);
   assert.equal(fs.existsSync(`${artifact}-wal`), false);
   assert.equal(fs.existsSync(`${artifact}-shm`), false);
