@@ -98,6 +98,8 @@ const intrinsicEventTargetAddEventListener =
   EventTarget.prototype.addEventListener;
 const intrinsicEventTargetRemoveEventListener =
   EventTarget.prototype.removeEventListener;
+const intrinsicArrayIncludes = Array.prototype.includes;
+const intrinsicArrayPush = Array.prototype.push;
 const intrinsicPromiseConstructor = Promise;
 const intrinsicPromisePrototype = Promise.prototype;
 const intrinsicHeadersGet = Headers.prototype.get;
@@ -150,6 +152,7 @@ const intrinsicTypedArrayTag = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   Symbol.toStringTag,
 )?.get;
+const intrinsicUint8ArrayConstructor = Uint8Array;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 
 function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
@@ -293,6 +296,18 @@ function header(response: ValidatedHttpResponse, name: string): string | null {
   return intrinsicHeadersGet.call(response.headers, name);
 }
 
+function uint8ArrayByteLength(value: Uint8Array): number {
+  try {
+    if (intrinsicTypedArrayByteLength === undefined) boundaryFailure();
+    const byteLength = intrinsicTypedArrayByteLength.call(value) as number;
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) boundaryFailure();
+    return byteLength;
+  } catch (error) {
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
+  }
+}
+
 function copyUint8Array(value: unknown): Uint8Array {
   try {
     if (
@@ -313,8 +328,12 @@ function copyUint8Array(value: unknown): Uint8Array {
       byteOffset < 0
     )
       boundaryFailure();
-    const source = new Uint8Array(buffer, byteOffset, byteLength);
-    const copy = new Uint8Array(byteLength);
+    const source = new intrinsicUint8ArrayConstructor(
+      buffer,
+      byteOffset,
+      byteLength,
+    );
+    const copy = new intrinsicUint8ArrayConstructor(byteLength);
     intrinsicUint8ArraySet.call(copy, source);
     return copy;
   } catch (error) {
@@ -579,13 +598,13 @@ async function readBoundedBody(
         if (signalAborted(signal)) throw abortReason(signal);
         const copy = copyUint8Array(chunk);
         if (signalAborted(signal)) throw abortReason(signal);
-        const byteLength = copy.byteLength;
+        const byteLength = uint8ArrayByteLength(copy);
         if (byteLength > maximum - size) {
           cancelReaderAndCheckAbort(reader, signal);
           return { ok: false };
         }
         size += byteLength;
-        chunks.push(copy);
+        intrinsicArrayPush.call(chunks, copy);
       } catch {
         if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
@@ -608,13 +627,24 @@ async function readBoundedBody(
     throw abortReason(signal);
   }
   if (framingMismatch) return { ok: false };
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
+  try {
+    const body = new intrinsicUint8ArrayConstructor(size);
+    let offset = 0;
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const byteLength = uint8ArrayByteLength(chunk);
+      intrinsicUint8ArraySet.call(body, chunk, offset);
+      if (signalAborted(signal)) throw abortReason(signal);
+      offset += byteLength;
+    }
+    if (offset !== size) boundaryFailure();
+    throwIfAborted(signal);
+    return { ok: true, body };
+  } catch (error) {
+    if (signalAborted(signal)) throw abortReason(signal);
+    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    boundaryFailure();
   }
-  return { ok: true, body };
 }
 
 function requireGatewayErrorHttpShape(
@@ -838,7 +868,8 @@ export class GatewayLlmClient {
     throwIfAborted(signal);
     const exact = exactDispatch(input);
     const model = normalizedModel(exact.model);
-    if (!model.allowedRoutes.includes(exact.route)) boundaryFailure();
+    if (!intrinsicArrayIncludes.call(model.allowedRoutes, exact.route))
+      boundaryFailure();
     const payload = exact.payload;
     const rid = requestId(this.#randomBytes);
     let body: string;
@@ -851,7 +882,7 @@ export class GatewayLlmClient {
         targetGeneration: model.targetGeneration,
         route: exact.route,
         transport: exact.transport,
-        byteLength: payload.byteLength,
+        byteLength: uint8ArrayByteLength(payload),
         sha256,
         payload,
       });

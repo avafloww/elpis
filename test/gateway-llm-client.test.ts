@@ -326,6 +326,48 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(routeReads, 0);
   });
 
+  it('authorizes routes without ambient Array includes', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'includes',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    const original = descriptor.value as typeof Array.prototype.includes;
+    let fetchCalls = 0;
+    const hostileModel = {
+      ...model,
+      get allowedRoutes() {
+        Object.defineProperty(Array.prototype, 'includes', {
+          ...descriptor,
+          value(this: unknown[], search: unknown, fromIndex?: number) {
+            if (search === 'messages') {
+              Object.defineProperty(Array.prototype, 'includes', descriptor);
+              return true;
+            }
+            return Reflect.apply(original, this, [search, fromIndex]);
+          },
+        });
+        return ['responses'] as const;
+      },
+    };
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          throw new Error('must not run');
+        }).dispatch({
+          ...dispatchInput(),
+          model: hostileModel,
+          route: 'messages',
+        }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+    } finally {
+      Object.defineProperty(Array.prototype, 'includes', descriptor);
+    }
+  });
+
   it('returns the original raw body stream with only provenance-safe status and headers', async () => {
     const raw = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -943,6 +985,103 @@ describe('GatewayLlmClient request boundary', () => {
     });
     await boundary.dispatch(dispatchInput(actual));
     assert.deepEqual(received, new Uint8Array(4));
+  });
+
+  it('assembles response bytes without ambient typed-array set', async () => {
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      typedArrayPrototype,
+      'set',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let setCalls = 0;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(canonical);
+          Object.defineProperty(typedArrayPrototype, 'set', {
+            ...descriptor,
+            value() {
+              setCalls += 1;
+              Object.defineProperty(typedArrayPrototype, 'set', descriptor);
+              throw new Error(secret);
+            },
+          });
+          controller.close();
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        (error: unknown) => {
+          assert.ok(error instanceof GatewayLlmClientError);
+          assert.equal(error.code, 'internal_error');
+          assert.equal(error.message.includes(secret), false);
+          return true;
+        },
+      );
+      assert.equal(setCalls, 0);
+    } finally {
+      Object.defineProperty(typedArrayPrototype, 'set', descriptor);
+    }
+  });
+
+  it('assembles response bytes without ambient Array iteration', async () => {
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    const actual = new Uint8Array(canonical.byteLength);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    const original =
+      descriptor.value as (typeof Array.prototype)[typeof Symbol.iterator];
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(actual);
+          Object.defineProperty(Array.prototype, Symbol.iterator, {
+            ...descriptor,
+            value: function* (this: unknown[]) {
+              if (
+                this.length === 1 &&
+                this[0] instanceof Uint8Array &&
+                this[0].byteLength === canonical.byteLength
+              ) {
+                Object.defineProperty(
+                  Array.prototype,
+                  Symbol.iterator,
+                  descriptor,
+                );
+                yield canonical;
+                return;
+              }
+              yield* Reflect.apply(original, this, []);
+            },
+          });
+          controller.close();
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, descriptor);
+    }
   });
 
   it('copies response chunk bytes without invoking its iterator', async () => {
