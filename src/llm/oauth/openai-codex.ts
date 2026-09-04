@@ -6,6 +6,7 @@
 // exchange that pair for the normal access/refresh token family. Inference is
 // implemented separately in ../codex-client.ts.
 
+import { CODEX_OAUTH_CLIENT_VERSION } from '@elpis/provider-transport';
 import type { OAuthCredentials } from './store.js';
 
 export const OPENAI_CODEX_CREDENTIAL_KEY = 'openai-codex';
@@ -13,7 +14,7 @@ export const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 export const OPENAI_CODEX_DEVICE_AUTH_URL =
   'https://auth.openai.com/codex/device';
 export const OPENAI_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
-export const OPENAI_CODEX_CLIENT_VERSION = '0.144.1';
+export const OPENAI_CODEX_CLIENT_VERSION = CODEX_OAUTH_CLIENT_VERSION;
 
 const TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const DEVICE_USERCODE_URL =

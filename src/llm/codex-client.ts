@@ -13,6 +13,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
 import OpenAI from 'openai';
+import {
+  createCodexOAuthFetch,
+  type CodexOAuthObserver,
+} from '@elpis/provider-transport';
 import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
 import {
@@ -52,49 +56,13 @@ import {
   recordPolicyDenial,
 } from './policy-flight-recorder.js';
 
-const ALLOWED_CODEX_PATHS = ['/backend-api/codex/', '/backend-api/models'];
-const DEFAULT_CODEX_CONTEXT_WINDOW = 272_000;
-const GPT_5_6_CONTEXT_WINDOW = 372_000;
-const CODEX_RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
-
 type FetchFn = typeof fetch;
 
-function urlOf(input: RequestInfo | URL): URL {
-  if (input instanceof Request) return new URL(input.url);
-  return new URL(typeof input === 'string' ? input : input.toString());
-}
+const DEFAULT_CODEX_CONTEXT_WINDOW = 272_000;
+const GPT_5_6_CONTEXT_WINDOW = 372_000;
 
-function assertCodexTarget(input: RequestInfo | URL): void {
-  const url = urlOf(input);
-  const pathAllowed = ALLOWED_CODEX_PATHS.some((path) =>
-    path.endsWith('/') ? url.pathname.startsWith(path) : url.pathname === path,
-  );
-  if (
-    url.protocol !== 'https:' ||
-    url.hostname !== 'chatgpt.com' ||
-    url.port ||
-    !pathAllowed
-  ) {
-    throw new Error(
-      `refusing to send OpenAI Codex OAuth credential to non-canonical URL: ${url.origin}${url.pathname}`,
-    );
-  }
-}
-
-function mergeHeaders(
-  input: RequestInfo | URL,
-  init: RequestInit | undefined,
-): Headers {
-  const headers = new Headers(
-    input instanceof Request ? input.headers : undefined,
-  );
-  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-  return headers;
-}
-
-/** Authenticated fetch boundary shared by inference and model discovery.
- * It owns the only bearer injection point, strips API-key auth, and retries
- * exactly once after a 401-triggered forced refresh. */
+/** Resident adapter around the neutral authenticated transport. Policy-denial
+ * observation stays here because it owns private Config and storage effects. */
 export function createCodexFetch(
   store: OAuthStore,
   sessionId: () => string,
@@ -102,260 +70,203 @@ export function createCodexFetch(
   responsesLite = false,
   config?: Config,
   preserveTransportHeaders = false,
+  dispatcher?: unknown,
 ): FetchFn {
   let policyMonitorSequence = 0;
-  return (async (
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<Response> => {
-    assertCodexTarget(input);
-    const send = async (): Promise<Response> => {
-      const token = await store.getAccessToken();
-      const identity = store.read();
-      if (!identity?.accountId) {
-        throw new Error(
-          `OpenAI Codex OAuth credential in ${store.location} has no ChatGPT account id — re-run npm run oauth-login -- codex`,
-        );
-      }
-      const headers = mergeHeaders(input, init);
-      headers.delete('x-api-key');
-      headers.set('Authorization', `Bearer ${token}`);
-      headers.set('chatgpt-account-id', identity.accountId);
-      const setTransport = (name: string, value: string): void => {
-        if (!preserveTransportHeaders || !headers.has(name))
-          headers.set(name, value);
-      };
-      setTransport('OpenAI-Beta', 'responses=experimental');
-      setTransport('originator', 'pi');
-      setTransport('version', OPENAI_CODEX_CLIENT_VERSION);
-      setTransport('User-Agent', 'elpis/0.1.0');
-      setTransport('session_id', sessionId());
-      setTransport('conversation_id', sessionId());
-      setTransport('x-client-request-id', sessionId());
-      if (responsesLite) setTransport(CODEX_RESPONSES_LITE_HEADER, 'true');
-      else if (!preserveTransportHeaders)
-        headers.delete(CODEX_RESPONSES_LITE_HEADER);
-      setTransport('Accept', 'application/json');
-      const replayableInput = input instanceof Request ? input.clone() : input;
-      const requestBody =
-        init?.body instanceof Uint8Array || Buffer.isBuffer(init?.body)
-          ? new Uint8Array(init.body as Uint8Array)
-          : typeof init?.body === 'string'
-            ? new TextEncoder().encode(init.body)
-            : input instanceof Request
-              ? new Uint8Array(await input.clone().arrayBuffer())
-              : new Uint8Array();
-      const requestExpectsStream = (() => {
-        try {
-          const parsed = JSON.parse(new TextDecoder().decode(requestBody)) as {
-            stream?: unknown;
-          };
-          return parsed.stream === true;
-        } catch {
-          return false;
-        }
-      })();
-      const requestCapture = {
-        url: urlOf(input).href,
-        method:
-          init?.method ?? (input instanceof Request ? input.method : 'GET'),
-        headers: nonSecretHeaders(headers),
-        body: requestBody,
-      };
-      const sealBody = (
-        response: Response,
-        responseBody: Uint8Array,
-        bodyComplete: boolean,
-        captureTrigger:
-          'http-status' | 'stream-policy-event' | 'stream-policy-bytes',
-      ): void => {
-        try {
-          const record = recordPolicyDenial(
-            config!,
-            'codex-responses',
-            requestCapture,
-            {
-              status: response.status,
-              statusText: response.statusText,
-              headers: nonSecretHeaders(response.headers),
-              body: responseBody,
-              bodyComplete,
-              captureTrigger,
-            },
-            {
-              status: response.status,
-              message: new TextDecoder().decode(responseBody),
-            },
-          );
-          if (record)
-            config!.logger.error(
-              `[policy-flight-recorder] sealed denial | directory=${record.directory} | manifest_sha256=${record.manifestSha256}`,
+  const policyConfig = config;
+  const observe: CodexOAuthObserver | undefined = policyConfig
+    ? async ({ request, response }) => {
+        const requestCapture = {
+          url: request.url,
+          method: request.method,
+          headers: nonSecretHeaders(request.headers),
+          body: request.body,
+        };
+        const sealBody = (
+          observedResponse: Response,
+          responseBody: Uint8Array,
+          bodyComplete: boolean,
+          captureTrigger:
+            'http-status' | 'stream-policy-event' | 'stream-policy-bytes',
+        ): void => {
+          try {
+            const record = recordPolicyDenial(
+              policyConfig,
+              'codex-responses',
+              requestCapture,
+              {
+                status: observedResponse.status,
+                statusText: observedResponse.statusText,
+                headers: nonSecretHeaders(observedResponse.headers),
+                body: responseBody,
+                bodyComplete,
+                captureTrigger,
+              },
+              {
+                status: observedResponse.status,
+                message: new TextDecoder().decode(responseBody),
+              },
             );
-        } catch (captureError) {
-          config!.logger.error(
-            '[policy-flight-recorder] failed to seal denial:',
-            captureError,
-          );
-        }
-      };
-      const sealHttpResponse = async (response: Response): Promise<void> => {
-        const responseBody = new Uint8Array(await response.arrayBuffer());
-        sealBody(response, responseBody, true, 'http-status');
-      };
-      const policyErrorEvent = (eventText: string): boolean => {
-        const eventName =
-          eventText
-            .match(/^event:\s*([^\r\n]+)/m)?.[1]
-            ?.trim()
-            .toLowerCase() ?? '';
-        const dataText = eventText
-          .split(/\r?\n/)
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
-        let payloadType = '';
-        let hasErrorObject = false;
-        try {
-          const payload = JSON.parse(dataText) as {
-            type?: unknown;
-            error?: unknown;
-            response?: { error?: unknown };
-          };
-          payloadType =
-            typeof payload.type === 'string' ? payload.type.toLowerCase() : '';
-          hasErrorObject =
-            payload.error !== undefined ||
-            payload.response?.error !== undefined;
-        } catch {
-          // A live trailing event can be incomplete JSON. Its explicit event
-          // name still identifies the envelope while denial text prevents an
-          // early match on a bare header.
-        }
-        const errorEnvelope =
-          eventName === 'error' ||
-          eventName === 'response.failed' ||
-          payloadType === 'error' ||
-          payloadType === 'response.failed' ||
-          hasErrorObject;
-        return errorEnvelope && isPolicyDenial(dataText || eventText);
-      };
-      const monitorSseResponse = async (
-        response: Response,
-        monitorId: number,
-      ): Promise<void> => {
-        const reader = response.body?.getReader();
-        if (!reader) {
-          config!.logger.warn(
-            `[policy-flight-recorder] monitor=${monitorId} no response body`,
-          );
-          return;
-        }
-        const chunks: Uint8Array[] = [];
-        let bytes = 0;
-        let chunksRead = 0;
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-              config!.logger.info(
-                `[policy-flight-recorder] monitor=${monitorId} eof | chunks=${chunksRead} | bytes=${bytes}`,
+            if (record)
+              policyConfig.logger.error(
+                `[policy-flight-recorder] sealed denial | directory=${record.directory} | manifest_sha256=${record.manifestSha256}`,
               );
-              return;
-            }
-            if (!value) continue;
-            chunks.push(value);
-            chunksRead++;
-            bytes += value.byteLength;
-            if (bytes > 8 * 1024 * 1024) {
-              config!.logger.warn(
-                `[policy-flight-recorder] monitor=${monitorId} limit | chunks=${chunksRead} | bytes=${bytes}`,
-              );
-              await reader.cancel('policy flight recorder monitor limit');
-              return;
-            }
-            const raw = Buffer.concat(
-              chunks.map((chunk) => Buffer.from(chunk)),
-              bytes,
+          } catch (captureError) {
+            policyConfig.logger.error(
+              '[policy-flight-recorder] failed to seal denial:',
+              captureError,
             );
-            const text = raw.toString('utf8');
-            const segments = text.split(/\r?\n\r?\n/);
-            const trailing = segments.pop() ?? '';
-            const completeEvents = segments.length;
-            const matchedCompleteEvent = segments.some(policyErrorEvent);
-            const matchedTrailingError = policyErrorEvent(trailing);
-            const policyTextSeen = isPolicyDenial(text);
-            if (chunksRead === 1 || policyTextSeen) {
-              config!.logger.info(
-                `[policy-flight-recorder] monitor=${monitorId} progress | chunks=${chunksRead} | bytes=${bytes} | complete_events=${completeEvents} | policy_text=${policyTextSeen} | error_event=${matchedCompleteEvent || matchedTrailingError}`,
-              );
-            }
-            if (matchedCompleteEvent || matchedTrailingError) {
-              sealBody(
-                response,
-                new Uint8Array(raw),
-                false,
-                matchedCompleteEvent
-                  ? 'stream-policy-event'
-                  : 'stream-policy-bytes',
-              );
-              config!.logger.info(
-                `[policy-flight-recorder] monitor=${monitorId} matched | chunks=${chunksRead} | bytes=${bytes} | complete_events=${completeEvents} | event_complete=${matchedCompleteEvent}`,
-              );
-              await reader.cancel('policy denial captured');
-              return;
-            }
           }
-        } catch (captureError) {
-          config!.logger.error(
-            `[policy-flight-recorder] monitor=${monitorId} failed:`,
-            captureError,
+        };
+        const sealHttpResponse = async (
+          observedResponse: Response,
+        ): Promise<void> => {
+          const responseBody = new Uint8Array(
+            await observedResponse.arrayBuffer(),
           );
+          sealBody(observedResponse, responseBody, true, 'http-status');
+        };
+        const policyErrorEvent = (eventText: string): boolean => {
+          const eventName =
+            eventText
+              .match(/^event:\s*([^\r\n]+)/m)?.[1]
+              ?.trim()
+              .toLowerCase() ?? '';
+          const dataText = eventText
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trimStart())
+            .join('\n');
+          let payloadType = '';
+          let hasErrorObject = false;
+          try {
+            const payload = JSON.parse(dataText) as {
+              type?: unknown;
+              error?: unknown;
+              response?: { error?: unknown };
+            };
+            payloadType =
+              typeof payload.type === 'string'
+                ? payload.type.toLowerCase()
+                : '';
+            hasErrorObject =
+              payload.error !== undefined ||
+              payload.response?.error !== undefined;
+          } catch {
+            // A live trailing event can be incomplete JSON. Its explicit event
+            // name still identifies the envelope while denial text prevents an
+            // early match on a bare header.
+          }
+          const errorEnvelope =
+            eventName === 'error' ||
+            eventName === 'response.failed' ||
+            payloadType === 'error' ||
+            payloadType === 'response.failed' ||
+            hasErrorObject;
+          return errorEnvelope && isPolicyDenial(dataText || eventText);
+        };
+        const monitorSseResponse = async (
+          observedResponse: Response,
+          monitorId: number,
+        ): Promise<void> => {
+          const reader = observedResponse.body?.getReader();
+          if (!reader) {
+            policyConfig.logger.warn(
+              `[policy-flight-recorder] monitor=${monitorId} no response body`,
+            );
+            return;
+          }
+          const chunks: Uint8Array[] = [];
+          let bytes = 0;
+          let chunksRead = 0;
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) {
+                policyConfig.logger.info(
+                  `[policy-flight-recorder] monitor=${monitorId} eof | chunks=${chunksRead} | bytes=${bytes}`,
+                );
+                return;
+              }
+              if (!value) continue;
+              chunks.push(value);
+              chunksRead++;
+              bytes += value.byteLength;
+              if (bytes > 8 * 1024 * 1024) {
+                policyConfig.logger.warn(
+                  `[policy-flight-recorder] monitor=${monitorId} limit | chunks=${chunksRead} | bytes=${bytes}`,
+                );
+                await reader.cancel('policy flight recorder monitor limit');
+                return;
+              }
+              const raw = Buffer.concat(
+                chunks.map((chunk) => Buffer.from(chunk)),
+                bytes,
+              );
+              const text = raw.toString('utf8');
+              const segments = text.split(/\r?\n\r?\n/);
+              const trailing = segments.pop() ?? '';
+              const completeEvents = segments.length;
+              const matchedCompleteEvent = segments.some(policyErrorEvent);
+              const matchedTrailingError = policyErrorEvent(trailing);
+              const policyTextSeen = isPolicyDenial(text);
+              if (chunksRead === 1 || policyTextSeen) {
+                policyConfig.logger.info(
+                  `[policy-flight-recorder] monitor=${monitorId} progress | chunks=${chunksRead} | bytes=${bytes} | complete_events=${completeEvents} | policy_text=${policyTextSeen} | error_event=${matchedCompleteEvent || matchedTrailingError}`,
+                );
+              }
+              if (matchedCompleteEvent || matchedTrailingError) {
+                sealBody(
+                  observedResponse,
+                  new Uint8Array(raw),
+                  false,
+                  matchedCompleteEvent
+                    ? 'stream-policy-event'
+                    : 'stream-policy-bytes',
+                );
+                policyConfig.logger.info(
+                  `[policy-flight-recorder] monitor=${monitorId} matched | chunks=${chunksRead} | bytes=${bytes} | complete_events=${completeEvents} | event_complete=${matchedCompleteEvent}`,
+                );
+                await reader.cancel('policy denial captured');
+                return;
+              }
+            }
+          } catch (captureError) {
+            policyConfig.logger.error(
+              `[policy-flight-recorder] monitor=${monitorId} failed:`,
+              captureError,
+            );
+          }
+        };
+        const responseIsSse =
+          response.headers
+            .get('content-type')
+            ?.toLowerCase()
+            .includes('text/event-stream') ?? false;
+        policyConfig.logger.info(
+          `[policy-flight-recorder] transport | status=${response.status} | request_stream=${request.expectsStream} | content_type_sse=${responseIsSse} | content_type_present=${response.headers.has('content-type')}`,
+        );
+        if (response.status >= 400 && response.status < 500) {
+          await sealHttpResponse(response);
+        } else if (response.ok && (request.expectsStream || responseIsSse)) {
+          const monitorId = ++policyMonitorSequence;
+          policyConfig.logger.info(
+            `[policy-flight-recorder] monitor=${monitorId} attached | status=${response.status} | request_stream=${request.expectsStream} | content_type_sse=${responseIsSse}`,
+          );
+          void monitorSseResponse(response, monitorId);
         }
-      };
-      // Never follow redirects while carrying the bearer. Even though Fetch
-      // normally strips Authorization on a cross-origin redirect, making that
-      // behavior explicit here keeps the security boundary local and auditable.
-      const response = await fetchFn(replayableInput, {
-        ...init,
-        headers,
-        redirect: 'error',
-      });
-      const responseIsSse =
-        response.headers
-          .get('content-type')
-          ?.toLowerCase()
-          .includes('text/event-stream') ?? false;
-      if (config) {
-        config.logger.info(
-          `[policy-flight-recorder] transport | status=${response.status} | request_stream=${requestExpectsStream} | content_type_sse=${responseIsSse} | content_type_present=${response.headers.has('content-type')}`,
-        );
       }
-      if (config && response.status >= 400 && response.status < 500) {
-        await sealHttpResponse(response.clone());
-      } else if (
-        config &&
-        response.ok &&
-        (requestExpectsStream || responseIsSse)
-      ) {
-        const monitorId = ++policyMonitorSequence;
-        config.logger.info(
-          `[policy-flight-recorder] monitor=${monitorId} attached | status=${response.status} | request_stream=${requestExpectsStream} | content_type_sse=${responseIsSse}`,
-        );
-        void monitorSseResponse(response.clone(), monitorId);
-      }
-      return response;
-    };
+    : undefined;
 
-    let response = await send();
-    if (response.status === 401) {
-      // The body is irrelevant and leaving it unread can pin the underlying
-      // connection while the refresh exchange runs.
-      await response.body?.cancel().catch(() => undefined);
-      await store.forceRefresh();
-      response = await send();
-    }
-    return response;
-  }) as FetchFn;
+  return createCodexOAuthFetch({
+    credentials: store,
+    sessionId,
+    fetch: fetchFn,
+    responsesLite,
+    preserveTransportHeaders,
+    dispatcher,
+    observe,
+  });
 }
 
 function codexClient(
@@ -377,7 +288,15 @@ function codexClient(
     maxRetries: 0,
     timeout: 1_200_000,
     fetchOptions: { dispatcher } as unknown as Record<string, unknown>,
-    fetch: createCodexFetch(store, sessionId, fetchFn, responsesLite, config),
+    fetch: createCodexFetch(
+      store,
+      sessionId,
+      fetchFn,
+      responsesLite,
+      config,
+      false,
+      dispatcher,
+    ),
   });
 }
 
