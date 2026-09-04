@@ -528,6 +528,7 @@ describe('GatewayLlmClient request boundary', () => {
       'cancelled during response inspection',
       'AbortError',
     );
+    const secret = firstCredential.token + '@' + ENDPOINT;
     let cancelled = 0;
     const boundary = client(async (_target, init) => {
       const request = decodeLlmProxyRequest(init.body as string);
@@ -542,7 +543,7 @@ describe('GatewayLlmClient request boundary', () => {
         url: '',
         get status() {
           controller.abort(reason);
-          return 200;
+          throw new Error(secret);
         },
         headers: new Headers({
           [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
@@ -564,6 +565,31 @@ describe('GatewayLlmClient request boundary', () => {
     );
     await Promise.resolve();
     assert.equal(cancelled, 1);
+  });
+
+  it('makes an abort from a null body getter outrank boundary failure', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled during body inspection',
+      'AbortError',
+    );
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+      }),
+      get body() {
+        controller.abort(reason);
+        return null;
+      },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
   });
 
   it('rejects non-boolean completion and safely assimilates cancellation', async () => {
@@ -694,27 +720,25 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(cancelled, 0);
   });
 
-  it('makes release cleanup abort outrank buffered bytes', async () => {
-    const controller = new AbortController();
-    const reason = new DOMException('cancelled during release', 'AbortError');
+  it('uses intrinsic releaseLock instead of a branded reader override', async () => {
     const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
-    let reads = 0;
-    const reader = {
-      read() {
-        reads += 1;
-        return Promise.resolve(
-          reads === 1
-            ? { done: false, value: canonical }
-            : { done: true, value: undefined },
-        );
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(canonical);
+        controller.close();
       },
-      cancel() {
-        throw new Error('untrusted cancel must not run');
+    });
+    const reader = stream.getReader();
+    let releaseCalls = 0;
+    Object.defineProperty(reader, 'releaseLock', {
+      value() {
+        releaseCalls += 1;
+        return Promise.resolve();
       },
-      releaseLock() {
-        controller.abort(reason);
-      },
-    };
+    });
+    Object.defineProperty(stream, 'getReader', {
+      value: () => reader,
+    });
     const response = {
       redirected: false,
       type: 'basic',
@@ -723,12 +747,14 @@ describe('GatewayLlmClient request boundary', () => {
       headers: new Headers({
         'content-type': 'application/json; charset=utf-8',
       }),
-      body: { getReader: () => reader },
+      body: stream,
     } as unknown as Response;
     await assert.rejects(
-      client(async () => response).dispatch(dispatchInput(), controller.signal),
-      (error) => error === reason,
+      client(async () => response).dispatch(dispatchInput()),
+      GatewayLlmClientError,
     );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(releaseCalls, 0);
   });
 
   it('rejects content-length mismatch after a complete reader sequence', async () => {
@@ -842,6 +868,20 @@ describe('GatewayLlmClient request boundary', () => {
     );
     await Promise.resolve();
     assert.equal(cancelled, 1);
+  });
+
+  it('makes synchronous fetch abort outrank its thrown error', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled inside fetch', 'AbortError');
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    const hostileFetch = (() => {
+      controller.abort(reason);
+      throw new Error(secret);
+    }) as unknown as GatewayLlmFetch;
+    await assert.rejects(
+      client(hostileFetch).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
   });
 
   it('rejects a native fetch Promise with poisoned constructor without invoking it', async () => {
