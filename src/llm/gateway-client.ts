@@ -89,9 +89,33 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw abortReason(signal);
 }
 
+const intrinsicPromiseThen = Promise.prototype.then;
+
+function toNativePromise<T>(value: T | PromiseLike<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    try {
+      void intrinsicPromiseThen.call(value, resolve, reject);
+      return;
+    } catch {}
+    let normalized: Promise<T>;
+    try {
+      normalized = Promise.resolve(value);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    try {
+      void intrinsicPromiseThen.call(normalized, resolve, reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
 function observePromise(value: unknown): void {
+  const normalized = toNativePromise(value);
   try {
-    void Promise.resolve(value).catch(() => undefined);
+    void intrinsicPromiseThen.call(normalized, undefined, () => undefined);
   } catch {}
 }
 
@@ -269,7 +293,7 @@ async function readBoundedBody(
       if (signal?.aborted) throw abortReason(signal);
       let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>>;
       try {
-        pendingRead = Promise.resolve(reader.read());
+        pendingRead = toNativePromise(reader.read());
       } catch {
         cancelReader(reader);
         return { ok: false };
@@ -287,22 +311,26 @@ async function readBoundedBody(
       if (signal?.aborted) throw abortReason(signal);
       try {
         const done = item.done;
+        if (signal?.aborted) throw abortReason(signal);
         if (done !== true && done !== false) {
           cancelReader(reader);
           return { ok: false };
         }
         if (done) break;
         const chunk = item.value;
+        if (signal?.aborted) throw abortReason(signal);
         if (!(chunk instanceof Uint8Array)) {
           cancelReader(reader);
           return { ok: false };
         }
         const byteLength = chunk.byteLength;
+        if (signal?.aborted) throw abortReason(signal);
         if (!Number.isSafeInteger(byteLength) || byteLength > maximum - size) {
           cancelReader(reader);
           return { ok: false };
         }
         const copy = Uint8Array.from(chunk);
+        if (signal?.aborted) throw abortReason(signal);
         if (copy.byteLength !== byteLength) {
           cancelReader(reader);
           return { ok: false };
@@ -310,10 +338,12 @@ async function readBoundedBody(
         size += byteLength;
         chunks.push(copy);
       } catch {
+        if (signal?.aborted) throw abortReason(signal);
         cancelReader(reader);
         return { ok: false };
       }
     }
+    if (signal?.aborted) throw abortReason(signal);
   } finally {
     signal?.removeEventListener('abort', onAbort);
     try {
@@ -482,7 +512,7 @@ export class GatewayLlmClient {
     const target = authority.endpoint + LLM_PROXY_PATHS.catalog;
     let pending: Promise<Response>;
     try {
-      pending = Promise.resolve(
+      pending = toNativePromise(
         this.#fetch(target, {
           method: 'GET',
           headers: {
@@ -564,7 +594,7 @@ export class GatewayLlmClient {
     const target = authority.endpoint + LLM_PROXY_PATHS.request;
     let pending: Promise<Response>;
     try {
-      pending = Promise.resolve(
+      pending = toNativePromise(
         this.#fetch(target, {
           method: 'POST',
           headers: {

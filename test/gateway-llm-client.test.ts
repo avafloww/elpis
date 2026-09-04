@@ -502,12 +502,14 @@ describe('GatewayLlmClient request boundary', () => {
       },
       cancel() {
         cancelled += 1;
-        return {
-          catch() {
+        const result = Promise.resolve();
+        Object.defineProperty(result, 'catch', {
+          value() {
             hostileCatchCalls += 1;
             return Promise.resolve();
           },
-        };
+        });
+        return result;
       },
       releaseLock() {},
     };
@@ -544,6 +546,51 @@ describe('GatewayLlmClient request boundary', () => {
           return Promise.resolve({ done: false, value: canonical });
         }
         return Promise.resolve({ done: true, value: undefined });
+      },
+      cancel() {
+        cancelled += 1;
+        return Promise.resolve();
+      },
+      releaseLock() {},
+    };
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+      }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(cancelled, 1);
+  });
+
+  it('makes an abort from the completion getter win over buffered bytes', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled during completion',
+      'AbortError',
+    );
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    let reads = 0;
+    let cancelled = 0;
+    const reader = {
+      read() {
+        reads += 1;
+        if (reads === 1)
+          return Promise.resolve({ done: false, value: canonical });
+        return Promise.resolve({
+          get done() {
+            controller.abort(reason);
+            return true;
+          },
+          value: undefined,
+        });
       },
       cancel() {
         cancelled += 1;
@@ -653,6 +700,43 @@ describe('GatewayLlmClient request boundary', () => {
       GatewayLlmClientBoundaryError,
     );
     await Promise.resolve();
+    assert.equal(cancelled, 1);
+  });
+
+  it('preserves abort and cancellation for a native Promise with hostile then', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      'cancelled at native fetch handoff',
+      'AbortError',
+    );
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let cancelled = 0;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled += 1;
+        },
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    const responsePromise = Promise.resolve(response);
+    Object.defineProperty(responsePromise, 'then', {
+      value() {
+        throw new Error(secret);
+      },
+    });
+    const hostileFetch = (() => {
+      controller.abort(reason);
+      return responsePromise;
+    }) as unknown as GatewayLlmFetch;
+    await assert.rejects(
+      client(hostileFetch).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(cancelled, 1);
   });
 
