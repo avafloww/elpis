@@ -113,6 +113,11 @@ const intrinsicObjectGetOwnPropertyDescriptors =
   Object.getOwnPropertyDescriptors;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectPrototype = Object.prototype;
+const intrinsicNumber = Number;
+const intrinsicNumberIsInteger = Number.isInteger;
+const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
+const intrinsicRegExpTest = RegExp.prototype.test;
+const intrinsicURL = URL;
 const intrinsicIsPromise = nodeTypes.isPromise;
 const intrinsicIsProxy = nodeTypes.isProxy;
 const gatewayLlmClientBoundaryErrorPrototype =
@@ -429,7 +434,8 @@ function uint8ArrayByteLength(value: Uint8Array): number {
       value,
       [],
     ) as number;
-    if (!Number.isSafeInteger(byteLength) || byteLength < 0) boundaryFailure();
+    if (!intrinsicNumberIsSafeInteger(byteLength) || byteLength < 0)
+      boundaryFailure();
     return byteLength;
   } catch (error) {
     if (isGatewayLlmClientBoundaryError(error)) throw error;
@@ -463,9 +469,9 @@ function copyUint8Array(value: unknown): Uint8Array {
       [],
     ) as number;
     if (
-      !Number.isSafeInteger(byteLength) ||
+      !intrinsicNumberIsSafeInteger(byteLength) ||
       byteLength < 0 ||
-      !Number.isSafeInteger(byteOffset) ||
+      !intrinsicNumberIsSafeInteger(byteOffset) ||
       byteOffset < 0
     )
       boundaryFailure();
@@ -511,9 +517,12 @@ function throwIfResponseAborted(
 
 function exactContentLength(value: string | null): number | null {
   if (value === null) return null;
-  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) return -1;
-  const result = Number(value);
-  return Number.isSafeInteger(result) ? result : -1;
+  if (
+    !intrinsicReflectApply(intrinsicRegExpTest, /^(?:0|[1-9][0-9]*)$/, [value])
+  )
+    return -1;
+  const result = intrinsicNumber(value);
+  return intrinsicNumberIsSafeInteger(result) ? result : -1;
 }
 
 function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
@@ -522,7 +531,7 @@ function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
     const endpoint = snapshot.endpoint;
     if ((phase !== 'active' && phase !== 'rotating') || endpoint === null)
       throw new GatewayResidentStateError('invalid_state');
-    const parsed = new URL(endpoint);
+    const parsed = new intrinsicURL(endpoint);
     if (
       parsed.protocol !== 'https:' ||
       parsed.username !== '' ||
@@ -628,14 +637,14 @@ function validateHttpResponse(
       response,
       [],
     ) as ReadableStream<Uint8Array> | null;
-    const validated = Object.freeze({
+    const validated = intrinsicObjectFreeze({
       [validatedHttpResponseBrand]: true as const,
       status,
       headers,
       body,
     });
     if (
-      !Number.isInteger(status) ||
+      !intrinsicNumberIsInteger(status) ||
       status < 200 ||
       status > 599 ||
       typeof redirected !== 'boolean' ||
@@ -974,7 +983,7 @@ function snapshotRoutes(value: unknown): readonly LlmProxyRoute[] {
         : undefined;
     if (
       typeof lengthValue !== 'number' ||
-      !Number.isSafeInteger(lengthValue) ||
+      !intrinsicNumberIsSafeInteger(lengthValue) ||
       lengthValue < 0
     )
       boundaryFailure();

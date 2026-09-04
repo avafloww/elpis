@@ -20,16 +20,30 @@ const intrinsicBufferFrom = Buffer.from;
 const intrinsicBufferToString = Buffer.prototype.toString;
 const intrinsicJsonParse = JSON.parse;
 const intrinsicJsonStringify = JSON.stringify;
+const intrinsicMapConstructor = Map;
+const intrinsicMapGet = Map.prototype.get;
+const intrinsicMapSet = Map.prototype.set;
+const intrinsicMaxSafeInteger = Number.MAX_SAFE_INTEGER;
+const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
 const intrinsicObjectCreate = Object.create;
 const intrinsicObjectDefineProperty = Object.defineProperty;
+const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectKeys = Object.keys;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicRegExpTest = RegExp.prototype.test;
+const intrinsicSetAdd = Set.prototype.add;
+const intrinsicSetConstructor = Set;
 const intrinsicSetHas = Set.prototype.has;
+const intrinsicStringSplit = String.prototype.split;
 const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 
 function setHas(set: Set<unknown>, value: unknown): boolean {
   return intrinsicReflectApply(intrinsicSetHas, set, [value]);
+}
+
+function regexTest(expression: RegExp, value: string): boolean {
+  return intrinsicReflectApply(intrinsicRegExpTest, expression, [value]);
 }
 
 function bufferFrom(
@@ -55,21 +69,21 @@ function decodeUtf8(value: Uint8Array): string {
   return intrinsicReflectApply(intrinsicTextDecoderDecode, fatalUtf8, [value]);
 }
 
-export const LLM_PROXY_FORMATS = Object.freeze({
+export const LLM_PROXY_FORMATS = intrinsicObjectFreeze({
   catalog: 'elpis-gateway-llm-catalog-v1',
   request: 'elpis-gateway-llm-request-v1',
   error: 'elpis-gateway-llm-error-v1',
   responseProvenance: 'elpis-gateway-llm-response-provenance-v1',
 } as const);
 
-export const LLM_PROXY_PROVIDER_TYPES = Object.freeze([
+export const LLM_PROXY_PROVIDER_TYPES = intrinsicObjectFreeze([
   'openai-compatible',
   'anthropic-oauth',
   'codex-oauth',
 ] as const);
 export type LlmProxyProviderType = (typeof LLM_PROXY_PROVIDER_TYPES)[number];
 
-export const LLM_PROXY_TOOL_TIERS = Object.freeze([
+export const LLM_PROXY_TOOL_TIERS = intrinsicObjectFreeze([
   'weak',
   'medium',
   'strong',
@@ -77,7 +91,7 @@ export const LLM_PROXY_TOOL_TIERS = Object.freeze([
 export type LlmProxyToolTier = (typeof LLM_PROXY_TOOL_TIERS)[number];
 
 /** Logical routes, never arbitrary URLs. A broker maps these to its pinned target. */
-export const LLM_PROXY_ROUTES = Object.freeze([
+export const LLM_PROXY_ROUTES = intrinsicObjectFreeze([
   'responses',
   'chat/completions',
   'messages',
@@ -86,12 +100,12 @@ export const LLM_PROXY_ROUTES = Object.freeze([
   'models',
 ] as const);
 export type LlmProxyRoute = (typeof LLM_PROXY_ROUTES)[number];
-export const LLM_PROXY_GET_ROUTES = Object.freeze([
+export const LLM_PROXY_GET_ROUTES = intrinsicObjectFreeze([
   'codex/models',
   'models',
 ] as const satisfies readonly LlmProxyRoute[]);
 
-export const LLM_PROXY_ERROR_CODES = Object.freeze([
+export const LLM_PROXY_ERROR_CODES = intrinsicObjectFreeze([
   'invalid_request',
   'unauthorized',
   'forbidden',
@@ -108,7 +122,7 @@ export const LLM_PROXY_ERROR_CODES = Object.freeze([
 export type LlmProxyErrorCode = (typeof LLM_PROXY_ERROR_CODES)[number];
 
 /** Response metadata safe to relay. Redirect, cookie, and authentication fields are absent. */
-export const LLM_PROXY_SAFE_RESPONSE_HEADERS = Object.freeze([
+export const LLM_PROXY_SAFE_RESPONSE_HEADERS = intrinsicObjectFreeze([
   'anthropic-ratelimit-input-tokens-limit',
   'anthropic-ratelimit-input-tokens-remaining',
   'anthropic-ratelimit-input-tokens-reset',
@@ -134,7 +148,7 @@ export const LLM_PROXY_SAFE_RESPONSE_HEADERS = Object.freeze([
 export type SafeLlmResponseHeader =
   (typeof LLM_PROXY_SAFE_RESPONSE_HEADERS)[number];
 
-export const LLM_PROXY_LIMITS = Object.freeze({
+export const LLM_PROXY_LIMITS = intrinsicObjectFreeze({
   catalogBodyBytes: 256 * 1024,
   requestBodyBytes: 48 * 1024 * 1024,
   errorBodyBytes: 1024,
@@ -282,18 +296,23 @@ function guarded<T>(operation: () => T): T {
   }
 }
 function record(value: unknown): JsonRecord {
-  if (value === null || typeof value !== 'object' || Array.isArray(value))
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    intrinsicArrayIsArray(value)
+  )
     invalid();
   return value as JsonRecord;
 }
 function exact(value: JsonRecord, keys: readonly string[]): void {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (
-    actual.length !== expected.length ||
-    actual.some((key, i) => key !== expected[i])
-  )
-    invalid();
+  const actual = intrinsicObjectKeys(value);
+  if (actual.length !== keys.length) invalid();
+  for (let index = 0; index < actual.length; index += 1) {
+    let found = false;
+    for (let candidate = 0; candidate < keys.length; candidate += 1)
+      if (actual[index] === keys[candidate]) found = true;
+    if (!found) invalid();
+  }
 }
 function exactFormat(value: unknown, format: string): void {
   if (value !== format) invalid();
@@ -309,7 +328,8 @@ function bytesIn(value: string, minimum: number, maximum: number): string {
   return value;
 }
 function plainText(value: unknown, minimum: number, maximum: number): string {
-  if (typeof value !== 'string' || /[\p{Cc}\p{Cf}]/u.test(value)) invalid();
+  if (typeof value !== 'string' || regexTest(/[\p{Cc}\p{Cf}]/u, value))
+    invalid();
   return bytesIn(value, minimum, maximum);
 }
 function nullableText(value: unknown, maximum: number): string | null {
@@ -322,7 +342,7 @@ function boundedInteger(
   maximum: number,
 ): number {
   if (
-    !Number.isSafeInteger(value) ||
+    !intrinsicNumberIsSafeInteger(value) ||
     (value as number) < minimum ||
     (value as number) > maximum
   )
@@ -336,7 +356,7 @@ function requestIdValue(value: unknown): RequestId {
 function modelRefValue(value: unknown): string {
   if (
     typeof value !== 'string' ||
-    !modelRefPattern.test(value) ||
+    !regexTest(modelRefPattern, value) ||
     encodeUtf8(value).byteLength > LLM_PROXY_LIMITS.modelRefBytes
   )
     invalid();
@@ -344,8 +364,8 @@ function modelRefValue(value: unknown): string {
 }
 function upstreamModelValue(value: unknown): string {
   const model = plainText(value, 1, LLM_PROXY_LIMITS.upstreamModelBytes);
-  if (!upstreamModelPattern.test(model)) invalid();
-  if (credentialShapedUpstreamModel.test(model)) invalid();
+  if (!regexTest(upstreamModelPattern, model)) invalid();
+  if (regexTest(credentialShapedUpstreamModel, model)) invalid();
   return model;
 }
 function generationValue(value: unknown): LlmTargetGeneration {
@@ -415,7 +435,8 @@ function serializeBounded(value: unknown, maximum: number): string {
 export function isLlmTargetGeneration(
   value: unknown,
 ): value is LlmTargetGeneration {
-  if (typeof value !== 'string' || !generationPattern.test(value)) return false;
+  if (typeof value !== 'string' || !regexTest(generationPattern, value))
+    return false;
   const suffix = value.slice('egt1.'.length);
   const decoded = bufferFrom(suffix, 'base64url');
   return (
@@ -437,16 +458,16 @@ function normalizeTransport(value: unknown): LlmProxyTransportMetadata {
   const input = record(value);
   if (input.kind === 'none') {
     exact(input, ['kind']);
-    return Object.freeze({ kind: 'none' });
+    return intrinsicObjectFreeze({ kind: 'none' });
   }
   if (input.kind !== 'codex') invalid();
   exact(input, ['kind', 'sessionId']);
   if (
     typeof input.sessionId !== 'string' ||
-    !visibleAscii.test(input.sessionId)
+    !regexTest(visibleAscii, input.sessionId)
   )
     invalid();
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     kind: 'codex',
     sessionId: bytesIn(input.sessionId, 1, LLM_PROXY_LIMITS.transportIdBytes),
   });
@@ -480,7 +501,7 @@ function normalizeMemoryRequest(value: unknown): LlmProxyRequest {
   if (
     byteLength !== payload.byteLength ||
     typeof input.sha256 !== 'string' ||
-    !sha256Pattern.test(input.sha256)
+    !regexTest(sha256Pattern, input.sha256)
   )
     invalid();
   if (payloadDigest(payload) !== input.sha256) invalid();
@@ -492,7 +513,7 @@ function normalizeMemoryRequest(value: unknown): LlmProxyRequest {
     route === 'codex/models' ||
     route === 'models';
   if ((transport.kind === 'codex') !== codexRoute) invalid();
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     format: LLM_PROXY_FORMATS.request,
     requestId: requestIdValue(input.requestId),
     modelRef: modelRefValue(input.modelRef),
@@ -525,7 +546,7 @@ function decodeWirePayload(
   if (
     typeof value !== 'string' ||
     typeof sha256 !== 'string' ||
-    !sha256Pattern.test(sha256)
+    !regexTest(sha256Pattern, sha256)
   )
     invalid();
   // This length check precedes allocation and also bounds deliberately malformed base64.
@@ -589,16 +610,18 @@ export function serializeLlmProxyRequest(value: LlmProxyRequest): string {
 
 function normalizeRoutes(value: unknown): readonly LlmProxyRoute[] {
   if (
-    !Array.isArray(value) ||
+    !intrinsicArrayIsArray(value) ||
     value.length === 0 ||
     value.length > LLM_PROXY_ROUTES.length
   )
     invalid();
-  const routes = value.map(routeValue);
+  const routes: LlmProxyRoute[] = [];
+  for (let index = 0; index < value.length; index += 1)
+    routes[index] = routeValue(value[index]);
   for (let i = 1; i < routes.length; i += 1) {
     if (routes[i - 1] >= routes[i]) invalid();
   }
-  return Object.freeze(routes);
+  return intrinsicObjectFreeze(routes);
 }
 function normalizeCatalogModel(value: unknown): LlmProxyCatalogModel {
   const input = record(value);
@@ -640,12 +663,13 @@ function normalizeCatalogModel(value: unknown): LlmProxyCatalogModel {
         : route === 'codex/responses' ||
           route === 'codex/models' ||
           route === 'models';
-  if (allowedRoutes.some((route) => !routeAllowed(route))) invalid();
+  for (let index = 0; index < allowedRoutes.length; index += 1)
+    if (!routeAllowed(allowedRoutes[index])) invalid();
   const contextSize =
     input.contextSize === null
       ? null
       : boundedInteger(input.contextSize, 1, LLM_PROXY_LIMITS.contextSize);
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     modelRef: modelRefValue(input.modelRef),
     targetGeneration: generationValue(input.targetGeneration),
     providerType,
@@ -688,30 +712,45 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
   exact(input, ['format', 'revision', 'models']);
   exactFormat(input.format, LLM_PROXY_FORMATS.catalog);
   if (
-    !Array.isArray(input.models) ||
+    !intrinsicArrayIsArray(input.models) ||
     input.models.length > LLM_PROXY_LIMITS.models
   )
     invalid();
-  const models = input.models.map(normalizeCatalogModel);
-  const providerTypes = new Map<string, LlmProxyProviderType>();
-  const toolTiers = new Set<LlmProxyToolTier>();
+  const models: LlmProxyCatalogModel[] = [];
+  for (let index = 0; index < input.models.length; index += 1)
+    models[index] = normalizeCatalogModel(input.models[index]);
+  const providerTypes = new intrinsicMapConstructor<
+    string,
+    LlmProxyProviderType
+  >();
+  const toolTiers = new intrinsicSetConstructor<LlmProxyToolTier>();
   for (let i = 0; i < models.length; i += 1) {
     if (i > 0 && models[i - 1].modelRef >= models[i].modelRef) invalid();
-    const providerId = models[i].modelRef.split('/', 1)[0];
-    const priorType = providerTypes.get(providerId);
+    const providerId = (
+      intrinsicReflectApply(intrinsicStringSplit, models[i].modelRef, [
+        '/',
+        1,
+      ]) as string[]
+    )[0];
+    const priorType = intrinsicReflectApply(intrinsicMapGet, providerTypes, [
+      providerId,
+    ]) as LlmProxyProviderType | undefined;
     if (priorType !== undefined && priorType !== models[i].providerType)
       invalid();
-    providerTypes.set(providerId, models[i].providerType);
+    intrinsicReflectApply(intrinsicMapSet, providerTypes, [
+      providerId,
+      models[i].providerType,
+    ]);
     const tier = models[i].toolTier;
     if (tier !== null) {
       if (setHas(toolTiers, tier)) invalid();
-      toolTiers.add(tier);
+      intrinsicReflectApply(intrinsicSetAdd, toolTiers, [tier]);
     }
   }
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     format: LLM_PROXY_FORMATS.catalog,
-    revision: boundedInteger(input.revision, 0, Number.MAX_SAFE_INTEGER),
-    models: Object.freeze(models),
+    revision: boundedInteger(input.revision, 0, intrinsicMaxSafeInteger),
+    models: intrinsicObjectFreeze(models),
   });
 }
 export function decodeLlmProxyCatalog(body: LlmProxyBody): LlmProxyCatalog {
@@ -739,7 +778,7 @@ export function serializeLlmProxyCatalog(value: LlmProxyCatalog): string {
 function authorizationFailure(
   code: LlmProxyAuthorizationFailureCode,
 ): LlmProxyAuthorizationResult {
-  return Object.freeze({ ok: false, code });
+  return intrinsicObjectFreeze({ ok: false, code });
 }
 
 function canonicalPayloadModel(payload: Uint8Array): string {
@@ -761,20 +800,28 @@ export function authorizeLlmProxyRequest(
   return guarded(() => {
     const normalizedCatalog = normalizeCatalog(catalog);
     const normalizedRequest = normalizeMemoryRequest(request);
-    const model = normalizedCatalog.models.find(
-      (candidate) => candidate.modelRef === normalizedRequest.modelRef,
-    );
+    let model: LlmProxyCatalogModel | undefined;
+    for (let index = 0; index < normalizedCatalog.models.length; index += 1)
+      if (
+        normalizedCatalog.models[index].modelRef === normalizedRequest.modelRef
+      )
+        model = normalizedCatalog.models[index];
     if (!model) return authorizationFailure('not_found');
     if (model.targetGeneration !== normalizedRequest.targetGeneration)
       return authorizationFailure('stale_target');
-    if (!model.allowedRoutes.includes(normalizedRequest.route))
+    if (
+      !setHas(
+        new intrinsicSetConstructor(model.allowedRoutes),
+        normalizedRequest.route,
+      )
+    )
       return authorizationFailure('route_not_allowed');
     if (
       !setHas(getRouteSet, normalizedRequest.route) &&
       canonicalPayloadModel(normalizedRequest.payload) !== model.model
     )
       return authorizationFailure('forbidden');
-    return Object.freeze({ ok: true, model });
+    return intrinsicObjectFreeze({ ok: true, model });
   });
 }
 
@@ -790,11 +837,11 @@ function normalizeError(value: unknown): LlmProxyErrorEnvelope {
   if (typeof input.code !== 'string' || !setHas(errorCodeSet, input.code))
     invalid();
   if (input.requestId === undefined)
-    return Object.freeze({
+    return intrinsicObjectFreeze({
       format: LLM_PROXY_FORMATS.error,
       code: input.code as LlmProxyErrorCode,
     });
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     format: LLM_PROXY_FORMATS.error,
     code: input.code as LlmProxyErrorCode,
     requestId: requestIdValue(input.requestId),
@@ -835,23 +882,27 @@ function normalizeResponseHeaders(
   value: unknown,
 ): readonly LlmSafeResponseHeader[] {
   if (
-    !Array.isArray(value) ||
+    !intrinsicArrayIsArray(value) ||
     value.length > LLM_PROXY_SAFE_RESPONSE_HEADERS.length
   )
     invalid();
-  const headers = value.map((candidate) => {
-    const input = record(candidate);
+  const headers: LlmSafeResponseHeader[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const input = record(value[index]);
     exact(input, ['name', 'value']);
     if (!isSafeLlmResponseHeader(input.name) || typeof input.value !== 'string')
       invalid();
-    if (!headerValuePattern.test(input.value)) invalid();
+    if (!regexTest(headerValuePattern, input.value)) invalid();
     bytesIn(input.value, 1, LLM_PROXY_LIMITS.responseHeaderValueBytes);
-    return Object.freeze({ name: input.name, value: input.value });
-  });
+    headers[index] = intrinsicObjectFreeze({
+      name: input.name,
+      value: input.value,
+    });
+  }
   for (let i = 1; i < headers.length; i += 1) {
     if (headers[i - 1].name >= headers[i].name) invalid();
   }
-  return Object.freeze(headers);
+  return intrinsicObjectFreeze(headers);
 }
 function normalizeProvenance(value: unknown): LlmResponseProvenance {
   const input = record(value);
@@ -865,7 +916,7 @@ function normalizeProvenance(value: unknown): LlmResponseProvenance {
     'headers',
   ]);
   exactFormat(input.format, LLM_PROXY_FORMATS.responseProvenance);
-  return Object.freeze({
+  return intrinsicObjectFreeze({
     format: LLM_PROXY_FORMATS.responseProvenance,
     requestId: requestIdValue(input.requestId),
     modelRef: modelRefValue(input.modelRef),
@@ -898,7 +949,7 @@ export function decodeLlmResponseProvenance(
       typeof value !== 'string' ||
       value.length === 0 ||
       value.length > LLM_PROXY_LIMITS.provenanceHeaderBytes ||
-      !/^[A-Za-z0-9_-]+$/.test(value)
+      !regexTest(/^[A-Za-z0-9_-]+$/, value)
     )
       invalid();
     const bytes = bufferFrom(value, 'base64url');

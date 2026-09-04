@@ -147,6 +147,257 @@ describe('GatewayLlmClient catalog boundary', () => {
     assert.throws(() => (result.models as LlmProxyCatalogModel[]).push(model));
   });
 
+  it('rejects endpoint path escape despite store-poisoned URL constructor', async () => {
+    const NativeURL = globalThis.URL;
+    let fetchCalls = 0;
+    let constructorCalls = 0;
+    function PoisonedURL(this: Record<string, string>, input: string) {
+      constructorCalls += 1;
+      globalThis.URL = NativeURL;
+      this.protocol = 'https:';
+      this.username = '';
+      this.password = '';
+      this.pathname = '/';
+      this.search = '';
+      this.hash = '';
+      this.origin = input;
+    }
+    const authority: GatewayLlmResidentStore = {
+      read: () => {
+        globalThis.URL = PoisonedURL as unknown as typeof URL;
+        return Object.freeze({ ...snapshot(), endpoint: ENDPOINT + '/escape' });
+      },
+      activeNodeToken: () => firstCredential.token,
+    };
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          return jsonResponse(serializeLlmProxyCatalog(catalog));
+        }, authority).fetchCatalog(),
+        GatewayResidentStateError,
+      );
+      assert.equal(fetchCalls, 0);
+      assert.equal(constructorCalls, 0);
+    } finally {
+      globalThis.URL = NativeURL;
+    }
+  });
+
+  it('keeps response validation tied to the native response snapshot', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Object, 'freeze');
+    assert.ok(descriptor && 'value' in descriptor);
+    let actualCancelled = 0;
+    let hostileCalls = 0;
+    const actualBody = new ReadableStream<Uint8Array>(
+      {
+        cancel() {
+          actualCancelled += 1;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const spoofBody = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          controller.enqueue(Buffer.from(serializeLlmProxyCatalog(catalog)));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const response = new Response(actualBody, {
+      status: 200,
+      headers: {
+        'content-encoding': 'gzip',
+        'content-type': 'application/json; charset=utf-8',
+      },
+    });
+    const boundary = client(async () => {
+      Object.defineProperty(Object, 'freeze', {
+        ...descriptor,
+        value<T>(value: T): Readonly<T> {
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            'status' in value &&
+            'headers' in value &&
+            'body' in value
+          ) {
+            hostileCalls += 1;
+            Object.defineProperty(Object, 'freeze', descriptor);
+            return {
+              ...value,
+              headers: new Headers({
+                'content-type': 'application/json; charset=utf-8',
+              }),
+              body: spoofBody,
+            } as Readonly<T>;
+          }
+          return value as Readonly<T>;
+        },
+      });
+      return response;
+    });
+    try {
+      await assert.rejects(
+        boundary.fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(actualCancelled, 1);
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Object, 'freeze', descriptor);
+    }
+  });
+
+  it('rejects leading-zero content length despite regex poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      RegExp.prototype,
+      'test',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    const body = serializeLlmProxyCatalog(catalog);
+    const malformedLength = '0' + Buffer.byteLength(body);
+    let hostileCalls = 0;
+    const boundary = client(async () => {
+      const response = new Response(body, {
+        status: 200,
+        headers: {
+          'content-length': malformedLength,
+          'content-type': 'application/json; charset=utf-8',
+        },
+      });
+      Object.defineProperty(RegExp.prototype, 'test', {
+        ...descriptor,
+        value(value: string) {
+          if (value === malformedLength) {
+            hostileCalls += 1;
+            Object.defineProperty(RegExp.prototype, 'test', descriptor);
+            return true;
+          }
+          return Reflect.apply(descriptor.value as RegExp['test'], this, [
+            value,
+          ]);
+        },
+      });
+      return response;
+    });
+    try {
+      await assert.rejects(
+        boundary.fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(RegExp.prototype, 'test', descriptor);
+    }
+  });
+
+  it('rejects fractional catalog revision despite Number poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Number, 'isSafeInteger');
+    assert.ok(descriptor && 'value' in descriptor);
+    const nativeIsSafeInteger = descriptor.value as typeof Number.isSafeInteger;
+    let hostileCalls = 0;
+    const body = JSON.stringify({
+      format: LLM_PROXY_FORMATS.catalog,
+      revision: 0.5,
+      models: [],
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(Number, 'isSafeInteger', {
+              ...descriptor,
+              value(value: unknown) {
+                if (value === 0.5) {
+                  hostileCalls += 1;
+                  Object.defineProperty(Number, 'isSafeInteger', descriptor);
+                  return true;
+                }
+                return Reflect.apply(nativeIsSafeInteger, Number, [value]);
+              },
+            });
+            controller.enqueue(Buffer.from(body));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Number, 'isSafeInteger', descriptor);
+    }
+  });
+
+  it('rejects conflicting catalog providers despite Map poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Map.prototype, 'get');
+    assert.ok(descriptor && 'value' in descriptor);
+    const nativeGet = descriptor.value as Map<unknown, unknown>['get'];
+    let hostileCalls = 0;
+    const body = JSON.stringify({
+      format: LLM_PROXY_FORMATS.catalog,
+      revision: 1,
+      models: [
+        { ...model, modelRef: 'shared/a' },
+        {
+          ...model,
+          modelRef: 'shared/b',
+          providerType: 'anthropic-oauth',
+          allowedRoutes: ['messages'],
+          toolTier: null,
+        },
+      ],
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(Map.prototype, 'get', {
+              ...descriptor,
+              value(this: Map<unknown, unknown>, key: unknown) {
+                if (key === 'shared') {
+                  hostileCalls += 1;
+                  if (hostileCalls === 2)
+                    Object.defineProperty(Map.prototype, 'get', descriptor);
+                  return undefined;
+                }
+                return Reflect.apply(nativeGet, this, [key]);
+              },
+            });
+            controller.enqueue(Buffer.from(body));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Map.prototype, 'get', descriptor);
+    }
+  });
+
   it('fails closed on resident auth state before network', async () => {
     let calls = 0;
     const boundary = client(
@@ -259,6 +510,51 @@ it('keeps validated authority independent of ambient Object.freeze', async () =>
 });
 
 describe('GatewayLlmClient request boundary', () => {
+  it('does not let token callbacks expand model route authority', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'map');
+    assert.ok(descriptor && 'value' in descriptor);
+    const nativeMap = descriptor.value as Array<unknown>['map'];
+    let fetchCalls = 0;
+    let hostileCalls = 0;
+    const authority = store(() => {
+      Object.defineProperty(Array.prototype, 'map', {
+        ...descriptor,
+        value(
+          this: unknown[],
+          callback: (
+            value: unknown,
+            index: number,
+            array: unknown[],
+          ) => unknown,
+        ) {
+          if (this.length === 1 && this[0] === 'responses') {
+            hostileCalls += 1;
+            Object.defineProperty(Array.prototype, 'map', descriptor);
+            return ['chat/completions', 'responses'];
+          }
+          return Reflect.apply(nativeMap, this, [callback]);
+        },
+      });
+      return firstCredential.token;
+    });
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          throw new Error('must not run');
+        }, authority).dispatch({
+          ...dispatchInput(),
+          route: 'chat/completions',
+        }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Array.prototype, 'map', descriptor);
+    }
+  });
+
   it('serializes the exact envelope, digest and an owned payload copy', async () => {
     const payload = Buffer.from('{"model":"aster-1","input":"hello"}');
     const original = Buffer.from(payload);
