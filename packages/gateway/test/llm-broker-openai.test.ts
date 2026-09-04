@@ -25,6 +25,12 @@ test('Gateway store dispatches an authorized OpenAI-compatible request without e
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const calls: Request[] = [];
   let randomByte = 0x41;
+  let holdForAbort = false;
+  let observedAbortReason: unknown;
+  let markAbortFetchStarted!: () => void;
+  const abortFetchStarted = new Promise<void>((resolve) => {
+    markAbortFetchStarted = resolve;
+  });
   const store = openGatewayStore(directory, {
     now: () => 1000,
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
@@ -37,6 +43,17 @@ test('Gateway store dispatches an authorized OpenAI-compatible request without e
       }
       const request = new Request(input, init);
       calls.push(request);
+      if (holdForAbort) {
+        markAbortFetchStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          const onAbort = () => {
+            observedAbortReason = request.signal.reason;
+            reject(request.signal.reason);
+          };
+          request.signal.addEventListener('abort', onAbort, { once: true });
+          if (request.signal.aborted) onAbort();
+        });
+      }
       return new Response(new Uint8Array([0x72, 0x61, 0x77]), {
         status: 207,
         headers: { 'content-type': 'application/json' },
@@ -132,6 +149,19 @@ test('Gateway store dispatches an authorized OpenAI-compatible request without e
     request,
     signal: new AbortController().signal,
   };
+  holdForAbort = true;
+  const controller = new AbortController();
+  const cancellation = new Error('synthetic provider cancellation');
+  const pending = store.llmProxy.dispatch({
+    ...dispatchInput,
+    signal: controller.signal,
+  });
+  await abortFetchStarted;
+  controller.abort(cancellation);
+  await assert.rejects(pending, (error) => error === cancellation);
+  assert.equal(observedAbortReason, cancellation);
+  holdForAbort = false;
+
   await rejectWithoutNetwork({
     ...dispatchInput,
     request: {

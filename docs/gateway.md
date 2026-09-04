@@ -52,6 +52,10 @@ The LLM routes accept only an active resident node bearer; browser authenticatio
 
 Gateway returns provider status and body bytes without parsing them. Response provenance is a bounded safe-header projection; unsafe, duplicate, accessor-backed, or oversized adapter metadata fails closed. Streaming is backpressured, capped at 32 MiB, and governed by call and per-read idle deadlines. Client disconnect and shutdown propagate cancellation. A failure before response commitment uses the canonical Gateway error codec; after any provider bytes are committed, failure destroys the response instead of appending JSON or retrying.
 
+The Gateway process composes the HTTP plane with a private broker over the same hardened SQLite store. OpenAI-compatible targets use their immutable canonical HTTPS base URL. Anthropic OAuth targets admit only the versioned `messages` grammar. Codex OAuth admits only the versioned `codex/responses`, `codex/models`, and `models` grammars and always dispatches to fixed `https://chatgpt.com/backend-api` paths; stored grammar strings are version assertions, never URL templates. Provider credentials have no public readback or callback-lease surface.
+
+OAuth managers are cached per immutable credential for process-wide refresh single-flight. Every request performs exact-generation authorization before network work, and refresh persists through the credential's exact SQLite secret revision without holding a transaction across a provider call. A conflicting refresh re-reads the winner; changing a target generation or revoking its grant affects later admissions, not a request already admitted to network work.
+
 Set Gateway's canonical public URL to the exact external HTTPS origin. Browser Origin checks and the resident WSS target derive from that value; path, query, fragment, embedded credentials, and noncanonical forms are rejected.
 
 ## Setup and resident enrollment
