@@ -15,19 +15,55 @@ import {
 } from '../src/index.js';
 import { GATEWAY_LLM_WIRE_GRAMMARS } from '../src/llm-broker.js';
 
-test('Gateway broker dispatches Anthropic OAuth through its private credential manager', async (t) => {
+test('Gateway broker dispatches Anthropic OAuth through a dispatch-local credential source', async (t) => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'elpis-gateway-anthropic-broker-'),
   );
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const calls: Request[] = [];
   let randomByte = 0x61;
+  let unauthorizedMode = false;
+  let unauthorizedAttempts = 0;
+  let unauthorizedRefreshes = 0;
   const store = openGatewayStore(directory, {
     now: () => 1000,
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
     llmFetch: async (input, init) => {
       const request = new Request(input, init);
       calls.push(request);
+      if (request.url === 'https://api.anthropic.com/v1/oauth/token') {
+        unauthorizedRefreshes += 1;
+        return new Response(
+          JSON.stringify({
+            access_token: 'synthetic-anthropic-access-after-401',
+            refresh_token: 'synthetic-anthropic-refresh-after-401',
+            expires_in: 3600,
+            account: {
+              uuid: 'private-anthropic-id',
+              email_address: 'aster@example.com',
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (unauthorizedMode) {
+        unauthorizedAttempts += 1;
+        if (unauthorizedAttempts === 1)
+          return new Response(new Uint8Array([0x66, 0x69, 0x72, 0x73, 0x74]), {
+            status: 401,
+          });
+        assert.equal(
+          request.headers.get('authorization'),
+          'Bearer synthetic-anthropic-access-after-401',
+        );
+        return new Response(
+          new Uint8Array([0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64]),
+          {
+            status: 401,
+            headers: { 'x-request-id': 'second-401' },
+          },
+        );
+      }
       return new Response(new Uint8Array([0x61, 0x6e, 0x74, 0x68]), {
         status: 202,
         headers: { 'content-type': 'text/event-stream' },
@@ -116,6 +152,25 @@ test('Gateway broker dispatches Anthropic OAuth through its private credential m
     new Uint8Array(await calls[0].arrayBuffer()),
     new Uint8Array(payload),
   );
+
+  unauthorizedMode = true;
+  const unauthorizedRequest = {
+    ...request,
+    requestId: 'egr1.RRRRRRRRRRRRRRRRRRRRRR',
+  } as LlmProxyRequest;
+  const unauthorized = await store.llmProxy.dispatch({
+    instanceId,
+    model,
+    request: unauthorizedRequest,
+    signal: new AbortController().signal,
+  });
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(
+    new Uint8Array(await new Response(unauthorized.body).arrayBuffer()),
+    new Uint8Array([0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64]),
+  );
+  assert.equal(unauthorizedAttempts, 2);
+  assert.equal(unauthorizedRefreshes, 1);
 
   const visible = JSON.stringify({
     keys: Object.keys(store.llmProxy),
@@ -242,11 +297,12 @@ test('Anthropic OAuth refresh is single-flight, revision-CAS persisted, and reus
     sha256: createHash('sha256').update(payload).digest('hex'),
     payload,
   });
+  const firstController = new AbortController();
   const first = store.llmProxy.dispatch({
     instanceId,
     model,
     request: makeRequest('egr1.GGGGGGGGGGGGGGGGGGGGGG'),
-    signal: new AbortController().signal,
+    signal: firstController.signal,
   });
   await started;
   const second = store.llmProxy.dispatch({
@@ -255,12 +311,22 @@ test('Anthropic OAuth refresh is single-flight, revision-CAS persisted, and reus
     request: makeRequest('egr1.HHHHHHHHHHHHHHHHHHHHHH'),
     signal: new AbortController().signal,
   });
+  const cancellation = new Error('synthetic refresh waiter cancelled');
+  firstController.abort(cancellation);
+  await assert.rejects(first, (error) => error === cancellation);
+  let drained = false;
+  const draining = store.llmProxy.drain().then(() => {
+    drained = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
   releaseRefresh();
-  const exchanges = await Promise.all([first, second]);
-  for (const exchange of exchanges)
-    await new Response(exchange.body).arrayBuffer();
+  const exchange = await second;
+  await new Response(exchange.body).arrayBuffer();
+  await draining;
+  assert.equal(drained, true);
   assert.equal(tokenCalls, 1);
-  assert.equal(messageCalls, 2);
+  assert.equal(messageCalls, 1);
   assert.equal(
     store
       .audit(100)
@@ -280,6 +346,6 @@ test('Anthropic OAuth refresh is single-flight, revision-CAS persisted, and reus
   });
   await new Response(reopened.body).arrayBuffer();
   assert.equal(tokenCalls, 1);
-  assert.equal(messageCalls, 3);
+  assert.equal(messageCalls, 2);
   store.close();
 });

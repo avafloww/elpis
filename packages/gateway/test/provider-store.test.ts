@@ -9,6 +9,7 @@ import {
   newGatewayInstanceId,
   openGatewayStore,
 } from '../src/index.js';
+import { GATEWAY_LLM_WIRE_GRAMMARS } from '../src/llm-broker.js';
 
 function fixture(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-provider-store-'));
@@ -56,7 +57,7 @@ test('provider target generations and grants produce exact secret-free catalogs'
     expiresAt: 9000,
   });
   const hiddenOpenAiBase = 'https://private-openai-endpoint.example/v1';
-  const hiddenCodexBase = 'https://private-codex-endpoint.example/backend-api';
+  const hiddenCodexBase = 'https://chatgpt.com/backend-api';
   const weakConfig = {
     credentialId: api.credentialId,
     modelRef: 'ananke/weak',
@@ -64,8 +65,8 @@ test('provider target generations and grants produce exact secret-free catalogs'
     model: 'upstream-weak-a',
     allowedRoutes: ['chat/completions', 'responses'] as const,
     wireGrammar: {
-      responses: 'hidden-openai-responses-grammar-v1',
-      'chat/completions': 'hidden-openai-chat-grammar-v1',
+      responses: GATEWAY_LLM_WIRE_GRAMMARS.responses,
+      'chat/completions': GATEWAY_LLM_WIRE_GRAMMARS['chat/completions'],
     },
     contextSize: 32768,
     reasoningEffort: null,
@@ -84,9 +85,9 @@ test('provider target generations and grants produce exact secret-free catalogs'
     model: 'gpt-codex-test',
     allowedRoutes: ['codex/models', 'codex/responses', 'models'] as const,
     wireGrammar: {
-      models: 'hidden-codex-models-grammar-v1',
-      'codex/responses': 'hidden-codex-responses-grammar-v1',
-      'codex/models': 'hidden-codex-models-backend-grammar-v1',
+      models: GATEWAY_LLM_WIRE_GRAMMARS.models,
+      'codex/responses': GATEWAY_LLM_WIRE_GRAMMARS.codexResponses,
+      'codex/models': GATEWAY_LLM_WIRE_GRAMMARS.codexModels,
     },
     contextSize: null,
     reasoningEffort: 'high',
@@ -112,6 +113,37 @@ test('provider target generations and grants produce exact secret-free catalogs'
       return /credential not found/.test(String(error));
     },
   );
+  for (const invalid of [
+    {
+      ...weakConfig,
+      modelRef: 'ananke/http',
+      baseUrl: 'http://provider.example/v1',
+    },
+    {
+      ...weakConfig,
+      modelRef: 'ananke/route',
+      allowedRoutes: ['messages'] as const,
+      wireGrammar: { messages: GATEWAY_LLM_WIRE_GRAMMARS.messages },
+    },
+    {
+      ...weakConfig,
+      modelRef: 'ananke/grammar',
+      wireGrammar: {
+        responses: 'wrong-responses-v1',
+        'chat/completions': GATEWAY_LLM_WIRE_GRAMMARS['chat/completions'],
+      },
+    },
+    {
+      ...codexConfig,
+      modelRef: 'codex/deceptive',
+      baseUrl: 'https://provider.example/backend-api',
+    },
+  ]) {
+    assert.throws(
+      () => store.providers.configureModel(invalid),
+      /(?:provider base URL has invalid syntax|provider model configuration failed)/,
+    );
+  }
 
   now = 2000;
   const weakA = store.providers.configureModel(weakConfig);
@@ -379,10 +411,8 @@ test('provider target generations and grants produce exact secret-free catalogs'
   assert.equal(targets[0].account_ref, hiddenAccountRef);
   assert.equal(targets[0].base_url, hiddenOpenAiBase);
   assert.equal(
-    String(targets[0].wire_grammar_json).includes(
-      'hidden-openai-responses-grammar-v1',
-    ),
-    true,
+    JSON.parse(String(targets[0].wire_grammar_json)).responses,
+    GATEWAY_LLM_WIRE_GRAMMARS.responses,
   );
   assert.equal(targets[3].credential_id, oauth.credentialId);
   assert.equal(targets[3].base_url, hiddenCodexBase);
@@ -396,5 +426,21 @@ test('provider target generations and grants produce exact secret-free catalogs'
   );
   assert.deepEqual(witness.prepare('PRAGMA foreign_key_check').all(), []);
   witness.close();
+
+  const corruption = new DatabaseSync(store.databasePath, {
+    enableForeignKeyConstraints: true,
+  });
+  corruption.exec('DROP TRIGGER gateway_provider_targets_no_update');
+  corruption
+    .prepare(
+      `UPDATE gateway_provider_targets SET base_url = 'http://provider.example/v1'
+       WHERE target_generation = ?`,
+    )
+    .run(punctuationDash.targetGeneration);
+  corruption.close();
+  assert.throws(
+    () => store.providers.catalogForInstance(instanceId),
+    /gateway provider catalog is invalid/,
+  );
   store.close();
 });

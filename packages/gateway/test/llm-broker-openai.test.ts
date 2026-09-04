@@ -181,45 +181,33 @@ test('Gateway store dispatches an authorized OpenAI-compatible request without e
   aborted.abort();
   await rejectWithoutNetwork({ ...dispatchInput, signal: aborted.signal });
 
-  const badConfigured = store.providers.configureModel({
-    credentialId: credential.credentialId,
-    modelRef: 'ananke/bad',
-    baseUrl: 'https://provider.example.com/v1',
-    model: 'upstream-bad',
-    allowedRoutes: ['responses'],
-    wireGrammar: { responses: 'unknown-openai-responses-v1' },
-    contextSize: 32768,
-    reasoningEffort: null,
-    reasoningSummary: null,
-    reasoningContext: null,
-    toolTier: null,
-    externalThinking: false,
-    toolContractVersion: 'elpis-tools-v1',
-    callTimeoutMs: 60000,
-    streamIdleTimeoutMs: 60000,
-  });
-  store.providers.grantModelToInstance({ instanceId, modelRef: 'ananke/bad' });
-  const badModel = store.llmProxy
-    .catalogForInstance(instanceId)
-    .models.find((candidate) => candidate.modelRef === 'ananke/bad');
-  assert.ok(badModel);
-  const badPayload = Buffer.from(JSON.stringify({ model: 'upstream-bad' }));
-  await rejectWithoutNetwork({
-    instanceId,
-    model: badModel,
-    request: {
-      format: LLM_PROXY_FORMATS.request,
-      requestId: 'egr1.EEEEEEEEEEEEEEEEEEEEEE',
-      modelRef: badModel.modelRef,
-      targetGeneration: badConfigured.targetGeneration,
-      route: 'responses',
-      transport: { kind: 'none' },
-      byteLength: badPayload.byteLength,
-      sha256: createHash('sha256').update(badPayload).digest('hex'),
-      payload: badPayload,
-    },
-    signal: new AbortController().signal,
-  });
+  assert.throws(
+    () =>
+      store.providers.configureModel({
+        credentialId: credential.credentialId,
+        modelRef: 'ananke/bad',
+        baseUrl: 'https://provider.example.com/v1',
+        model: 'upstream-bad',
+        allowedRoutes: ['responses'],
+        wireGrammar: { responses: 'unknown-openai-responses-v1' },
+        contextSize: 32768,
+        reasoningEffort: null,
+        reasoningSummary: null,
+        reasoningContext: null,
+        toolTier: null,
+        externalThinking: false,
+        toolContractVersion: 'elpis-tools-v1',
+        callTimeoutMs: 60000,
+        streamIdleTimeoutMs: 60000,
+      }),
+    /provider model configuration failed/,
+  );
+  assert.equal(
+    store.llmProxy
+      .catalogForInstance(instanceId)
+      .models.some((candidate) => candidate.modelRef === 'ananke/bad'),
+    false,
+  );
 
   store.providers.revokeModelFromInstance({
     instanceId,

@@ -1,5 +1,6 @@
 import { createHash, randomBytes as systemRandomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { assertGatewayProviderTarget } from './llm-target-policy.js';
 import {
   decodeLlmProxyCatalog,
   isLlmTargetGeneration,
@@ -346,7 +347,7 @@ function canonicalBaseUrl(value: unknown): string {
     throw new Error('provider base URL has invalid syntax');
   }
   if (
-    (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
+    parsed.protocol !== 'https:' ||
     parsed.username !== '' ||
     parsed.password !== '' ||
     parsed.search !== '' ||
@@ -537,12 +538,24 @@ function catalogFromRows(
   const models = rows.map((row) => {
     if (row.external_thinking !== 0 && row.external_thinking !== 1)
       throw new Error('stored provider catalog is invalid');
+    const allowedRoutes = JSON.parse(
+      String(row.allowed_routes_json),
+    ) as LlmProxyRoute[];
+    assertGatewayProviderTarget({
+      providerType: row.provider_type as LlmProxyProviderType,
+      baseUrl: String(row.base_url),
+      routes: allowedRoutes,
+      wireGrammar: JSON.parse(String(row.wire_grammar_json)) as Record<
+        string,
+        string
+      >,
+    });
     return {
       modelRef: row.model_ref,
       targetGeneration: row.target_generation,
       providerType: row.provider_type,
       model: row.upstream_model,
-      allowedRoutes: JSON.parse(String(row.allowed_routes_json)) as unknown,
+      allowedRoutes,
       contextSize: row.context_size,
       reasoningEffort: row.reasoning_effort,
       reasoningSummary: row.reasoning_summary,
@@ -771,6 +784,12 @@ export class GatewayProviderStore {
         input.wireGrammar,
         normalized.allowedRoutes,
       );
+      assertGatewayProviderTarget({
+        providerType: credential.providerType,
+        baseUrl,
+        routes: normalized.allowedRoutes,
+        wireGrammar: JSON.parse(wireGrammarJson) as Record<string, string>,
+      });
       const snapshotSha256 = targetSnapshotSha256(
         credential,
         baseUrl,
@@ -1135,7 +1154,8 @@ export class GatewayProviderStore {
       .prepare(
         `SELECT
            t.model_ref, t.target_generation, t.provider_type,
-           t.upstream_model, t.allowed_routes_json, t.context_size,
+           t.base_url, t.upstream_model, t.allowed_routes_json,
+           t.wire_grammar_json, t.context_size,
            t.reasoning_effort, t.reasoning_summary, t.reasoning_context,
            t.tool_tier, t.external_thinking, t.tool_contract_version,
            t.call_timeout_ms, t.stream_idle_timeout_ms

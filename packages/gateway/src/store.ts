@@ -4,8 +4,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
 import { GatewayProviderStore } from './provider-store.js';
-import { createGatewayLlmProxyApi } from './llm-broker.js';
-import type { GatewayLlmProxyApi } from './llm-proxy-http.js';
+import {
+  createGatewayLlmProxyApi,
+  type GatewayLlmBrokerApi,
+} from './llm-broker.js';
 import {
   isCredentialId,
   isGatewayInstanceId,
@@ -234,7 +236,7 @@ export class GatewayStore {
   readonly databasePath: string;
   readonly credentials: GatewayCredentialStore;
   readonly providers: GatewayProviderStore;
-  readonly llmProxy: GatewayLlmProxyApi;
+  readonly llmProxy: GatewayLlmBrokerApi;
   readonly #database: DatabaseSync;
   readonly #now: () => number;
   #closed = false;

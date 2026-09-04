@@ -77,6 +77,7 @@ export function createGatewayApplication(
       try {
         await service.stop();
       } finally {
+        await store.llmProxy.drain();
         store.close();
       }
     },

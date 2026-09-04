@@ -6,15 +6,13 @@ import {
   type LlmProxyRequest,
 } from '@elpis/gateway-protocol';
 import {
-  OAuthCredentialManager,
   createAnthropicOAuthTransport,
   createCodexOAuthFetch,
   createOpenAICompatibleFetch,
-  oauthCredentialsEqual,
   refreshAnthropicToken,
   refreshOpenAICodexToken,
+  validateOAuthCredentials,
   type OAuthCredentials,
-  type OAuthCredentialStorage,
 } from '@elpis/provider-transport';
 import type {
   AuthenticatedNode,
@@ -24,16 +22,10 @@ import type {
   GatewayLlmProxyApi,
   GatewayLlmProxyExchange,
 } from './llm-proxy-http.js';
+import { GATEWAY_LLM_WIRE_GRAMMARS } from './llm-target-policy.js';
 import type { GatewayProviderStore } from './provider-store.js';
 
-export const GATEWAY_LLM_WIRE_GRAMMARS = Object.freeze({
-  responses: 'openai-compatible-responses-v1',
-  'chat/completions': 'openai-compatible-chat-completions-v1',
-  messages: 'anthropic-oauth-messages-v1',
-  codexResponses: 'codex-oauth-responses-v1',
-  codexModels: 'codex-oauth-backend-models-v1',
-  models: 'codex-oauth-models-v1',
-} as const);
+export { GATEWAY_LLM_WIRE_GRAMMARS } from './llm-target-policy.js';
 
 type BrokerFetch = typeof globalThis.fetch;
 
@@ -48,6 +40,10 @@ export interface CreateGatewayLlmProxyApiOptions {
   readonly dispatcher?: unknown;
 }
 
+export interface GatewayLlmBrokerApi extends GatewayLlmProxyApi {
+  drain(): Promise<void>;
+}
+
 const fatalUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function refused(): never {
@@ -58,6 +54,39 @@ function abortReason(signal: AbortSignal): unknown {
   return (
     signal.reason ?? new DOMException('The request was aborted', 'AbortError')
   );
+}
+
+async function awaitWithAbort<T>(
+  start: () => T | PromiseLike<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw abortReason(signal);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortReason(signal)));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    let operation: Promise<T>;
+    try {
+      operation = Promise.resolve(start());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 function text(value: unknown): string {
@@ -298,69 +327,61 @@ function oauthCredentialsFromRow(row: AuthorizedRow): OAuthCredentials {
   };
 }
 
-class GatewayOAuthStorage implements OAuthCredentialStorage {
-  readonly location = 'gateway OAuth credential';
-  readonly #database: DatabaseSync;
-  readonly #providers: GatewayProviderStore;
-  readonly #credentialId: string;
-  readonly #providerType: 'anthropic-oauth' | 'codex-oauth';
+const OAUTH_REFRESH_SKEW_MS = 60_000;
+type OAuthProviderType = 'anthropic-oauth' | 'codex-oauth';
+
+interface OAuthSnapshot {
+  readonly credentialId: string;
+  readonly providerType: OAuthProviderType;
+  readonly secretRevision: number;
+  readonly credentials: OAuthCredentials;
+}
+
+function oauthSnapshotFromRow(
+  row: AuthorizedRow,
+  providerType: OAuthProviderType,
+): OAuthSnapshot {
+  if (row.provider_type !== providerType) refused();
+  return Object.freeze({
+    credentialId: text(row.credential_id),
+    providerType,
+    secretRevision: integer(row.oauth_secret_revision),
+    credentials: Object.freeze(oauthCredentialsFromRow(row)),
+  });
+}
+
+class DispatchOAuthCredentialSource {
+  readonly location = 'gateway dispatch OAuth credential';
+  #current: OAuthSnapshot;
+  readonly #now: () => number;
+  readonly #refresh: (snapshot: OAuthSnapshot) => Promise<OAuthSnapshot>;
 
   constructor(
-    database: DatabaseSync,
-    providers: GatewayProviderStore,
-    credentialId: string,
-    providerType: 'anthropic-oauth' | 'codex-oauth',
+    snapshot: OAuthSnapshot,
+    now: () => number,
+    refresh: (snapshot: OAuthSnapshot) => Promise<OAuthSnapshot>,
   ) {
-    this.#database = database;
-    this.#providers = providers;
-    this.#credentialId = credentialId;
-    this.#providerType = providerType;
+    this.#current = snapshot;
+    this.#now = now;
+    this.#refresh = refresh;
   }
 
-  #row(): AuthorizedRow | undefined {
-    return this.#database
-      .prepare(
-        `SELECT auth_kind, provider_type, oauth_access, oauth_refresh,
-                oauth_expires, oauth_secret_revision, account_identity_json
-         FROM gateway_provider_credentials
-         WHERE id = ? AND provider_type = ? AND auth_kind = 'oauth'`,
-      )
-      .get(this.#credentialId, this.#providerType) as AuthorizedRow | undefined;
+  read(): { readonly accountId?: string } {
+    const { accountId } = this.#current.credentials;
+    return accountId === undefined ? {} : { accountId };
   }
 
-  read(): OAuthCredentials | undefined {
-    const row = this.#row();
-    return row ? oauthCredentialsFromRow(row) : undefined;
+  async getAccessToken(): Promise<string> {
+    if (
+      this.#now() >=
+      this.#current.credentials.expires - OAUTH_REFRESH_SKEW_MS
+    )
+      this.#current = await this.#refresh(this.#current);
+    return this.#current.credentials.access;
   }
 
-  write(_credentials: OAuthCredentials): void {
-    throw new Error('gateway OAuth credential direct write refused');
-  }
-
-  compareAndWrite(
-    expected: OAuthCredentials,
-    replacement: OAuthCredentials,
-  ): boolean {
-    const row = this.#row();
-    if (!row || !oauthCredentialsEqual(oauthCredentialsFromRow(row), expected))
-      return false;
-    try {
-      this.#providers.refreshOAuthCredential({
-        credentialId: this.#credentialId,
-        expectedSecretRevision: integer(row.oauth_secret_revision),
-        accessToken: replacement.access,
-        refreshToken: replacement.refresh,
-        expiresAt: replacement.expires,
-      });
-      return true;
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === 'gateway provider OAuth refresh conflict'
-      )
-        return false;
-      throw new Error('gateway OAuth credential update failed');
-    }
+  async forceRefresh(): Promise<void> {
+    this.#current = await this.#refresh(this.#current);
   }
 }
 
@@ -390,6 +411,15 @@ function exchangeFromResponse(response: Response): GatewayLlmProxyExchange {
   });
 }
 
+function cancelResponseBody(response: Response): void {
+  try {
+    const cleanup = response.body?.cancel();
+    if (cleanup) void cleanup.catch(() => undefined);
+  } catch {
+    // Retrying must not depend on best-effort cleanup of the rejected response.
+  }
+}
+
 class GatewayLlmBroker implements GatewayLlmProxyApi {
   readonly #database: DatabaseSync;
   readonly #credentials: GatewayCredentialStore;
@@ -397,7 +427,9 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
   readonly #now: () => number;
   readonly #fetch: BrokerFetch;
   readonly #dispatcher: unknown;
-  readonly #oauthManagers = new Map<string, OAuthCredentialManager>();
+  readonly #refreshes = new Map<string, Promise<OAuthSnapshot>>();
+  readonly #activeDispatches = new Set<Promise<GatewayLlmProxyExchange>>();
+  #draining = false;
 
   constructor(options: CreateGatewayLlmProxyApiOptions) {
     this.#database = options.database;
@@ -408,34 +440,94 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
     this.#dispatcher = options.dispatcher;
   }
 
-  #oauthManager(
-    row: AuthorizedRow,
-    providerType: 'anthropic-oauth' | 'codex-oauth',
-  ): OAuthCredentialManager {
-    const credentialId = text(row.credential_id);
-    const cached = this.#oauthManagers.get(credentialId);
-    if (cached) return cached;
-    const manager = new OAuthCredentialManager({
-      storage: new GatewayOAuthStorage(
-        this.#database,
-        this.#providers,
-        credentialId,
-        providerType,
-      ),
-      refresh: (refreshToken) =>
-        providerType === 'anthropic-oauth'
-          ? refreshAnthropicToken(refreshToken, {
+  #readOAuthSnapshot(
+    credentialId: string,
+    providerType: OAuthProviderType,
+  ): OAuthSnapshot {
+    const row = this.#database
+      .prepare(
+        `SELECT id AS credential_id, auth_kind, provider_type, oauth_access,
+                oauth_refresh, oauth_expires, oauth_secret_revision,
+                account_identity_json
+         FROM gateway_provider_credentials
+         WHERE id = ? AND provider_type = ? AND auth_kind = 'oauth'`,
+      )
+      .get(credentialId, providerType) as AuthorizedRow | undefined;
+    if (!row) refused();
+    return oauthSnapshotFromRow(row, providerType);
+  }
+
+  #refreshOAuth(snapshot: OAuthSnapshot): Promise<OAuthSnapshot> {
+    const existing = this.#refreshes.get(snapshot.credentialId);
+    if (existing) return existing;
+    if (this.#draining)
+      return Promise.reject(new Error('gateway LLM broker is draining'));
+    const latest = this.#readOAuthSnapshot(
+      snapshot.credentialId,
+      snapshot.providerType,
+    );
+    if (latest.secretRevision !== snapshot.secretRevision)
+      return Promise.resolve(latest);
+
+    let tracked!: Promise<OAuthSnapshot>;
+    const refresh = (async () => {
+      const fresh =
+        snapshot.providerType === 'anthropic-oauth'
+          ? await refreshAnthropicToken(snapshot.credentials.refresh, {
               fetch: this.#fetch,
               now: this.#now,
             })
-          : refreshOpenAICodexToken(refreshToken, {
+          : await refreshOpenAICodexToken(snapshot.credentials.refresh, {
               fetch: this.#fetch,
               now: this.#now,
-            }),
-      now: this.#now,
+            });
+      const credentials = validateOAuthCredentials({
+        ...snapshot.credentials,
+        ...fresh,
+      });
+      try {
+        const receipt = this.#providers.refreshOAuthCredential({
+          credentialId: snapshot.credentialId,
+          expectedSecretRevision: snapshot.secretRevision,
+          accessToken: credentials.access,
+          refreshToken: credentials.refresh,
+          expiresAt: credentials.expires,
+        });
+        return Object.freeze({
+          ...snapshot,
+          secretRevision: receipt.secretRevision,
+          credentials: Object.freeze(credentials),
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'gateway provider OAuth refresh conflict'
+        )
+          return this.#readOAuthSnapshot(
+            snapshot.credentialId,
+            snapshot.providerType,
+          );
+        throw new Error('gateway OAuth credential update failed');
+      }
+    })();
+    tracked = refresh.finally(() => {
+      if (this.#refreshes.get(snapshot.credentialId) === tracked)
+        this.#refreshes.delete(snapshot.credentialId);
     });
-    this.#oauthManagers.set(credentialId, manager);
-    return manager;
+    this.#refreshes.set(snapshot.credentialId, tracked);
+    void tracked.catch(() => undefined);
+    return tracked;
+  }
+
+  #oauthSource(
+    row: AuthorizedRow,
+    providerType: OAuthProviderType,
+  ): DispatchOAuthCredentialSource {
+    return new DispatchOAuthCredentialSource(
+      oauthSnapshotFromRow(row, providerType),
+      this.#now,
+      (snapshot) => this.#refreshOAuth(snapshot),
+    );
   }
 
   authenticateNode(token: unknown): AuthenticatedNode | null {
@@ -446,7 +538,34 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
     return this.#providers.catalogForInstance(instanceId);
   }
 
-  async dispatch(input: {
+  dispatch(input: {
+    readonly instanceId: string;
+    readonly request: LlmProxyRequest;
+    readonly model: LlmProxyCatalogModel;
+    readonly signal: AbortSignal;
+  }): Promise<GatewayLlmProxyExchange> {
+    if (this.#draining)
+      return Promise.reject(new Error('gateway LLM broker is draining'));
+    const operation = this.#dispatch(input);
+    this.#activeDispatches.add(operation);
+    void operation.then(
+      () => this.#activeDispatches.delete(operation),
+      () => this.#activeDispatches.delete(operation),
+    );
+    return operation;
+  }
+
+  async drain(): Promise<void> {
+    this.#draining = true;
+    while (this.#activeDispatches.size > 0 || this.#refreshes.size > 0) {
+      await Promise.allSettled([
+        ...this.#activeDispatches,
+        ...this.#refreshes.values(),
+      ]);
+    }
+  }
+
+  async #dispatch(input: {
     readonly instanceId: string;
     readonly request: LlmProxyRequest;
     readonly model: LlmProxyCatalogModel;
@@ -508,19 +627,29 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
         );
       }
       if (row.provider_type === 'anthropic-oauth') {
+        const credentials = this.#oauthSource(row, 'anthropic-oauth');
         const transport = createAnthropicOAuthTransport({
           baseUrl,
-          credentials: this.#oauthManager(row, 'anthropic-oauth'),
+          credentials,
+          unauthorized: 'return-response',
           fetch: this.#fetch,
           dispatcher: this.#dispatcher,
         });
-        return exchangeFromResponse(
-          await transport({
-            body: payload,
-            stream: streamFromPayload(payload),
-            signal,
-          }),
-        );
+        const transportRequest = {
+          body: payload,
+          stream: streamFromPayload(payload),
+          signal,
+        };
+        const first = await transport(transportRequest);
+        if (first.status !== 401) return exchangeFromResponse(first);
+        try {
+          await awaitWithAbort(() => credentials.forceRefresh(), signal);
+        } catch {
+          if (signal.aborted) throw abortReason(signal);
+          return exchangeFromResponse(first);
+        }
+        cancelResponseBody(first);
+        return exchangeFromResponse(await transport(transportRequest));
       }
       if (request.transport.kind !== 'codex') refused();
       const sessionId = request.transport.sessionId;
@@ -535,7 +664,7 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
               : null;
       if (target === null) refused();
       const providerFetch = createCodexOAuthFetch({
-        credentials: this.#oauthManager(row, 'codex-oauth'),
+        credentials: this.#oauthSource(row, 'codex-oauth'),
         sessionId: () => sessionId,
         preserveTransportHeaders: false,
         fetch: this.#fetch,
@@ -561,6 +690,6 @@ class GatewayLlmBroker implements GatewayLlmProxyApi {
 
 export function createGatewayLlmProxyApi(
   options: CreateGatewayLlmProxyApiOptions,
-): GatewayLlmProxyApi {
+): GatewayLlmBrokerApi {
   return new GatewayLlmBroker(options);
 }

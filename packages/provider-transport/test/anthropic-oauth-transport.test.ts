@@ -232,6 +232,30 @@ test('401 refreshes once without replay and throws typed retriable signal', asyn
   assert.equal(credentials.refreshes(), 1);
 });
 
+test('return-response unauthorized mode preserves the exact 401 without refreshing', async () => {
+  const credentials = credentialSource();
+  const response = new Response(new Uint8Array([0x72, 0x61, 0x77]), {
+    status: 401,
+    headers: { 'x-request-id': 'raw-401' },
+  });
+  const transport = createAnthropicOAuthTransport({
+    baseUrl: 'https://api.anthropic.test',
+    credentials: credentials.source,
+    unauthorized: 'return-response',
+    fetch: async () => response,
+  });
+
+  const returned = await transport({ body: bytes('{}'), stream: false });
+  assert.equal(returned, response);
+  assert.equal(returned.status, 401);
+  assert.deepEqual(
+    new Uint8Array(await returned.arrayBuffer()),
+    new Uint8Array([0x72, 0x61, 0x77]),
+  );
+  assert.equal(credentials.tokens(), 1);
+  assert.equal(credentials.refreshes(), 0);
+});
+
 test('an aborting 401 response does not start refresh', async () => {
   const controller = new AbortController();
   const credentials = credentialSource();

@@ -160,56 +160,60 @@ test('Gateway broker dispatches Codex OAuth to its pinned endpoint with one sess
   assert.equal(calls[2].method, 'GET');
   assert.equal((await calls[2].arrayBuffer()).byteLength, 0);
 
-  const deceptive = store.providers.configureModel({
+  const admittedBeforeRotation = dispatchGet(
+    'models',
+    'egr1.SSSSSSSSSSSSSSSSSSSSSS',
+  );
+  store.providers.refreshOAuthCredential({
     credentialId: credential.credentialId,
-    modelRef: 'codex/deceptive',
-    baseUrl: 'https://upstream.example.com/',
-    model: 'gpt-codex-deceptive',
-    allowedRoutes: ['codex/responses'],
-    wireGrammar: {
-      'codex/responses': GATEWAY_LLM_WIRE_GRAMMARS.codexResponses,
-    },
-    contextSize: 272000,
-    reasoningEffort: 'high',
-    reasoningSummary: 'auto',
-    reasoningContext: 'opaque',
-    toolTier: null,
-    externalThinking: true,
-    toolContractVersion: 'elpis-tools-v1',
-    callTimeoutMs: 60000,
-    streamIdleTimeoutMs: 60000,
+    expectedSecretRevision: 0,
+    accessToken: 'synthetic-codex-access-rotated',
+    refreshToken: 'synthetic-codex-refresh-rotated',
+    expiresAt: 2000000,
   });
-  store.providers.grantModelToInstance({
-    instanceId,
-    modelRef: 'codex/deceptive',
-  });
-  const deceptiveModel = store.llmProxy
-    .catalogForInstance(instanceId)
-    .models.find((candidate) => candidate.modelRef === 'codex/deceptive');
-  assert.ok(deceptiveModel);
-  const deceptivePayload = Buffer.from(
-    JSON.stringify({ model: 'gpt-codex-deceptive', stream: true }),
+  await new Response((await admittedBeforeRotation).body).arrayBuffer();
+  assert.equal(
+    calls[3].headers.get('authorization'),
+    'Bearer synthetic-codex-access',
   );
-  await assert.rejects(
-    store.llmProxy.dispatch({
-      instanceId,
-      model: deceptiveModel,
-      request: {
-        format: LLM_PROXY_FORMATS.request,
-        requestId: 'egr1.MMMMMMMMMMMMMMMMMMMMMM',
-        modelRef: deceptiveModel.modelRef,
-        targetGeneration: deceptive.targetGeneration,
-        route: 'codex/responses',
-        transport: { kind: 'codex', sessionId: 'session-deceptive' },
-        byteLength: deceptivePayload.byteLength,
-        sha256: createHash('sha256').update(deceptivePayload).digest('hex'),
-        payload: deceptivePayload,
-      },
-      signal: new AbortController().signal,
-    }),
-    /gateway LLM dispatch refused/,
+  await new Response(
+    (await dispatchGet('models', 'egr1.TTTTTTTTTTTTTTTTTTTTTT')).body,
+  ).arrayBuffer();
+  assert.equal(
+    calls[4].headers.get('authorization'),
+    'Bearer synthetic-codex-access-rotated',
   );
-  assert.equal(calls.length, 3);
+
+  assert.throws(
+    () =>
+      store.providers.configureModel({
+        credentialId: credential.credentialId,
+        modelRef: 'codex/deceptive',
+        baseUrl: 'https://upstream.example.com/',
+        model: 'gpt-codex-deceptive',
+        allowedRoutes: ['codex/responses'],
+        wireGrammar: {
+          'codex/responses': GATEWAY_LLM_WIRE_GRAMMARS.codexResponses,
+        },
+        contextSize: 272000,
+        reasoningEffort: 'high',
+        reasoningSummary: 'auto',
+        reasoningContext: 'opaque',
+        toolTier: null,
+        externalThinking: true,
+        toolContractVersion: 'elpis-tools-v1',
+        callTimeoutMs: 60000,
+        streamIdleTimeoutMs: 60000,
+      }),
+    /provider model configuration failed/,
+  );
+  assert.equal(
+    store.llmProxy
+      .catalogForInstance(instanceId)
+      .models.some((candidate) => candidate.modelRef === 'codex/deceptive'),
+    false,
+  );
+  assert.equal(calls.length, 5);
 
   const visible = JSON.stringify({
     keys: Object.keys(store.llmProxy),

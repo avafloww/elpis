@@ -22,6 +22,7 @@ export interface AnthropicOAuthTransportOptions {
   readonly credentials: AnthropicOAuthCredentialSource;
   readonly fetch?: typeof globalThis.fetch;
   readonly dispatcher?: unknown;
+  readonly unauthorized?: 'refresh-and-throw' | 'return-response';
 }
 
 export interface AnthropicOAuthTransportRequest {
@@ -143,6 +144,12 @@ export function createAnthropicOAuthTransport(
     throw configurationError('requires an underlying fetch function');
   const credentials = options.credentials;
   const dispatcher = options.dispatcher;
+  const unauthorized = options.unauthorized ?? 'refresh-and-throw';
+  if (
+    unauthorized !== 'refresh-and-throw' &&
+    unauthorized !== 'return-response'
+  )
+    throw configurationError('has an invalid unauthorized mode');
 
   return async (request: AnthropicOAuthTransportRequest) => {
     if (!request || typeof request !== 'object')
@@ -180,7 +187,8 @@ export function createAnthropicOAuthTransport(
     if (dispatcher !== undefined) init.dispatcher = dispatcher;
     throwIfAborted(signal);
     const response = await underlyingFetch(target, init);
-    if (response.status !== 401) return response;
+    if (response.status !== 401 || unauthorized === 'return-response')
+      return response;
 
     const responseText = await awaitWithAbort(
       () => response.text().catch(() => ''),
