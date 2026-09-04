@@ -15,8 +15,12 @@ export const LLM_PROXY_HEADERS = Object.freeze({
   provenance: 'x-elpis-llm-provenance',
 } as const);
 
+const intrinsicArrayIsArray = Array.isArray;
 const intrinsicJsonParse = JSON.parse;
 const intrinsicJsonStringify = JSON.stringify;
+const intrinsicObjectCreate = Object.create;
+const intrinsicObjectDefineProperty = Object.defineProperty;
+const intrinsicObjectKeys = Object.keys;
 
 export const LLM_PROXY_FORMATS = Object.freeze({
   catalog: 'elpis-gateway-llm-catalog-v1',
@@ -329,8 +333,48 @@ function bodyText(body: LlmProxyBody, maximum: number): string {
   if (!(body instanceof Uint8Array) || body.byteLength > maximum) invalid();
   return fatalUtf8.decode(body);
 }
+function jsonWithoutHooks(value: unknown, depth = 0): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    value === undefined
+  )
+    return value;
+  if (depth >= 32 || typeof value !== 'object') invalid();
+  if (intrinsicArrayIsArray(value)) {
+    const output: unknown[] = [];
+    intrinsicObjectDefineProperty(output, 'toJSON', {
+      configurable: false,
+      enumerable: false,
+      value: undefined,
+      writable: false,
+    });
+    for (let index = 0; index < value.length; index += 1)
+      output[index] = jsonWithoutHooks(value[index], depth + 1);
+    return output;
+  }
+  const output = intrinsicObjectCreate(null) as Record<string, unknown>;
+  const keys = intrinsicObjectKeys(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key === 'toJSON') invalid();
+    intrinsicObjectDefineProperty(output, key, {
+      configurable: false,
+      enumerable: true,
+      value: jsonWithoutHooks(
+        (value as Record<string, unknown>)[key],
+        depth + 1,
+      ),
+      writable: false,
+    });
+  }
+  return output;
+}
+
 function serializeBounded(value: unknown, maximum: number): string {
-  const encoded = intrinsicJsonStringify(value);
+  const encoded = intrinsicJsonStringify(jsonWithoutHooks(value));
   if (typeof encoded !== 'string' || utf8.encode(encoded).byteLength > maximum)
     invalid();
   return encoded;
@@ -669,7 +713,7 @@ function canonicalPayloadModel(payload: Uint8Array): string {
   const text = fatalUtf8.decode(payload);
   const parsed = record(intrinsicJsonParse(text) as unknown);
   if (
-    intrinsicJsonStringify(parsed) !== text ||
+    intrinsicJsonStringify(jsonWithoutHooks(parsed)) !== text ||
     typeof parsed.model !== 'string'
   )
     invalid();

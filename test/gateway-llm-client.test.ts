@@ -299,6 +299,71 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('normalizes request ID errors without mutable Symbol.hasInstance', async () => {
+    const previous = Object.getOwnPropertyDescriptor(
+      GatewayLlmClientBoundaryError,
+      Symbol.hasInstance,
+    );
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let thrown: unknown;
+    const boundary = new GatewayLlmClient({
+      store: store(),
+      fetch: async () => {
+        throw new Error('must not run');
+      },
+      randomBytes: () => {
+        Object.defineProperty(
+          GatewayLlmClientBoundaryError,
+          Symbol.hasInstance,
+          {
+            configurable: true,
+            value() {
+              if (previous === undefined)
+                delete (
+                  GatewayLlmClientBoundaryError as unknown as Record<
+                    PropertyKey,
+                    unknown
+                  >
+                )[Symbol.hasInstance];
+              else
+                Object.defineProperty(
+                  GatewayLlmClientBoundaryError,
+                  Symbol.hasInstance,
+                  previous,
+                );
+              return true;
+            },
+          },
+        );
+        throw new Error(secret);
+      },
+    });
+    try {
+      await boundary.dispatch(dispatchInput());
+    } catch (error) {
+      thrown = error;
+    } finally {
+      if (previous === undefined)
+        delete (
+          GatewayLlmClientBoundaryError as unknown as Record<
+            PropertyKey,
+            unknown
+          >
+        )[Symbol.hasInstance];
+      else
+        Object.defineProperty(
+          GatewayLlmClientBoundaryError,
+          Symbol.hasInstance,
+          previous,
+        );
+    }
+    assert.equal(
+      Object.getPrototypeOf(thrown),
+      GatewayLlmClientBoundaryError.prototype,
+    );
+    assert.equal((thrown as Error).message.includes(secret), false);
+  });
+
   it('snapshots valid Codex transport metadata', async () => {
     const codexModel: LlmProxyCatalogModel = Object.freeze({
       ...model,
@@ -1714,6 +1779,55 @@ describe('GatewayLlmClient request boundary', () => {
     } finally {
       Object.defineProperty(JSON, 'parse', parseDescriptor);
       Object.defineProperty(JSON, 'stringify', stringifyDescriptor);
+    }
+  });
+
+  it('rejects noncanonical error bytes despite inherited toJSON', async () => {
+    const previous = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'toJSON',
+    );
+    const malformed = `{"code":"internal_error","format":"${LLM_PROXY_FORMATS.error}"}`;
+    let hookCalls = 0;
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(Object.prototype, 'toJSON', {
+              configurable: true,
+              value() {
+                hookCalls += 1;
+                if (previous === undefined)
+                  delete (Object.prototype as { toJSON?: unknown }).toJSON;
+                else
+                  Object.defineProperty(Object.prototype, 'toJSON', previous);
+                return {
+                  code: 'internal_error',
+                  format: LLM_PROXY_FORMATS.error,
+                };
+              },
+            });
+            controller.enqueue(Buffer.from(malformed));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hookCalls, 0);
+    } finally {
+      if (previous === undefined)
+        delete (Object.prototype as { toJSON?: unknown }).toJSON;
+      else Object.defineProperty(Object.prototype, 'toJSON', previous);
     }
   });
 

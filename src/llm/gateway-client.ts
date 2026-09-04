@@ -113,6 +113,11 @@ const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectPrototype = Object.prototype;
 const intrinsicIsPromise = nodeTypes.isPromise;
 const intrinsicIsProxy = nodeTypes.isProxy;
+const gatewayLlmClientBoundaryErrorPrototype =
+  GatewayLlmClientBoundaryError.prototype;
+const gatewayLlmClientErrorPrototype = GatewayLlmClientError.prototype;
+const gatewayResidentStateErrorPrototype = GatewayResidentStateError.prototype;
+const intrinsicReadableStreamPrototype = ReadableStream.prototype;
 const hashPrototype = Object.getPrototypeOf(createHash('sha256')) as {
   update: (...args: unknown[]) => unknown;
   digest: (...args: unknown[]) => unknown;
@@ -177,6 +182,37 @@ const intrinsicTypedArrayTag = Object.getOwnPropertyDescriptor(
 const intrinsicUint8ArrayConstructor = Uint8Array;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 
+function hasExactPrototype(value: unknown, prototype: object): boolean {
+  try {
+    return (
+      value !== null &&
+      typeof value === 'object' &&
+      !intrinsicIsProxy(value) &&
+      intrinsicObjectGetPrototypeOf(value) === prototype
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isGatewayLlmClientBoundaryError(
+  value: unknown,
+): value is GatewayLlmClientBoundaryError {
+  return hasExactPrototype(value, gatewayLlmClientBoundaryErrorPrototype);
+}
+
+function isGatewayLlmClientError(
+  value: unknown,
+): value is GatewayLlmClientError {
+  return hasExactPrototype(value, gatewayLlmClientErrorPrototype);
+}
+
+function isGatewayResidentStateError(
+  value: unknown,
+): value is GatewayResidentStateError {
+  return hasExactPrototype(value, gatewayResidentStateErrorPrototype);
+}
+
 function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
   if (signal === undefined) return false;
   try {
@@ -189,7 +225,7 @@ function signalAborted(signal: AbortSignal | undefined): signal is AbortSignal {
     if (typeof aborted !== 'boolean') boundaryFailure();
     return aborted;
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -199,7 +235,7 @@ function abortReason(signal: AbortSignal): unknown {
     if (intrinsicAbortSignalReason === undefined) boundaryFailure();
     return intrinsicReflectApply(intrinsicAbortSignalReason, signal, []);
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -258,7 +294,7 @@ async function toNativePromise<T>(value: unknown): Promise<T> {
       boundaryFailure();
     }
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
   return await (value as Promise<T>);
@@ -338,7 +374,8 @@ function safeResponseBody(
     if (
       descriptor !== undefined &&
       'value' in descriptor &&
-      (descriptor.value === null || descriptor.value instanceof ReadableStream)
+      (descriptor.value === null ||
+        hasExactPrototype(descriptor.value, intrinsicReadableStreamPrototype))
     )
       return descriptor.value as ReadableStream<Uint8Array> | null;
   } catch {}
@@ -393,7 +430,7 @@ function uint8ArrayByteLength(value: Uint8Array): number {
     if (!Number.isSafeInteger(byteLength) || byteLength < 0) boundaryFailure();
     return byteLength;
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -439,7 +476,7 @@ function copyUint8Array(value: unknown): Uint8Array {
     intrinsicReflectApply(intrinsicUint8ArraySet, copy, [source]);
     return copy;
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -496,7 +533,7 @@ function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
       throw new GatewayResidentStateError('corrupt_state');
     return endpoint;
   } catch (error) {
-    if (error instanceof GatewayResidentStateError) throw error;
+    if (isGatewayResidentStateError(error)) throw error;
     throw new GatewayResidentStateError('corrupt_state');
   }
 }
@@ -506,7 +543,7 @@ function activeAuthority(store: GatewayLlmResidentStore): ActiveAuthority {
   try {
     snapshot = store.read();
   } catch (error) {
-    if (error instanceof GatewayResidentStateError) throw error;
+    if (isGatewayResidentStateError(error)) throw error;
     throw new GatewayResidentStateError('corrupt_state');
   }
   const endpoint = canonicalEndpoint(snapshot);
@@ -516,7 +553,7 @@ function activeAuthority(store: GatewayLlmResidentStore): ActiveAuthority {
   try {
     authorization = formatNodeBearerAuthorization(store.activeNodeToken());
   } catch (error) {
-    if (error instanceof GatewayResidentStateError) throw error;
+    if (isGatewayResidentStateError(error)) throw error;
     throw new GatewayResidentStateError('corrupt_state');
   }
   return Object.freeze({ endpoint, authorization });
@@ -612,7 +649,7 @@ function validateHttpResponse(
     return validated;
   } catch (error) {
     throwIfResponseAborted(response, signal);
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     cancelBody(response, signal);
     boundaryFailure();
   }
@@ -740,7 +777,7 @@ async function readBoundedBody(
     return { ok: true, body };
   } catch (error) {
     if (signalAborted(signal)) throw abortReason(signal);
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -762,7 +799,7 @@ function requireGatewayErrorHttpShape(
     throwIfHttpResponseAborted(response, signal);
   } catch (error) {
     throwIfHttpResponseAborted(response, signal);
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     cancelHttpResponse(response, signal);
     boundaryFailure();
   }
@@ -795,8 +832,8 @@ async function gatewayError(
       boundaryFailure();
     throw new GatewayLlmClientError(decoded.code, decoded.requestId);
   } catch (error) {
-    if (error instanceof GatewayLlmClientError) throw error;
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientError(error)) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -824,7 +861,7 @@ function payloadSha256(payload: Uint8Array): string {
     intrinsicReflectApply(intrinsicHashUpdate, hash, [payload]);
     return intrinsicReflectApply(intrinsicHashDigest, hash, ['hex']) as string;
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -834,16 +871,17 @@ function requestId(
   signal: AbortSignal | undefined,
 ): RequestId {
   try {
-    const generated = bytes(16);
+    const returned = bytes(16);
     throwIfAborted(signal);
-    if (!(generated instanceof Uint8Array) || generated.byteLength !== 16)
-      boundaryFailure();
+    const generated = copyUint8Array(returned);
+    throwIfAborted(signal);
+    if (uint8ArrayByteLength(generated) !== 16) boundaryFailure();
     const value = 'egr1.' + Buffer.from(generated).toString('base64url');
     if (!isRequestId(value)) boundaryFailure();
     return value;
   } catch (error) {
     if (signalAborted(signal)) throw abortReason(signal);
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -902,7 +940,7 @@ function ownDataDescriptors(
     }
     return descriptors;
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -949,7 +987,7 @@ function snapshotRoutes(value: unknown): readonly LlmProxyRoute[] {
     }
     return intrinsicObjectFreeze(routes);
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -1006,7 +1044,7 @@ function snapshotTransport(value: unknown): LlmProxyTransportMetadata {
       sessionId: descriptors.sessionId.value as string,
     });
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -1038,7 +1076,7 @@ function exactDispatch(
       transport: snapshotTransport(descriptors.transport.value),
     });
   } catch (error) {
-    if (error instanceof GatewayLlmClientBoundaryError) throw error;
+    if (isGatewayLlmClientBoundaryError(error)) throw error;
     boundaryFailure();
   }
 }
@@ -1108,7 +1146,7 @@ export class GatewayLlmClient {
       }
     } catch (error) {
       throwIfHttpResponseAborted(response, signal);
-      if (error instanceof GatewayLlmClientBoundaryError) throw error;
+      if (isGatewayLlmClientBoundaryError(error)) throw error;
       cancelHttpResponse(response, signal);
       boundaryFailure();
     }
@@ -1173,9 +1211,10 @@ export class GatewayLlmClient {
       )
         boundaryFailure();
     } catch (error) {
-      if (error instanceof GatewayLlmClientBoundaryError) throw error;
+      if (isGatewayLlmClientBoundaryError(error)) throw error;
       boundaryFailure();
     }
+    throwIfAborted(signal);
 
     const target = authority.endpoint + LLM_PROXY_PATHS.request;
     let pending: Promise<Response>;
