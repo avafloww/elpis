@@ -3,7 +3,7 @@
 // The ChatGPT subscription surface is OpenAI-Responses-shaped but it is not the
 // public API: requests go to `/backend-api/codex/responses`, require the
 // ChatGPT workspace id beside the bearer token, always stream, and reject
-// caller-supplied output caps. GPT-5.6 additionally uses Codex Responses Lite:
+// caller-supplied output caps. GPT-5.6 and Astra use Codex Responses Lite:
 // tools are carried in an `additional_tools` developer input item and output
 // items finish on `response.output_item.done`. This module deliberately reuses
 // responses.ts's message/reasoning translation while owning those transport
@@ -300,12 +300,11 @@ function codexClient(
   });
 }
 
-/** OMP/codex-rs enable Responses Lite by default for the GPT-5.6 family. The
- * live model registry also reports `use_responses_lite`, but Elpis's model
- * discovery boundary intentionally returns only a context window; the family
- * predicate is the stable fallback used by OMP's generated model policy. */
+/** Codex's model registry enables Responses Lite for GPT-5.6 and Astra.
+ * Discovery returns only a context window, so keep explicit model families
+ * here for clients that bypass discovery with a configured context size. */
 export function usesCodexResponsesLite(model: string): boolean {
-  return /^gpt-5\.6(?:-|$)/.test(model);
+  return /^(?:gpt-5\.6|gpt-6-astra)(?:-|$)/.test(model);
 }
 
 function normalizeCodexLiteInput(input: unknown[]): unknown[] {
@@ -327,7 +326,7 @@ function normalizeCodexLiteInput(input: unknown[]): unknown[] {
 }
 
 /** Move the public Responses tool declaration into the Responses Lite input
- * grammar used by GPT-5.6 Codex. The private backend otherwise accepts the
+ * grammar used by GPT-5.6 and Astra on Codex. The private backend otherwise accepts the
  * request but treats the model as if it had no callable tool. */
 export const shapeCodexResponsesLiteRequest: ResponsesRequestTransform = (
   body,

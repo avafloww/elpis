@@ -153,6 +153,12 @@ test('Codex discovery uses the known 5.6 fallback when upstream omits context_wi
   assert.equal(await fetchCodexContextWindow(config, store, fetchFn), 372000);
 });
 
+test('Astra enables the Codex Responses Lite grammar', () => {
+  assert.equal(usesCodexResponsesLite('gpt-6-astra'), true);
+  assert.equal(usesCodexResponsesLite('gpt-6-astra-2026-09-04'), true);
+  assert.equal(usesCodexResponsesLite('gpt-6-unknown'), false);
+});
+
 test('GPT-5.6 Codex uses Responses Lite request shaping', () => {
   assert.equal(usesCodexResponsesLite('gpt-5.6-sol'), true);
   assert.equal(usesCodexResponsesLite('gpt-5.6-terra'), true);
@@ -745,42 +751,44 @@ test('Codex LLM applies the replay sanitizer to the actual request body', async 
   });
 });
 
-test('Codex LLM reconstructs run from output_item.done when terminal response omits output', async () => {
-  const { store } = fakeStore();
-  const llm = createCodexOAuthLLM(codexConfig('gpt-5.6-sol'), store);
-  let body: Record<string, unknown> | undefined;
-  (llm.client!.responses as any).create = async (
-    request: Record<string, unknown>,
-  ) => {
-    body = request;
-    return {
-      async *[Symbol.asyncIterator]() {
-        yield {
-          type: 'response.output_item.done',
-          output_index: 0,
-          item: {
-            type: 'function_call',
-            call_id: 'call_run',
-            name: 'run',
-            arguments: '{"code":"","end":true}',
-          },
-        };
-        yield {
-          type: 'response.completed',
-          response: {
-            usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
-          },
-        };
-      },
+for (const model of ['gpt-5.6-sol', 'gpt-6-astra']) {
+  test(`${model} reconstructs run from output_item.done when terminal response omits output`, async () => {
+    const { store } = fakeStore();
+    const llm = createCodexOAuthLLM(codexConfig(model), store);
+    let body: Record<string, unknown> | undefined;
+    (llm.client!.responses as any).create = async (
+      request: Record<string, unknown>,
+    ) => {
+      body = request;
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'response.output_item.done',
+            output_index: 0,
+            item: {
+              type: 'function_call',
+              call_id: 'call_run',
+              name: 'run',
+              arguments: '{"code":"","end":true}',
+            },
+          };
+          yield {
+            type: 'response.completed',
+            response: {
+              usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+            },
+          };
+        },
+      };
     };
-  };
-  const result = await llm.complete([{ role: 'user', content: 'finish' }]);
-  const input = body?.input as Array<Record<string, unknown>>;
-  assert.equal(input[0].type, 'additional_tools');
-  assert.equal('tools' in (body ?? {}), false);
-  assert.equal(result.message.tool_calls?.[0].id, 'call_run');
-  assert.equal(result.message.tool_calls?.[0].function.name, 'run');
-});
+    const result = await llm.complete([{ role: 'user', content: 'finish' }]);
+    const input = body?.input as Array<Record<string, unknown>>;
+    assert.equal(input[0].type, 'additional_tools');
+    assert.equal('tools' in (body ?? {}), false);
+    assert.equal(result.message.tool_calls?.[0].id, 'call_run');
+    assert.equal(result.message.tool_calls?.[0].function.name, 'run');
+  });
+}
 
 test('Codex fetch seals exact wire request and flagged response without consuming it', async () => {
   const { store } = fakeStore();

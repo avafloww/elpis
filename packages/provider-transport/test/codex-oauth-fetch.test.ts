@@ -91,7 +91,7 @@ test('injects exact Codex headers and replays the body once after 401', async ()
   assert.equal(seen[1].headers.get('chatgpt-account-id'), 'acct-1');
   assert.equal(seen[1].headers.get('openai-beta'), 'responses=experimental');
   assert.equal(seen[1].headers.get('originator'), 'pi');
-  assert.equal(seen[1].headers.get('version'), '0.144.1');
+  assert.equal(seen[1].headers.get('version'), '0.153.3');
   assert.equal(seen[1].headers.get('session_id'), 'session-1');
   assert.equal(seen[1].headers.get('conversation_id'), 'session-1');
   assert.equal(seen[1].headers.get('x-client-request-id'), 'session-1');

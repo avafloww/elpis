@@ -11,7 +11,7 @@ const SENSITIVE_REQUEST_HEADERS = [
 const MAX_HEADER_VALUE_LENGTH = 131_072;
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/;
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
-export const CODEX_OAUTH_CLIENT_VERSION = '0.144.1';
+export const CODEX_OAUTH_CLIENT_VERSION = '0.153.3';
 
 export interface CodexOAuthIdentity {
   readonly accountId?: string;

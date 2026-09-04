@@ -38,7 +38,11 @@ The adapter:
 - refreshes once after an authentication failure;
 - records policy denials only when both denial text and an error-shaped SSE envelope are present.
 
-Responses Lite request shape is applied where required by the backend.
+GPT-5.6 and GPT-6 Astra use Responses Lite request shaping, including tool
+attachments and the matching transport header. The adapter advertises Codex
+client compatibility version `0.153.3`; older versions can receive HTTP 400
+with a “requires a newer version of Codex” error even when the subscription
+has model access.
 
 ## Limitations
 
