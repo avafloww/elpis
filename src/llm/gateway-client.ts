@@ -89,12 +89,26 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw abortReason(signal);
 }
 
+function observePromise(value: unknown): void {
+  try {
+    void Promise.resolve(value).catch(() => undefined);
+  } catch {}
+}
+
 function cancelBody(response: Response): void {
   try {
-    void response.body?.cancel().catch(() => undefined);
+    observePromise(response.body?.cancel());
   } catch {
     // Cancellation is an observation/cleanup path and must not replace the failure.
   }
+}
+
+function cancelReader(
+  reader: Pick<ReadableStreamDefaultReader<Uint8Array>, 'cancel'>,
+): void {
+  try {
+    observePromise(reader.cancel());
+  } catch {}
 }
 
 function exactContentLength(value: string | null): number | null {
@@ -242,56 +256,61 @@ async function readBoundedBody(
     rejectAbort = reject;
   });
   const onAbort = (): void => {
-    try {
-      void reader.cancel().catch(() => undefined);
-    } catch {}
+    cancelReader(reader);
     if (signal !== undefined) rejectAbort?.(abortReason(signal));
   };
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    if (signal?.aborted) throw abortReason(signal);
+    if (signal?.aborted) {
+      cancelReader(reader);
+      throw abortReason(signal);
+    }
     for (;;) {
+      if (signal?.aborted) throw abortReason(signal);
+      let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>>;
+      try {
+        pendingRead = Promise.resolve(reader.read());
+      } catch {
+        cancelReader(reader);
+        return { ok: false };
+      }
       let item: ReadableStreamReadResult<Uint8Array>;
       try {
         item = await (signal === undefined
-          ? reader.read()
-          : Promise.race([reader.read(), aborted]));
+          ? pendingRead
+          : Promise.race([pendingRead, aborted]));
       } catch {
         if (signal?.aborted) throw abortReason(signal);
-        try {
-          void reader.cancel().catch(() => undefined);
-        } catch {}
+        cancelReader(reader);
         return { ok: false };
       }
+      if (signal?.aborted) throw abortReason(signal);
       try {
-        if (item.done) break;
+        const done = item.done;
+        if (done !== true && done !== false) {
+          cancelReader(reader);
+          return { ok: false };
+        }
+        if (done) break;
         const chunk = item.value;
         if (!(chunk instanceof Uint8Array)) {
-          try {
-            void reader.cancel().catch(() => undefined);
-          } catch {}
+          cancelReader(reader);
           return { ok: false };
         }
         const byteLength = chunk.byteLength;
         if (!Number.isSafeInteger(byteLength) || byteLength > maximum - size) {
-          try {
-            void reader.cancel().catch(() => undefined);
-          } catch {}
+          cancelReader(reader);
           return { ok: false };
         }
         const copy = Uint8Array.from(chunk);
         if (copy.byteLength !== byteLength) {
-          try {
-            void reader.cancel().catch(() => undefined);
-          } catch {}
+          cancelReader(reader);
           return { ok: false };
         }
         size += byteLength;
         chunks.push(copy);
       } catch {
-        try {
-          void reader.cancel().catch(() => undefined);
-        } catch {}
+        cancelReader(reader);
         return { ok: false };
       }
     }

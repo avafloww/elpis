@@ -488,6 +488,86 @@ describe('GatewayLlmClient request boundary', () => {
     assert.equal(nanCancelled, 1);
   });
 
+  it('rejects non-boolean completion and safely assimilates cancellation', async () => {
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    let reads = 0;
+    let cancelled = 0;
+    let hostileCatchCalls = 0;
+    const reader = {
+      read() {
+        reads += 1;
+        if (reads === 1)
+          return Promise.resolve({ done: false, value: canonical });
+        return Promise.resolve({ done: 'yes', value: undefined });
+      },
+      cancel() {
+        cancelled += 1;
+        return {
+          catch() {
+            hostileCatchCalls += 1;
+            return Promise.resolve();
+          },
+        };
+      },
+      releaseLock() {},
+    };
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+      }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput()),
+      GatewayLlmClientBoundaryError,
+    );
+    await Promise.resolve();
+    assert.equal(cancelled, 1);
+    assert.equal(hostileCatchCalls, 0);
+  });
+
+  it('makes a synchronous read abort win over fulfilled read results', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled during read', 'AbortError');
+    const canonical = Buffer.from(proxyError('internal_error', REQUEST_ID));
+    let reads = 0;
+    let cancelled = 0;
+    const reader = {
+      read() {
+        reads += 1;
+        if (reads === 1) {
+          controller.abort(reason);
+          return Promise.resolve({ done: false, value: canonical });
+        }
+        return Promise.resolve({ done: true, value: undefined });
+      },
+      cancel() {
+        cancelled += 1;
+        return Promise.resolve();
+      },
+      releaseLock() {},
+    };
+    const response = {
+      redirected: false,
+      type: 'basic',
+      url: '',
+      status: 500,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+      }),
+      body: { getReader: () => reader },
+    } as unknown as Response;
+    await assert.rejects(
+      client(async () => response).dispatch(dispatchInput(), controller.signal),
+      (error) => error === reason,
+    );
+    assert.equal(cancelled, 1);
+  });
+
   it('cancels malformed body chunks without reflecting property errors', async () => {
     const secret = firstCredential.token + '@' + ENDPOINT;
     let cancelled = 0;
