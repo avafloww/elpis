@@ -149,12 +149,19 @@ const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 function toNativePromise<T>(value: T | PromiseLike<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     try {
-      if (
-        value instanceof Promise &&
-        Object.getOwnPropertyDescriptor(value, 'constructor') !== undefined
-      ) {
-        reject(new GatewayLlmClientBoundaryError());
-        return;
+      if (value instanceof Promise) {
+        const constructor = Object.getOwnPropertyDescriptor(
+          value,
+          'constructor',
+        );
+        if (
+          constructor !== undefined &&
+          (!('value' in constructor) ||
+            (constructor.value !== Promise && constructor.value !== undefined))
+        ) {
+          reject(new GatewayLlmClientBoundaryError());
+          return;
+        }
       }
       void intrinsicPromiseThen.call(value, resolve, reject);
       return;

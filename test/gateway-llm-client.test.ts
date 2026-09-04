@@ -1071,6 +1071,36 @@ describe('GatewayLlmClient request boundary', () => {
     );
   });
 
+  it('observes a native fetch Promise with a safe own constructor', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled at safe handoff', 'AbortError');
+    let resolveFetch!: (response: Response) => void;
+    let cancelled = 0;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    Object.defineProperty(pending, 'constructor', { value: Promise });
+    const hostileFetch = (() => {
+      controller.abort(reason);
+      return pending;
+    }) as unknown as GatewayLlmFetch;
+    await assert.rejects(
+      client(hostileFetch).fetchCatalog(controller.signal),
+      (error) => error === reason,
+    );
+    resolveFetch(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled += 1;
+          },
+        }),
+      ),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(cancelled, 1);
+  });
+
   it('rejects a native fetch Promise with poisoned constructor without invoking it', async () => {
     const controller = new AbortController();
     const reason = new DOMException(
