@@ -100,6 +100,8 @@ const intrinsicEventTargetAddEventListener =
 const intrinsicEventTargetRemoveEventListener =
   EventTarget.prototype.removeEventListener;
 const intrinsicArrayIncludes = Array.prototype.includes;
+const intrinsicBufferFrom = Buffer.from;
+const intrinsicBufferToString = Buffer.prototype.toString;
 const intrinsicArrayIsArray = Array.isArray;
 const intrinsicArrayPrototype = Array.prototype;
 const intrinsicArrayPush = Array.prototype.push;
@@ -556,7 +558,7 @@ function activeAuthority(store: GatewayLlmResidentStore): ActiveAuthority {
     if (isGatewayResidentStateError(error)) throw error;
     throw new GatewayResidentStateError('corrupt_state');
   }
-  return Object.freeze({ endpoint, authorization });
+  return intrinsicObjectFreeze({ endpoint, authorization });
 }
 
 async function cancelLateResponse(request: Promise<Response>): Promise<void> {
@@ -876,7 +878,14 @@ function requestId(
     const generated = copyUint8Array(returned);
     throwIfAborted(signal);
     if (uint8ArrayByteLength(generated) !== 16) boundaryFailure();
-    const value = 'egr1.' + Buffer.from(generated).toString('base64url');
+    const encoded = intrinsicReflectApply(intrinsicBufferFrom, Buffer, [
+      generated,
+    ]) as Buffer;
+    const value =
+      'egr1.' +
+      (intrinsicReflectApply(intrinsicBufferToString, encoded, [
+        'base64url',
+      ]) as string);
     if (!isRequestId(value)) boundaryFailure();
     return value;
   } catch (error) {

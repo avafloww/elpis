@@ -16,6 +16,8 @@ export const LLM_PROXY_HEADERS = Object.freeze({
 } as const);
 
 const intrinsicArrayIsArray = Array.isArray;
+const intrinsicBufferFrom = Buffer.from;
+const intrinsicBufferToString = Buffer.prototype.toString;
 const intrinsicJsonParse = JSON.parse;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicObjectCreate = Object.create;
@@ -23,9 +25,34 @@ const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectKeys = Object.keys;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicSetHas = Set.prototype.has;
+const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
+const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 
 function setHas(set: Set<unknown>, value: unknown): boolean {
   return intrinsicReflectApply(intrinsicSetHas, set, [value]);
+}
+
+function bufferFrom(
+  value: string | Uint8Array,
+  encoding?: BufferEncoding,
+): Buffer {
+  return intrinsicReflectApply(
+    intrinsicBufferFrom,
+    Buffer,
+    encoding === undefined ? [value] : [value, encoding],
+  ) as Buffer;
+}
+
+function bufferToString(value: Buffer, encoding: BufferEncoding): string {
+  return intrinsicReflectApply(intrinsicBufferToString, value, [encoding]);
+}
+
+function encodeUtf8(value: string): Uint8Array {
+  return intrinsicReflectApply(intrinsicTextEncoderEncode, utf8, [value]);
+}
+
+function decodeUtf8(value: Uint8Array): string {
+  return intrinsicReflectApply(intrinsicTextDecoderDecode, fatalUtf8, [value]);
 }
 
 export const LLM_PROXY_FORMATS = Object.freeze({
@@ -272,11 +299,11 @@ function exactFormat(value: unknown, format: string): void {
   if (value !== format) invalid();
 }
 function bytesIn(value: string, minimum: number, maximum: number): string {
-  const bytes = utf8.encode(value);
+  const bytes = encodeUtf8(value);
   if (
     bytes.byteLength < minimum ||
     bytes.byteLength > maximum ||
-    fatalUtf8.decode(bytes) !== value
+    decodeUtf8(bytes) !== value
   )
     invalid();
   return value;
@@ -310,7 +337,7 @@ function modelRefValue(value: unknown): string {
   if (
     typeof value !== 'string' ||
     !modelRefPattern.test(value) ||
-    utf8.encode(value).byteLength > LLM_PROXY_LIMITS.modelRefBytes
+    encodeUtf8(value).byteLength > LLM_PROXY_LIMITS.modelRefBytes
   )
     invalid();
   return value;
@@ -331,13 +358,12 @@ function routeValue(value: unknown): LlmProxyRoute {
 }
 function bodyText(body: LlmProxyBody, maximum: number): string {
   if (typeof body === 'string') {
-    const bytes = utf8.encode(body);
-    if (bytes.byteLength > maximum || fatalUtf8.decode(bytes) !== body)
-      invalid();
+    const bytes = encodeUtf8(body);
+    if (bytes.byteLength > maximum || decodeUtf8(bytes) !== body) invalid();
     return body;
   }
   if (!(body instanceof Uint8Array) || body.byteLength > maximum) invalid();
-  return fatalUtf8.decode(body);
+  return decodeUtf8(body);
 }
 function jsonWithoutHooks(value: unknown, depth = 0): unknown {
   if (
@@ -381,7 +407,7 @@ function jsonWithoutHooks(value: unknown, depth = 0): unknown {
 
 function serializeBounded(value: unknown, maximum: number): string {
   const encoded = intrinsicJsonStringify(jsonWithoutHooks(value));
-  if (typeof encoded !== 'string' || utf8.encode(encoded).byteLength > maximum)
+  if (typeof encoded !== 'string' || encodeUtf8(encoded).byteLength > maximum)
     invalid();
   return encoded;
 }
@@ -391,8 +417,10 @@ export function isLlmTargetGeneration(
 ): value is LlmTargetGeneration {
   if (typeof value !== 'string' || !generationPattern.test(value)) return false;
   const suffix = value.slice('egt1.'.length);
-  const decoded = Buffer.from(suffix, 'base64url');
-  return decoded.byteLength === 16 && decoded.toString('base64url') === suffix;
+  const decoded = bufferFrom(suffix, 'base64url');
+  return (
+    decoded.byteLength === 16 && bufferToString(decoded, 'base64url') === suffix
+  );
 }
 export function newLlmTargetGeneration(
   randomBytes: LlmGenerationRandomBytes = systemRandomBytes,
@@ -401,7 +429,7 @@ export function newLlmTargetGeneration(
     if (typeof randomBytes !== 'function') invalid();
     const bytes = randomBytes(16);
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 16) invalid();
-    return `egt1.${Buffer.from(bytes).toString('base64url')}` as LlmTargetGeneration;
+    return `egt1.${bufferToString(bufferFrom(bytes), 'base64url')}` as LlmTargetGeneration;
   });
 }
 
@@ -486,7 +514,7 @@ function requestWire(request: LlmProxyRequest): JsonRecord {
     transport: request.transport,
     byteLength: request.byteLength,
     sha256: request.sha256,
-    payload: Buffer.from(request.payload).toString('base64'),
+    payload: bufferToString(bufferFrom(request.payload), 'base64'),
   };
 }
 function decodeWirePayload(
@@ -503,11 +531,11 @@ function decodeWirePayload(
   // This length check precedes allocation and also bounds deliberately malformed base64.
   if (value.length > Math.ceil(LLM_PROXY_LIMITS.payloadBytes / 3) * 4)
     invalid();
-  const decoded = Buffer.from(value, 'base64');
+  const decoded = bufferFrom(value, 'base64');
   if (
     decoded.byteLength !== byteLength ||
     decoded.byteLength > LLM_PROXY_LIMITS.payloadBytes ||
-    decoded.toString('base64') !== value ||
+    bufferToString(decoded, 'base64') !== value ||
     payloadDigest(decoded) !== sha256
   )
     invalid();
@@ -568,7 +596,7 @@ function normalizeRoutes(value: unknown): readonly LlmProxyRoute[] {
     invalid();
   const routes = value.map(routeValue);
   for (let i = 1; i < routes.length; i += 1) {
-    if (routes[i - 1].localeCompare(routes[i]) >= 0) invalid();
+    if (routes[i - 1] >= routes[i]) invalid();
   }
   return Object.freeze(routes);
 }
@@ -668,8 +696,7 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
   const providerTypes = new Map<string, LlmProxyProviderType>();
   const toolTiers = new Set<LlmProxyToolTier>();
   for (let i = 0; i < models.length; i += 1) {
-    if (i > 0 && models[i - 1].modelRef.localeCompare(models[i].modelRef) >= 0)
-      invalid();
+    if (i > 0 && models[i - 1].modelRef >= models[i].modelRef) invalid();
     const providerId = models[i].modelRef.split('/', 1)[0];
     const priorType = providerTypes.get(providerId);
     if (priorType !== undefined && priorType !== models[i].providerType)
@@ -716,7 +743,7 @@ function authorizationFailure(
 }
 
 function canonicalPayloadModel(payload: Uint8Array): string {
-  const text = fatalUtf8.decode(payload);
+  const text = decodeUtf8(payload);
   const parsed = record(intrinsicJsonParse(text) as unknown);
   if (
     intrinsicJsonStringify(jsonWithoutHooks(parsed)) !== text ||
@@ -822,7 +849,7 @@ function normalizeResponseHeaders(
     return Object.freeze({ name: input.name, value: input.value });
   });
   for (let i = 1; i < headers.length; i += 1) {
-    if (headers[i - 1].name.localeCompare(headers[i].name) >= 0) invalid();
+    if (headers[i - 1].name >= headers[i].name) invalid();
   }
   return Object.freeze(headers);
 }
@@ -858,7 +885,7 @@ export function encodeLlmResponseProvenance(
       normalizeProvenance(value),
       LLM_PROXY_LIMITS.provenanceHeaderBytes,
     );
-    const encoded = Buffer.from(json, 'utf8').toString('base64url');
+    const encoded = bufferToString(bufferFrom(json, 'utf8'), 'base64url');
     if (encoded.length > LLM_PROXY_LIMITS.provenanceHeaderBytes) invalid();
     return encoded;
   });
@@ -874,10 +901,10 @@ export function decodeLlmResponseProvenance(
       !/^[A-Za-z0-9_-]+$/.test(value)
     )
       invalid();
-    const bytes = Buffer.from(value, 'base64url');
-    if (bytes.toString('base64url') !== value) invalid();
+    const bytes = bufferFrom(value, 'base64url');
+    if (bufferToString(bytes, 'base64url') !== value) invalid();
     const decoded = normalizeProvenance(
-      record(intrinsicJsonParse(fatalUtf8.decode(bytes)) as unknown),
+      record(intrinsicJsonParse(decodeUtf8(bytes)) as unknown),
     );
     // Require the one canonical field order and representation emitted above.
     if (encodeLlmResponseProvenance(decoded) !== value) invalid();

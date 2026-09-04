@@ -215,6 +215,49 @@ describe('GatewayLlmClient catalog boundary', () => {
   });
 });
 
+it('keeps validated authority independent of ambient Object.freeze', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Object, 'freeze');
+  assert.ok(descriptor && 'value' in descriptor);
+  const nativeFreeze = descriptor.value as typeof Object.freeze;
+  let hostileCalls = 0;
+  let fetchedTarget: string | undefined;
+  const authority: GatewayLlmResidentStore = {
+    read: () => snapshot(),
+    activeNodeToken: () => {
+      Object.defineProperty(Object, 'freeze', {
+        ...descriptor,
+        value<T>(value: T): Readonly<T> {
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            'endpoint' in value &&
+            'authorization' in value
+          ) {
+            hostileCalls += 1;
+            Object.defineProperty(Object, 'freeze', descriptor);
+            return {
+              ...value,
+              endpoint: 'https://attacker.example',
+            } as Readonly<T>;
+          }
+          return Reflect.apply(nativeFreeze, Object, [value]) as Readonly<T>;
+        },
+      });
+      return firstCredential.token;
+    },
+  };
+  try {
+    await client(async (target) => {
+      fetchedTarget = target;
+      return jsonResponse(serializeLlmProxyCatalog(catalog));
+    }, authority).fetchCatalog();
+    assert.equal(fetchedTarget, ENDPOINT + LLM_PROXY_PATHS.catalog);
+    assert.equal(hostileCalls, 0);
+  } finally {
+    Object.defineProperty(Object, 'freeze', descriptor);
+  }
+});
+
 describe('GatewayLlmClient request boundary', () => {
   it('serializes the exact envelope, digest and an owned payload copy', async () => {
     const payload = Buffer.from('{"model":"aster-1","input":"hello"}');
@@ -657,6 +700,87 @@ describe('GatewayLlmClient request boundary', () => {
     }
   });
 
+  it('keeps request payload identity independent of randomBytes Buffer poisoning', async () => {
+    const fromDescriptor = Object.getOwnPropertyDescriptor(Buffer, 'from');
+    const toStringDescriptor = Object.getOwnPropertyDescriptor(
+      Buffer.prototype,
+      'toString',
+    );
+    assert.ok(fromDescriptor && 'value' in fromDescriptor);
+    assert.ok(toStringDescriptor && 'value' in toStringDescriptor);
+    const nativeFrom = fromDescriptor.value as typeof Buffer.from;
+    const nativeToString = toStringDescriptor.value as Buffer['toString'];
+    const payload = Buffer.from('{"model":"aster-1"}');
+    const forged = Buffer.from('{"model":"bster-1"}');
+    assert.equal(payload.byteLength, forged.byteLength);
+    let hostileCalls = 0;
+    let observed: Uint8Array | undefined;
+    const boundary = new GatewayLlmClient({
+      store: store(),
+      fetch: async (_target, init) => {
+        const request = decodeLlmProxyRequest(init.body as string);
+        observed = request.payload;
+        return new Response('ok', {
+          status: 200,
+          headers: {
+            [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+              format: LLM_PROXY_FORMATS.responseProvenance,
+              requestId: request.requestId,
+              modelRef: request.modelRef,
+              targetGeneration: request.targetGeneration,
+              route: request.route,
+              status: 200,
+              headers: [],
+            }),
+          },
+        });
+      },
+      randomBytes: () => {
+        let payloadConversions = 0;
+        Object.defineProperty(Buffer, 'from', {
+          ...fromDescriptor,
+          value(value: unknown, encoding?: BufferEncoding) {
+            if (
+              value instanceof Uint8Array &&
+              value.byteLength === payload.byteLength
+            ) {
+              payloadConversions += 1;
+              hostileCalls += 1;
+              if (payloadConversions === 2)
+                Object.defineProperty(Buffer, 'from', fromDescriptor);
+              return Reflect.apply(nativeFrom, Buffer, [forged]);
+            }
+            if (typeof value === 'string' && encoding === 'base64') {
+              hostileCalls += 1;
+              const actual = Reflect.apply(nativeFrom, Buffer, [payload]);
+              Object.defineProperty(actual, 'toString', {
+                configurable: true,
+                value(requested?: BufferEncoding) {
+                  if (requested === 'base64')
+                    return Reflect.apply(nativeToString, forged, ['base64']);
+                  return Reflect.apply(nativeToString, this, [requested]);
+                },
+              });
+              return actual;
+            }
+            return Reflect.apply(nativeFrom, Buffer, [value, encoding]);
+          },
+        });
+        return Buffer.alloc(16);
+      },
+    });
+    try {
+      const response = await boundary.dispatch(dispatchInput(payload));
+      assert.equal(response.status, 200);
+      assert.equal(observed?.byteLength, payload.byteLength);
+      for (let index = 0; index < payload.byteLength; index += 1)
+        assert.equal(observed?.[index], payload[index]);
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(Buffer, 'from', fromDescriptor);
+    }
+  });
+
   it('keeps request codecs independent of randomBytes JSON poisoning', async () => {
     const parseDescriptor = Object.getOwnPropertyDescriptor(JSON, 'parse');
     const stringifyDescriptor = Object.getOwnPropertyDescriptor(
@@ -793,6 +917,59 @@ describe('GatewayLlmClient request boundary', () => {
       assert.equal(outcome, 'resolved');
     } finally {
       Object.defineProperty(Promise, 'race', descriptor);
+    }
+  });
+
+  it('rejects duplicate provenance headers despite localeCompare poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      String.prototype,
+      'localeCompare',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    let hostileCalls = 0;
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const provenance = JSON.stringify({
+        format: LLM_PROXY_FORMATS.responseProvenance,
+        requestId: request.requestId,
+        modelRef: request.modelRef,
+        targetGeneration: request.targetGeneration,
+        route: request.route,
+        status: 200,
+        headers: [
+          { name: 'content-type', value: 'text/plain' },
+          { name: 'content-type', value: 'text/html' },
+        ],
+      });
+      Object.defineProperty(String.prototype, 'localeCompare', {
+        ...descriptor,
+        value() {
+          hostileCalls += 1;
+          if (hostileCalls === 2)
+            Object.defineProperty(
+              String.prototype,
+              'localeCompare',
+              descriptor,
+            );
+          return -1;
+        },
+      });
+      return new Response('actual', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]:
+            Buffer.from(provenance).toString('base64url'),
+        },
+      });
+    });
+    try {
+      await assert.rejects(
+        boundary.dispatch(dispatchInput()),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(String.prototype, 'localeCompare', descriptor);
     }
   });
 
@@ -1828,6 +2005,52 @@ describe('GatewayLlmClient request boundary', () => {
       if (previous === undefined)
         delete (Object.prototype as { toJSON?: unknown }).toJSON;
       else Object.defineProperty(Object.prototype, 'toJSON', previous);
+    }
+  });
+
+  it('rejects malformed error bytes despite stream decoder poisoning', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      TextDecoder.prototype,
+      'decode',
+    );
+    assert.ok(descriptor && 'value' in descriptor);
+    let hostileCalls = 0;
+    const canonical = proxyError('internal_error');
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            Object.defineProperty(TextDecoder.prototype, 'decode', {
+              ...descriptor,
+              value() {
+                hostileCalls += 1;
+                Object.defineProperty(
+                  TextDecoder.prototype,
+                  'decode',
+                  descriptor,
+                );
+                return canonical;
+              },
+            });
+            controller.enqueue(Buffer.from('{"evil":true}'));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      },
+    );
+    try {
+      await assert.rejects(
+        client(async () => response).fetchCatalog(),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(TextDecoder.prototype, 'decode', descriptor);
     }
   });
 
