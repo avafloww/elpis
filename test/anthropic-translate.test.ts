@@ -35,7 +35,9 @@ test('Anthropic completion sends the resident skill declaration in its wire body
   const originalFetch = globalThis.fetch;
   let capturedBody: any = null;
   globalThis.fetch = async (_input, init) => {
-    capturedBody = JSON.parse(String(init?.body));
+    capturedBody = JSON.parse(
+      new TextDecoder().decode(init?.body as Uint8Array),
+    );
     return new Response('data: {"type":"message_stop"}\n\n', {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
@@ -59,11 +61,48 @@ test('Anthropic completion sends the resident skill declaration in its wire body
       skillTool: SKILL_TOOL,
     });
     assert.ok(capturedBody);
+    assert.match(capturedBody.system[0].text, /cch=[0-9a-f]{5}/);
+    assert.equal(capturedBody.system[0].text.includes('cch=00000'), false);
     assert.ok(
       capturedBody.tools.some((tool: any) => tool.name === 'skill'),
       'the resident skill declaration must reach the Anthropic wire body',
     );
     assert.equal(capturedBody.tool_choice.disable_parallel_tool_use, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Anthropic 401 refreshes once without transport replay and stays retriable', async () => {
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  let refreshes = 0;
+  globalThis.fetch = async () => {
+    networkCalls += 1;
+    return new Response('expired', { status: 401 });
+  };
+  const config = makeConfig({
+    llm: {
+      ...makeConfig().llm,
+      baseUrl: 'https://anthropic.invalid',
+      model: 'test-anthropic',
+    },
+  });
+  const store = {
+    read: () => null,
+    getAccessToken: async () => 'test-access-token',
+    forceRefresh: async () => {
+      refreshes += 1;
+    },
+  };
+  try {
+    const llm = createAnthropicOAuthLLM(config, store as any, undefined);
+    await assert.rejects(
+      () => llm.complete([sys(), { role: 'user', content: 'hello' }]),
+      /anthropic 401: expired/,
+    );
+    assert.equal(networkCalls, 1);
+    assert.equal(refreshes, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

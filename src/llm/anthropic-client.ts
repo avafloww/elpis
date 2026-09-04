@@ -25,6 +25,11 @@
 
 import { createHash } from 'node:crypto';
 import { Agent } from 'undici';
+import {
+  ANTHROPIC_CLAUDE_CODE_VERSION,
+  AnthropicOAuthUnauthorizedError,
+  createAnthropicOAuthTransport,
+} from '@elpis/provider-transport';
 import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
 import { addStandaloneOutputBytes } from './standalone-limits.js';
@@ -54,18 +59,9 @@ import {
 import { endpointAt, stampGeneration } from './provenance.js';
 
 // ─── Claude Code fingerprint constants (matched to oh-my-pi's reversed values) ─
-const CLAUDE_CODE_VERSION = '2.1.220';
-const CLAUDE_CODE_USER_AGENT = `claude-cli/${CLAUDE_CODE_VERSION} (external, claude-desktop)`;
+const CLAUDE_CODE_VERSION = ANTHROPIC_CLAUDE_CODE_VERSION;
 const CLAUDE_CODE_IDENTITY =
   "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
-/** Betas that identify the request as Claude Code + grant OAuth inference.
- * `interleaved-thinking-2025-05-14` lets the model think between tool calls
- * (extended thinking is enabled — see anthropicThinkingParam). */
-const ANTHROPIC_BETAS = [
-  'oauth-2025-04-20',
-  'claude-code-20250219',
-  'interleaved-thinking-2025-05-14',
-];
 
 /** Adaptive extended thinking, on by default (required on newer Claude models —
  * omitting it on Opus 5 runs adaptive anyway, and it's the modern replacement
@@ -82,7 +78,6 @@ const MAX_OUTPUT_TOKENS = 64000;
 // even when we don't send the param, and it shares this budget — a tight cap
 // could let thinking truncate the visible summary.
 const SUMMARIZE_MAX_TOKENS = 32000;
-const ANTHROPIC_VERSION = '2023-06-01';
 
 // Billing header (see createBillingHeader / patchCch). `cch=00000` is a
 // placeholder replaced with the real XXH64 attestation before the body is sent.
@@ -343,33 +338,26 @@ async function postAnthropic(
   stream: boolean,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const token = await store.getAccessToken();
-  const url = `${config.llm.baseUrl.replace(/\/+$/, '')}/v1/messages?beta=true`;
-  const serialized = patchCch(JSON.stringify(body));
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'anthropic-version': ANTHROPIC_VERSION,
-      'anthropic-beta': ANTHROPIC_BETAS.join(','),
-      'content-type': 'application/json',
-      accept: stream ? 'text/event-stream' : 'application/json',
-      'User-Agent': CLAUDE_CODE_USER_AGENT,
-      'x-app': 'cli',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: serialized,
-    signal,
+  const serialized = new TextEncoder().encode(patchCch(JSON.stringify(body)));
+  const transport = createAnthropicOAuthTransport({
+    baseUrl: config.llm.baseUrl,
+    credentials: store,
+    fetch,
     dispatcher,
-  } as RequestInit & { dispatcher: Agent });
+  });
+  let res: Response;
+  try {
+    res = await transport({ body: serialized, stream, signal });
+  } catch (error) {
+    if (error instanceof AnthropicOAuthUnauthorizedError) {
+      throw new RetriableError(
+        new Error(`anthropic 401: ${error.responseText}`),
+      );
+    }
+    throw error;
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    // A 401 usually means the access token expired between the store's skew
-    // check and the request — force a refresh so the retry uses a fresh token.
-    if (res.status === 401) {
-      await store.forceRefresh().catch(() => {});
-      throw new RetriableError(new Error(`anthropic 401: ${text}`));
-    }
     const err = Object.assign(new Error(`anthropic ${res.status}: ${text}`), {
       status: res.status,
     });

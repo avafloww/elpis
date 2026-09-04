@@ -352,7 +352,9 @@ test('Anthropic standalone omits tools and tool choice on the wire', async () =>
   const originalFetch = globalThis.fetch;
   let body: Record<string, unknown> | undefined;
   globalThis.fetch = async (_input, init) => {
-    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    body = JSON.parse(
+      new TextDecoder().decode(init?.body as Uint8Array),
+    ) as Record<string, unknown>;
     const sse = [
       'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
       'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}',
