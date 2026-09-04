@@ -64,6 +64,11 @@ test('injects exact Codex headers and replays the body once after 401', async ()
       authorization: 'Bearer hostile',
       'chatgpt-account-id': 'hostile-account',
       'x-api-key': 'hostile-key',
+      'api-key': 'hostile-api-key',
+      cookie: 'hostile-cookie',
+      host: 'hostile.example',
+      'proxy-authorization': 'Basic hostile',
+      'set-cookie': 'session=hostile',
       'x-safe': 'preserved',
     },
     body: '{"same":"bytes"}',
@@ -95,7 +100,15 @@ test('injects exact Codex headers and replays the body once after 401', async ()
     'true',
   );
   assert.equal(seen[1].headers.get('x-safe'), 'preserved');
-  assert.equal(seen[1].headers.has('x-api-key'), false);
+  for (const name of [
+    'x-api-key',
+    'api-key',
+    'cookie',
+    'host',
+    'proxy-authorization',
+    'set-cookie',
+  ])
+    assert.equal(seen[1].headers.has(name), false, name);
 });
 
 test('refuses hostile Codex targets before credential or network access', async () => {
@@ -171,6 +184,7 @@ test('observer receives exact body and clone without transport secrets', async (
 
   const returned = await transport(responsesUrl, {
     method: 'POST',
+    headers: { 'set-cookie': 'session=secret', 'x-safe': 'visible' },
     body: 'observer-bytes',
   });
   assert.equal(returned, providerResponse);
@@ -185,6 +199,8 @@ test('observer receives exact body and clone without transport secrets', async (
   assert.equal(observations[0].headers.get('session_id'), 'observed-session');
   assert.equal(observations[0].headers.has('authorization'), false);
   assert.equal(observations[0].headers.has('chatgpt-account-id'), false);
+  assert.equal(observations[0].headers.has('set-cookie'), false);
+  assert.equal(observations[0].headers.get('x-safe'), 'visible');
 });
 
 test('uses only the trusted dispatcher and preserves recorded transport headers', async () => {
@@ -332,4 +348,154 @@ test('cancels a transferred request body after refusing its target', async () =>
   assert.equal(request.bodyUsed, true);
   assert.equal(cancellations, 1);
   assert.equal(credentials.reads(), 0);
+});
+
+test('reads a RequestInit body accessor once and observes the wire bytes', async () => {
+  const credentials = credentialSource();
+  let reads = 0;
+  let wireBody = '';
+  let observedBody = '';
+  const init: RequestInit = { method: 'POST' };
+  Object.defineProperty(init, 'body', {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? 'first-body' : 'second-body';
+    },
+  });
+  const transport = createCodexOAuthFetch({
+    credentials: credentials.source,
+    sessionId: () => 'session-1',
+    fetch: async (_input, requestInit) => {
+      wireBody = String(requestInit?.body);
+      return new Response();
+    },
+    observe: ({ request }) => {
+      observedBody = new TextDecoder().decode(request.body);
+    },
+  });
+
+  await transport(responsesUrl, init);
+  assert.equal(reads, 1);
+  assert.equal(wireBody, 'first-body');
+  assert.equal(observedBody, 'first-body');
+});
+
+test('already-aborted requests do not start credential or network effects', async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  let tokens = 0;
+  let networkCalls = 0;
+  const transport = createCodexOAuthFetch({
+    credentials: {
+      location: 'aborted credential',
+      read: () => ({ accountId: 'acct-1' }),
+      getAccessToken: async () => {
+        tokens += 1;
+        return 'access-1';
+      },
+      forceRefresh: async () => undefined,
+    },
+    sessionId: () => 'session-1',
+    fetch: async () => {
+      networkCalls += 1;
+      return new Response();
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      transport(responsesUrl, {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      }),
+    { name: 'AbortError' },
+  );
+  assert.equal(tokens, 0);
+  assert.equal(networkCalls, 0);
+});
+
+test('abort cancels non-settling request body acquisition', async () => {
+  const controller = new AbortController();
+  let cancellations = 0;
+  let tokens = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull() {
+      return new Promise<void>(() => undefined);
+    },
+    cancel() {
+      cancellations += 1;
+    },
+  });
+  const request = new Request(responsesUrl, {
+    method: 'POST',
+    body,
+    signal: controller.signal,
+    ...({ duplex: 'half' } as object),
+  });
+  const transport = createCodexOAuthFetch({
+    credentials: {
+      location: 'body credential',
+      read: () => ({ accountId: 'acct-1' }),
+      getAccessToken: async () => {
+        tokens += 1;
+        return 'access-1';
+      },
+      forceRefresh: async () => undefined,
+    },
+    sessionId: () => 'session-1',
+    fetch: async () => new Response(),
+  });
+
+  const pending = transport(request);
+  await Promise.resolve();
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  const outcome = await Promise.race([
+    pending.then(
+      () => 'resolved',
+      (error: unknown) =>
+        error instanceof DOMException && error.name === 'AbortError'
+          ? 'aborted'
+          : 'other-error',
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 100)),
+  ]);
+  assert.equal(outcome, 'aborted');
+  assert.equal(cancellations, 1);
+  assert.equal(tokens, 0);
+});
+
+test('an aborting 401 response does not start credential refresh', async () => {
+  const controller = new AbortController();
+  let refreshes = 0;
+  let networkCalls = 0;
+  const transport = createCodexOAuthFetch({
+    credentials: {
+      location: 'refresh credential',
+      read: () => ({ accountId: 'acct-1' }),
+      getAccessToken: async () => 'access-1',
+      forceRefresh: async () => {
+        refreshes += 1;
+      },
+    },
+    sessionId: () => 'session-1',
+    fetch: async () => {
+      networkCalls += 1;
+      controller.abort(new DOMException('cancelled', 'AbortError'));
+      return new Response('', { status: 401 });
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      transport(responsesUrl, {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      }),
+    { name: 'AbortError' },
+  );
+  assert.equal(networkCalls, 1);
+  assert.equal(refreshes, 0);
 });

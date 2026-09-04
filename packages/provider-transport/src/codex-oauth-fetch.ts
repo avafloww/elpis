@@ -1,4 +1,4 @@
-const SENSITIVE_OBSERVER_HEADERS = [
+const SENSITIVE_REQUEST_HEADERS = [
   'authorization',
   'chatgpt-account-id',
   'x-api-key',
@@ -6,6 +6,7 @@ const SENSITIVE_OBSERVER_HEADERS = [
   'cookie',
   'host',
   'proxy-authorization',
+  'set-cookie',
 ] as const;
 const MAX_HEADER_VALUE_LENGTH = 131_072;
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/;
@@ -53,6 +54,11 @@ export interface CodexOAuthFetchOptions {
 
 type FetchInitWithDispatcher = RequestInit & { dispatcher?: unknown };
 
+interface OwnedInput {
+  readonly request: Request;
+  readonly sourceBody: BodyInit | null | undefined;
+}
+
 interface RequestSnapshot {
   readonly url: string;
   readonly method: string;
@@ -87,7 +93,10 @@ function headerValue(value: unknown, name: string): string {
   return value;
 }
 
-function snapshotInput(input: RequestInfo | URL, init?: RequestInit): Request {
+function snapshotInput(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): OwnedInput {
   let stableInput = input;
   try {
     if (typeof input === 'string') {
@@ -97,12 +106,16 @@ function snapshotInput(input: RequestInfo | URL, init?: RequestInit): Request {
     } else if (!(input instanceof Request)) {
       throw refusedRequest();
     }
-    return new Request(stableInput, {
-      ...init,
-      credentials: 'omit',
-      redirect: 'error',
-      referrer: '',
-    });
+    const stableInit: RequestInit = init === undefined ? {} : { ...init };
+    return {
+      request: new Request(stableInput, {
+        ...stableInit,
+        credentials: 'omit',
+        redirect: 'error',
+        referrer: '',
+      }),
+      sourceBody: stableInit.body,
+    };
   } catch {
     throw refusedRequest();
   }
@@ -155,7 +168,7 @@ async function releaseRequestBody(request: Request): Promise<void> {
 }
 
 async function awaitWithAbort<T>(
-  promise: Promise<T>,
+  start: () => T | PromiseLike<T>,
   signal: AbortSignal,
 ): Promise<T> {
   if (signal.aborted) throw abortReason(signal);
@@ -169,10 +182,78 @@ async function awaitWithAbort<T>(
     };
     const onAbort = (): void => finish(() => reject(abortReason(signal)));
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    let started: Promise<T>;
+    try {
+      started = Promise.resolve(start());
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    started.then(
       (value) => finish(() => resolve(value)),
       (error) => finish(() => reject(error)),
     );
+  });
+}
+
+async function readRequestBody(request: Request): Promise<Uint8Array> {
+  if (!request.body) {
+    if (request.signal.aborted) throw abortReason(request.signal);
+    return new Uint8Array();
+  }
+  const reader = request.body.getReader();
+  if (request.signal.aborted) {
+    const reason = abortReason(request.signal);
+    void reader.cancel(reason).catch(() => undefined);
+    throw reason;
+  }
+  return new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      request.signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      const reason = abortReason(request.signal);
+      finish(() => {
+        void reader.cancel(reason).catch(() => undefined);
+        reject(reason);
+      });
+    };
+    request.signal.addEventListener('abort', onAbort, { once: true });
+    if (request.signal.aborted) {
+      onAbort();
+      return;
+    }
+    void (async () => {
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (settled) return;
+          if (done) break;
+          if (!value) continue;
+          chunks.push(value);
+          bytes += value.byteLength;
+        }
+        const body = new Uint8Array(bytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          body.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        finish(() => resolve(body));
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    })();
   });
 }
 
@@ -181,9 +262,7 @@ async function requestSnapshot(
   sourceBody: BodyInit | null | undefined,
 ): Promise<RequestSnapshot> {
   const hasBody = request.body !== null;
-  const body = hasBody
-    ? new Uint8Array(await request.arrayBuffer())
-    : new Uint8Array();
+  const body = await readRequestBody(request);
   return {
     url: request.url,
     method: request.method,
@@ -232,7 +311,7 @@ function requestInitFromSnapshot(
 
 function observedHeaders(headers: Headers): Headers {
   const safe = new Headers(headers);
-  for (const name of SENSITIVE_OBSERVER_HEADERS) safe.delete(name);
+  for (const name of SENSITIVE_REQUEST_HEADERS) safe.delete(name);
   return safe;
 }
 
@@ -275,21 +354,22 @@ export function createCodexOAuthFetch(
   const observe = options.observe;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
-    const owned = snapshotInput(input, init);
+    const ownedInput = snapshotInput(input, init);
+    const owned = ownedInput.request;
     try {
       validateTarget(owned);
     } catch (error) {
       await releaseRequestBody(owned);
       throw error;
     }
-    const snapshot = await requestSnapshot(owned, init?.body);
+    const snapshot = await requestSnapshot(owned, ownedInput.sourceBody);
     const session = headerValue(options.sessionId(), 'session id');
     const expectsStream = requestExpectsStream(snapshot.body);
 
     const send = async (attempt: 1 | 2): Promise<Response> => {
       const token = headerValue(
         await awaitWithAbort(
-          Promise.resolve().then(() => options.credentials.getAccessToken()),
+          () => options.credentials.getAccessToken(),
           snapshot.signal,
         ),
         'access token',
@@ -299,7 +379,7 @@ export function createCodexOAuthFetch(
         `credential in ${options.credentials.location} account id`,
       );
       const headers = new Headers(snapshot.headers);
-      headers.delete('x-api-key');
+      for (const name of SENSITIVE_REQUEST_HEADERS) headers.delete(name);
       headers.set('authorization', `Bearer ${token}`);
       headers.set('chatgpt-account-id', accountId);
       const setTransport = (name: string, value: string): void => {
@@ -341,7 +421,7 @@ export function createCodexOAuthFetch(
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       await awaitWithAbort(
-        Promise.resolve().then(() => options.credentials.forceRefresh()),
+        () => options.credentials.forceRefresh(),
         snapshot.signal,
       );
       response = await send(2);
