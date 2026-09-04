@@ -35,6 +35,8 @@ The adapter:
 - requests encrypted reasoning with `store: false`;
 - persists and replays eligible reasoning items under exact provenance checks;
 - supports tool-free summarization and standalone bounded completion lanes;
+- enforces configured stream-idle and total-call timeouts in standalone lanes,
+  including memory consolidation, so a stalled provider cannot hold boot indefinitely;
 - refreshes once after an authentication failure;
 - records policy denials only when both denial text and an error-shaped SSE envelope are present.
 

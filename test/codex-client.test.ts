@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import type { OAuthStore } from '../src/llm/oauth/store.js';
 import {
   buildCodexStandaloneRequest,
+  codexStandaloneComplete,
   createCodexFetch,
   createCodexOAuthLLM,
   fetchCodexContextWindow,
@@ -520,7 +521,11 @@ test('completeStandalone uses its lane key for authenticated transport and reque
   assert.equal(headers.get('x-client-request-id'), 'motor-lane');
   assert.ok(transportSignal);
   controller.abort();
-  assert.equal(transportSignal.aborted, true);
+  assert.equal(
+    transportSignal.aborted,
+    false,
+    'completed calls detach caller cancellation',
+  );
   assert.equal(body?.prompt_cache_key, 'motor-lane');
   assert.equal(body?.model, 'gpt-5.6-luna');
   assert.deepEqual(body?.include, ['reasoning.encrypted_content']);
@@ -552,6 +557,95 @@ test('completeStandalone uses its lane key for authenticated transport and reque
     }),
     /different Codex wire grammar/,
   );
+});
+
+for (const phase of ['acquisition', 'stream']) {
+  test(`Codex standalone bounds idle ${phase} even when the provider ignores abort`, async () => {
+    const { store } = fakeStore();
+    const config = codexConfig('gpt-6-astra');
+    config.llm.streamIdleTimeoutMs = 20;
+    const llm = createCodexOAuthLLM(config, store);
+    let signal: AbortSignal | undefined;
+    let closed = false;
+    (llm.client!.responses as any).create = async (
+      _body: unknown,
+      opts: { signal: AbortSignal },
+    ) => {
+      signal = opts.signal;
+      if (phase === 'acquisition') return new Promise(() => {});
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => new Promise(() => {}),
+            return: async () => {
+              closed = true;
+              return { done: true };
+            },
+          };
+        },
+      };
+    };
+    await assert.rejects(
+      codexStandaloneComplete(
+        llm.client!,
+        config,
+        [{ role: 'user', content: 'Summarize synthetic notes.' }],
+        'test-lane',
+        true,
+      ),
+      /standalone stream idle/,
+    );
+    assert.equal(signal?.aborted, true);
+    assert.equal(closed, phase === 'stream');
+  });
+}
+
+test('Codex standalone returns a terminal response without waiting for stream EOF', async () => {
+  const { store } = fakeStore();
+  const config = codexConfig('gpt-6-astra');
+  config.llm.streamIdleTimeoutMs = 20;
+  const llm = createCodexOAuthLLM(config, store);
+  let closed = false;
+  (llm.client!.responses as any).create = async () => ({
+    [Symbol.asyncIterator]() {
+      let sent = false;
+      return {
+        next: async () => {
+          if (sent) return new Promise(() => {});
+          sent = true;
+          return {
+            done: false,
+            value: {
+              type: 'response.completed',
+              response: {
+                output: [
+                  {
+                    type: 'message',
+                    content: [
+                      { type: 'output_text', text: 'Compact synthetic notes.' },
+                    ],
+                  },
+                ],
+              },
+            },
+          };
+        },
+        return: async () => {
+          closed = true;
+          return { done: true };
+        },
+      };
+    },
+  });
+  const result = await codexStandaloneComplete(
+    llm.client!,
+    config,
+    [{ role: 'user', content: 'Summarize.' }],
+    'terminal-test',
+    true,
+  );
+  assert.equal(result.content, 'Compact synthetic notes.');
+  assert.equal(closed, true);
 });
 
 test('Codex standalone aborts before visible output exceeds its byte limit', async () => {

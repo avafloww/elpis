@@ -478,11 +478,51 @@ export async function codexStandaloneComplete(
     opts,
   );
   const controller = new AbortController();
-  if (opts.signal?.aborted) controller.abort();
-  else
-    opts.signal?.addEventListener('abort', () => controller.abort(), {
-      once: true,
-    });
+  const abortFromCaller = (): void => controller.abort(opts.signal?.reason);
+  if (opts.signal?.aborted) abortFromCaller();
+  else opts.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const markProgress = (): void => {
+    clearTimeout(idleTimer);
+    if (config.llm.streamIdleTimeoutMs > 0)
+      idleTimer = setTimeout(
+        () =>
+          controller.abort(
+            new Error(
+              `Codex standalone stream idle for ${config.llm.streamIdleTimeoutMs}ms`,
+            ),
+          ),
+        config.llm.streamIdleTimeoutMs,
+      );
+  };
+  markProgress();
+  const callTimer =
+    config.llm.callTimeoutMs > 0
+      ? setTimeout(
+          () => controller.abort(new Error('Codex standalone call timed out')),
+          config.llm.callTimeoutMs,
+        )
+      : undefined;
+  // Race cancellation explicitly: a provider iterator may ignore its signal.
+  const bounded = async <T>(pending: PromiseLike<T>): Promise<T> => {
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        Promise.resolve(pending),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(controller.signal.reason);
+          if (controller.signal.aborted) onAbort();
+          else
+            controller.signal.addEventListener('abort', onAbort, {
+              once: true,
+            });
+        }),
+      ]);
+    } finally {
+      if (onAbort) controller.signal.removeEventListener('abort', onAbort);
+    }
+  };
+  let iterator: AsyncIterator<OpenAI.Responses.ResponseStreamEvent> | undefined;
   let streamed = '';
   let visibleOutputBytes = 0;
   let final: {
@@ -493,10 +533,23 @@ export async function codexStandaloneComplete(
   } | null = null;
   const completedItems = new Map<number, unknown>();
   try {
-    const events = await client.responses.create(body, {
-      signal: controller.signal,
-    });
-    for await (const event of events) {
+    const events = await bounded(
+      client.responses.create(body, {
+        signal: controller.signal,
+      }),
+    );
+    iterator = events[Symbol.asyncIterator]();
+    for (;;) {
+      const step = await bounded(iterator.next());
+      if (step.done) break;
+      const event = step.value;
+      if (
+        ('delta' in event &&
+          typeof event.delta === 'string' &&
+          event.delta.length > 0) ||
+        event.type === 'response.output_item.done'
+      )
+        markProgress();
       if (event.type === 'response.output_text.delta') {
         visibleOutputBytes = addStandaloneOutputBytes(
           visibleOutputBytes,
@@ -507,8 +560,10 @@ export async function codexStandaloneComplete(
         streamed += event.delta;
       } else if (event.type === 'response.output_item.done')
         completedItems.set(event.output_index, event.item);
-      else if (event.type === 'response.completed') final = event.response;
-      else if (event.type === 'response.incomplete') {
+      else if (event.type === 'response.completed') {
+        final = event.response;
+        break;
+      } else if (event.type === 'response.incomplete') {
         throw new Error(
           `Codex standalone completion incomplete after ${streamed.length} characters`,
         );
@@ -517,7 +572,18 @@ export async function codexStandaloneComplete(
       }
     }
   } catch (error) {
+    controller.abort(error);
     throw classifyError(error);
+  } finally {
+    clearTimeout(idleTimer);
+    clearTimeout(callTimer);
+    opts.signal?.removeEventListener('abort', abortFromCaller);
+    // Closing a stuck iterator must not block startup's memory fallback.
+    try {
+      void Promise.resolve(iterator?.return?.()).catch(() => undefined);
+    } catch {
+      /* cleanup must not replace the completion result */
+    }
   }
   if (!final)
     throw classifyError(
