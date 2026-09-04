@@ -150,6 +150,10 @@ function abortReason(signal: AbortSignal): unknown {
   );
 }
 
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
 async function releaseRequestBody(request: Request): Promise<void> {
   if (!request.body || request.bodyUsed) return;
   let timer: NodeJS.Timeout | null = null;
@@ -374,8 +378,11 @@ export function createCodexOAuthFetch(
         ),
         'access token',
       );
+      throwIfAborted(snapshot.signal);
+      const identity = options.credentials.read();
+      throwIfAborted(snapshot.signal);
       const accountId = headerValue(
-        options.credentials.read()?.accountId,
+        identity?.accountId,
         `credential in ${options.credentials.location} account id`,
       );
       const headers = new Headers(snapshot.headers);
@@ -397,6 +404,7 @@ export function createCodexOAuthFetch(
       else if (!preserveTransportHeaders) headers.delete(RESPONSES_LITE_HEADER);
       setTransport('accept', 'application/json');
 
+      throwIfAborted(snapshot.signal);
       const response = await underlyingFetch(
         snapshot.url,
         requestInitFromSnapshot(snapshot, headers, dispatcher),

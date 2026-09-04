@@ -466,6 +466,53 @@ test('abort cancels non-settling request body acquisition', async () => {
   assert.equal(tokens, 0);
 });
 
+test('abort after token settlement prevents account lookup and network', async () => {
+  const controller = new AbortController();
+  let releaseToken!: (token: string) => void;
+  let tokenStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    tokenStarted = resolve;
+  });
+  const token = new Promise<string>((resolve) => {
+    releaseToken = resolve;
+  });
+  let reads = 0;
+  let networkCalls = 0;
+  const transport = createCodexOAuthFetch({
+    credentials: {
+      location: 'settlement credential',
+      read: () => {
+        reads += 1;
+        return { accountId: 'acct-1' };
+      },
+      getAccessToken: () => {
+        tokenStarted();
+        return token;
+      },
+      forceRefresh: async () => undefined,
+    },
+    sessionId: () => 'session-1',
+    fetch: async () => {
+      networkCalls += 1;
+      return new Response();
+    },
+  });
+
+  const pending = transport(responsesUrl, {
+    method: 'POST',
+    body: '{}',
+    signal: controller.signal,
+  });
+  await started;
+  releaseToken('access-1');
+  queueMicrotask(() =>
+    controller.abort(new DOMException('cancelled', 'AbortError')),
+  );
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(reads, 0);
+  assert.equal(networkCalls, 0);
+});
+
 test('an aborting 401 response does not start credential refresh', async () => {
   const controller = new AbortController();
   let refreshes = 0;
