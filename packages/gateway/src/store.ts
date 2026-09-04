@@ -4,6 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { backupGatewayDatabase, type GatewayBackupReceipt } from './backup.js';
 import { GatewayCredentialStore } from './credential-store.js';
 import { GatewayProviderStore } from './provider-store.js';
+import { createGatewayLlmProxyApi } from './llm-broker.js';
+import type { GatewayLlmProxyApi } from './llm-proxy-http.js';
 import {
   isCredentialId,
   isGatewayInstanceId,
@@ -62,6 +64,8 @@ export interface GatewayAuditEvent extends GatewayAuditInput {
 export interface OpenGatewayStoreOptions {
   now?: () => number;
   randomBytes?: RandomBytes;
+  llmFetch?: typeof globalThis.fetch;
+  llmDispatcher?: unknown;
 }
 
 function exactInteger(value: unknown, label: string): number {
@@ -230,6 +234,7 @@ export class GatewayStore {
   readonly databasePath: string;
   readonly credentials: GatewayCredentialStore;
   readonly providers: GatewayProviderStore;
+  readonly llmProxy: GatewayLlmProxyApi;
   readonly #database: DatabaseSync;
   readonly #now: () => number;
   #closed = false;
@@ -240,6 +245,8 @@ export class GatewayStore {
     database: DatabaseSync,
     now: () => number,
     randomBytes?: RandomBytes,
+    llmFetch?: typeof globalThis.fetch,
+    llmDispatcher?: unknown,
   ) {
     this.dataDirectory = dataDirectory;
     this.databasePath = databasePath;
@@ -259,6 +266,13 @@ export class GatewayStore {
       () => hardenDatabaseFiles(this.databasePath),
       randomBytes,
     );
+    this.llmProxy = createGatewayLlmProxyApi({
+      database,
+      credentials: this.credentials,
+      providers: this.providers,
+      fetch: llmFetch,
+      dispatcher: llmDispatcher,
+    });
   }
 
   config(): GatewayConfig {
@@ -475,6 +489,8 @@ export function openGatewayStore(
       database,
       options.now ?? Date.now,
       options.randomBytes,
+      options.llmFetch,
+      options.llmDispatcher,
     );
   } catch (error) {
     try {
