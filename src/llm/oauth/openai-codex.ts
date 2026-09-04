@@ -6,11 +6,17 @@
 // exchange that pair for the normal access/refresh token family. Inference is
 // implemented separately in ../codex-client.ts.
 
-import { CODEX_OAUTH_CLIENT_VERSION } from '@elpis/provider-transport';
+import {
+  CODEX_OAUTH_CLIENT_VERSION,
+  OPENAI_CODEX_CLIENT_ID,
+  codexTokenIdentity,
+  decodeCodexJwt,
+  refreshOpenAICodexToken as refreshOpenAICodexTokenTransport,
+} from '@elpis/provider-transport';
 import type { OAuthCredentials } from './store.js';
 
 export const OPENAI_CODEX_CREDENTIAL_KEY = 'openai-codex';
-export const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+export { OPENAI_CODEX_CLIENT_ID, codexTokenIdentity, decodeCodexJwt };
 export const OPENAI_CODEX_DEVICE_AUTH_URL =
   'https://auth.openai.com/codex/device';
 export const OPENAI_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -25,8 +31,6 @@ const DEVICE_REDIRECT_URI = 'https://auth.openai.com/deviceauth/callback';
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 const DEVICE_POLL_SAFETY_MARGIN_MS = 3_000;
 const DEVICE_MAX_WAIT_MS = 15 * 60 * 1000;
-const JWT_AUTH_CLAIM = 'https://api.openai.com/auth';
-const JWT_PROFILE_CLAIM = 'https://api.openai.com/profile';
 
 type FetchFn = typeof fetch;
 type SleepFn = (ms: number) => Promise<void>;
@@ -38,59 +42,8 @@ interface TokenResponse {
   expires_in?: number;
 }
 
-interface JwtPayload {
-  [JWT_AUTH_CLAIM]?: {
-    chatgpt_account_id?: string;
-    chatgpt_plan_type?: string;
-  };
-  [JWT_PROFILE_CLAIM]?: { email?: string };
-  [key: string]: unknown;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Decode a JWT payload without validating its signature. The token endpoint
- * is trusted and these claims are attribution/routing metadata, not an auth
- * decision; the backend still validates the bearer token itself. */
-export function decodeCodexJwt(token: string): JwtPayload | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    return JSON.parse(
-      Buffer.from(parts[1] ?? '', 'base64url').toString('utf8'),
-    ) as JwtPayload;
-  } catch {
-    return null;
-  }
-}
-
-export function codexTokenIdentity(
-  accessToken: string,
-  idToken?: string,
-): {
-  accountId?: string;
-  email?: string;
-  planType?: string;
-} {
-  const access = decodeCodexJwt(accessToken);
-  const id = idToken ? decodeCodexJwt(idToken) : null;
-  const auth = access?.[JWT_AUTH_CLAIM];
-  const idAuth = id?.[JWT_AUTH_CLAIM];
-  const accountId = auth?.chatgpt_account_id;
-  const email = access?.[JWT_PROFILE_CLAIM]?.email?.trim().toLowerCase();
-  const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)
-    ?.trim()
-    .toLowerCase();
-  return {
-    accountId:
-      typeof accountId === 'string' && accountId.length > 0
-        ? accountId
-        : undefined,
-    email: email || undefined,
-    planType: planType || undefined,
-  };
 }
 
 function endpointError(status: number, text: string): string {
@@ -279,44 +232,12 @@ export async function loginOpenAICodexDevice(
 
 /** Refresh a Codex access token. Identity/workspace fields omitted by refresh
  * survive because OAuthStore merges this slice over the stored credential. */
-export async function refreshOpenAICodexToken(
+export function refreshOpenAICodexToken(
   refreshToken: string,
   fetchFn: FetchFn = fetch,
 ): Promise<OAuthCredentials> {
-  const response = await fetchFn(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: OPENAI_CODEX_CLIENT_ID,
-    }),
-    signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+  return refreshOpenAICodexTokenTransport(refreshToken, {
+    fetch: fetchFn,
+    now: () => Date.now(),
   });
-  const text = await response.text();
-  if (!response.ok)
-    throw new Error(
-      `OpenAI Codex token refresh failed: ${endpointError(response.status, text)}`,
-    );
-  let data: TokenResponse;
-  try {
-    data = JSON.parse(text) as TokenResponse;
-  } catch {
-    throw new Error('OpenAI Codex token refresh returned invalid JSON');
-  }
-  if (!data.access_token || !Number.isFinite(data.expires_in)) {
-    throw new Error(
-      'OpenAI Codex refresh response missing access_token or expires_in',
-    );
-  }
-  const identity = codexTokenIdentity(data.access_token);
-  return {
-    access: data.access_token,
-    refresh: data.refresh_token || refreshToken,
-    expires: Date.now() + (data.expires_in as number) * 1000,
-    // Omit absent identity fields entirely: OAuthStore's shallow merge then
-    // preserves the login-fixed workspace instead of `undefined` erasing it.
-    ...(identity.accountId ? { accountId: identity.accountId } : {}),
-    ...(identity.email ? { email: identity.email } : {}),
-  };
 }

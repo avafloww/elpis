@@ -3,9 +3,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  codexTokenIdentity as transportCodexTokenIdentity,
+  decodeCodexJwt as transportDecodeCodexJwt,
+  refreshOpenAICodexToken as transportRefreshOpenAICodexToken,
+} from '@elpis/provider-transport';
+import {
   OPENAI_CODEX_CLIENT_ID,
   OPENAI_CODEX_DEVICE_AUTH_URL,
   codexTokenIdentity,
+  decodeCodexJwt,
   loginOpenAICodexDevice,
   refreshOpenAICodexToken,
 } from '../src/llm/oauth/openai-codex.js';
@@ -30,6 +36,47 @@ test('codexTokenIdentity extracts workspace, normalized email, and plan claims',
     planType: 'pro',
   });
   assert.equal(codexTokenIdentity('not-a-jwt').accountId, undefined);
+});
+
+test('resident exports the shared identity helpers unchanged', () => {
+  assert.equal(codexTokenIdentity, transportCodexTokenIdentity);
+  assert.equal(decodeCodexJwt, transportDecodeCodexJwt);
+});
+
+test('resident refresh wrapper preserves shared transport results and request behavior', async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ url: String(input), init });
+    return new Response(
+      JSON.stringify({
+        access_token: access,
+        refresh_token: 'refresh-new',
+        expires_in: 90,
+      }),
+    );
+  }) as typeof fetch;
+  const fixedNow = 1_700_000_000_000;
+  const originalNow = Date.now;
+  Date.now = () => fixedNow;
+  try {
+    const resident = await refreshOpenAICodexToken('refresh-old', fetchFn);
+    const shared = await transportRefreshOpenAICodexToken('refresh-old', {
+      fetch: fetchFn,
+      now: () => fixedNow,
+    });
+    assert.deepEqual(resident, shared);
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.url, 'https://auth.openai.com/oauth/token');
+    assert.equal(request.init?.redirect, 'error');
+    assert.ok(request.init?.signal instanceof AbortSignal);
+    const form = request.init?.body as URLSearchParams;
+    assert.equal(form.get('client_id'), OPENAI_CODEX_CLIENT_ID);
+    assert.equal(form.get('refresh_token'), 'refresh-old');
+  }
 });
 
 test('device login initializes, treats 403 as pending, then exchanges server PKCE', async () => {
