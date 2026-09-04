@@ -105,13 +105,12 @@ function exactContentLength(value: string | null): number | null {
 }
 
 function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
-  if (
-    (snapshot.phase !== 'active' && snapshot.phase !== 'rotating') ||
-    snapshot.endpoint === null
-  )
-    throw new GatewayResidentStateError('invalid_state');
   try {
-    const parsed = new URL(snapshot.endpoint);
+    const phase = snapshot.phase;
+    const endpoint = snapshot.endpoint;
+    if ((phase !== 'active' && phase !== 'rotating') || endpoint === null)
+      throw new GatewayResidentStateError('invalid_state');
+    const parsed = new URL(endpoint);
     if (
       parsed.protocol !== 'https:' ||
       parsed.username !== '' ||
@@ -119,17 +118,25 @@ function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
       parsed.pathname !== '/' ||
       parsed.search !== '' ||
       parsed.hash !== '' ||
-      parsed.origin !== snapshot.endpoint
+      parsed.origin !== endpoint
     )
-      throw new Error();
-  } catch {
+      throw new GatewayResidentStateError('corrupt_state');
+    return endpoint;
+  } catch (error) {
+    if (error instanceof GatewayResidentStateError) throw error;
     throw new GatewayResidentStateError('corrupt_state');
   }
-  return snapshot.endpoint;
 }
 
 function activeAuthority(store: GatewayLlmResidentStore): ActiveAuthority {
-  const endpoint = canonicalEndpoint(store.read());
+  let snapshot: GatewayResidentSnapshot;
+  try {
+    snapshot = store.read();
+  } catch (error) {
+    if (error instanceof GatewayResidentStateError) throw error;
+    throw new GatewayResidentStateError('corrupt_state');
+  }
+  const endpoint = canonicalEndpoint(snapshot);
   // This is intentionally a separate read on every HTTP call. The token is never
   // retained by the client, so a completed rotation affects the next call only.
   let authorization: string;
@@ -179,9 +186,13 @@ async function fetchOnce(
   }
 }
 
-function validateHttpResponse(response: Response, target: string): void {
+function validateHttpResponse(response: Response, target: string): number {
   try {
+    const status = response.status;
     if (
+      !Number.isInteger(status) ||
+      status < 200 ||
+      status > 599 ||
       response.redirected === true ||
       response.type === 'opaqueredirect' ||
       (response.url !== '' && response.url !== target) ||
@@ -190,6 +201,7 @@ function validateHttpResponse(response: Response, target: string): void {
       cancelBody(response);
       boundaryFailure();
     }
+    return status;
   } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     cancelBody(response);
@@ -283,11 +295,13 @@ async function readBoundedBody(
   return { ok: true, body };
 }
 
-function requireGatewayErrorHttpShape(response: Response): void {
+function requireGatewayErrorHttpShape(
+  response: Response,
+  status: number,
+): void {
   try {
     if (
-      response.status < 400 ||
-      response.status > 599 ||
+      status < 400 ||
       response.headers.get('content-type') !== 'application/json; charset=utf-8'
     ) {
       cancelBody(response);
@@ -302,10 +316,11 @@ function requireGatewayErrorHttpShape(response: Response): void {
 
 async function gatewayError(
   response: Response,
+  status: number,
   signal: AbortSignal | undefined,
   expectedRequestId?: RequestId,
 ): Promise<never> {
-  requireGatewayErrorHttpShape(response);
+  requireGatewayErrorHttpShape(response, status);
   const result = await readBoundedBody(
     response,
     LLM_PROXY_LIMITS.errorBodyBytes,
@@ -364,17 +379,38 @@ function exactDispatch(
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value))
       boundaryFailure();
-    const keys = Object.keys(value as object).sort();
+    const keys = Reflect.ownKeys(value).sort();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
     if (
       keys.length !== 4 ||
       keys[0] !== 'model' ||
       keys[1] !== 'payload' ||
       keys[2] !== 'route' ||
-      keys[3] !== 'transport' ||
-      !(value.payload instanceof Uint8Array)
+      keys[3] !== 'transport'
     )
       boundaryFailure();
-    return value;
+    const model = descriptors.model;
+    const payload = descriptors.payload;
+    const route = descriptors.route;
+    const transport = descriptors.transport;
+    if (
+      model === undefined ||
+      !('value' in model) ||
+      payload === undefined ||
+      !('value' in payload) ||
+      route === undefined ||
+      !('value' in route) ||
+      transport === undefined ||
+      !('value' in transport) ||
+      !(payload.value instanceof Uint8Array)
+    )
+      boundaryFailure();
+    return Object.freeze({
+      model: model.value as LlmProxyCatalogModel,
+      payload: Uint8Array.from(payload.value),
+      route: route.value as LlmProxyRoute,
+      transport: transport.value as LlmProxyTransportMetadata,
+    });
   } catch (error) {
     if (error instanceof GatewayLlmClientBoundaryError) throw error;
     boundaryFailure();
@@ -429,8 +465,8 @@ export class GatewayLlmClient {
       cancelBody(response);
       throw abortReason(signal);
     }
-    validateHttpResponse(response, target);
-    if (response.status !== 200) return gatewayError(response, signal);
+    const status = validateHttpResponse(response, target);
+    if (status !== 200) return gatewayError(response, status, signal);
     try {
       if (
         response.headers.get(LLM_PROXY_HEADERS.provenance) !== null ||
@@ -467,7 +503,7 @@ export class GatewayLlmClient {
     const exact = exactDispatch(input);
     const model = normalizedModel(exact.model);
     if (!model.allowedRoutes.includes(exact.route)) boundaryFailure();
-    const payload = Uint8Array.from(exact.payload);
+    const payload = exact.payload;
     const rid = requestId(this.#randomBytes);
     let body: string;
     try {
@@ -511,7 +547,7 @@ export class GatewayLlmClient {
       cancelBody(response);
       throw abortReason(signal);
     }
-    validateHttpResponse(response, target);
+    const status = validateHttpResponse(response, target);
 
     let encodedProvenance: string | null;
     try {
@@ -520,7 +556,8 @@ export class GatewayLlmClient {
       cancelBody(response);
       boundaryFailure();
     }
-    if (encodedProvenance === null) return gatewayError(response, signal, rid);
+    if (encodedProvenance === null)
+      return gatewayError(response, status, signal, rid);
 
     let provenance: ReturnType<typeof decodeLlmResponseProvenance>;
     try {
@@ -534,7 +571,7 @@ export class GatewayLlmClient {
       provenance.modelRef !== model.modelRef ||
       provenance.targetGeneration !== model.targetGeneration ||
       provenance.route !== exact.route ||
-      provenance.status !== response.status
+      provenance.status !== status
     ) {
       cancelBody(response);
       boundaryFailure();

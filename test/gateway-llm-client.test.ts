@@ -165,6 +165,30 @@ describe('GatewayLlmClient catalog boundary', () => {
     assert.equal(calls, 0);
   });
 
+  it('normalizes snapshot-read failures before network access', async () => {
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let calls = 0;
+    const boundary = client(
+      async () => {
+        calls += 1;
+        throw new Error('must not run');
+      },
+      {
+        read: () => {
+          throw new Error(secret);
+        },
+        activeNodeToken: () => firstCredential.token,
+      },
+    );
+    await assert.rejects(boundary.fetchCatalog(), (error: unknown) => {
+      assert.ok(error instanceof GatewayResidentStateError);
+      assert.equal(error.code, 'corrupt_state');
+      assert.equal(error.message.includes(secret), false);
+      return true;
+    });
+    assert.equal(calls, 0);
+  });
+
   it('reads the active token separately for each call', async () => {
     let current = firstCredential.token;
     let reads = 0;
@@ -244,6 +268,62 @@ describe('GatewayLlmClient request boundary', () => {
       decoded.sha256,
       'f1db3b02bccd7736a4f7506cde53188285e00cc4d1c2b5a40b6aa63177b75f1f',
     );
+  });
+
+  it('owns one route snapshot and rejects accessor-backed dispatch input', async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const mutable = {
+      ...dispatchInput(),
+      route: 'responses' as 'responses' | 'messages',
+    };
+    const boundary = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      await waiting;
+      return new Response('ok', {
+        status: 200,
+        headers: {
+          [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+            format: LLM_PROXY_FORMATS.responseProvenance,
+            requestId: request.requestId,
+            modelRef: request.modelRef,
+            targetGeneration: request.targetGeneration,
+            route: request.route,
+            status: 200,
+            headers: [],
+          }),
+        },
+      });
+    });
+    const attempt = boundary.dispatch(mutable);
+    mutable.route = 'messages';
+    release();
+    assert.equal((await attempt).status, 200);
+
+    let calls = 0;
+    let routeReads = 0;
+    const accessorInput = {
+      model,
+      payload: Buffer.from('{}'),
+      transport: { kind: 'none' as const },
+      get route() {
+        routeReads += 1;
+        return routeReads === 1
+          ? ('responses' as const)
+          : ('messages' as const);
+      },
+    };
+    await assert.rejects(
+      client(async () => {
+        calls += 1;
+        throw new Error('must not run');
+      }).dispatch(accessorInput),
+      GatewayLlmClientBoundaryError,
+    );
+    assert.equal(calls, 0);
+    assert.equal(routeReads, 0);
   });
 
   it('returns the original raw body stream with only provenance-safe status and headers', async () => {
@@ -331,6 +411,81 @@ describe('GatewayLlmClient request boundary', () => {
       await Promise.resolve();
       assert.equal(cancelled, 1, kind);
     }
+  });
+
+  it('rejects malformed response status without leaking or accepting an error envelope', async () => {
+    const secret = firstCredential.token + '@' + ENDPOINT;
+    let throwingCancelled = 0;
+    const throwing = client(async (_target, init) => {
+      const request = decodeLlmProxyRequest(init.body as string);
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          throwingCancelled += 1;
+        },
+      });
+      const headers = new Headers({
+        [LLM_PROXY_HEADERS.provenance]: encodeLlmResponseProvenance({
+          format: LLM_PROXY_FORMATS.responseProvenance,
+          requestId: request.requestId,
+          modelRef: request.modelRef,
+          targetGeneration: request.targetGeneration,
+          route: request.route,
+          status: 200,
+          headers: [],
+        }),
+      });
+      return {
+        redirected: false,
+        type: 'basic',
+        url: '',
+        headers,
+        body,
+        get status() {
+          throw new Error(secret);
+        },
+      } as unknown as Response;
+    });
+    await assert.rejects(
+      throwing.dispatch(dispatchInput()),
+      (error: unknown) => {
+        assert.ok(error instanceof GatewayLlmClientBoundaryError);
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      },
+    );
+    await Promise.resolve();
+    assert.equal(throwingCancelled, 1);
+
+    let nanCancelled = 0;
+    const nanStatus = client(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            Buffer.from(proxyError('internal_error', REQUEST_ID)),
+          );
+          controller.close();
+        },
+        cancel() {
+          nanCancelled += 1;
+        },
+      });
+      return {
+        redirected: false,
+        type: 'basic',
+        url: '',
+        status: Number.NaN,
+        headers: new Headers({
+          'content-type': 'application/json; charset=utf-8',
+        }),
+        body,
+      } as unknown as Response;
+    });
+    await assert.rejects(
+      nanStatus.dispatch(dispatchInput()),
+      GatewayLlmClientBoundaryError,
+    );
+    await Promise.resolve();
+    assert.equal(nanCancelled, 1);
   });
 
   it('strictly exposes canonical Gateway errors and rejects oversized errors', async () => {
