@@ -266,9 +266,10 @@ function normalizedLlmExchange(value: unknown): GatewayLlmProxyExchange {
     !('value' in headers) ||
     !('value' in body) ||
     !Number.isSafeInteger(status.value) ||
-    status.value < 100 ||
+    status.value < 200 ||
     status.value > 599 ||
-    (body.value !== null && !(body.value instanceof ReadableStream))
+    (body.value !== null && !(body.value instanceof ReadableStream)) ||
+    (body.value !== null && [204, 205, 304].includes(status.value as number))
   )
     throw new GatewayLlmHttpError(500, 'internal_error');
   return {
@@ -335,7 +336,13 @@ export function raceLlmAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
+  if (signal.aborted) {
+    promise.then(
+      () => undefined,
+      () => undefined,
+    );
+    return Promise.reject(signal.reason);
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (operation: () => void): void => {

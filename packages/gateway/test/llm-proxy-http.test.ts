@@ -31,6 +31,11 @@ import {
   type GatewayLlmProxyApi,
   type GatewayLlmProxyRateLimiter,
 } from '../src/index.js';
+import {
+  GatewayLlmAbort,
+  raceLlmAbort,
+  streamLlmExchange,
+} from '../src/llm-proxy-http.js';
 
 type Reply = {
   status: number;
@@ -412,6 +417,24 @@ test('LLM HTTP routes reject aliases and authenticate before catalog or body wor
   assert.equal(accepted.body.toString(), serializeLlmProxyCatalog(f.catalog));
   assert.deepEqual(decodeLlmProxyCatalog(accepted.body), f.catalog);
   assert.deepEqual(f.calls, ['authenticate', 'catalog']);
+});
+
+test('pre-aborted LLM races still observe the supplied operation', async () => {
+  const controller = new AbortController();
+  const reason = new GatewayLlmAbort('shutdown');
+  controller.abort(reason);
+  let rejectionObservers = 0;
+  const operation = {
+    then(_fulfilled: unknown, rejected: unknown) {
+      if (typeof rejected === 'function') rejectionObservers += 1;
+      return Promise.resolve();
+    },
+  } as unknown as Promise<never>;
+  await assert.rejects(
+    raceLlmAbort(operation, controller.signal),
+    (error: unknown) => error === reason,
+  );
+  assert.equal(rejectionObservers, 1);
 });
 
 test('default LLM limiter is bounded and cannot evict a live peer bucket', () => {
@@ -977,6 +1000,84 @@ test('LLM HTTP service stop aborts dispatch and returns canonical cancellation',
   });
   assert.equal(aborts, 1);
   assert.deepEqual(f.calls, ['authenticate', 'catalog']);
+});
+
+test('LLM HTTP rejects informational finals and bodies on body-forbidden statuses', async () => {
+  const makeResponse = () => {
+    let ended = false;
+    const response = {
+      destroyed: false,
+      headersSent: false,
+      statusCode: 200,
+      setHeader() {},
+      write() {
+        return true;
+      },
+      end() {
+        ended = true;
+      },
+    } as unknown as http.ServerResponse;
+    return { response, ended: () => ended };
+  };
+  const request = {
+    format: LLM_PROXY_FORMATS.request,
+    requestId: 'egr1.DDDDDDDDDDDDDDDDDDDDDD',
+    modelRef: 'resident/gpt-5.4',
+    targetGeneration: newLlmTargetGeneration((size) =>
+      Buffer.alloc(size, 0x43),
+    ),
+    route: 'responses',
+    transport: { kind: 'none' },
+    byteLength: 2,
+    sha256: createHash('sha256').update('{}').digest('hex'),
+    payload: Buffer.from('{}'),
+  } as const satisfies LlmProxyRequest;
+
+  for (const status of [100, 199]) {
+    const target = makeResponse();
+    await assert.rejects(
+      streamLlmExchange(
+        target.response,
+        { status, headers: [], body: null },
+        request,
+        new AbortController(),
+        0,
+      ),
+    );
+    assert.equal(target.ended(), false);
+  }
+  for (const status of [204, 205, 304]) {
+    const target = makeResponse();
+    await assert.rejects(
+      streamLlmExchange(
+        target.response,
+        {
+          status,
+          headers: [],
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(Buffer.from('forbidden'));
+              controller.close();
+            },
+          }),
+        },
+        request,
+        new AbortController(),
+        0,
+      ),
+    );
+    assert.equal(target.ended(), false);
+  }
+  const valid = makeResponse();
+  await streamLlmExchange(
+    valid.response,
+    { status: 204, headers: [], body: null },
+    request,
+    new AbortController(),
+    0,
+  );
+  assert.equal(valid.response.statusCode, 204);
+  assert.equal(valid.ended(), true);
 });
 
 test('LLM HTTP rejects accessor and oversized response metadata without executing it', async (t) => {
