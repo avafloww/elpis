@@ -219,7 +219,7 @@ test('migration history is an exact immutable prefix', () => {
     () =>
       runGatewayMigrations(database, [
         { name: '001-initial', sql: `${GATEWAY_MIGRATIONS[0].sql}\nSELECT 1;` },
-        GATEWAY_MIGRATIONS[1],
+        ...GATEWAY_MIGRATIONS.slice(1),
       ]),
     /checksum drift/,
   );
@@ -227,30 +227,31 @@ test('migration history is an exact immutable prefix', () => {
     () =>
       runGatewayMigrations(database, [
         { name: '000-before', sql: 'SELECT 1;' },
-        GATEWAY_MIGRATIONS[0],
+        ...GATEWAY_MIGRATIONS,
       ]),
     /not an exact prefix/,
   );
   database.close();
 });
 
-test('a v1 database advances by exact prefix without rewriting migration 001', () => {
+test('a v2 database advances by exact prefix without rewriting earlier migrations', () => {
   const database = new DatabaseSync(':memory:');
   assert.deepEqual(
-    runGatewayMigrations(database, [GATEWAY_MIGRATIONS[0]], () => 10).applied,
-    ['001-initial'],
+    runGatewayMigrations(database, GATEWAY_MIGRATIONS.slice(0, 2), () => 10)
+      .applied,
+    ['001-initial', '002-credentials'],
   );
   assert.deepEqual(
     runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 20),
     {
-      existing: ['001-initial'],
-      applied: ['002-credentials'],
+      existing: ['001-initial', '002-credentials'],
+      applied: ['003-provider-store'],
     },
   );
   assert.equal(
     (database.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    2,
+    3,
   );
   database.close();
 });
@@ -346,4 +347,439 @@ test('public URL and bounded audit inputs fail closed', (t) => {
   );
   assert.throws(() => store.audit(0));
   store.close();
+});
+
+test('provider schema keeps credentials and targets immutable while OAuth refresh stays catalog-invisible', () => {
+  const database = new DatabaseSync(':memory:', {
+    enableForeignKeyConstraints: true,
+  });
+  runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 10);
+  const apiCredentialId = `epc1.${'A'.repeat(22)}`;
+  const oauthCredentialId = `epc1.${'B'.repeat(22)}`;
+  const insertCredential = database.prepare(
+    `INSERT INTO gateway_provider_credentials (
+      id, provider_id, provider_type, account_ref, account_identity_json,
+      auth_kind, api_key, oauth_access, oauth_refresh, oauth_expires,
+      oauth_secret_revision, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertCredential.run(
+    apiCredentialId,
+    'provider',
+    'openai-compatible',
+    'default',
+    '{}',
+    'api-key',
+    Buffer.from('synthetic-api-key'),
+    null,
+    null,
+    null,
+    0,
+    10,
+    10,
+  );
+  insertCredential.run(
+    oauthCredentialId,
+    'codex',
+    'codex-oauth',
+    'account',
+    '{"accountId":"synthetic-account"}',
+    'oauth',
+    null,
+    Buffer.from('synthetic-access-1'),
+    Buffer.from('synthetic-refresh-1'),
+    100,
+    0,
+    10,
+    10,
+  );
+  assert.throws(
+    () =>
+      insertCredential.run(
+        `epc1.${'E'.repeat(22)}`,
+        'codex',
+        'codex-oauth',
+        'duplicate-identity',
+        '{"accountId":"one","accountId":"two"}',
+        'oauth',
+        null,
+        Buffer.from('synthetic-access'),
+        Buffer.from('synthetic-refresh'),
+        100,
+        0,
+        10,
+        10,
+      ),
+    /identity/,
+  );
+  assert.throws(
+    () =>
+      insertCredential.run(
+        `epc1.${'F'.repeat(22)}`,
+        'codex',
+        'codex-oauth',
+        'fractional-state',
+        '{}',
+        'oauth',
+        null,
+        Buffer.from('synthetic-access'),
+        Buffer.from('synthetic-refresh'),
+        1.5,
+        0.5,
+        10,
+        10,
+      ),
+    /constraint|integer/i,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          "UPDATE gateway_provider_catalog SET revision = revision + 1, updated_at = 'poison'",
+        )
+        .run(),
+    /revision/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          'UPDATE gateway_provider_credentials SET api_key = ? WHERE id = ?',
+        )
+        .run(Buffer.from('replacement'), apiCredentialId),
+    /immutable/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          'INSERT OR REPLACE INTO gateway_provider_credentials SELECT * FROM gateway_provider_credentials WHERE id = ?',
+        )
+        .run(apiCredentialId),
+    /already exists/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          'UPDATE gateway_provider_credentials SET account_identity_json = ?, oauth_secret_revision = 1 WHERE id = ?',
+        )
+        .run('{"accountId":"other"}', oauthCredentialId),
+    /immutable/,
+  );
+  database
+    .prepare(
+      `UPDATE gateway_provider_credentials
+       SET oauth_access = ?, oauth_refresh = ?, oauth_expires = ?,
+           oauth_secret_revision = oauth_secret_revision + 1, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      Buffer.from('synthetic-access-2'),
+      Buffer.from('synthetic-refresh-2'),
+      200,
+      20,
+      oauthCredentialId,
+    );
+  assert.equal(
+    (
+      database
+        .prepare(
+          'SELECT oauth_secret_revision AS revision FROM gateway_provider_credentials WHERE id = ?',
+        )
+        .get(oauthCredentialId) as { revision: number }
+    ).revision,
+    1,
+  );
+  assert.equal(
+    (
+      database
+        .prepare(
+          'SELECT revision FROM gateway_provider_catalog WHERE singleton_id = 1',
+        )
+        .get() as { revision: number }
+    ).revision,
+    0,
+  );
+
+  const generation = `egt1.${'A'.repeat(22)}`;
+  const inserted = database
+    .prepare(
+      `INSERT INTO gateway_provider_targets (
+        target_generation, model_ref, provider_id, provider_type,
+        credential_id, account_ref, account_identity_json, base_url,
+        upstream_model, allowed_routes_json, wire_grammar_json, context_size,
+        reasoning_effort, reasoning_summary, reasoning_context, tool_tier,
+        external_thinking, tool_contract_version, call_timeout_ms,
+        stream_idle_timeout_ms, snapshot_sha256, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      generation,
+      'provider/model',
+      'provider',
+      'openai-compatible',
+      apiCredentialId,
+      'default',
+      '{}',
+      'https://provider.example/v1',
+      'model-v1',
+      '["responses"]',
+      '{"responses":"responses-v1"}',
+      1000,
+      null,
+      null,
+      null,
+      'strong',
+      0,
+      'v1',
+      1000,
+      1000,
+      Buffer.alloc(32, 1),
+      30,
+    );
+  const targetSeq = Number(inserted.lastInsertRowid);
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          'UPDATE gateway_provider_targets SET upstream_model = ? WHERE target_seq = ?',
+        )
+        .run('changed', targetSeq),
+    /immutable/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare('DELETE FROM gateway_provider_targets WHERE target_seq = ?')
+        .run(targetSeq),
+    /retained/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          'INSERT OR REPLACE INTO gateway_provider_targets SELECT * FROM gateway_provider_targets WHERE target_seq = ?',
+        )
+        .run(targetSeq),
+    /already exists/,
+  );
+  assert.throws(
+    () =>
+      database.exec(
+        `INSERT OR REPLACE INTO gateway_provider_catalog
+         (singleton_id, revision, updated_at)
+         SELECT singleton_id, revision, updated_at FROM gateway_provider_catalog`,
+      ),
+    /already exists/,
+  );
+  database.close();
+});
+
+test('provider heads and grants advance monotonically and never carry authority forward', () => {
+  const database = new DatabaseSync(':memory:', {
+    enableForeignKeyConstraints: true,
+  });
+  runGatewayMigrations(database, GATEWAY_MIGRATIONS, () => 10);
+  database
+    .prepare(
+      'INSERT INTO gateway_instances (id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)',
+    )
+    .run('instance-a', 'Aster', 10, 10);
+  const credentialId = `epc1.${'C'.repeat(22)}`;
+  database
+    .prepare(
+      `INSERT INTO gateway_provider_credentials (
+        id, provider_id, provider_type, account_ref, account_identity_json,
+        auth_kind, api_key, oauth_access, oauth_refresh, oauth_expires,
+        oauth_secret_revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      credentialId,
+      'provider',
+      'openai-compatible',
+      'default',
+      '{}',
+      'api-key',
+      Buffer.from('synthetic-api-key'),
+      null,
+      null,
+      null,
+      0,
+      10,
+      10,
+    );
+  const insertTarget = database.prepare(
+    `INSERT INTO gateway_provider_targets (
+      target_generation, model_ref, provider_id, provider_type,
+      credential_id, account_ref, account_identity_json, base_url,
+      upstream_model, allowed_routes_json, wire_grammar_json, context_size,
+      reasoning_effort, reasoning_summary, reasoning_context, tool_tier,
+      external_thinking, tool_contract_version, call_timeout_ms,
+      stream_idle_timeout_ms, snapshot_sha256, created_at
+    ) VALUES (?, 'provider/model', 'provider', 'openai-compatible', ?,
+      'default', '{}', 'https://provider.example/v1', ?, '["responses"]',
+      '{"responses":"responses-v1"}', 1000, NULL, NULL, NULL, 'strong', 0,
+      'v1', 1000, 1000, ?, ?)`,
+  );
+  const generation1 = `egt1.${'C'.repeat(22)}`;
+  const generation2 = `egt1.${'D'.repeat(22)}`;
+  const target1 = Number(
+    insertTarget.run(
+      generation1,
+      credentialId,
+      'model-v1',
+      Buffer.alloc(32, 1),
+      20,
+    ).lastInsertRowid,
+  );
+  const target2 = Number(
+    insertTarget.run(
+      generation2,
+      credentialId,
+      'model-v2',
+      Buffer.alloc(32, 2),
+      30,
+    ).lastInsertRowid,
+  );
+  database
+    .prepare(
+      `INSERT INTO gateway_provider_model_heads (
+        model_ref, target_seq, target_generation, enabled, created_at, updated_at
+      ) VALUES ('provider/model', ?, ?, 1, 20, 20)`,
+    )
+    .run(target1, generation1);
+  database
+    .prepare(
+      `INSERT INTO gateway_instance_model_grants (
+        instance_id, model_ref, target_seq, target_generation, authorized_at
+      ) VALUES ('instance-a', 'provider/model', ?, ?, 20)`,
+    )
+    .run(target1, generation1);
+  assert.equal(
+    (
+      database
+        .prepare(
+          'SELECT revision FROM gateway_provider_catalog WHERE singleton_id = 1',
+        )
+        .get() as { revision: number }
+    ).revision,
+    2,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT INTO gateway_instance_model_grants (
+            instance_id, model_ref, target_seq, target_generation, authorized_at
+          ) VALUES ('instance-a', 'provider/model', ?, ?, 20)`,
+        )
+        .run(target2, generation2),
+    /active head|UNIQUE/,
+  );
+  database
+    .prepare(
+      `UPDATE gateway_provider_model_heads
+       SET target_seq = ?, target_generation = ?, updated_at = 30
+       WHERE model_ref = 'provider/model'`,
+    )
+    .run(target2, generation2);
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM gateway_instance_model_grants WHERE model_ref = 'provider/model'",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT OR REPLACE INTO gateway_provider_model_heads (
+            model_ref, target_seq, target_generation, enabled, created_at, updated_at
+          ) VALUES ('provider/model', ?, ?, 1, 20, 31)`,
+        )
+        .run(target1, generation1),
+    /already exists/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `UPDATE gateway_provider_model_heads
+           SET target_seq = ?, target_generation = ?, updated_at = 40
+           WHERE model_ref = 'provider/model'`,
+        )
+        .run(target1, generation1),
+    /advance/,
+  );
+  database
+    .prepare(
+      `INSERT INTO gateway_instance_model_grants (
+        instance_id, model_ref, target_seq, target_generation, authorized_at
+      ) VALUES ('instance-a', 'provider/model', ?, ?, 35)`,
+    )
+    .run(target2, generation2);
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT OR REPLACE INTO gateway_instance_model_grants (
+            instance_id, model_ref, target_seq, target_generation, authorized_at
+          ) VALUES ('instance-a', 'provider/model', ?, ?, 36)`,
+        )
+        .run(target2, generation2),
+    /already exists/,
+  );
+  database
+    .prepare('UPDATE gateway_instances SET revoked_at = 40 WHERE id = ?')
+    .run('instance-a');
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM gateway_instance_model_grants WHERE instance_id = 'instance-a'",
+        )
+        .get() as { count: number }
+    ).count,
+    0,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare('UPDATE gateway_instances SET revoked_at = NULL WHERE id = ?')
+        .run('instance-a'),
+    /revocation/,
+  );
+  database
+    .prepare(
+      "UPDATE gateway_provider_model_heads SET enabled = 0, updated_at = 40 WHERE model_ref = 'provider/model'",
+    )
+    .run();
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          "UPDATE gateway_provider_model_heads SET enabled = 1, updated_at = 50 WHERE model_ref = 'provider/model'",
+        )
+        .run(),
+    /newer target/,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT INTO gateway_instance_model_grants (
+            instance_id, model_ref, target_seq, target_generation, authorized_at
+          ) VALUES ('instance-a', 'provider/model', ?, ?, 50)`,
+        )
+        .run(target2, generation2),
+    /active head|revoked/,
+  );
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  database.close();
 });
