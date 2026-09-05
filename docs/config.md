@@ -27,7 +27,7 @@ The example file is the exhaustive annotated reference. This document explains t
 
 OpenAI-compatible generation requests are pinned to the configured credential-free HTTP(S) `base_url` and exactly its `/responses` and `/chat/completions` routes. Elpis refuses redirects and injects `api_key` only after the final request route has been validated.
 
-The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor`, `secretary`, and `compaction` are optional. Configured optional roles resolve through the same provider-local model registry. A configured `secretary` remains unused until the Kubernetes-only secretary runtime is enabled. A configured `compaction` supplies the model used for background conversation summaries; its context window and per-model token density are resolved during early boot for summary-input admission. Omitting `compaction` performs no additional context lookup or client construction and preserves the main-model compaction behavior. Omitting either optional role leaves its registry reference and target as `null`.
+The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor`, `secretary`, and `compaction` are optional. Configured optional roles resolve through the same provider-local model registry. A configured `secretary` remains unused until the Kubernetes-only secretary runtime is enabled. A configured `compaction` supplies the model used for background conversation summaries; its context window and per-model token density are resolved during early boot for summary-input admission. Omitting `compaction` performs no additional context lookup or client construction and preserves the main-model compaction behavior. An omitted optional role has a `null` registry reference and target.
 
 A canonical model may set `tool_tier: weak`, `medium`, or `strong` to opt into the resident's bounded `elpis.llm` one-shot query surface. Each tier may be assigned to at most one model across the whole registry; duplicates fail configuration loading. Omitted or `null` means unavailable. The legacy flat LLM form exposes no query models.
 
@@ -60,9 +60,11 @@ llm:
   roles:
     main: primary/main
     classifier: primary/classifier
-    compaction: primary/classifier # optional
+    compaction: primary/main # optional; needs room for the full fold
   completion_reserve_tokens: 8192
 ```
+
+Choose a compaction model with room for the entire assembled fold, including the previous summary, instructions, framing, and output reserve. A small-context classifier is not automatically a suitable compaction model even if it is cheaper.
 
 `tool_tier` changes only query exposure. Role selection remains independent, so a role model is not queryable unless explicitly opted in and a query-only model need not hold a runtime role.
 

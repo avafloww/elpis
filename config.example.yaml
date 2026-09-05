@@ -84,7 +84,7 @@ llm:
   # roles:
   #   main: primary/main
   #   classifier: primary/classifier
-  #   compaction: primary/classifier # optional
+  #   compaction: primary/main # optional; needs room for the full fold
   # completion_reserve_tokens: 8192
   #
   # --- anthropic-oauth (Claude Pro/Max subscription) ---
