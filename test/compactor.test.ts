@@ -369,7 +369,7 @@ test('compactor: skip-guard — a trivial fold (single message tail) does not su
   const llm = fakeLLM();
   const c = createCompactor(llm, tracker, { keepTokens: 1 });
   const msgs = [big('only')];
-  c.start(msgs);
+  assert.deepEqual(c.start(msgs), { status: 'skipped' });
   assert.equal(c.running, false, 'nothing worth summarizing');
   assert.equal(llm.calls, 0);
   assert.equal(c.boundaryIndex, 0);
@@ -542,7 +542,8 @@ test('compactor: summary budget counts instructions, reminder, framing, and outp
       estimateTokens: (text) => text.length,
     },
   });
-  rejected.start(msgs);
+  const rejection = rejected.start(msgs);
+  assert.equal(rejection.status, 'rejected');
   assert.equal(
     rejectedLLM.calls,
     0,

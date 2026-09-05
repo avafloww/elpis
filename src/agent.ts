@@ -2759,6 +2759,26 @@ export class Agent {
     }
   }
 
+  /** Record exactly one failed real fold and latch automatic retry. */
+  private recordCompactionCycleFailure(reason: string): void {
+    this.compactionCycleInFlight = false;
+    this.failedCompactionCycles++;
+    const retryDelayMs = compactionRetryBackoffMs(this.failedCompactionCycles);
+    this.compactionRetryNotBefore = Date.now() + retryDelayMs;
+    this.logger.warn(
+      `compaction cycle failed | cycles=${this.failedCompactionCycles} | retry_in_ms=${retryDelayMs} | ${reason}`,
+    );
+    if (shouldAlertOnCompactionFailure(this.failedCompactionCycles)) {
+      void this.sendError(
+        compactionFailureAlert(
+          this.failedCompactionCycles,
+          reason,
+          retryDelayMs,
+        ),
+      );
+    }
+  }
+
   /** Loop-top compaction checkpoint. `idle` = called outside the loop (from
    * compactNow when the loop is parked) — applyCompaction still runs at a safe
    * moment because the history ends on a completed pair when idle. */
@@ -2797,32 +2817,12 @@ export class Agent {
         /* observer only */
       }
     } else if (this.compactionCycleInFlight && !this.compactor.running) {
-      // The started cycle ended with NO accepted summary (API failures or
-      // quality-gate rejections exhausted its retries). A time latch below
-      // keeps intervening turns from immediately re-folding the same input for
-      // ~3 more fold-sized calls; count it and alert the operator on its own
-      // cadence (, ;.
-      // Un-awaited like the loop-spin alerts; the model-facing escalation
-      // nudge below stays deliberately one-shot.
-      this.compactionCycleInFlight = false;
-      this.failedCompactionCycles++;
-      const reason = this.compactor.lastError ?? 'no summary returned';
-      const retryDelayMs = compactionRetryBackoffMs(
-        this.failedCompactionCycles,
+      // The admitted cycle ended with NO accepted summary (API failures or
+      // quality-gate rejections exhausted its retries). The explicit in-flight
+      // latch ensures an old lastError can never recount a prior cycle.
+      this.recordCompactionCycleFailure(
+        this.compactor.lastError ?? 'no summary returned',
       );
-      this.compactionRetryNotBefore = Date.now() + retryDelayMs;
-      this.logger.warn(
-        `compaction cycle failed | cycles=${this.failedCompactionCycles} | retry_in_ms=${retryDelayMs} | ${reason}`,
-      );
-      if (shouldAlertOnCompactionFailure(this.failedCompactionCycles)) {
-        void this.sendError(
-          compactionFailureAlert(
-            this.failedCompactionCycles,
-            reason,
-            retryDelayMs,
-          ),
-        );
-      }
     }
     const tokens = this.tracker.currentTokens;
     const overTrigger = tokens >= this.effectiveTrigger;
@@ -2839,11 +2839,20 @@ export class Agent {
       this.logger.info(
         `compaction start | tokens=${tokens} | trigger=${this.effectiveTrigger}${this.compactRequested ? ' | manual' : ''}`,
       );
-      this.compactor.start(this.messages);
-      // start may decline via its skip-guard (trivial fold) — only a cycle
-      // that actually engaged counts for the failed-cycle detection above.
-      this.compactionCycleInFlight = this.compactor.running;
+      const startResult = this.compactor.start(this.messages);
       this.compactRequested = false;
+      if (startResult.status === 'started') {
+        this.compactionCycleInFlight = true;
+      } else if (startResult.status === 'rejected') {
+        // Admission runs synchronously before a provider call. Count this real
+        // fold now: there may be no later checkpoint for an idle /compact, and
+        // running never becomes true for the async completion branch above.
+        this.recordCompactionCycleFailure(startResult.error);
+      } else {
+        // A trivial skip is not a failed cycle. The busy status is defensive
+        // because the checkpoint only enters this block while running is false.
+        this.compactionCycleInFlight = false;
+      }
       try {
         this.deps.console?.compactionStarted(tokens);
       } catch {

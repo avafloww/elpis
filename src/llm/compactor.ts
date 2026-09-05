@@ -74,11 +74,19 @@ export interface CompactorOpts {
 export const SUMMARY_FLOOR_CAP = 2000;
 export const SUMMARY_FLOOR_PER_MESSAGE = 10;
 
+export type CompactionStartResult =
+  | { status: 'started' }
+  | { status: 'busy' }
+  | { status: 'skipped' }
+  | { status: 'rejected'; error: string };
+
 export interface Compactor {
   readonly running: boolean;
   readonly boundaryIndex: number;
-  /** Kick off a background summary (returns immediately, does not block). */
-  start(messages: ChatMessage[]): void;
+  /** Kick off a background summary (returns immediately, does not block).
+   * The result distinguishes a real admitted fold from a trivial skip and a
+   * synchronous admission rejection. */
+  start(messages: ChatMessage[]): CompactionStartResult;
   /** True once the background summary has landed and is ready to apply. */
   hasCompletedResult(): boolean;
   /** Promise that resolves when the in-flight summary finishes (or immediately if none). */
@@ -292,8 +300,8 @@ export function createCompactor(
     get lastError() {
       return summarizer.lastError;
     },
-    start(messages: ChatMessage[]): void {
-      if (summarizer.running) return;
+    start(messages: ChatMessage[]): CompactionStartResult {
+      if (summarizer.running) return { status: 'busy' };
       const walked = walkKeepBoundary(messages, keepTokens, ratioFn());
       boundaryIndex = enforcePairIntegrity(messages, walked);
       // Prior-summary carry (#4): if the head is a previous summary, exclude it
@@ -316,7 +324,7 @@ export function createCompactor(
       // whole tail, or only the prior summary would be folded).
       if (foldSlice.length === 0) {
         boundaryIndex = 0;
-        return;
+        return { status: 'skipped' };
       }
       resultSummary = null;
       startedLength = messages.length;
@@ -340,7 +348,7 @@ export function createCompactor(
         SUMMARY_FLOOR_CAP,
         SUMMARY_FLOOR_PER_MESSAGE * foldSlice.length,
       );
-      summarizer.start(input, { minChars });
+      return summarizer.start(input, { minChars });
     },
     hasCompletedResult(): boolean {
       return !summarizer.running && resultSummary !== null;

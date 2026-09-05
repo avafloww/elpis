@@ -284,6 +284,183 @@ test('compaction checkpoint: a cycle ending with no accepted summary alerts the 
   agent.stop();
 });
 
+test('compaction checkpoint: synchronous admission rejection alerts once and backs off automatic retry', async () => {
+  const base = makeConfig();
+  const logs: string[] = [];
+  let summarizeCalls = 0;
+  const { agent, sent, tracker, compactor, cleanup } = buildTestAgent({
+    llm: stubLLM(() => {
+      summarizeCalls++;
+      return Promise.resolve(SUMMARY_OK);
+    }),
+    config: {
+      discord: { ...base.discord, errorChannelId: 'err-ch' },
+      compaction: { triggerTokens: 500, keepTokens: 20000 },
+      llm: { ...base.llm, completionReserveTokens: 100 },
+      heartbeat: {
+        intervalMs: 0,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        reflectionMinMessages: 3,
+        socialNudgeMs: 12 * 60 * 60 * 1000,
+      },
+    },
+    tracker: createContextTracker(100000, 100),
+    compactorOpts: {
+      keepTokens: 100,
+      log: (line) => logs.push(line),
+      summaryInputBudget: {
+        contextWindowTokens: 200,
+        outputReserveTokens: 100,
+        framingTokens: 0,
+        estimateTokens: (text) => text.length,
+      },
+    },
+    tmpPrefix: 'harness-admission-auto-',
+  });
+  let idleResolve: (() => void) | null = null;
+  agent['deps'].onIdle = () => idleResolve?.();
+  void agent.loop();
+
+  const idle = new Promise<void>((resolve) => {
+    idleResolve = resolve;
+  });
+  agent.enqueue({ ...bigUserMsg(), id: 'm1' });
+  agent.enqueue({ ...bigUserMsg(), id: 'm2' });
+  await idle;
+  await microtask();
+
+  assert.equal(summarizeCalls, 0, 'admission fails before provider attempts');
+  assert.equal(agent['failedCompactionCycles'], 1);
+  assert.ok(agent['compactionRetryNotBefore'] > Date.now());
+  assert.equal(
+    logs.filter((line) => line.startsWith('summarize admission rejected:'))
+      .length,
+    1,
+    'the real fold is validated only once at the first checkpoint',
+  );
+  assert.equal(
+    sent.filter(
+      (item) =>
+        item.channelId === 'err-ch' &&
+        /compaction has failed 1 full cycle/.test(item.text),
+    ).length,
+    1,
+    'the synchronous failure reaches the configured error observer',
+  );
+
+  // Another over-trigger turn lands during the retry latch. The stale
+  // compactor error must neither count the old cycle again nor revalidate it.
+  const idle2 = new Promise<void>((resolve) => {
+    idleResolve = resolve;
+  });
+  agent.enqueue({ ...bigUserMsg(), id: 'm3' });
+  await idle2;
+  await microtask();
+  assert.equal(agent['failedCompactionCycles'], 1);
+  assert.equal(summarizeCalls, 0);
+  assert.equal(
+    logs.filter((line) => line.startsWith('summarize admission rejected:'))
+      .length,
+    1,
+  );
+  assert.ok(
+    !agent.messagesForTest.some((message) =>
+      message.content.startsWith('=== Summary of earlier conversation'),
+    ),
+    'rejected admission leaves the original history live',
+  );
+
+  // Exercise a later trivial request while the rejection remains in lastError.
+  // Its explicit skipped outcome must not turn that stale error into cycle 2.
+  assert.ok(compactor.lastError);
+  agent['messages'] = [];
+  tracker.recompute([]);
+  agent.compactNow();
+  await microtask();
+  assert.equal(agent['failedCompactionCycles'], 1);
+  assert.equal(
+    sent.filter((item) => /compaction has failed/.test(item.text)).length,
+    1,
+    'a trivial fold neither fails nor recounts the stale admission error',
+  );
+  agent.stop();
+  cleanup();
+});
+
+test('idle manual compaction admission rejection is observed as one failed cycle', async () => {
+  const base = makeConfig();
+  const logs: string[] = [];
+  let summarizeCalls = 0;
+  const { agent, sent, cleanup } = buildTestAgent({
+    llm: stubLLM(() => {
+      summarizeCalls++;
+      return Promise.resolve(SUMMARY_OK);
+    }),
+    config: {
+      discord: { ...base.discord, errorChannelId: 'err-ch' },
+      compaction: { triggerTokens: 50000, keepTokens: 20000 },
+      llm: { ...base.llm, completionReserveTokens: 100 },
+      heartbeat: {
+        intervalMs: 0,
+        maxIntervalMs: 4 * 60 * 60 * 1000,
+        reflectionMinMessages: 3,
+        socialNudgeMs: 12 * 60 * 60 * 1000,
+      },
+    },
+    tracker: createContextTracker(100000, 100),
+    compactorOpts: {
+      keepTokens: 100,
+      log: (line) => logs.push(line),
+      summaryInputBudget: {
+        contextWindowTokens: 200,
+        outputReserveTokens: 100,
+        framingTokens: 0,
+        estimateTokens: (text) => text.length,
+      },
+    },
+    tmpPrefix: 'harness-admission-manual-',
+  });
+  let idleResolve: (() => void) | null = null;
+  agent['deps'].onIdle = () => idleResolve?.();
+  void agent.loop();
+  const idle = new Promise<void>((resolve) => {
+    idleResolve = resolve;
+  });
+  agent.enqueue({ ...bigUserMsg(), id: 'm1' });
+  agent.enqueue({ ...bigUserMsg(), id: 'm2' });
+  await idle;
+  const historyBefore = agent.messagesForTest.slice();
+
+  agent.compactNow();
+  await microtask();
+
+  assert.equal(summarizeCalls, 0, 'manual admission makes no provider attempt');
+  assert.equal(agent['failedCompactionCycles'], 1);
+  assert.ok(agent['compactionRetryNotBefore'] > Date.now());
+  assert.equal(agent['compactRequested'], false, 'manual request is consumed');
+  assert.deepEqual(
+    agent.messagesForTest,
+    historyBefore,
+    'idle rejection cannot replace or append to conversation history',
+  );
+  assert.equal(
+    logs.filter((line) => line.startsWith('summarize admission rejected:'))
+      .length,
+    1,
+  );
+  assert.ok(
+    sent.some(
+      (item) =>
+        item.channelId === 'err-ch' &&
+        /compaction has failed 1 full cycle/.test(item.text) &&
+        /estimated summary request exceeds/.test(item.text),
+    ),
+    'idle /compact reaches the actual configured error observer immediately',
+  );
+  agent.stop();
+  cleanup();
+});
+
 test('compaction checkpoint: past 2× trigger with no successful apply escalates', async () => {
   // summarize never resolves → compaction stays running, compactingSince stays set.
   const { agent } = buildTestAgent({

@@ -1004,9 +1004,9 @@ export function yieldNudgeAlert(count: number): string {
   );
 }
 
-/** Operator alert for a failed compaction cycle: every summarize attempt in
- * the cycle failed or was rejected by
- * the quality gate. Automatic retries are time-latched so intervening turns
+/** Operator alert for a failed compaction cycle: admission rejected the real
+ * fold, or every summarize attempt failed or was rejected by the quality gate.
+ * Automatic retries are time-latched so intervening turns
  * do not burn the same fold repeatedly, while the first failure stays loud.
  * Routed to discord.error_channel_id, never seen by the model. */
 export function compactionFailureAlert(
@@ -1016,10 +1016,9 @@ export function compactionFailureAlert(
 ): string {
   const retrySeconds = Math.ceil(retryDelayMs / 1000);
   return (
-    `[harness] compaction has failed ${cycles} full cycle${cycles === 1 ? '' : 's'} since ` +
-    'crossing the trigger — each cycle re-sends the ~full fold to the summarizer (3 attempts), ' +
-    `so automatic retry is paused for ${retrySeconds}s instead of restarting on every turn. ` +
-    'The context is still growing toward its window; this failure is not silent. ' +
+    `[harness] compaction has failed ${cycles} full cycle${cycles === 1 ? '' : 's'} — ` +
+    `automatic retry is paused for ${retrySeconds}s instead of restarting on every turn. ` +
+    'The original history remains live, but repeated failures can let context keep growing; ' +
     `Last error: ${reason}. Intervene if this does not clear.`
   );
 }

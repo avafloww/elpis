@@ -58,6 +58,11 @@ export function serializeHistory(
     : text;
 }
 
+export type GuardedSummarizerStartResult =
+  | { status: 'started' }
+  | { status: 'busy' }
+  | { status: 'rejected'; error: string };
+
 export interface GuardedSummarizer {
   readonly running: boolean;
   readonly lastError: string | null;
@@ -67,7 +72,10 @@ export interface GuardedSummarizer {
    * FAILED attempt (recorded in lastError, retried up to `retries`) — a
    * degenerate one-sentence "summary" is a successful API call but a
    * catastrophic memory loss, so success must mean more than non-empty. */
-  start(input: string, startOpts?: { minChars?: number }): void;
+  start(
+    input: string,
+    startOpts?: { minChars?: number },
+  ): GuardedSummarizerStartResult;
   /** Resolves when the in-flight summarize call finishes (or immediately if
    * none). Used by callers that need to wait at a safe checkpoint. */
   done(): Promise<void>;
@@ -107,14 +115,20 @@ export function createGuardedSummarizer(
     get lastError() {
       return lastError;
     },
-    start(input: string, startOpts: { minChars?: number } = {}): void {
-      if (running) return;
+    start(
+      input: string,
+      startOpts: { minChars?: number } = {},
+    ): GuardedSummarizerStartResult {
+      if (running) return { status: 'busy' };
+      // A start has its own lifecycle. Do not let a prior cycle's error become
+      // evidence about this one if validation or admission behavior changes.
+      lastError = null;
       try {
         opts.validateInput?.(input);
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
         opts.log?.(`summarize admission rejected: ${lastError}`);
-        return;
+        return { status: 'rejected', error: lastError };
       }
       running = true;
       const minChars = startOpts.minChars ?? 0;
@@ -158,6 +172,7 @@ export function createGuardedSummarizer(
         }
         running = false;
       })();
+      return { status: 'started' };
     },
     async done(): Promise<void> {
       if (inflight) await inflight;
