@@ -359,6 +359,35 @@ test('exact later trailers recover malformed published subjects without relaxing
   );
 });
 
+test('release subject aliases allow a bounded recovery batch and reject overflow', async (t) => {
+  for (const count of [64, 65]) {
+    const root = await fixture(true);
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const aliases: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const sha = await addCommit(root, `Published work ${index}`, {
+        'src/recovery.ts': `export const value = ${index};\n`,
+      });
+      aliases.push(`Release-Subject-Alias: ${sha} fix: preserve work ${index}`);
+    }
+    const repaired = await addCommit(
+      root,
+      'fix(release): classify published recovery batch',
+      { 'docs/recovery.md': 'Append-only recovery.\n' },
+      aliases.join('\n'),
+    );
+    if (count === 64) {
+      const release = await prepareReleaseWorkflow(root, repaired);
+      assert.equal(release.mode, 'release');
+    } else {
+      await assert.rejects(
+        prepareReleaseWorkflow(root, repaired),
+        /too many release subject aliases/,
+      );
+    }
+  }
+});
+
 test('explicit bootstrap creates only deterministic v0.1.0 tag and supports recovery', async (t) => {
   const roots = await Promise.all([fixture(false), fixture(false)]);
   t.after(() =>

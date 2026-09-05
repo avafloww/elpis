@@ -30,7 +30,7 @@ const MAX_RELEASE_NOTE_COMMITS = 512;
 const MAX_RELEASE_NOTE_SUBJECT_BYTES = 512;
 const MAX_RELEASE_NOTES_BYTES = 64 * 1024;
 const MAX_RELEASE_ALIAS_BODY_BYTES = 16 * 1024;
-const MAX_RELEASE_SUBJECT_ALIASES = 32;
+const MAX_RELEASE_SUBJECT_ALIASES = 64;
 const RELEASE_ALIAS =
   /^Release-Subject-Alias: ([0-9a-f]{40}) (\S(?:[^\r\n]*\S)?)$/;
 const RELEASE_ALIAS_COMMIT = /^fix\(release\): \S/;

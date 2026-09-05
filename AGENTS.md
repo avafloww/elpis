@@ -8,18 +8,18 @@ Elpis hosts one persistent agent. Its most important property is continuity: inp
 
 Before editing a subsystem, read its area document:
 
-| Area | Documentation | Primary source |
-| --- | --- | --- |
-| Runtime loop and routing | `docs/architecture.md`, `docs/context.md` | `src/agent.ts`, `src/index.ts` |
-| Prompt assembly | `docs/context.md` | `src/llm/prompt.ts`, `src/llm/llm.ts` |
-| Compaction | `docs/compaction.md` | `src/llm/compactor.ts`, `src/llm/summarize.ts` |
-| Persistence | `docs/persistence.md` | `src/store/` |
-| Sandbox | `docs/sandbox.md` | `src/sandbox/` |
-| Discord | `docs/architecture.md`, `docs/config.md` | `src/discord/` |
-| Console | `docs/console.md` | `src/console/` |
-| Mind | `docs/mind.md` | `src/store/mind.ts` |
-| Workers | `docs/workers.md` | `src/worker/`, `src/kernel/` |
-| Providers | provider-specific docs | `src/llm/` |
+| Area                     | Documentation                             | Primary source                                 |
+| ------------------------ | ----------------------------------------- | ---------------------------------------------- |
+| Runtime loop and routing | `docs/architecture.md`, `docs/context.md` | `src/agent.ts`, `src/index.ts`                 |
+| Prompt assembly          | `docs/context.md`                         | `src/llm/prompt.ts`, `src/llm/llm.ts`          |
+| Compaction               | `docs/compaction.md`                      | `src/llm/compactor.ts`, `src/llm/summarize.ts` |
+| Persistence              | `docs/persistence.md`                     | `src/store/`                                   |
+| Sandbox                  | `docs/sandbox.md`                         | `src/sandbox/`                                 |
+| Discord                  | `docs/architecture.md`, `docs/config.md`  | `src/discord/`                                 |
+| Console                  | `docs/console.md`                         | `src/console/`                                 |
+| Mind                     | `docs/mind.md`                            | `src/store/mind.ts`                            |
+| Workers                  | `docs/workers.md`                         | `src/worker/`, `src/kernel/`                   |
+| Providers                | provider-specific docs                    | `src/llm/`                                     |
 
 ## Vocabulary and neutrality
 
@@ -93,6 +93,7 @@ npm run bench:check
 ## Source conventions
 
 - TypeScript, ESM, Node.js 22+.
+- Use Conventional Commit subjects such as `fix(sandbox): preserve search errors`, `feat: add a capability`, or `docs: clarify behavior`. Release automation rejects unclassified subjects. Repair already-published subjects through the bounded append-only `Release-Subject-Alias` mechanism; do not rewrite published history.
 - Prefer direct, readable code over abstraction without a measured need.
 - Add comments for invariants, hidden constraints, and non-obvious failure modes—not chronology or task numbers.
 - Do not leave references to removed modules, private incidents, migration task labels, or old filenames.
