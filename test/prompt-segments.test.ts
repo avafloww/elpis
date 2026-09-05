@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build, segmentSystemPrompt } from '../src/llm/prompt.js';
+import { RUN_TOOL } from '../src/llm/llm.js';
 
 const inputs = {
   soul: 'SOUL_BODY_MARKER_XYZ',
@@ -10,6 +11,36 @@ const inputs = {
   dataDirectory: '/DD',
   guildCount: 1,
 };
+
+test('build: sandbox documentation distinguishes ephemeral core from persistent full scope', () => {
+  const full = build(inputs);
+  assert.ok(
+    full.includes(
+      'Omitting `sandbox` creates a fresh core-only ephemeral sandbox',
+    ),
+  );
+  assert.ok(
+    full.includes(
+      'Only calls selecting the same persistent sandbox share JavaScript variables',
+    ),
+  );
+  assert.ok(full.includes('Core ephemeral runs have no `_`'));
+  assert.ok(
+    full.includes(
+      'Reading files (including reloading AGENTS.md) needs a full sandbox',
+    ),
+  );
+  assert.ok(
+    !full.includes('executes JavaScript in a PERSISTENT sandbox that survives'),
+  );
+  assert.ok(
+    !full.includes('Sandbox variables are shared between `run` calls.'),
+  );
+  assert.match(
+    RUN_TOOL.function.parameters.properties.sandbox.description,
+    /Mind id, unique prefix, or exact title/,
+  );
+});
 
 test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   const full = build(inputs);

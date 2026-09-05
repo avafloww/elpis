@@ -8,7 +8,11 @@ import {
   type WorkerControlCredential,
 } from './auth.js';
 import { generateWorkerSlug, newWorkerId } from './names.js';
-import type { WorkerSourceReceipt, WorkerWorkspaceStore } from './workspace.js';
+import {
+  WorkerWorkspaceError,
+  type WorkerSourceReceipt,
+  type WorkerWorkspaceStore,
+} from './workspace.js';
 
 export type WorkerSessionStatus =
   'spawning' | 'running' | 'idle' | 'finished' | 'failed' | 'dismissed';
@@ -347,9 +351,14 @@ export class WorkerSpawnBroker {
           )
           .run(this.now(), detail, id);
         if (error instanceof WorkerSpawnError) throw error;
+        const summary =
+          error instanceof WorkerWorkspaceError &&
+          error.reason === 'dirty_source'
+            ? 'worker source repository must be clean; checkpoint changes before starting a worker'
+            : 'worker source preparation failed';
         throw new WorkerSpawnError(
           'workspace_failed',
-          'worker source preparation failed',
+          `${summary}; inspect elpis.worker.status("${id}") for details`,
         );
       }
     }

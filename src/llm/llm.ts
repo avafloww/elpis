@@ -511,7 +511,7 @@ export const RUN_TOOL: RunTool = {
         sandbox: {
           type: 'string',
           description:
-            'Exact alias of a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.',
+            'Canonical Mind id, unique prefix, or exact title for a persistent full-capability sandbox. Omit for a fresh core-only ephemeral run.',
         },
         wake: {
           type: 'object',

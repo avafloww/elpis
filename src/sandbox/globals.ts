@@ -276,6 +276,11 @@ export const RESERVED_GLOBALS: Readonly<Record<string, true>> = {
   TextEncoder: true,
   TextDecoder: true,
   fetch: true,
+  AbortController: true,
+  AbortSignal: true,
+  Headers: true,
+  Request: true,
+  Response: true,
   btoa: true,
   atob: true,
   crypto: true,
@@ -714,7 +719,9 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     const max = Number.isFinite(opts.max)
       ? Math.max(1, Math.floor(opts.max as number))
       : 200;
-    const cmd = `grep ${flags.join(' ')} -e ${sh.q(pattern)} ${sh.q(where)} 2>/dev/null | head -n ${max}`;
+    // Drain the capped stream so grep keeps its real exit status instead of SIGPIPE.
+    const pipeline = `(grep ${flags.join(' ')} -e ${sh.q(pattern)} -- ${sh.q(where)}; status=$?; if [ "$status" -eq 1 ]; then exit 0; else exit "$status"; fi) | awk ${sh.q(`NR <= ${max}`)}`;
+    const cmd = `bash -o pipefail -c ${sh.q(pipeline)}`;
     const receipt = beginOperationReceipt({
       kind: 'file',
       name: 'grep',
@@ -725,16 +732,27 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         cwd: deps.config.paths.harnessRoot,
         timeout: 30_000,
       });
+      const valid = r.signal === null && r.code === 0;
       const hits = r.stdout.trimEnd();
-      const out = hits
-        ? hits
-        : `grep: no matches for ${JSON.stringify(pattern)} in ${where}`;
+      const out =
+        valid && !hits
+          ? `grep: no matches for ${JSON.stringify(pattern)} in ${where}`
+          : hits;
       completeOperationReceipt(receipt, {
         stdout: out,
         stderr: r.stderr,
-        code: r.code,
+        code: valid ? 0 : r.code,
         signal: r.signal,
       });
+      if (!valid) {
+        const diagnostic = boundedReceiptText(
+          r.stderr.trim() || 'no diagnostic',
+          RUN_OPERATION_ERROR_MAX_BYTES,
+        ).text;
+        throw new Error(
+          `grep failed (exit ${r.code}, signal ${r.signal}): ${diagnostic}`,
+        );
+      }
       return out;
     } catch (error) {
       failOperationReceipt(receipt, error);
@@ -1103,6 +1121,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   g.TextEncoder = TextEncoder;
   g.TextDecoder = TextDecoder;
   g.fetch = fetch;
+  g.AbortController = AbortController;
+  g.AbortSignal = AbortSignal;
+  g.Headers = Headers;
+  g.Request = Request;
+  g.Response = Response;
   g.btoa = btoa;
   g.atob = atob;
   g.queueMicrotask = queueMicrotask;

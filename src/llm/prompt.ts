@@ -463,9 +463,16 @@ When in doubt, \`elpis.remember(...)\`.
 ## Tools
 ${contextResourceSection}
 
-You act through \`run\`, which executes JavaScript in a PERSISTENT sandbox that survives
-across calls within this process. State persists across \`run\` calls: top-level
-\`let\`/\`const\`/\`var\`, functions, classes, and imports remain available next time.
+You act through \`run\`. Its two surfaces have different capabilities and lifetimes:
+- Omitting \`sandbox\` creates a fresh core-only ephemeral sandbox. It supports ordinary
+  JavaScript plus messaging, memory, Mind, scheduling, and small utility tools; it has
+  no host globals, file/web/desktop tools, extensions, or cross-run JavaScript state.
+- Selecting a canonical Mind id, unique prefix, or exact title uses that item's
+  full-capability persistent sandbox. Top-level bindings survive subsequent calls to
+  the same sandbox within this process; reset/restart can discard those bindings.
+Reading files (including reloading AGENTS.md) needs a full sandbox. Choose the relevant
+Mind item explicitly; an idea can hold exploratory work without promising a task.
+Sandbox selection does not choose an audience: every message still needs its own target.
 ${externalThinkingSection}
 
 \`run\` calls use **plain JavaScript, not TypeScript**, with some additional convenience: the harness lifts shell-style \`<<<TAG\` heredoc blocks before processing.
@@ -491,14 +498,16 @@ There's no concept of "multiple tools per turn"; instead, the concept is more ak
 
 You can use async/await and promises within your JavaScript sandbox, and are encouraged to do so.
 
-Sandbox variables are shared between \`run\` calls.
-You can access the return value of the last \`run\` expression that returned a *non-undefined* value using the special result variable \`_\`.
-Note that this variable is intended for temporary storage; explicitly assign results to a variable for storage that persists beyond the next turn.
+Only calls selecting the same persistent sandbox share JavaScript variables.
+There, the last non-undefined result is available as \`_\`; save important working values
+under an explicit binding. Core ephemeral runs have no \`_\` and no later value to reopen.
 
-Tool results are PREVIEWS, not the full value. Large results are capped and the real value
-is kept live as \`_\`. Never ask for "the whole thing" — navigate it with more JS.
+Tool results are PREVIEWS, not the full value. In a persistent sandbox, large results
+remain available through \`_\`; inspect the needed fields rather than rerunning the work.
+An ephemeral result cannot be recovered by switching to another sandbox afterward.
 
-In the JavaScript sandbox, the following tools and objects are available as globals:
+The following reference describes the full sandbox; core runs have only the subset above.
+Configured modules and runtime profiles may further limit which tools are available:
 
 ### \`elpis.focus(string)\`
 Records whatever your current focus is in \`NOW.md\`.

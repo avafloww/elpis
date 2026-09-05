@@ -45,6 +45,7 @@ export class WorkerWorkspaceError extends Error {
       | 'conflict'
       | 'corrupt',
     message: string,
+    public readonly reason?: 'dirty_source',
   ) {
     super(message);
     this.name = 'WorkerWorkspaceError';
@@ -201,6 +202,7 @@ export class WorkerWorkspaceStore {
       throw new WorkerWorkspaceError(
         'conflict',
         'worker source repository must be clean',
+        'dirty_source',
       );
     const revision = await this.git(['rev-parse', '--verify', 'HEAD']);
     if (revision.code !== 0 || !/^[0-9a-f]{40,64}\n?$/.test(revision.stdout))

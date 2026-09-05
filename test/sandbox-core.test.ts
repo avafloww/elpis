@@ -84,6 +84,65 @@ test('core sandbox exposes only the core elpis allowlist and no host globals', a
   }
 });
 
+test('full sandbox supports fetch request, headers, response, and cancellation primitives', async () => {
+  const environment = deps('full');
+  try {
+    const sandbox = createSandbox(environment);
+    const response = await sandbox.run(`
+      const controller = new AbortController();
+      const request = new Request('data:application/json,%7B%22ok%22%3Atrue%7D', {
+        headers: new Headers({ 'x-example': 'present' }),
+        signal: controller.signal,
+      });
+      const received = await fetch(request);
+      const body = await received.json();
+      const synthetic = Response.json(body);
+      controller.abort('stopped');
+      body.ok === true && received instanceof Response &&
+        synthetic.headers.get('content-type') === 'application/json' &&
+        request.headers.get('x-example') === 'present' &&
+        controller.signal instanceof AbortSignal &&
+        request.signal.aborted && request.signal.reason === 'stopped'
+    `);
+    assert.equal(response.ok, true, response.error);
+    assert.equal(response.preview, 'true');
+    for (const name of [
+      'AbortController',
+      'AbortSignal',
+      'Headers',
+      'Request',
+      'Response',
+    ]) {
+      const attempt = await sandbox.run('const ' + name + ' = 1');
+      assert.equal(attempt.ok, false, name);
+      assert.equal(attempt.failureKind, 'preparse', name);
+    }
+  } finally {
+    fs.rmSync(environment.config.paths.dataDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test('core sandbox still omits fetch companion globals', async () => {
+  const environment = deps('core');
+  try {
+    const sandbox = createSandbox(environment);
+    const result = await sandbox.run(`
+      [typeof AbortController, typeof AbortSignal, typeof Headers,
+       typeof Request, typeof Response].every(value => value === 'undefined')
+    `);
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.preview, 'true');
+  } finally {
+    fs.rmSync(environment.config.paths.dataDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
 test('core sandbox has no last-value mechanics or persistent allocation surface', async () => {
   const sandbox = createSandbox(deps('core'));
   const first = await sandbox.run('21 * 2');

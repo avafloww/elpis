@@ -13,6 +13,7 @@ import {
   type WorkerProvisionState,
   type WorkerSession,
 } from '../src/worker/spawn.js';
+import { WorkerWorkspaceError } from '../src/worker/workspace.js';
 import { noopLogger } from '../src/lib/log.js';
 import { openDatabase } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
@@ -251,7 +252,8 @@ test('source preparation failure creates no Pod and revokes the failed session',
     (error: unknown) =>
       error instanceof WorkerSpawnError &&
       error.code === 'workspace_failed' &&
-      !error.message.includes('dirty'),
+      !error.message.includes('dirty') &&
+      error.message.includes('elpis.worker.status("wrk-test0001")'),
   );
   assert.equal(f.provisioned.length, 0);
   assert.equal(f.preparedSources.length, 1);
@@ -262,6 +264,66 @@ test('source preparation failure creates no Pod and revokes the failed session',
   assert.equal(failed.sourceRevision, null);
   assert.equal(resolveWorkerSession(f.db, f.credentials[0].token), null);
   f.close();
+});
+
+test('unclassified workspace failures expose a lookup instead of raw diagnostics', async () => {
+  const f = fixture();
+  try {
+    f.setSourceError(
+      new WorkerWorkspaceError('unavailable', 'private-git-diagnostic'),
+    );
+    await assert.rejects(
+      () => f.broker.start(f.item.id),
+      (error: unknown) => {
+        assert.ok(error instanceof WorkerSpawnError);
+        assert.equal(error.code, 'workspace_failed');
+        assert.equal(
+          error.message,
+          'worker source preparation failed; inspect elpis.worker.status("wrk-test0001") for details',
+        );
+        return true;
+      },
+    );
+    assert.equal(
+      f.broker.status('wrk-test0001').lastError,
+      'private-git-diagnostic',
+    );
+    assert.equal(f.provisioned.length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test('dirty source failure gives fixed guidance and identifies its failed session', async () => {
+  const f = fixture();
+  try {
+    const error = new WorkerWorkspaceError(
+      'conflict',
+      'private source detail',
+      'dirty_source',
+    );
+    f.setSourceError(error);
+    await assert.rejects(
+      () => f.broker.start(f.item.id),
+      (error: unknown) => {
+        assert.ok(error instanceof WorkerSpawnError);
+        assert.equal(error.code, 'workspace_failed');
+        assert.match(error.message, /source repository must be clean/);
+        assert.match(error.message, /checkpoint/);
+        assert.ok(
+          error.message.includes('elpis.worker.status("wrk-test0001")'),
+        );
+        assert.equal(error.message.includes('private source detail'), false);
+        return true;
+      },
+    );
+    assert.equal(f.provisioned.length, 0);
+    assert.equal(f.broker.status('wrk-test0001').status, 'failed');
+    assert.deepEqual(f.discardedSources, ['wrk-test0001']);
+    assert.equal(resolveWorkerSession(f.db, f.credentials[0].token), null);
+  } finally {
+    f.close();
+  }
 });
 
 test('provision failure is durable, revoked, and cleaned without leaking detail', async () => {

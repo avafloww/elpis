@@ -1,10 +1,10 @@
 # JavaScript sandbox
 
-The resident model receives `run(code)` for action and an on-demand `skill(names)` context loader. Elpis evaluates run code in one persistent `node:vm` context and injects a capability namespace; worker and secretary lanes keep their custom run-only tool sets.
+The resident model receives `run({ code, detail, sandbox?, wake? })` for action and an on-demand `skill(names)` context loader. Omitting `sandbox` creates a fresh core-only `node:vm` context with messaging, durable thought/work, and utility tools but no host globals or cross-run values. Selecting a canonical Mind id, unique prefix, or exact title uses that item's persistent full-capability context. Worker and secretary lanes keep their custom run-only tool sets.
 
 ## Persistence
 
-Top-level `let`, `const`, `var`, function, and class declarations are transformed into persistent global bindings. They survive later `run` calls in the same process. The most recent non-`undefined` result is available as `_`.
+In a selected persistent sandbox, top-level `let`, `const`, `var`, function, and class declarations become persistent global bindings. They survive later calls to the same sandbox until reset or restart. The most recent non-`undefined` result is available as `_`. Core ephemeral runs retain neither bindings nor `_` for another call.
 
 This is working memory, not durable storage. Write durable state under `DATA_DIR`.
 
@@ -35,11 +35,15 @@ Heredoc bodies are verbatim. Use `elpis.fill()` when explicit `{{name}}` substit
 - `elpis.*` — namespaced capabilities;
 - `fs` — Node filesystem API;
 - `require()` — CommonJS/builtin package loading rooted in the process;
-- `process`, `Buffer`, `fetch`, `URL`, Web Crypto, encoders;
+- `process`, `Buffer`, `fetch`, its `AbortController`/`AbortSignal`/`Headers`/`Request`/`Response` companions, `URL`, Web Crypto, encoders (host globals are absent from the core ephemeral surface);
 - `HARNESS_ROOT`, `DATA_DIR`;
 - `console` — captured per-run logging.
 
 Dynamic `import()` is not available inside the VM. Use `require()` for runtime-loaded local CommonJS modules.
+
+## Text search
+
+`elpis.grep` distinguishes genuine no-match results from failed searches. Invalid regular expressions, missing inputs, and command failures throw bounded diagnostics and retain failed operation receipts. Output is capped globally by line count, while the search stream is drained to preserve grep's exit status; the existing timeout and byte limits still apply. A genuine grep no-match exit is normalized to a successful query receipt.
 
 ## Capability groups
 

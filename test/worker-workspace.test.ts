@@ -91,7 +91,10 @@ test('workspace source export is exact, private, token-bound, and rejects dirty 
     await assert.rejects(
       () => f.store.prepareSource('wrk-b1b2c3d4'),
       (error: unknown) =>
-        error instanceof WorkerWorkspaceError && error.code === 'conflict',
+        error instanceof WorkerWorkspaceError &&
+        error.code === 'conflict' &&
+        'reason' in error &&
+        error.reason === 'dirty_source',
     );
     assert.equal(
       fs.existsSync(path.join(f.storageRoot, 'sources', 'wrk-b1b2c3d4')),

@@ -16,6 +16,8 @@ When `workers.workspace.source_root` names a clean Git repository, spawn exports
 
 Worker authority is a strict allowlist for its own workspace: local file editing, shell, git, bounded reads/previews, and timing helpers. It has no resident memory, channels, inbound message, Scheduler, restart/deploy, sudo, SSH, background jobs, or unscoped Mind mutation.
 
+Source-preparation failures identify the failed session with an `elpis.worker.status(...)` lookup. A dirty source tree gets fixed checkpoint guidance; arbitrary Git/filesystem details are not copied into the thrown error. The failed session remains revoked and no Pod is created.
+
 ## Isolation
 
 Production workers run in fixed operator-owned restricted Pods. Callers may not supply images, commands, mounts, namespaces, service accounts, security contexts, resources, arbitrary environment, or alternate Mind roots. A worker Pod receives only its workspace/scratch and a short-lived control token for token-bound completion, Mind, mailbox, and workspace-custody endpoints. Provider credentials, Discord credentials, resident DATA_DIR, and Kubernetes service-account tokens stay outside the Pod.
