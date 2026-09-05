@@ -27,7 +27,7 @@ The example file is the exhaustive annotated reference. This document explains t
 
 OpenAI-compatible generation requests are pinned to the configured credential-free HTTP(S) `base_url` and exactly its `/responses` and `/chat/completions` routes. Elpis refuses redirects and injects `api_key` only after the final request route has been validated.
 
-The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor` and `secretary` are optional. A configured `secretary` resolves through the same provider-local model registry and remains unused until the Kubernetes-only secretary runtime is enabled.
+The canonical provider/model registry uses `llm.providers` plus role references. `main` and `classifier` are required; `motor`, `secretary`, and `compaction` are optional. Configured optional roles resolve through the same provider-local model registry. A configured `secretary` remains unused until the Kubernetes-only secretary runtime is enabled. A configured `compaction` is validated and retained as role metadata; this declaration alone does not change compaction runtime behavior. Omitting either role leaves its registry reference and target as `null`.
 
 A canonical model may set `tool_tier: weak`, `medium`, or `strong` to opt into the resident's bounded `elpis.llm` one-shot query surface. Each tier may be assigned to at most one model across the whole registry; duplicates fail configuration loading. Omitted or `null` means unavailable. The legacy flat LLM form exposes no query models.
 
@@ -60,6 +60,7 @@ llm:
   roles:
     main: primary/main
     classifier: primary/classifier
+    compaction: primary/classifier # optional
   completion_reserve_tokens: 8192
 ```
 

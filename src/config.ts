@@ -312,22 +312,34 @@ function exactMapping(
   const value = at(tree, dotted);
   if (value === undefined || (allowNull && value === null)) return null;
   if (value === null || typeof value !== 'object' || Array.isArray(value))
-    throw new Error(`${file}: key \`${dotted}\` must be a mapping${allowNull ? ' or null' : ''}`);
+    throw new Error(
+      `${file}: key \`${dotted}\` must be a mapping${allowNull ? ' or null' : ''}`,
+    );
   const mapping = value as YamlTree;
   for (const key of Object.keys(mapping))
     if (!allowed.includes(key))
-      throw new Error(`${file}: key \`${dotted}\` contains unknown key \`${key}\``);
+      throw new Error(
+        `${file}: key \`${dotted}\` contains unknown key \`${key}\``,
+      );
   return mapping;
 }
 
-function canonicalDashboardOrigin(value: unknown, key: string, file: string): string {
+function canonicalDashboardOrigin(
+  value: unknown,
+  key: string,
+  file: string,
+): string {
   if (typeof value !== 'string' || value.length === 0)
-    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+    throw new Error(
+      `${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`,
+    );
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+    throw new Error(
+      `${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`,
+    );
   }
   if (
     parsed.protocol !== 'https:' ||
@@ -338,7 +350,9 @@ function canonicalDashboardOrigin(value: unknown, key: string, file: string): st
     parsed.hash !== '' ||
     parsed.origin !== value
   )
-    throw new Error(`${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`);
+    throw new Error(
+      `${file}: key \`${key}\` must be a canonical credential-free HTTPS origin`,
+    );
   return value;
 }
 
@@ -349,14 +363,24 @@ function parseDashboardConfig(
   dashboard: Config['dashboard'];
   console: DashboardLocalConfig;
 } {
-  const dashboardPresent = Object.prototype.hasOwnProperty.call(tree, 'dashboard');
+  const dashboardPresent = Object.prototype.hasOwnProperty.call(
+    tree,
+    'dashboard',
+  );
   const consolePresent = Object.prototype.hasOwnProperty.call(tree, 'console');
   if (dashboardPresent && consolePresent)
-    throw new Error(`${file}: \`dashboard\` and legacy \`console\` are mutually exclusive`);
+    throw new Error(
+      `${file}: \`dashboard\` and legacy \`console\` are mutually exclusive`,
+    );
 
   if (dashboardPresent) {
     exactMapping(tree, 'dashboard', ['local', 'remote'], file);
-    exactMapping(tree, 'dashboard.local', ['enabled', 'mcp_enabled', 'port', 'host'], file);
+    exactMapping(
+      tree,
+      'dashboard.local',
+      ['enabled', 'mcp_enabled', 'port', 'host'],
+      file,
+    );
     const remoteMapping = exactMapping(
       tree,
       'dashboard.remote',
@@ -394,7 +418,13 @@ function parseDashboardConfig(
     return { dashboard: { local, remote }, console: local };
   }
 
-  exactMapping(tree, 'console', ['enabled', 'mcp_enabled', 'port', 'host'], file, true);
+  exactMapping(
+    tree,
+    'console',
+    ['enabled', 'mcp_enabled', 'port', 'host'],
+    file,
+    true,
+  );
   const local: DashboardLocalConfig = {
     enabled: boolOr(tree, 'console.enabled', true, file),
     mcpEnabled: boolOr(tree, 'console.mcp_enabled', false, file),
@@ -1150,7 +1180,8 @@ function parseLlmConfig(
       key !== 'main' &&
       key !== 'classifier' &&
       key !== 'motor' &&
-      key !== 'secretary',
+      key !== 'secretary' &&
+      key !== 'compaction',
   );
   if (unknownRoles.length)
     throw new Error(
@@ -1169,6 +1200,12 @@ function parseLlmConfig(
       )!,
       motor: rawString(rolesRaw, 'motor', 'llm.roles.motor', file),
       secretary: rawString(rolesRaw, 'secretary', 'llm.roles.secretary', file),
+      compaction: rawString(
+        rolesRaw,
+        'compaction',
+        'llm.roles.compaction',
+        file,
+      ),
     },
   });
   return projectLlmRegistry(registry, completionReserveTokens, 'canonical');

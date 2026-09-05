@@ -82,6 +82,7 @@ llm:
     classifier: openrouter/sol
     motor: openrouter/motor
     secretary: openrouter/secretary
+    compaction: openrouter/secretary
 discord:
   bot_token: ${TOKEN}
   guilds:
@@ -153,6 +154,45 @@ test('configFile: canonical provider/model registry resolves roles and projects 
   );
 });
 
+test('configFile: optional compaction role resolves, normalizes absence, and rejects unknown refs', () => {
+  const configured = loadConfigFile(fixture(CANONICAL_OK));
+  assert.equal(
+    configured.llm.registry.roles.compaction,
+    'openrouter/secretary',
+  );
+  assert.equal(
+    configured.llm.registry.targets.compaction?.name,
+    'openai/gpt-5.6-secretary',
+  );
+  assert.equal(
+    configForLlmRole(configured, 'compaction').llm.model,
+    'openai/gpt-5.6-secretary',
+  );
+
+  const absent = loadConfigFile(
+    fixture(CANONICAL_OK.replace('    compaction: openrouter/secretary\n', '')),
+  );
+  assert.equal(absent.llm.registry.roles.compaction, null);
+  assert.equal(absent.llm.registry.targets.compaction, null);
+  assert.throws(
+    () => configForLlmRole(absent, 'compaction'),
+    /llm\.roles\.compaction is not configured/,
+  );
+
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(
+          CANONICAL_OK.replace(
+            'compaction: openrouter/secretary',
+            'compaction: openrouter/missing',
+          ),
+        ),
+      ),
+    /llm\.roles\.compaction references unknown model/,
+  );
+});
+
 test('configFile: optional secretary role resolves and fails closed when absent', () => {
   const configured = loadConfigFile(fixture(CANONICAL_OK));
   assert.equal(
@@ -176,7 +216,10 @@ test('configFile: optional secretary role resolves and fails closed when absent'
 });
 
 test('configFile: tool tiers are optional, strict, and unique', () => {
-  const invalid = CANONICAL_OK.replace('tool_tier: weak', 'tool_tier: enormous');
+  const invalid = CANONICAL_OK.replace(
+    'tool_tier: weak',
+    'tool_tier: enormous',
+  );
   assert.throws(
     () => loadConfigFile(fixture(invalid)),
     /tool_tier.*weak, medium, or strong/,
@@ -389,7 +432,9 @@ test('configFile: legacy console maps to the object-identical local dashboard', 
 });
 
 test('configFile: canonical dashboard local and remote parse without a second authority', () => {
-  const token = createEnrollmentCredential((size) => Buffer.alloc(size, 7)).token;
+  const token = createEnrollmentCredential((size) =>
+    Buffer.alloc(size, 7),
+  ).token;
   const c = loadConfigFile(
     fixture(
       MINIMAL_OK +
@@ -413,7 +458,9 @@ test('configFile: dashboard and legacy console are mutually exclusive exact mapp
   assert.throws(
     () =>
       loadConfigFile(
-        fixture(MINIMAL_OK + '\nconsole:\n  enabled: true\ndashboard:\n  local: {}\n'),
+        fixture(
+          MINIMAL_OK + '\nconsole:\n  enabled: true\ndashboard:\n  local: {}\n',
+        ),
       ),
     /dashboard.*legacy `console`.*mutually exclusive/,
   );
@@ -426,7 +473,10 @@ test('configFile: dashboard and legacy console are mutually exclusive exact mapp
     '\ndashboard:\n  remote:\n    url: https://gateway.example\n    wrong: true\n',
     '\nconsole:\n  wrong: true\n',
   ])
-    assert.throws(() => loadConfigFile(fixture(MINIMAL_OK + body)), /(mapping|unknown key)/);
+    assert.throws(
+      () => loadConfigFile(fixture(MINIMAL_OK + body)),
+      /(mapping|unknown key)/,
+    );
 });
 
 test('configFile: remote endpoint and enrollment token are canonical and non-echoing', () => {

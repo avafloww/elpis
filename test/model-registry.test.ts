@@ -115,6 +115,29 @@ test('secretary role is optional', () => {
   assert.equal(registry.targets.secretary, null);
 });
 
+test('compaction role is optional and validates configured refs', () => {
+  const configured = input();
+  configured.roles.compaction = 'openrouter/motor';
+  const registry = createLlmModelRegistry(configured);
+  assert.equal(registry.roles.compaction, 'openrouter/motor');
+  assert.equal(registry.targets.compaction?.name, 'openai/gpt-5.6-mini');
+  assert.equal(
+    registry.targets.compaction?.provider,
+    registry.providers.openrouter,
+  );
+
+  const absent = input();
+  assert.equal(createLlmModelRegistry(absent).roles.compaction, null);
+  assert.equal(createLlmModelRegistry(absent).targets.compaction, null);
+
+  const unknown = input();
+  unknown.roles.compaction = 'openrouter/missing';
+  assert.throws(
+    () => createLlmModelRegistry(unknown),
+    /llm\.roles\.compaction references unknown model/,
+  );
+});
+
 test('motor role is required only when the motor module is active', () => {
   const value = input();
   value.roles.motor = null;
@@ -147,6 +170,8 @@ test('legacy adapter has one explicit compatibility identity for every active ro
   assert.equal(legacy.roles.classifier, legacy.roles.main);
   assert.equal(legacy.roles.motor, legacy.roles.main);
   assert.equal(legacy.targets.motor?.name, 'wire-model');
+  assert.equal(legacy.roles.compaction, null);
+  assert.equal(legacy.targets.compaction, null);
   assert.equal(legacy.targets.main.toolTier, null);
 });
 

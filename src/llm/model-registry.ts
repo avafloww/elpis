@@ -6,7 +6,8 @@ export const LLM_PROVIDER_TYPES = [
 export const LLM_TOOL_TIERS = ['weak', 'medium', 'strong'] as const;
 export type LlmProviderType = (typeof LLM_PROVIDER_TYPES)[number];
 export type LlmToolTier = (typeof LLM_TOOL_TIERS)[number];
-export type LlmRole = 'main' | 'classifier' | 'motor' | 'secretary';
+export type LlmRole =
+  'main' | 'classifier' | 'motor' | 'secretary' | 'compaction';
 
 export interface LlmModelDefinition {
   name: string;
@@ -35,6 +36,7 @@ export interface LlmRegistryInput {
     classifier: string;
     motor: string | null;
     secretary?: string | null;
+    compaction?: string | null;
   };
 }
 
@@ -47,12 +49,16 @@ export interface ResolvedLlmTarget extends LlmModelDefinition {
 
 export interface LlmModelRegistry {
   providers: Record<string, LlmProviderDefinition>;
-  roles: LlmRegistryInput['roles'] & { secretary: string | null };
+  roles: LlmRegistryInput['roles'] & {
+    secretary: string | null;
+    compaction: string | null;
+  };
   targets: {
     main: ResolvedLlmTarget;
     classifier: ResolvedLlmTarget;
     motor: ResolvedLlmTarget | null;
     secretary: ResolvedLlmTarget | null;
+    compaction: ResolvedLlmTarget | null;
   };
 }
 
@@ -216,6 +222,7 @@ export function legacyLlmModelRegistry(
         classifier: ref,
         motor: opts.motorEnabled ? ref : null,
         secretary: null,
+        compaction: null,
       },
     },
     { requireMotor: opts.motorEnabled },
@@ -264,12 +271,17 @@ export function createLlmModelRegistry(
     );
   return {
     providers: input.providers,
-    roles: { ...input.roles, secretary: input.roles.secretary ?? null },
+    roles: {
+      ...input.roles,
+      secretary: input.roles.secretary ?? null,
+      compaction: input.roles.compaction ?? null,
+    },
     targets: {
       main: resolve('main', input.roles.main)!,
       classifier: resolve('classifier', input.roles.classifier)!,
       motor: resolve('motor', input.roles.motor),
       secretary: resolve('secretary', input.roles.secretary),
+      compaction: resolve('compaction', input.roles.compaction),
     },
   };
 }
