@@ -98,6 +98,25 @@ function jsonRequest(
   };
 }
 
+test('catalog model ordering preserves the producer punctuation contract', () => {
+  const underscore = { ...model, modelRef: 'resident/m_', toolTier: null };
+  const dash = { ...model, modelRef: 'resident/m-', toolTier: null };
+  const ordered: LlmProxyCatalog = { ...catalog, models: [underscore, dash] };
+  assert.ok(underscore.modelRef.localeCompare(dash.modelRef) < 0);
+  assert.deepEqual(
+    decodeLlmProxyCatalog(serializeLlmProxyCatalog(ordered)),
+    ordered,
+  );
+  assert.throws(
+    () => serializeLlmProxyCatalog({ ...ordered, models: [dash, underscore] }),
+    LlmProxyCodecError,
+  );
+  assert.throws(
+    () => serializeLlmProxyCatalog({ ...ordered, models: [dash, dash] }),
+    LlmProxyCodecError,
+  );
+});
+
 test('LLM HTTP v1 constants are independent, exact, and frozen', () => {
   assert.deepEqual(LLM_PROXY_PATHS, {
     catalog: '/api/v1/resident/llm/catalog',

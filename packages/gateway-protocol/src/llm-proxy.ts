@@ -34,6 +34,7 @@ const intrinsicRegExpTest = RegExp.prototype.test;
 const intrinsicSetAdd = Set.prototype.add;
 const intrinsicSetConstructor = Set;
 const intrinsicSetHas = Set.prototype.has;
+const intrinsicStringLocaleCompare = String.prototype.localeCompare;
 const intrinsicStringSplit = String.prototype.split;
 const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
@@ -725,7 +726,15 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
   >();
   const toolTiers = new intrinsicSetConstructor<LlmProxyToolTier>();
   for (let i = 0; i < models.length; i += 1) {
-    if (i > 0 && models[i - 1].modelRef >= models[i].modelRef) invalid();
+    if (
+      i > 0 &&
+      intrinsicReflectApply(
+        intrinsicStringLocaleCompare,
+        models[i - 1].modelRef,
+        [models[i].modelRef],
+      ) >= 0
+    )
+      invalid();
     const providerId = (
       intrinsicReflectApply(intrinsicStringSplit, models[i].modelRef, [
         '/',
