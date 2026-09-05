@@ -38,6 +38,7 @@ import { createSandboxRegistry } from './sandbox/registry.js';
 import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
 import { createCompactor } from './llm/compactor.js';
+import { resolveCompactionRoleBudget } from './llm/compaction-role.js';
 import { createSecretRegistry } from './lib/secrets.js';
 import { ContextResources } from './context-resources.js';
 import { MotorSkills } from './motor-skills.js';
@@ -314,20 +315,24 @@ export async function createElpisRuntime(
     `extensions loaded: ${extensions.summaries.length}; skipped: ${extensions.failures.length}`,
   );
 
-  // These two are independent — a network probe (context window) and a disk
-  // read (most-recent transcript) — so kick them off together rather than
-  // serially. Restart recovery: load the single most-recent monocontext
+  // The main context probe, optional compaction-role budget resolution, and
+  // most-recent transcript read are independent, so kick them off together
+  // rather than serially. Restart recovery: load the single most-recent monocontext
   // transcript and prime the one history from it; returns null on first boot
   // (no sessions/main stream yet — the cutover from per-channel files is clean).
   const sessionsRoot = dataLayout.sessions;
   log('fetching context window for', config.llm.model, '...');
-  const [maxContextTokens, initialTranscript] = await Promise.all([
-    (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
-    (async () =>
-      loadMostRecentMain(sessionsRoot, {
-        opaqueReplayIdentity: replayIdentityForConfig(config),
-      }))(),
-  ]);
+  const [maxContextTokens, initialTranscript, summaryInputBudget] =
+    await Promise.all([
+      (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
+      (async () =>
+        loadMostRecentMain(sessionsRoot, {
+          opaqueReplayIdentity: replayIdentityForConfig(config),
+        }))(),
+      resolveCompactionRoleBudget(config, db, {
+        fetchContextWindow: adapters.fetchContextWindow ?? fetchContextWindow,
+      }),
+    ]);
   log('context window:', maxContextTokens, 'tokens');
   const initialMessages = initialTranscript?.messages ?? [];
   if (initialMessages.length > 0) {
@@ -640,13 +645,14 @@ export async function createElpisRuntime(
         `(configured ${config.compaction.triggerTokens}) — the configured value is not in effect`,
     );
   }
-  const compactor = createCompactor(llm, tracker, {
+  const compactor = createCompactor(llms.compaction ?? llm, tracker, {
     keepTokens: config.compaction.keepTokens,
     // Deliberately a loose 4 chars/token ceiling, not the calibrated ratio —
     // see the comment on foldSerializeCap in compactor.ts.
     foldSerializeCap:
       4 * Math.max(1, effectiveTrigger - config.compaction.keepTokens),
     ratio: () => density.ratio(),
+    summaryInputBudget,
     log: (line) => config.logger.info(line),
   });
   const transcript = createTranscriptStore(sessionsRoot);

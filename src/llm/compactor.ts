@@ -185,7 +185,7 @@ function compactionNotice(replaced: number): ChatMessage {
   };
 }
 
-function validateSummaryInputBudget(budget: SummaryInputBudget): void {
+export function validateSummaryInputBudget(budget: SummaryInputBudget): void {
   if (
     !Number.isSafeInteger(budget.contextWindowTokens) ||
     budget.contextWindowTokens <= 0
