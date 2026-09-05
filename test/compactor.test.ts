@@ -74,7 +74,7 @@ function fakeLLM(opts: { summary?: string; fail?: boolean } = {}): LLM & {
       });
     },
   };
-  return Object.assign(llm, {
+  const result = Object.assign(llm, {
     get calls() {
       return calls;
     },
@@ -88,6 +88,8 @@ function fakeLLM(opts: { summary?: string; fail?: boolean } = {}): LLM & {
       pending.length = 0;
     },
   });
+  Object.defineProperty(result, 'calls', { get: () => calls });
+  return result;
 }
 
 test('compaction prompt requires a first-person note to the future self at both ends', () => {
@@ -475,6 +477,205 @@ test('compactor: prior summary survives even when the fold body exceeds totalCap
   c.start(msgs);
   const input = llm.inputs[before];
   assert.ok(input.includes('PRIOR'), 'the prior summary is not truncated away');
+});
+
+// ---------- selected-summary-model input admission ----------
+
+test('compactor: summary budget counts instructions, reminder, framing, and output reserve without changing admitted input', () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
+
+  const noBudgetLLM = fakeLLM();
+  const noBudget = createCompactor(noBudgetLLM, tracker, { keepTokens: 250 });
+  noBudget.start(msgs);
+  const assembledInput = noBudgetLLM.inputs[0];
+  assert.ok(assembledInput.endsWith(SUMMARIZE_TAIL_REMINDER));
+
+  const framingTokens = 17;
+  const outputReserveTokens = 101;
+  const estimatedPieces: string[] = [];
+  const exactContext =
+    SOCIAL_SUMMARIZE_PROMPT.length +
+    assembledInput.length +
+    framingTokens +
+    outputReserveTokens;
+  const admittedLLM = fakeLLM();
+  let boundaryRatioCalls = 0;
+  const admitted = createCompactor(admittedLLM, tracker, {
+    keepTokens: 250,
+    ratio: () => {
+      boundaryRatioCalls++;
+      return 4;
+    },
+    summaryInputBudget: {
+      contextWindowTokens: exactContext,
+      outputReserveTokens,
+      framingTokens,
+      estimateTokens: (text) => {
+        estimatedPieces.push(text);
+        return text.length;
+      },
+    },
+  });
+  admitted.start(msgs);
+
+  assert.deepEqual(estimatedPieces, [SOCIAL_SUMMARIZE_PROMPT, assembledInput]);
+  assert.equal(
+    boundaryRatioCalls,
+    1,
+    'the foreground ratio is used only for boundary selection, not admission',
+  );
+  assert.equal(admittedLLM.calls, 1, 'the exact-fit request is admitted');
+  assert.equal(
+    admittedLLM.inputs[0],
+    assembledInput,
+    'admission observes but does not rewrite the assembled summarize input',
+  );
+
+  const rejectedLLM = fakeLLM();
+  const rejected = createCompactor(rejectedLLM, tracker, {
+    keepTokens: 250,
+    summaryInputBudget: {
+      contextWindowTokens: exactContext - 1,
+      outputReserveTokens,
+      framingTokens,
+      estimateTokens: (text) => text.length,
+    },
+  });
+  rejected.start(msgs);
+  assert.equal(
+    rejectedLLM.calls,
+    0,
+    'one token below the complete request budget is rejected',
+  );
+  assert.match(rejected.lastError!, /estimated_input_tokens=/);
+  assert.match(rejected.lastError!, /output_reserve_tokens=101/);
+  assert.match(
+    rejected.lastError!,
+    /estimates, not exact tokenizer guarantees/,
+  );
+});
+
+test('compactor: over-budget large carried summary is observable and retains original history', async () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const llm = fakeLLM();
+  const logs: string[] = [];
+  const estimatedPieces: string[] = [];
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    foldSerializeCap: 30,
+    summaryInputBudget: {
+      contextWindowTokens: 10_000,
+      outputReserveTokens: 500,
+      framingTokens: 20,
+      estimateTokens: (text) => {
+        estimatedPieces.push(text);
+        return text.length;
+      },
+    },
+    log: (line) => logs.push(line),
+  });
+  const prior =
+    '=== Summary of earlier conversation (99 earlier messages compacted) ===\n' +
+    'P'.repeat(20_000);
+  const msgs = [
+    mk('system', prior),
+    ...Array.from({ length: 10 }, (_, i) => big(`recent-${i}`)),
+  ];
+  const original = msgs.map((message) => ({ ...message }));
+  const expectedBoundary = enforcePairIntegrity(
+    msgs,
+    walkKeepBoundary(msgs, 250),
+  );
+
+  c.start(msgs);
+  await c.done();
+
+  assert.equal(
+    c.boundaryIndex,
+    expectedBoundary,
+    'admission does not move the boundary',
+  );
+  assert.equal(llm.calls, 0, 'rejection happens before every model attempt');
+  assert.equal(c.running, false);
+  assert.equal(c.hasCompletedResult(), false);
+  assert.match(c.lastError!, /estimated summary request exceeds/);
+  assert.ok(
+    logs.some((line) => line.startsWith('summarize admission rejected:')),
+  );
+  assert.equal(estimatedPieces[0], SOCIAL_SUMMARIZE_PROMPT);
+  assert.ok(
+    estimatedPieces[1].includes('P'.repeat(20_000)),
+    'the carried prior summary is counted outside the small recent serialization cap',
+  );
+  assert.ok(estimatedPieces[1].includes('EARLIER MEMORY'));
+  assert.ok(estimatedPieces[1].includes('RECENT CONVERSATION TO FOLD IN'));
+  assert.ok(estimatedPieces[1].endsWith(SUMMARIZE_TAIL_REMINDER));
+  assert.deepEqual(msgs, original, 'start does not mutate the source history');
+  assert.equal(
+    c.applyCompaction(msgs),
+    msgs,
+    'no rejected result can replace history',
+  );
+});
+
+test('compactor: no summary budget preserves legacy no-admission behavior', () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const llm = fakeLLM();
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    foldSerializeCap: 1,
+  });
+  const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
+
+  c.start(msgs);
+
+  assert.equal(llm.calls, 1);
+  assert.equal(c.running, true);
+  assert.equal(c.lastError, null);
+});
+
+test('compactor: rejects nonsensical summary budget numbers at construction', () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const llm = fakeLLM();
+  const make = (
+    contextWindowTokens: number,
+    outputReserveTokens: number,
+    framingTokens: number,
+  ) =>
+    createCompactor(llm, tracker, {
+      summaryInputBudget: {
+        contextWindowTokens,
+        outputReserveTokens,
+        framingTokens,
+        estimateTokens: (text) => text.length,
+      },
+    });
+
+  assert.throws(() => make(Number.NaN, 0, 0), /contextWindowTokens/);
+  assert.throws(() => make(100, -1, 0), /outputReserveTokens/);
+  assert.throws(() => make(100, 0, -1), /framingTokens/);
+  assert.throws(() => make(100, 80, 20), /leave input capacity/);
+});
+
+test('compactor: a nonsensical runtime token estimate is rejected before a model call', () => {
+  const tracker = createContextTracker(1_000_000, 2000);
+  const llm = fakeLLM();
+  const c = createCompactor(llm, tracker, {
+    keepTokens: 250,
+    summaryInputBudget: {
+      contextWindowTokens: 10_000,
+      outputReserveTokens: 100,
+      framingTokens: 10,
+      estimateTokens: () => Number.NaN,
+    },
+  });
+  const msgs = Array.from({ length: 10 }, (_, i) => big(`m${i}`));
+
+  c.start(msgs);
+
+  assert.equal(llm.calls, 0);
+  assert.match(c.lastError!, /non-finite or negative estimate/);
 });
 
 // ---------- reset (context clear) ----------

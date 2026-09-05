@@ -32,9 +32,13 @@ The instruction appears both before and after the fold body so a long serialized
 
 ## Quality gates and retries
 
-The guarded summarizer supports an optional synchronous input-admission validator. A rejected input records an observable failure before any model request, without entering quality-retry attempts or delivering a replacement summary. A later admissible input can still succeed; reset clears the failure.
+The guarded summarizer supports an optional synchronous input-admission validator. When `createCompactor` receives a `summaryInputBudget`, it estimates the complete selected-summary-model request before admission: the carried prior summary, recent-history serialization and section wrappers, the tail reminder, `SOCIAL_SUMMARIZE_PROMPT`, plus caller-supplied provider framing or injected-prompt overhead. The caller also supplies that model's context window, output-token reserve, and token estimator. These values deliberately do not reuse the foreground history-density ratio, because the selected summary model can tokenize differently. Invalid numeric budgets fail at construction.
 
-A candidate is rejected when it is empty, implausibly short, malformed, truncated, or looks like a continuation rather than a summary. Rejections are logged with a reason and retried with bounded backoff.
+Admission requires the estimated input plus output reserve to fit the selected model's context window. An over-budget input records and logs an observable estimated-budget failure before any model request or quality retry. It does not move the fold boundary, tighten the serialization cap, discard additional history, or produce a replacement summary, so the original history remains live. Without `summaryInputBudget`, behavior is unchanged.
+
+This is an operational estimate, not an exact tokenizer guarantee. Callers should use model-specific estimation and include enough explicit framing overhead for the provider request envelope and any provider-added instructions.
+
+After admission, a candidate is rejected when it is empty, implausibly short, malformed, truncated, or looks like a continuation rather than a summary. Candidate rejections are logged with a reason and retried with bounded backoff.
 
 If no candidate is accepted, the original history remains live and an operator-visible notice reports the failure. A later successful fold clears stale failure state.
 

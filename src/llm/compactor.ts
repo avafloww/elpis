@@ -27,11 +27,25 @@ import {
   type ChatMessage,
   type LLM,
   estimateSentTokens,
+  SOCIAL_SUMMARIZE_PROMPT,
   SUMMARIZE_TAIL_REMINDER,
 } from './llm.js';
 import type { ContextTracker } from './context-tracker.js';
 import { createHash } from 'node:crypto';
 import { serializeHistory, createGuardedSummarizer } from './summarize.js';
+
+/** An estimated input admission budget for the selected summary model.
+ *
+ * The caller owns model/provider-specific values. `framingTokens` covers the
+ * request envelope and any provider-injected prompt text beyond
+ * SOCIAL_SUMMARIZE_PROMPT. Estimates are a preflight safeguard, not an exact
+ * tokenizer guarantee. */
+export interface SummaryInputBudget {
+  contextWindowTokens: number;
+  outputReserveTokens: number;
+  framingTokens: number;
+  estimateTokens: (text: string) => number;
+}
 
 export interface CompactorOpts {
   /** Verbatim tail size (tokens) kept unsummarized. Default 50000. */
@@ -43,6 +57,9 @@ export interface CompactorOpts {
   foldSerializeCap?: number;
   /** Getter for the live calibrated chars-per-token ratio (default () => 4). */
   ratio?: () => number;
+  /** Optional admission budget for the selected summary model. This is
+   * independent of `ratio`, which controls only the foreground keep boundary. */
+  summaryInputBudget?: SummaryInputBudget;
   /** Operator-log sink (rejected/failed summarize attempts, apply stats). */
   log?: (line: string) => void;
 }
@@ -168,12 +185,49 @@ function compactionNotice(replaced: number): ChatMessage {
   };
 }
 
+function validateSummaryInputBudget(budget: SummaryInputBudget): void {
+  if (
+    !Number.isSafeInteger(budget.contextWindowTokens) ||
+    budget.contextWindowTokens <= 0
+  ) {
+    throw new TypeError(
+      'summaryInputBudget.contextWindowTokens must be a positive safe integer',
+    );
+  }
+  if (
+    !Number.isSafeInteger(budget.outputReserveTokens) ||
+    budget.outputReserveTokens < 0
+  ) {
+    throw new TypeError(
+      'summaryInputBudget.outputReserveTokens must be a non-negative safe integer',
+    );
+  }
+  if (!Number.isSafeInteger(budget.framingTokens) || budget.framingTokens < 0) {
+    throw new TypeError(
+      'summaryInputBudget.framingTokens must be a non-negative safe integer',
+    );
+  }
+  if (
+    budget.outputReserveTokens + budget.framingTokens >=
+    budget.contextWindowTokens
+  ) {
+    throw new RangeError(
+      'summaryInputBudget output reserve and framing must leave input capacity',
+    );
+  }
+  if (typeof budget.estimateTokens !== 'function') {
+    throw new TypeError('summaryInputBudget.estimateTokens must be a function');
+  }
+}
+
 export function createCompactor(
   llm: LLM,
   tracker: ContextTracker,
   opts: CompactorOpts = {},
 ): Compactor {
   const keepTokens = opts.keepTokens ?? 50000;
+  const summaryInputBudget = opts.summaryInputBudget;
+  if (summaryInputBudget) validateSummaryInputBudget(summaryInputBudget);
   // foldSerializeCap intentionally uses a LOOSE 4 chars/token upper bound, NOT
   // the calibrated ratio: it's a safety ceiling on the serialized fold, so a
   // generous over-estimate (fewer truncations) is correct here; tightening to
@@ -191,6 +245,41 @@ export function createCompactor(
       resultSummary = summary;
     },
     log: opts.log,
+    validateInput: summaryInputBudget
+      ? (input) => {
+          // The provider sends these as system and user content. Estimate both
+          // complete strings, then add caller-supplied envelope/injected-prompt
+          // framing. This intentionally does not use the foreground boundary
+          // ratio: the selected summary model may tokenize at another density.
+          const systemEstimate = summaryInputBudget.estimateTokens(
+            SOCIAL_SUMMARIZE_PROMPT,
+          );
+          const userEstimate = summaryInputBudget.estimateTokens(input);
+          if (
+            !Number.isFinite(systemEstimate) ||
+            systemEstimate < 0 ||
+            !Number.isFinite(userEstimate) ||
+            userEstimate < 0
+          ) {
+            throw new Error(
+              'summary input token estimator returned a non-finite or negative estimate',
+            );
+          }
+          const estimatedInputTokens =
+            systemEstimate + userEstimate + summaryInputBudget.framingTokens;
+          const estimatedRequestTokens =
+            estimatedInputTokens + summaryInputBudget.outputReserveTokens;
+          if (estimatedRequestTokens > summaryInputBudget.contextWindowTokens) {
+            throw new Error(
+              'estimated summary request exceeds selected-model context budget ' +
+                `(estimated_input_tokens=${estimatedInputTokens}, ` +
+                `output_reserve_tokens=${summaryInputBudget.outputReserveTokens}, ` +
+                `context_window_tokens=${summaryInputBudget.contextWindowTokens}); ` +
+                'token counts are estimates, not exact tokenizer guarantees',
+            );
+          }
+        }
+      : undefined,
   });
 
   return {
