@@ -14,6 +14,8 @@ The parent-facing surface is `elpis.worker.start(mindId, { modelRef? })`, `send`
 
 When `workers.workspace.source_root` names a clean Git repository, spawn exports only tracked `HEAD` bytes and binds revision, digest, and size before Pod provisioning. The worker verifies and extracts that archive before its first model turn. Before finish, trusted wrapper code re-fetches the baseline, creates a fresh external Git object/index outside the model worktree, generates a deterministic binary-capable patch, uploads it into host custody, and only then prepares the finish. Source-bound sessions cannot post a finish without a matching artifact receipt. The worker receives neither the host source path nor push/deploy credentials.
 
+The exported workspace intentionally has no `.git` metadata or parent history. Workers inspect the supplied files directly; exact-diff review mandates must include the comparison diff or baseline from the dispatcher. Initializing a new repository cannot verify original ancestry, and artifact export does not require worker-side Git commits.
+
 Worker authority is a strict allowlist for its own workspace: local file editing, shell, git, bounded reads/previews, and timing helpers. It has no resident memory, channels, inbound message, Scheduler, restart/deploy, sudo, SSH, background jobs, or unscoped Mind mutation.
 
 Source-preparation failures identify the failed session with an `elpis.worker.status(...)` lookup. A dirty source tree gets fixed checkpoint guidance; arbitrary Git/filesystem details are not copied into the thrown error. The failed session remains revoked and no Pod is created.

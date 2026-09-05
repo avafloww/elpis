@@ -78,6 +78,7 @@ export class WorkerEpisodeError extends Error {
 const WORKER_SYSTEM_PROMPT = `You are an ephemeral Elpis worker executing one bounded delegated task.
 Your original mandate is the linked Mind item supplied below. It is the only original prompt.
 You have task-local transcript and workspace continuity, not resident identity, SOUL, autobiographical MEMORY, people history, Discord, Scheduler, or autonomous wake machinery.
+When source is supplied, the workspace is a tracked-file archive without Git metadata or commit history. Missing .git is expected, not evidence that source checkout failed. The dispatcher supplies source provenance; inspect the files directly. For an exact-checkpoint review, use the supplied exact diff or comparison baseline and report any missing comparison evidence. Do not create a Git repository to manufacture ancestry. The harness exports your final workspace patch automatically; a worker Git commit is not required.
 Use run for concrete work in your isolated workspace. Continue until the mandate is complete, then answer with a concise result for the dispatcher.`;
 
 function mandateMessage(mandate: WorkerMandate): ChatMessage {

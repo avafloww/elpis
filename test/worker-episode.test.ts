@@ -83,6 +83,33 @@ class FakeBroker implements WorkerEpisodeBroker {
   }
 }
 
+test('worker initialization explains source archive and review baseline limitations', async (t) => {
+  const root = dir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const broker = new FakeBroker([
+    result({ role: 'assistant', content: 'Reviewed.' }),
+  ]);
+  const episode = new WorkerEpisode({
+    broker,
+    journal: new WorkerJournal(path.join(root, 'episode.jsonl')),
+    sandbox: {
+      async run() {
+        throw new Error('unused');
+      },
+    },
+  });
+  await episode.run();
+  const system = broker.requests[0][0].content;
+  assert.equal(typeof system, 'string');
+  assert.match(system as string, /without Git metadata or commit history/);
+  assert.match(system as string, /dispatcher supplies source provenance/);
+  assert.match(system as string, /exact diff or comparison baseline/);
+  assert.match(
+    system as string,
+    /Do not create a Git repository to manufacture ancestry/,
+  );
+});
+
 test('worker episode executes with durable receipts and idempotent guidance', async () => {
   const root = dir();
   const file = path.join(root, 'episode.jsonl');
