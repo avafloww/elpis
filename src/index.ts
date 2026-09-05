@@ -37,7 +37,7 @@ import {
 import { createSandboxRegistry } from './sandbox/registry.js';
 import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
-import { createCompactor } from './llm/compactor.js';
+import { createCompactor, type SummaryInputBudget } from './llm/compactor.js';
 import { resolveCompactionRoleBudget } from './llm/compaction-role.js';
 import { createSecretRegistry } from './lib/secrets.js';
 import { ContextResources } from './context-resources.js';
@@ -136,6 +136,7 @@ import { resolveBuildIdentity, type BuildIdentity } from './build-identity.js';
 
 export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
+  openDatabase?: typeof openDatabase;
   fetchContextWindow?: typeof fetchContextWindow;
   createLLM?: typeof createLLM;
   createDiscord?: typeof createDiscord;
@@ -243,7 +244,20 @@ export async function createElpisRuntime(
   // The agent's structured-data store (channels + feedback signal). Opened once
   // and shared; a failure here is a boot problem (channels depend on it), so it
   // is intentionally NOT swallowed. See docs/persistence.md.
-  const db = openDatabase(dataLayout.root);
+  const db = (adapters.openDatabase ?? openDatabase)(dataLayout.root);
+  let summaryInputBudget: SummaryInputBudget | undefined;
+  try {
+    summaryInputBudget = await resolveCompactionRoleBudget(config, db, {
+      fetchContextWindow: adapters.fetchContextWindow ?? fetchContextWindow,
+    });
+  } catch (error) {
+    // Nothing else owns the newly opened database yet. Cleanup is best-effort:
+    // a close failure must not replace the budget error that made boot unsafe.
+    try {
+      db.close();
+    } catch {}
+    throw error;
+  }
   const secretRegistry = createSecretRegistry(config);
   const gatewayResidentStore = createGatewayResidentStore(db);
   for (const value of gatewayResidentStore.secretValues())
@@ -315,24 +329,20 @@ export async function createElpisRuntime(
     `extensions loaded: ${extensions.summaries.length}; skipped: ${extensions.failures.length}`,
   );
 
-  // The main context probe, optional compaction-role budget resolution, and
-  // most-recent transcript read are independent, so kick them off together
-  // rather than serially. Restart recovery: load the single most-recent monocontext
-  // transcript and prime the one history from it; returns null on first boot
-  // (no sessions/main stream yet — the cutover from per-channel files is clean).
+  // The main context probe and most-recent transcript read are independent, so
+  // kick them off together rather than serially. Restart recovery: load the
+  // single most-recent monocontext transcript and prime the one history from it;
+  // returns null on first boot (no sessions/main stream yet — the cutover from
+  // per-channel files is clean).
   const sessionsRoot = dataLayout.sessions;
   log('fetching context window for', config.llm.model, '...');
-  const [maxContextTokens, initialTranscript, summaryInputBudget] =
-    await Promise.all([
-      (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
-      (async () =>
-        loadMostRecentMain(sessionsRoot, {
-          opaqueReplayIdentity: replayIdentityForConfig(config),
-        }))(),
-      resolveCompactionRoleBudget(config, db, {
-        fetchContextWindow: adapters.fetchContextWindow ?? fetchContextWindow,
-      }),
-    ]);
+  const [maxContextTokens, initialTranscript] = await Promise.all([
+    (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
+    (async () =>
+      loadMostRecentMain(sessionsRoot, {
+        opaqueReplayIdentity: replayIdentityForConfig(config),
+      }))(),
+  ]);
   log('context window:', maxContextTokens, 'tokens');
   const initialMessages = initialTranscript?.messages ?? [];
   if (initialMessages.length > 0) {
