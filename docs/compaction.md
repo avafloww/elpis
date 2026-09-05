@@ -32,6 +32,8 @@ The instruction appears both before and after the fold body so a long serialized
 
 ## Quality gates and retries
 
+The guarded summarizer supports an optional synchronous input-admission validator. A rejected input records an observable failure before any model request, without entering quality-retry attempts or delivering a replacement summary. A later admissible input can still succeed; reset clears the failure.
+
 A candidate is rejected when it is empty, implausibly short, malformed, truncated, or looks like a continuation rather than a summary. Rejections are logged with a reason and retried with bounded backoff.
 
 If no candidate is accepted, the original history remains live and an operator-visible notice reports the failure. A later successful fold clears stale failure state.

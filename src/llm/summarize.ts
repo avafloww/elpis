@@ -89,6 +89,7 @@ export function createGuardedSummarizer(
   llm: LLM,
   opts: {
     retries?: number;
+    validateInput?: (input: string) => void;
     onResult?: (summary: string) => void;
     log?: (line: string) => void;
   } = {},
@@ -108,6 +109,13 @@ export function createGuardedSummarizer(
     },
     start(input: string, startOpts: { minChars?: number } = {}): void {
       if (running) return;
+      try {
+        opts.validateInput?.(input);
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        opts.log?.(`summarize admission rejected: ${lastError}`);
+        return;
+      }
       running = true;
       const minChars = startOpts.minChars ?? 0;
       const startEpoch = epoch;
