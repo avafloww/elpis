@@ -1242,6 +1242,7 @@ export interface LlmRoleClients {
   classifier: LLM;
   motor: LLM | null;
   secretary: LLM | null;
+  compaction: LLM | null;
 }
 
 export function createLlmRoleClients(
@@ -1266,6 +1267,9 @@ export function createLlmRoleClients(
       : null,
     secretary: config.llm.registry.targets.secretary
       ? create(configForLlmRole(config, 'secretary'), undefined, options.db)
+      : null,
+    compaction: config.llm.registry.targets.compaction
+      ? create(configForLlmRole(config, 'compaction'), undefined, options.db)
       : null,
   };
 }

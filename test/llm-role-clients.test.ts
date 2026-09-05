@@ -95,6 +95,7 @@ test('role clients are independently constructed from resolved role targets', ()
   assert.equal(calls[2].hub, undefined);
   assert.notEqual(clients.main, clients.classifier);
   assert.notEqual(clients.main, clients.motor);
+  assert.equal(clients.compaction, null);
 });
 
 test('configured secretary is independently constructed and requestable', async () => {
@@ -132,6 +133,60 @@ test('configured secretary is independently constructed and requestable', async 
       { role: 'user', content: 'organize' },
     ]),
     result,
+  );
+});
+
+test('configured compaction client is separate and keeps foreground routing unchanged', async () => {
+  const config = roleConfig();
+  config.llm.registry = createLlmModelRegistry({
+    providers: config.llm.registry.providers,
+    roles: {
+      main: 'p/main',
+      classifier: 'p/classifier',
+      motor: null,
+      compaction: 'p/secretary',
+    },
+  });
+  const calls: Array<{ model: string; hub: unknown; contextSize: number }> = [];
+  const hub = {} as never;
+  const clients = createLlmRoleClients(config, {
+    hub,
+    motorActive: false,
+    create(projected, passedHub) {
+      calls.push({
+        model: projected.llm.model,
+        hub: passedHub,
+        contextSize: projected.llm.contextSize,
+      });
+      return fakeLlm(projected.llm.model);
+    },
+  });
+  assert.deepEqual(
+    calls.map((call) => call.model),
+    ['wire-main', 'wire-classifier', 'wire-secretary'],
+  );
+  assert.equal(clients.main.model, 'wire-main');
+  assert.equal(clients.classifier.model, 'wire-classifier');
+  assert.equal(clients.secretary, null);
+  assert.equal(clients.compaction?.model, 'wire-secretary');
+  assert.notEqual(clients.compaction, clients.main);
+  assert.equal(calls[0].hub, hub);
+  assert.equal(calls[2].hub, undefined);
+  assert.equal(calls[0].contextSize, 100_000);
+  assert.equal(calls[2].contextSize, 40_000);
+  clients.compaction!.summarize = async (text) => `fold:${text}`;
+  assert.equal(await clients.compaction!.summarize('history'), 'fold:history');
+  assert.throws(
+    () =>
+      createLlmRoleClients(config, {
+        motorActive: false,
+        create(projected) {
+          if (projected.llm.model === 'wire-secretary')
+            throw new Error('summary client unavailable');
+          return fakeLlm(projected.llm.model);
+        },
+      }),
+    /summary client unavailable/,
   );
 });
 
@@ -187,7 +242,13 @@ test('standalone role dispatch never sends motor work through classifier', async
     calls.push('motor');
     return result;
   };
-  const llms = { main: fakeLlm('main'), classifier, motor, secretary: null };
+  const llms = {
+    main: fakeLlm('main'),
+    classifier,
+    motor,
+    secretary: null,
+    compaction: null,
+  };
 
   assert.equal(
     await completeStandaloneForRole(llms, 'motor', [
