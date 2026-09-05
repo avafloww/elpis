@@ -3,7 +3,8 @@ WORKDIR /opt/elpis
 COPY package.json package-lock.json tsconfig.json ./
 COPY packages/gateway/package.json packages/gateway/package.json
 COPY packages/gateway-protocol/package.json packages/gateway-protocol/package.json
-RUN npm ci --legacy-peer-deps --workspace @elpis/gateway --workspace @elpis/gateway-protocol
+COPY packages/provider-transport/package.json packages/provider-transport/package.json
+RUN npm ci --legacy-peer-deps --workspace @elpis/gateway --workspace @elpis/gateway-protocol --workspace @elpis/provider-transport
 COPY packages/gateway/tsconfig.json packages/gateway/build-client.mjs packages/gateway/
 COPY packages/gateway/client packages/gateway/client
 COPY packages/gateway/public packages/gateway/public
@@ -12,19 +13,23 @@ COPY src/console/client src/console/client
 COPY src/console/public src/console/public
 COPY packages/gateway-protocol/tsconfig.json packages/gateway-protocol/tsconfig.json
 COPY packages/gateway-protocol/src packages/gateway-protocol/src
+COPY packages/provider-transport/tsconfig.json packages/provider-transport/tsconfig.json
+COPY packages/provider-transport/src packages/provider-transport/src
 RUN npm run build:gateway \
   && mkdir -p /opt/artifacts \
   && npm pack --silent --workspace @elpis/gateway-protocol --pack-destination /opt/artifacts \
+  && npm pack --silent --workspace @elpis/provider-transport --pack-destination /opt/artifacts \
   && npm pack --silent --workspace @elpis/gateway --pack-destination /opt/artifacts \
   && mv /opt/artifacts/elpis-gateway-protocol-*.tgz /opt/artifacts/protocol.tgz \
+  && mv /opt/artifacts/elpis-provider-transport-*.tgz /opt/artifacts/transport.tgz \
   && mv /opt/artifacts/elpis-gateway-[0-9]*.tgz /opt/artifacts/gateway.tgz
 
 FROM node:24-trixie-slim AS production-dependencies
 WORKDIR /opt/runtime
-COPY --from=build /opt/artifacts/protocol.tgz /opt/artifacts/gateway.tgz ./
+COPY --from=build /opt/artifacts/protocol.tgz /opt/artifacts/transport.tgz /opt/artifacts/gateway.tgz ./
 RUN printf '{"private":true,"type":"module"}\n' > package.json \
-  && npm install --omit=dev --ignore-scripts --package-lock=false ./protocol.tgz ./gateway.tgz \
-  && rm protocol.tgz gateway.tgz
+  && npm install --omit=dev --ignore-scripts --package-lock=false ./protocol.tgz ./transport.tgz ./gateway.tgz \
+  && rm protocol.tgz transport.tgz gateway.tgz
 
 FROM node:24-trixie-slim AS runtime
 ARG ELPIS_BUILD_REVISION

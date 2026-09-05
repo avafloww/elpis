@@ -10,6 +10,8 @@ Gateway has a separate published image at `ghcr.io/avafloww/elpis-gateway`. Rele
 
 GHCR package visibility is separate from repository access. Release CI deliberately remains red unless an anonymous manifest fetch succeeds. If a first publication remains private, a package owner must change `elpis-gateway` to **Public** in GitHub's package settings and rerun the failed workflow. Once public, GitHub does not allow the package to become private again.
 
+The dedicated build prepares and packages both local runtime dependencies, `@elpis/gateway-protocol` and `@elpis/provider-transport`, before installing the Gateway artifact into the production image. Standalone Gateway build/test commands also build their workspace dependencies rather than relying on pre-existing `dist` files.
+
 To build locally instead:
 
 ```bash

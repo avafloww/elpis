@@ -5,6 +5,54 @@ import * as path from 'node:path';
 const root = path.resolve(import.meta.dirname, '..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
+test('Gateway builds and packages its local provider transport dependency', () => {
+  const docker = read('Dockerfile.gateway');
+  const pkg = JSON.parse(read('package.json'));
+  const gateway = JSON.parse(read('packages/gateway/package.json'));
+  assert.ok(
+    pkg.scripts['build:gateway'].includes('npm run build:provider-transport'),
+  );
+  assert.ok(
+    pkg.scripts['build:gateway'].indexOf('build:provider-transport') <
+      pkg.scripts['build:gateway'].indexOf(
+        'npm run build --workspace @elpis/gateway',
+      ),
+  );
+  assert.ok(
+    gateway.scripts.pretest.includes('--workspace @elpis/provider-transport'),
+  );
+  assert.ok(
+    docker.includes(
+      'COPY packages/provider-transport/package.json packages/provider-transport/package.json',
+    ),
+  );
+  assert.ok(
+    docker.includes(
+      'COPY packages/provider-transport/tsconfig.json packages/provider-transport/tsconfig.json',
+    ),
+  );
+  assert.ok(
+    docker.includes(
+      'COPY packages/provider-transport/src packages/provider-transport/src',
+    ),
+  );
+  assert.match(
+    docker,
+    /RUN npm ci[^\n]*--workspace @elpis\/provider-transport/,
+  );
+  assert.ok(
+    docker.includes('npm pack --silent --workspace @elpis/provider-transport'),
+  );
+  assert.match(
+    docker,
+    /COPY --from=build[^\n]*\/opt\/artifacts\/transport\.tgz/,
+  );
+  assert.match(
+    docker,
+    /npm install --omit=dev --ignore-scripts[^\n]*\.\/transport\.tgz/,
+  );
+});
+
 test('official image hard-codes the restricted non-root runtime contract', () => {
   const docker = read('Dockerfile');
   const dockerignore = read('.dockerignore');
@@ -168,7 +216,7 @@ test('resident image owns exactly the shared resident workspace dependencies', (
   assert.equal(gatewayPackage.dependencies['@elpis/gateway-protocol'], '1.0.0');
   assert.equal(
     gatewayPackage.scripts.pretest,
-    'npm run build --workspace @elpis/gateway-protocol',
+    'npm run build --workspace @elpis/gateway-protocol && npm run build --workspace @elpis/provider-transport',
   );
   assert.match(
     docker,

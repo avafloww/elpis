@@ -21,7 +21,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.json && mkdir -p dist/public && cp -R public/. dist/public/ && npm run typecheck:client && npm run build:client",
     "typecheck:client": "tsc -p client/tsconfig.json",
     "build:client": "node build-client.mjs",
-    "pretest": "npm run build --workspace @elpis/gateway-protocol",
+    "pretest": "npm run build --workspace @elpis/gateway-protocol && npm run build --workspace @elpis/provider-transport",
     "test": "TEST_NO_NETWORK=1 node --test --test-timeout=30000 --import tsx/esm test/*.test.ts"
   },
   "bin": {
