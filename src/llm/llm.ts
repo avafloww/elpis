@@ -1,3 +1,7 @@
+import {
+  chatCompletionStatus,
+  type CompletionStatus,
+} from './completion-status.js';
 // llm.ts — OpenAI-compatible client + the model-facing tool definitions.
 //
 // `run` is the normal tool. An explicitly gated `think` tool may join it on the
@@ -870,7 +874,12 @@ export function sanitizeAssistantMessage(msg: {
   return { message: assistant, stripped: contentStripped || dropped };
 }
 
+export type { CompletionStatus } from './completion-status.js';
+
 export interface CompleteResult {
+  /** Transient terminal metadata. Omission is unknown, never complete.
+   * Independent of sanitizer eligibility; does not authorize speech. */
+  completionStatus?: CompletionStatus;
   message: ChatMessage;
   usage: LLMUsage;
   /** True if the sanitizer stripped leaked-CoT markers or dropped malformed tool
@@ -1088,6 +1097,7 @@ export async function streamComplete(
       total_tokens: 0,
     };
     let requestId: string | undefined;
+    let finishReason: unknown;
 
     try {
       const pending = client.chat.completions.create(
@@ -1108,6 +1118,8 @@ export async function streamComplete(
       const stream = streamed.data;
       requestId = streamed.request_id ?? undefined;
       for await (const chunk of stream) {
+        if (chunk.choices[0]?.finish_reason != null)
+          finishReason = chunk.choices[0].finish_reason;
         if (chunk.usage) {
           usage = {
             prompt_tokens: chunk.usage.prompt_tokens ?? 0,
@@ -1166,6 +1178,7 @@ export async function streamComplete(
     });
     return {
       message: sanitized.message,
+      completionStatus: chatCompletionStatus(finishReason),
       stripped: sanitized.stripped,
       usage,
       promptChars: charsSent,

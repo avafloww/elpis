@@ -1,3 +1,4 @@
+import { responsesCompletionStatus } from './completion-status.js';
 // responses.ts — the OpenAI Responses API path (reasoning-preserving).
 //
 // The Responses API is the modern surface: reasoning models return their
@@ -431,10 +432,16 @@ function buildResponsesParams(
 /** Assemble a CompleteResult from a finished Response object (either the
  * non-streaming return or a stream's `response.completed` payload). */
 function assembleResult(
-  resp: { output?: unknown[]; usage?: unknown },
+  resp: {
+    output?: unknown[];
+    usage?: unknown;
+    status?: unknown;
+    incomplete_details?: unknown;
+  },
   charsSent: number,
   extraContent = '',
   requestId?: string,
+  terminalEvent?: string,
 ): CompleteResult {
   const parts = fromResponseOutput(resp.output ?? []);
   const sanitized = sanitizeAssistantMessage({
@@ -447,6 +454,7 @@ function assembleResult(
   }
   return {
     message: sanitized.message,
+    completionStatus: responsesCompletionStatus(resp, terminalEvent),
     stripped: sanitized.stripped,
     usage: mapResponsesUsage(resp.usage),
     promptChars: charsSent,
@@ -510,6 +518,7 @@ export async function streamResponsesComplete(
     // only. Keep the done items by output index and reconstruct the response
     // from them below.
     const completedItems = new Map<number, unknown>();
+    let terminalEvent: string | undefined;
     let finalResponse: { output?: unknown[]; usage?: unknown } | null = null;
     let failure: unknown = null;
     let requestId: string | undefined;
@@ -670,6 +679,7 @@ export async function streamResponsesComplete(
             // incomplete (max_output_tokens hit) still carries whatever was
             // generated; surface it like chat's truncated finish rather than
             // erroring the turn.
+            terminalEvent = event.type;
             finalResponse = event.response;
             break streamLoop;
           }
@@ -741,6 +751,7 @@ export async function streamResponsesComplete(
       charsSent,
       streamedTextFallback,
       requestId,
+      terminalEvent,
     );
     assertStandaloneOutputBytes(result.message.content ?? '', maxOutputBytes);
     return result;

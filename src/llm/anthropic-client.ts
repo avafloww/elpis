@@ -1,3 +1,4 @@
+import { anthropicCompletionStatus } from './completion-status.js';
 // anthropic-client.ts — the Anthropic Messages wire path for a Claude Pro/Max
 // subscription (provider_type: 'anthropic-oauth').
 //
@@ -436,6 +437,7 @@ async function anthropicComplete(
     let usage: AnthropicUsage = {};
     let requestId: string | undefined;
     let messageStopped = false;
+    let stopReason: unknown;
     const controller = new AbortController();
     if (options.signal?.aborted) controller.abort();
     else
@@ -566,6 +568,9 @@ async function anthropicComplete(
             }
           }
         } else if (evt.type === 'message_delta') {
+          const reason = (evt.delta as { stop_reason?: unknown } | undefined)
+            ?.stop_reason;
+          if (reason != null) stopReason = reason;
           const u = (evt as { usage?: AnthropicUsage }).usage;
           if (u) usage = { ...usage, ...u };
         }
@@ -606,6 +611,7 @@ async function anthropicComplete(
       sanitized.message.thinking_blocks = thinkingBlocks;
     return {
       message: sanitized.message,
+      completionStatus: anthropicCompletionStatus(stopReason),
       stripped: sanitized.stripped,
       usage: toLLMUsage(usage),
       promptChars: charsSent,
