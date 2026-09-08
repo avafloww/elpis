@@ -876,6 +876,7 @@ for (const model of ['gpt-5.6-sol', 'gpt-6-astra']) {
       };
     };
     const result = await llm.complete([{ role: 'user', content: 'finish' }]);
+    assert.equal(result.completionStatus, 'complete');
     const input = body?.input as Array<Record<string, unknown>>;
     assert.equal(input[0].type, 'additional_tools');
     assert.equal('tools' in (body ?? {}), false);
