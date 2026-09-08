@@ -390,15 +390,15 @@ test('formatAttachmentParts: animated emote frames are grouped as one temporal a
   const { formatAttachmentParts } = await import('../src/agent.js');
   const attachments = [1, 2, 3, 4].map((frame) => ({
     url: `u${frame}`,
-    name: `emote-wagtail-111111111111111107-frame${frame}of4.png`,
+    name: `emote-wave-111111111111111107-frame${frame}of4.png`,
     contentType: 'image/png',
-    localPath: `/tmp/rowan-${frame}.png`,
+    localPath: `/tmp/emote-${frame}.png`,
     size: 2000 + frame,
   }));
   const parts = formatAttachmentParts(attachments);
   assert.equal(
     parts[0],
-    '<animation-frames kind="emote" name="wagtail" id="111111111111111107" attachments="1,2,3,4" frames="1,2,3,4" count="4">' +
+    '<animation-frames kind="emote" name="wave" id="111111111111111107" attachments="1,2,3,4" frames="1,2,3,4" count="4">' +
       'ONE animated emote sampled into temporal keyframes. Read these attachments in frame order as one animation, not as separate images or emotes.' +
       '</animation-frames>',
   );
@@ -408,8 +408,8 @@ test('formatAttachmentParts: animated emote frames are grouped as one temporal a
 
   const stored = formatInboundEnvelope(
     {
-      channelName: 'aster',
-      author: 'Clover',
+      channelName: 'lounge',
+      author: 'Bramble',
       authorId: '1',
       createdAt: '2026-08-08T00:00:00Z',
       content: 'wag :3',

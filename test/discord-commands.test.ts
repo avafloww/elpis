@@ -921,24 +921,24 @@ test('resolveModerationCommand: reason is optional and omitted when not given', 
 
 const NAMES = {
   users: new Map([
-    ['111111111111111103', 'Echo'],
-    ['22222222222222222', 'clover'],
+    ['111111111111111103', 'Aster'],
+    ['22222222222222222', 'Bramble'],
   ]),
   roles: new Map([['33333333333333333', 'friends']]),
-  channels: new Map([['44444444444444444', 'agent-zoo']]),
+  channels: new Map([['44444444444444444', 'lounge']]),
 };
 
 test('resolveMentions: a user mention becomes @displayName', () => {
   assert.equal(
     resolveMentions('<@111111111111111103> do mentions work too?', NAMES),
-    '@Echo do mentions work too?',
+    '@Aster do mentions work too?',
   );
 });
 
 test('resolveMentions: the legacy nickname form <@!id> resolves the same way', () => {
   assert.equal(
     resolveMentions('hi <@!22222222222222222>', NAMES),
-    'hi @clover',
+    'hi @Bramble',
   );
 });
 
@@ -948,7 +948,7 @@ test('resolveMentions: role and channel markup resolve too', () => {
       '<@&33333333333333333> meet in <#44444444444444444>',
       NAMES,
     ),
-    '@friends meet in #agent-zoo',
+    '@friends meet in #lounge',
   );
 });
 
@@ -969,7 +969,7 @@ test('resolveMentions: several mentions in one body all resolve', () => {
       '<@111111111111111103> and <@22222222222222222> both',
       NAMES,
     ),
-    '@Echo and @clover both',
+    '@Aster and @Bramble both',
   );
 });
 

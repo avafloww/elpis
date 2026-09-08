@@ -15,7 +15,7 @@ Extension files use one of these suffixes:
 
 The filename owns the namespace. Elpis strips the extension suffix, splits punctuation, underscores, spaces, and case boundaries into words, then emits lower camelCase ASCII. Names that begin with a number receive a leading underscore. For example:
 
-- `unn.ext.ts` → `elpis.ext.unn`
+- `Aster.ext.ts` → `elpis.ext.aster`
 - `My tools.ext.ts` → `elpis.ext.myTools`
 
 Files are activated sequentially in normalized namespace order, independent of filesystem iteration order. If two files normalize to the same namespace, both are quarantined and recorded as failures while the rest of Elpis continues starting.

@@ -251,7 +251,7 @@ test('discord ingest: mention markup in the body is resolved to names before it 
         '<@111111111111111103> do mentions work too? ask <@&333333333333333333> in <#1002>',
       mentions: {
         users: [
-          { id: '111111111111111103', displayName: 'Echo', username: 'echo' },
+          { id: '111111111111111103', displayName: 'Aster', username: 'aster' },
         ],
         roles: [{ id: '333333333333333333', name: 'friends' }],
         channels: [{ id: '1002', name: 'lounge' }],
@@ -263,7 +263,7 @@ test('discord ingest: mention markup in the body is resolved to names before it 
   assert.equal(seen.length, 1, 'the message reached the agent');
   assert.equal(
     seen[0].content,
-    '@Echo do mentions work too? ask @friends in #lounge',
+    '@Aster do mentions work too? ask @friends in #lounge',
     'user/role/channel markup all resolved at ingest',
   );
   agent.stop();

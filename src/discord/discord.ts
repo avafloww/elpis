@@ -830,7 +830,7 @@ export interface MentionNames {
 }
 
 /** Rewrite Discord's raw mention markup (`<@id>`, `<@!id>`, `<@&id>`, `<#id>`)
- * to the readable `@name` / `#name` form. On the wire a body arrives as
+ * to the readable `@name` / `#name` form. A synthetic example body is
  * `<@111111111111111103> do mentions work too?`, which tells the agent
  * nothing about WHO was pinged — least of all whether it was themselves.
  * Names come from what the gateway already delivered with the message

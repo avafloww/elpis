@@ -32,7 +32,7 @@ function extensionDatabase(): DatabaseSync {
 }
 
 test('extension namespaces are filename-owned and dot-safe', () => {
-  assert.equal(normalizeExtensionNamespace('Unn.ext.ts'), 'unn');
+  assert.equal(normalizeExtensionNamespace('Aster.ext.ts'), 'aster');
   assert.equal(normalizeExtensionNamespace('My odd-tool.ext.mts'), 'myOddTool');
   assert.equal(
     normalizeExtensionNamespace('alreadyCamel.ext.ts'),
