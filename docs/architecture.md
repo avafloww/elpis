@@ -130,7 +130,12 @@ Synthetic wakes do not masquerade as person-authored input. The turn records whe
 - Every message is persisted when committed.
 - Provider and compaction retries are bounded and observable.
 - A failed fold leaves the original history intact.
-- Process-level errors are logged and can be delivered to a configured error channel.
+- Provider failures, compaction failures, and sustained no-yield alerts retain their configured error-channel routing; process and late sandbox exceptions use the internal routing described below.
 - Background subprocesses have explicit lifecycle tracking.
 - Console failure does not stop the agent.
 - Invalid configuration fails loudly before the bot begins operating.
+
+Unowned process errors and late sandbox errors retain process logging and enter
+the resident's internal harness queue, not an automatic Discord send. Owned-run
+process error routing takes precedence. Logging and enqueue failures in this
+terminal observer cannot recursively escape into process error reporting.

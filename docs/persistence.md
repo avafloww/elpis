@@ -120,3 +120,15 @@ Do not delete Git-held or local transcript history merely because a backup comma
 ## Portability
 
 Readable files and transcripts can move between hosts. Opaque provider reasoning may be discarded on provider or model changes. The continuing agent's durable identity is not defined by opaque wire state.
+
+## Scheduler dispatch lifecycle
+
+Each due row is reread immediately before dispatch: completion, removal,
+rescheduling, and snoozing by earlier callbacks take precedence over a poll's
+snapshot. Callback lifecycle changes are not overwritten after delivery.
+Failed dispatches retain their row and persist a fixed 60-second retry floor in
+`next_run_at` (never pulling an existing later schedule forward or reviving a
+done row). Unrelated due tasks still progress in the same poll. After rearming,
+poll throws the original failure, or an AggregateError for multiple failures;
+errors remain observable without a zero-delay retry loop. Retries are at-least-once
+if a callback performs side effects before throwing.

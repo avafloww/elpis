@@ -535,7 +535,11 @@ export async function createElpisRuntime(
     onFutureSettled: (id, value, rejected, logs, sends) =>
       agent.notifyFutureSettled(id, value, rejected, { logs, sends }),
     onLateProcessError: (event) => {
-      log(formatSandboxLateProcessErrorNotice(event));
+      deliverInternalErrorNotice(
+        formatSandboxLateProcessErrorNotice(event),
+        log,
+        (notice) => agent.notifyInternalError(notice),
+      );
     },
     // F-UX: expose the typing indicator so the agent can explicitly say "I'm
     // thinking" during long sandbox work. Routes through agent.typing (which
@@ -966,8 +970,8 @@ export async function createElpisRuntime(
 
   // Process-level crash guards (a): an unhandled rejection or
   // uncaught exception used to bring the whole process down with no notice
-  // anywhere. Log it and — best-effort — surface it to the operator error
-  // channel via the public send path, then keep running. Never process.exit
+  // anywhere. Log it and surface it internally to the resident, then keep
+  // running. Never process.exit
   // here; the whole point is surviving instead of crashing silently.
   function reportProcessError(
     kind: 'unhandledRejection' | 'uncaughtException',
@@ -975,13 +979,9 @@ export async function createElpisRuntime(
   ): void {
     if (routeRunProcessError(kind, err)) return;
     const notice = formatProcessErrorNotice(kind, err);
-    log(notice);
-    const ch = config.discord.errorChannelId;
-    if (ch) {
-      agent.send(ch, notice).catch(() => {
-        /* never let the notice path crash us */
-      });
-    }
+    deliverInternalErrorNotice(notice, log, (text) =>
+      agent.notifyInternalError(text),
+    );
   }
   process.on('unhandledRejection', (reason) =>
     reportProcessError('unhandledRejection', reason),
@@ -1022,4 +1022,26 @@ if (isEntryPoint) {
     console.error('[harness] fatal:', e);
     process.exit(1);
   });
+}
+
+/** Error observers must not produce speech or recursively report their failures. */
+export function deliverInternalErrorNotice(
+  notice: string,
+  log: (text: string) => void,
+  enqueue: (text: string) => void,
+): void {
+  try {
+    log(notice);
+  } catch {
+    /* logging failure cannot escape a process guard */
+  }
+  try {
+    enqueue(notice);
+  } catch (error) {
+    try {
+      log('[harness] internal error notice delivery failed');
+    } catch {
+      /* terminal observer */
+    }
+  }
 }

@@ -136,8 +136,38 @@ export class Scheduler {
   poll(): void {
     const now = Date.now();
     const due = this.listDue(now);
-    for (const task of due) this.handleDue(task, now);
-    this.rearm();
+    const errors: unknown[] = [];
+    try {
+      for (const snapshot of due) {
+        const task = this.getById(snapshot.id);
+        if (
+          !task ||
+          task.doneAt != null ||
+          task.nextRunAt > now ||
+          (task.snoozeUntil != null && task.snoozeUntil > now)
+        )
+          continue;
+        try {
+          this.handleDue(task, now);
+        } catch (error) {
+          // Persist a fixed bounded retry delay, without reviving or pulling
+          // forward a lifecycle change made by the callback itself.
+          const current = this.getById(task.id);
+          if (current && current.doneAt == null) {
+            this.updateNextRun(
+              task.id,
+              Math.max(current.nextRunAt, Date.now() + 60_000),
+            );
+          }
+          errors.push(error);
+        }
+      }
+    } finally {
+      this.rearm();
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'Scheduled dispatches failed');
   }
 
   private handleDue(task: ScheduledTask, now: number): void {
@@ -145,6 +175,16 @@ export class Scheduler {
     this.deps.logger.info(
       `[scheduler] task due | id=${task.id} name=${task.name}`,
     );
+
+    const current = this.getById(task.id);
+    if (
+      !current ||
+      current.doneAt != null ||
+      current.nextRunAt !== task.nextRunAt ||
+      current.snoozeUntil !== task.snoozeUntil ||
+      current.intervalMs !== task.intervalMs
+    )
+      return;
 
     if (task.kind === 'reminder') {
       // Send initial nudge, reschedule main cadence, and spawn first nag.

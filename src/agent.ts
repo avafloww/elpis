@@ -687,7 +687,10 @@ export interface AgentDeps {
   /** Persistent transcript store (single 'main' stream). */
   transcript: TranscriptStore;
   /** Durable timer store for one-shot run wakes. */
-  scheduler?: Pick<Scheduler, 'create' | 'list' | 'update' | 'markDone'>;
+  scheduler?: Pick<
+    Scheduler,
+    'create' | 'list' | 'update' | 'markDone' | 'getById'
+  >;
   /** Messages to prime the one history with on boot (restart recovery). Empty /
    * omitted for a fresh start. */
   initialMessages?: ChatMessage[];
@@ -1379,8 +1382,24 @@ export class Agent {
     }
   }
 
+  notifyInternalError(notice: string): void {
+    this.enqueueInternal('harness', 'harness', notice, {
+      id: this.syntheticId('internal-error'),
+      author: 'harness',
+    });
+  }
+
   notifyRunWake(task: ScheduledTask): boolean {
     if (!isRunWakeTaskName(task.name)) return false;
+    const current = this.deps.scheduler?.getById(task.id);
+    if (
+      !current ||
+      current.doneAt != null ||
+      current.nextRunAt > Date.now() ||
+      (current.snoozeUntil != null && current.snoozeUntil > Date.now())
+    )
+      return true;
+    task = current;
     const payload = parseRunWakePayload(task.payload);
     if (!payload) {
       this.logger.warn(
