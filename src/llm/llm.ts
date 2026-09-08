@@ -138,7 +138,7 @@ export interface ChatMessage {
    * result is aged down at request-assembly time so the agent's outbound speech
    * survives even after the tool payload is stubbed. Persisted;
    * never sent to the API. */
-  sends?: { channel: string; text: string }[];
+  sends?: { channel: string; text: string; replyTo?: string }[];
   /** Out-of-band generation attribution. Persisted for forensic/data use, but
    * deliberately ignored by every provider request translator. */
   provenance?: GenerationProvenance;

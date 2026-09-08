@@ -508,7 +508,7 @@ export async function createElpisRuntime(
     send: async (
       channelId: string,
       content: string,
-      opts?: { files?: import('./types.js').OutboundAttachment[] },
+      opts?: import('./types.js').OutboundSendOptions,
     ) => agent.send(channelId, content, opts),
     logbuf: extensionLogbuf,
     agentName: () => readAgentName(config.paths.soulPath),

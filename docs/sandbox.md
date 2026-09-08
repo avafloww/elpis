@@ -110,3 +110,15 @@ A `run` result is internal. The inhabitant speaks to people only by calling `elp
 ## Browser and desktop state
 
 Browser profiles, screenshots, Xauthority, motor traces, and desktop runtime state live under the private data directory. They must never be committed with source.
+
+### Explicit Discord replies
+
+Programmatic `elpis.channel(ref).send(text, { replyTo, files? })` accepts an optional
+`replyTo`: a nonempty decimal Discord message-ID string of at most 20 digits.
+The reference belongs only to the explicitly selected channel; it does not resolve
+or authorize a destination. All normal send gates still apply. Discord must accept
+the reference or the send fails, without a plain-message fallback or original-message
+lookup. Only the first chunk references it; attachments retain their existing first-chunk
+behavior. Replies do not ping the original author automatically. Existing explicit
+mention behavior is unchanged. Console rejects reply metadata. Successful send
+provenance includes the reply target. Omitting `replyTo` preserves ordinary sends.

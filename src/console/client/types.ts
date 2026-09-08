@@ -77,7 +77,7 @@ export interface StreamEntry {
     }>;
   }>;
   tool_call_id?: string;
-  sends?: Array<{ channel: string; text: string }>;
+  sends?: Array<{ channel: string; text: string; replyTo?: string }>;
   run?: JsonObject;
   replaced?: number;
   rewritten?: number;

@@ -480,12 +480,18 @@ function parseChatMessage(
     if (contextResources.length > 0) msg.contextResources = contextResources;
   }
   if (Array.isArray(obj.sends)) {
-    const sends: { channel: string; text: string }[] = [];
+    const sends: { channel: string; text: string; replyTo?: string }[] = [];
     for (const s of obj.sends) {
       if (typeof s !== 'object' || s === null) continue;
       const so = s as Record<string, unknown>;
       if (typeof so.channel === 'string' && typeof so.text === 'string') {
-        sends.push({ channel: so.channel, text: so.text });
+        sends.push({
+          channel: so.channel,
+          text: so.text,
+          ...(typeof so.replyTo === 'string' && /^[0-9]{1,20}$/.test(so.replyTo)
+            ? { replyTo: so.replyTo }
+            : {}),
+        });
       }
     }
     if (sends.length > 0) msg.sends = sends;

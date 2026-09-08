@@ -54,6 +54,12 @@ export interface OutboundAttachment {
   name?: string;
 }
 
+export interface OutboundSendOptions {
+  files?: OutboundAttachment[];
+  /** Message in the explicitly targeted Discord channel. */
+  replyTo?: string;
+}
+
 export interface RunResult {
   ok: boolean;
   preview?: string;
@@ -71,7 +77,7 @@ export interface RunResult {
   note?: string;
   /** The channel().send() calls made during this run, retained for console
    * rendering, feedback localization, transcript recovery, and detached futures. */
-  sends?: { channel: string; text: string }[];
+  sends?: { channel: string; text: string; replyTo?: string }[];
   /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
   operationReceipts?: RunOperationReceipt[];
   operationReceiptsDropped?: number;
@@ -131,7 +137,7 @@ export interface SandboxDeps {
   send?: (
     channelId: string,
     content: string,
-    opts?: { files?: OutboundAttachment[] },
+    opts?: OutboundSendOptions,
   ) => Promise<void>;
   logbuf: string[];
   /** Hot-reloaded inhabitant name (SOUL.md frontmatter), used for self-authored records. */
@@ -277,7 +283,7 @@ export interface SandboxDeps {
     value: unknown,
     rejected: boolean,
     logs?: string,
-    sends?: { channel: string; text: string }[],
+    sends?: { channel: string; text: string; replyTo?: string }[],
   ) => void;
   /** A callback owned by a completed run fired later from a leaked async resource. */
   onLateProcessError?: (event: SandboxLateProcessError) => void;

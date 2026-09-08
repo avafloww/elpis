@@ -1,3 +1,4 @@
+import { validateReplyTo, discordReplyOptions } from '../lib/outbound.js';
 // discord.ts — gateway wiring, message in/out, chunking, slash commands.
 //
 // - intents: Guilds, GuildMessages, MessageContent, GuildMessageReactions (the
@@ -2173,11 +2174,16 @@ export function createDiscord(
   const send = async (
     channelId: string,
     text: string,
-    opts?: { files?: { path: string; name?: string }[] },
+    opts?: import('../types.js').OutboundSendOptions,
   ) => {
+    validateReplyTo(opts?.replyTo);
     log.debug(`outbound send #${channelId} (${text.length} chars)`);
     const channel = await client.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+    if (!channel || !channel.isTextBased() || !('send' in channel)) {
+      if (opts?.replyTo !== undefined)
+        throw new Error('reply target channel is not sendable');
+      return;
+    }
     const isThread =
       'isThread' in channel &&
       typeof channel.isThread === 'function' &&
@@ -2223,8 +2229,12 @@ export function createDiscord(
       return new AttachmentBuilder(f.path, { name });
     });
     for (let i = 0; i < chunks.length; i++) {
-      const payload: { content: string; files?: AttachmentBuilder[] } = {
+      const payload: {
+        content: string;
+        files?: AttachmentBuilder[];
+      } & ReturnType<typeof discordReplyOptions> = {
         content: chunks[i],
+        ...discordReplyOptions(opts?.replyTo, i),
       };
       if (i === 0 && attachments.length > 0) payload.files = attachments;
       await channel.send(payload);

@@ -57,3 +57,56 @@ test('Discord send revalidates fetched channel guild before delivery', async () 
   client.destroy();
   cleanup();
 });
+
+test('Discord replies use first chunk only and never retry a rejected reference', async () => {
+  const { agent, config, cleanup } = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds: [guild] } },
+  });
+  const { client } = createDiscord(config, agent);
+  const payloads: any[] = [];
+  let fail = false;
+  Object.defineProperty(client.channels, 'fetch', {
+    configurable: true,
+    value: async (id: string) => {
+      assert.equal(id, '1002');
+      return {
+        ...fetchedChannel('g1', () => {}),
+        send: async (payload: any) => {
+          payloads.push(payload);
+          if (fail) throw new Error('reference unavailable');
+        },
+      };
+    },
+  });
+  try {
+    await agent.send('1002', 'a'.repeat(4000), {
+      replyTo: '123',
+      files: [{ path: '/tmp/example.txt' }],
+    });
+    assert.deepEqual(payloads[0].reply, {
+      messageReference: '123',
+      failIfNotExists: true,
+    });
+    assert.deepEqual(payloads[0].allowedMentions, { repliedUser: false });
+    assert.equal(payloads[0].files.length, 1);
+    for (const payload of payloads.slice(1)) {
+      assert.equal(payload.reply, undefined);
+      assert.equal(payload.files, undefined);
+    }
+    payloads.length = 0;
+    fail = true;
+    await assert.rejects(
+      agent.send('1002', 'a'.repeat(4000), { replyTo: '123' }),
+      /reference unavailable/,
+    );
+    assert.equal(payloads.length, 1);
+    fail = false;
+    payloads.length = 0;
+    await agent.send('1002', 'plain');
+    assert.deepEqual(payloads, [{ content: 'plain' }]);
+  } finally {
+    agent.stop();
+    client.destroy();
+    cleanup();
+  }
+});

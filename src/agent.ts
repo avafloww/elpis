@@ -1,3 +1,4 @@
+import { validateReplyTo } from './lib/outbound.js';
 // agent.ts — orchestration: the one history, system prompt, tool dispatch, loop.
 //
 // CONVERSATION MODEL: monocontext. The agent is one mind with ONE
@@ -698,7 +699,7 @@ export interface AgentDeps {
   send: (
     channelId: string,
     text: string,
-    opts?: { files?: import('./types.js').OutboundAttachment[] },
+    opts?: import('./types.js').OutboundSendOptions,
   ) => Promise<void>;
   /** Called when the agent is about to make an LLM call (typing indicator). */
   onThinking?: (channelId: string) => void;
@@ -989,14 +990,17 @@ export class Agent {
   async send(
     channelId: string,
     content: string,
-    opts?: { files?: import('./types.js').OutboundAttachment[] },
+    opts?: import('./types.js').OutboundSendOptions,
   ): Promise<void> {
     if (this.turnSendScope === 'observe_only') {
       throw new Error(
         'sending is disabled for this ambient observation turn (discord.ambient_allow_send=false)',
       );
     }
+    validateReplyTo(opts?.replyTo);
     if (channelId === CONSOLE_CHANNEL_ID) {
+      if (opts?.replyTo !== undefined)
+        throw new Error('console reply metadata is not supported');
       if (opts?.files?.length)
         throw new Error('console attachments are not supported yet');
       this.sendsThisTurn++;
@@ -1644,7 +1648,7 @@ export class Agent {
     extra?: {
       logs?: string;
       label?: string;
-      sends?: { channel: string; text: string }[];
+      sends?: { channel: string; text: string; replyTo?: string }[];
     },
   ): void {
     const label = extra?.label ?? (rejected ? 'rejected' : 'settled');
