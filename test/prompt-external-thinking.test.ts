@@ -21,10 +21,7 @@ test('disabled external thinking leaves no model-facing think vocabulary', () =>
   assert.doesNotMatch(prompt, /`thoughts` argument/);
   assert.doesNotMatch(prompt, /external thinking/i);
   assert.doesNotMatch(prompt, /separator result means continue/);
-  assert.match(
-    prompt,
-    /Assistant `content` blocks exist only as a space to think/,
-  );
+  assert.match(prompt, /Unmarked assistant `content` remains internal/);
   assert.match(prompt, /Before your first `run\(\.\.\.\)` call/);
   assert.match(prompt, /You act through `run`/);
 });
@@ -37,14 +34,36 @@ test('enabled external thinking documents and invites voluntary pause-anytime us
   assert.match(prompt, /not only when the harness forces the first call/);
   assert.match(prompt, /not sent to chat channels/);
   assert.match(prompt, /separator result means continue/);
-  assert.match(prompt, /Keep assistant `content` empty or as close to empty/);
+  assert.match(prompt, /Keep unmarked assistant `content` empty/);
   assert.match(prompt, /Put cognition in `think`, actions in `run`/);
   assert.match(prompt, /including progress updates.*elpis\.channel/s);
-  assert.match(prompt, /Assistant `content` blocks are transport residue only/);
+  assert.match(
+    prompt,
+    /Unmarked assistant `content` is transport residue only/,
+  );
   assert.doesNotMatch(prompt, /Before your first `run\(\.\.\.\)` call/);
   assert.match(
     prompt,
     /Before the first action, use `think` if pausing would help/,
   );
-  assert.match(prompt, /You speak to the user ONLY through.*elpis\.channel/s);
+  assert.match(
+    prompt,
+    /Prefer an explicit speech header for ordinary text and replies/,
+  );
 });
+
+for (const externalThinking of [false, true]) {
+  test(`speech headers keep explicit routing and yielding (${externalThinking})`, () => {
+    const prompt = build(input(externalThinking));
+    assert.ok(prompt.includes('[send to=guild/channel replyTo=message-id]'));
+    assert.match(
+      prompt,
+      /The entire body after that first line is outward speech/,
+    );
+    assert.match(prompt, /A header does not yield/);
+    assert.match(prompt, /same response/);
+    assert.match(prompt, /attachments and programmatic work/);
+    assert.doesNotMatch(prompt, /You speak to the user ONLY through/);
+    assert.doesNotMatch(prompt, /They are never speech/);
+  });
+}

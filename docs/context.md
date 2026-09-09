@@ -27,7 +27,23 @@ Discord messages are serialized into `<incoming-message>` envelopes. Envelopes c
 
 Console messages carry console provenance. Scheduler, heartbeat, watch, and harness notices are marked synthetic. Worker progress crosses the durable mailbox rather than resident conversation ingress.
 
+## Explicit resident speech
+
+Ordinary text may use an exact leading header, followed by a newline and the message body:
+
+```text
+[send to=example/lounge replyTo=123]
+Hello.
+```
+
+`replyTo` is optional. The target is always guild-qualified; the whole body is outward speech, not a mixture of speech and private commentary. Programmatic channel sends remain available for attachments and other scripted work.
+
+Only fresh, complete, unstripped resident assistant output is eligible. The resident commits the assistant message before routing through the existing channel resolver and send checks. It appends the delivery outcome after all tool results; a failed send does not strand the tool batch. A header does not yield: the final successful wake-bearing `run` still controls that transition.
+
+Restored history, inbound text, and tool results are never replayed as sends. A context clear invalidates the old epoch: a late outcome leaves only a bounded private completion diagnostic, not a receipt in the newly cleared conversation. Failed or interrupted delivery can be partial; the mechanism does not promise crash-safe exactly-once delivery or automatically retry.
+
 ## Request projection
+
 
 The durable transcript is the record; the provider request is a projection of it.
 

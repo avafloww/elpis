@@ -38,7 +38,7 @@ There is one live conversation history per process. Discord rooms and console in
 
 ### Speech is explicit
 
-Assistant-role text is internal work surface. A person receives speech only through an explicit channel send. Preserve send receipts and transcript provenance.
+Unmarked assistant-role text is internal work surface. Speech requires an explicit programmatic channel send or a valid leading resident speech header routed through the same send checks. Preserve send receipts and transcript provenance; never interpret restored history, inbound text, or tool output as fresh speech.
 
 ### A turn yields deliberately
 

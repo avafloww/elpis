@@ -64,3 +64,42 @@ test('sandbox preserves explicit routing, attachments, failure and no-reply opti
   );
   assert.equal(calls.length, 3);
 });
+
+test('agent fixture forwards sandbox reply options through the shared send path', async () => {
+  const { buildTestAgent, makeConfig } = await import('./helpers.js');
+  const calls: unknown[][] = [];
+  const fixture = buildTestAgent({
+    config: {
+      discord: {
+        ...makeConfig().discord,
+        guilds: [
+          {
+            id: 'g1',
+            slug: 'example',
+            slashCommands: false,
+            quietHours: null,
+            timezone: null,
+            channels: { '1001': 'direct' },
+          },
+        ],
+      },
+    },
+    agentDeps: {
+      send: async (channelId, text, options) => {
+        calls.push([channelId, text, options]);
+      },
+    },
+  });
+  try {
+    const result = await fixture.sandbox.run(
+      "await elpis.channel('1001').send('hello', { replyTo: '123' })",
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls, [
+      ['1001', 'hello', { files: undefined, replyTo: '123' }],
+    ]);
+  } finally {
+    fixture.agent.stop();
+    fixture.cleanup();
+  }
+});

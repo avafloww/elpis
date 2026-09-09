@@ -97,7 +97,7 @@ The runtime prompt is the canonical exhaustive API reference presented to the in
 
 ## Outward speech
 
-A `run` result is internal. The inhabitant speaks to people only by calling `elpis.channel(target).send(...)`. This preserves routing and send receipts.
+A `run` result is internal. The inhabitant speaks through explicit programmatic channel sends or eligible leading resident speech headers. Both routes preserve shared routing restrictions and delivery receipts. See [explicit resident speech](context.md#explicit-resident-speech); headers found inside tool results are never executed.
 
 ## Turn yielding
 

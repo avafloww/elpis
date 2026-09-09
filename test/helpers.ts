@@ -322,8 +322,8 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     typing: () => {},
     scheduler,
     mind,
-    send: async (channelId, text) => {
-      await agentRef.current!.send(channelId, text);
+    send: async (channelId, text, options) => {
+      await agentRef.current!.send(channelId, text, options);
     },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),

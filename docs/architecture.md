@@ -46,10 +46,12 @@ Discord / console / scheduler / heartbeat / background completion
                                ▼
                     tool result + next loop
 
-Only elpis.channel(...).send(...) produces outward speech.
+Explicit channel sends and eligible resident speech headers produce outward speech.
 ```
 
 The loop is sequential. New messages can queue while work is active, but a second model turn never runs concurrently with the first.
+
+A resident speech header is committed with the assistant message, delivered through the shared channel-send path before tools, and receipted after the tool batch. Context-epoch checks precede tool effects and receipt insertion. See [explicit resident speech](context.md#explicit-resident-speech) for eligibility, clear, and replay behavior.
 
 ## Main modules
 

@@ -1,4 +1,5 @@
 import { validateReplyTo } from './lib/outbound.js';
+import { eligibleSpeechHeader } from './lib/speech-header.js';
 // agent.ts — orchestration: the one history, system prompt, tool dispatch, loop.
 //
 // CONVERSATION MODEL: monocontext. The agent is one mind with ONE
@@ -983,10 +984,8 @@ export class Agent {
     this.deps.onThinking?.(channelId);
   }
 
-  /** Send a message to a specific channel. Used by the sandbox's channel().send().
-   * Keeps the sendsThisTurn accounting (ghost-nudge); the send is already visible
-   * in-stream via the tool call + result, so it is NOT re-recorded as an
-   * assistant message ( dropped the cross-channel duplication). */
+  /** Shared routing and send accounting. Callers record their own outcome receipts
+   * rather than duplicating the body as another assistant message. */
   async send(
     channelId: string,
     content: string,
@@ -2389,7 +2388,10 @@ export class Agent {
       if (forceThinkForRequest) this.externalThinkForcedThisTurn = true;
 
       let yieldedByWake = false;
+      const header = eligibleSpeechHeader(resp);
+      const headerOutcome: { receipt?: ChatMessage } = {};
       const calls = resp.message.tool_calls ?? [];
+
       const invalidSkillBatch =
         calls.some((call) => call.function.name === 'skill') &&
         calls.length !== 1;
@@ -2657,8 +2659,32 @@ export class Agent {
           };
         },
         {
-          appendAssistant: (assistant) => {
+          appendAssistant: async (assistant) => {
             this.pushMessage(assistant, this.turnChannel);
+            if (!header || callEpoch !== this.epoch || this.stopped) return;
+            try {
+              const target = this.resolveChannelRef(header.target);
+              if (!target) throw new Error('unknown header destination');
+              await this.send(target, header.text, {
+                ...(header.replyTo ? { replyTo: header.replyTo } : {}),
+              });
+              headerOutcome.receipt = {
+                role: 'user',
+                content: `[harness: header message delivered to ${this.qualifiedChannelLabel(target)}. This is a delivery receipt, not a request to send again.]`,
+                sends: [
+                  {
+                    channel: target,
+                    text: header.text,
+                    ...(header.replyTo ? { replyTo: header.replyTo } : {}),
+                  },
+                ],
+              };
+            } catch {
+              headerOutcome.receipt = {
+                role: 'user',
+                content: `[harness: header send did not complete for ${header.target}; delivery may be partial. No automatic retry was attempted.]`,
+              };
+            }
           },
           appendTool: (toolMsg) => {
             if (callEpoch !== this.epoch) {
@@ -2673,14 +2699,21 @@ export class Agent {
           },
         },
       );
-      if (calls.length > 0) {
-        if (callEpoch !== this.epoch) {
+      if (callEpoch !== this.epoch) {
+        if (headerOutcome.receipt) {
           this.logger.warn(
-            'context cleared during tool dispatch — discarding turn',
+            '[agent] header send settled after context clear | completed=',
+            Boolean(headerOutcome.receipt.sends?.length),
           );
-          this.messages = [];
-          continue turn;
         }
+        this.deps.contextResources?.discardPending();
+        continue turn;
+      }
+      if (headerOutcome.receipt) {
+        this.pushMessage(headerOutcome.receipt, INTERNAL_CHANNEL_ID);
+        this.tracker.estimateAppended(headerOutcome.receipt.content);
+      }
+      if (calls.length > 0) {
         if (!yieldedByWake) {
           if (this.stopped) break turn;
           this.hasNewInput = true;
