@@ -122,3 +122,5 @@ lookup. Only the first chunk references it; attachments retain their existing fi
 behavior. Replies do not ping the original author automatically. Existing explicit
 mention behavior is unchanged. Console rejects reply metadata. Successful send
 provenance includes the reply target. Omitting `replyTo` preserves ordinary sends.
+Missing or non-sendable fetched Discord channels reject both ordinary sends and replies;
+a fulfilled send must not stand in for a silently skipped delivery.

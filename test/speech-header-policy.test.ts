@@ -24,7 +24,7 @@ for (const scenario of [
     const allowed = scenario === 'allowed' || scenario === 'parent-allowed';
     const idle = Promise.withResolvers<void>();
     let calls = 0;
-    let sends = 0;
+    const transportCalls: Array<{ channel: string; text: string }> = [];
     let muteActive = false;
     const mute: MuteRow = {
       channelId: parentScenario ? '1000' : '1001',
@@ -111,9 +111,7 @@ for (const scenario of [
       },
       agentDeps: {
         send: async (channel, text) => {
-          assert.equal(channel, '1001');
-          assert.equal(text, 'hello');
-          sends++;
+          transportCalls.push({ channel, text });
         },
         mutes: {
           get: (id) => (muteActive && id === mute.channelId ? mute : null),
@@ -147,7 +145,10 @@ for (const scenario of [
         attachments: [],
       });
       await idle.promise;
-      assert.equal(sends, allowed ? 1 : 0);
+      assert.deepEqual(
+        transportCalls,
+        allowed ? [{ channel: '1001', text: 'hello' }] : [],
+      );
       const successes = fixture.agent.messagesForTest.flatMap(
         (message) => message.sends ?? [],
       );

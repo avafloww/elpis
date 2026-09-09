@@ -2180,9 +2180,7 @@ export function createDiscord(
     log.debug(`outbound send #${channelId} (${text.length} chars)`);
     const channel = await client.channels.fetch(channelId);
     if (!channel || !channel.isTextBased() || !('send' in channel)) {
-      if (opts?.replyTo !== undefined)
-        throw new Error('reply target channel is not sendable');
-      return;
+      throw new Error('target channel is not sendable');
     }
     const isThread =
       'isThread' in channel &&
