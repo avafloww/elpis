@@ -41,8 +41,8 @@ export function resolveDataLayout(dataDirectory: string): DataLayout {
     config,
     extensions: path.join(config, 'extensions'),
     wordlists: path.join(config, 'wordlists'),
-    skills: path.join(root, 'skills'),
-    motorSkills: path.join(root, 'motor-skills'),
+    skills: path.join(config, 'skills'),
+    motorSkills: path.join(config, 'motor-skills'),
     database: path.join(root, 'elpis.db'),
     sessions: path.join(root, 'sessions'),
     bg: path.join(root, 'bg'),
@@ -153,6 +153,16 @@ function legacyMoves(layout: DataLayout): LegacyMove[] {
       source: path.join(root, 'extensions'),
       target: layout.extensions,
     },
+    {
+      key: 'skills',
+      source: path.join(layout.root, 'skills'),
+      target: layout.skills,
+    },
+    {
+      key: 'motor-skills',
+      source: path.join(layout.root, 'motor-skills'),
+      target: layout.motorSkills,
+    },
     { key: 'bg', source: path.join(root, 'bg'), target: layout.bg },
     { key: 'motor', source: path.join(root, 'motor'), target: layout.motor },
     {
@@ -230,7 +240,7 @@ function preflight(moves: LegacyMove[], commands: string[]): void {
   for (const move of moves) {
     if (fs.existsSync(move.source) && fs.existsSync(move.target)) {
       throw new Error(
-        `data layout conflict for ${move.key}: both legacy and elpis-data paths exist (${move.source}, ${move.target})`,
+        `data layout conflict for ${move.key}: both source and target paths exist (${move.source}, ${move.target})`,
       );
     }
   }
@@ -407,6 +417,19 @@ export function migrateDataLayout(
   const moves = legacyMoves(layout);
   preflight(moves, (opts.processCommands ?? liveProcessCommands)());
   const hasLegacyState = moves.some((move) => fs.existsSync(move.source));
+  const moved: string[] = [];
+  const moveAndRecord = (move: LegacyMove): void => {
+    if (!movePath(move)) return;
+    moved.push(move.key);
+    opts.log?.(
+      `migrated ${path.relative(dataDirectory, move.source)} → ${path.relative(dataDirectory, move.target)}`,
+    );
+  };
+  for (const move of moves) {
+    if (move.key === 'skills' || move.key === 'motor-skills') {
+      moveAndRecord(move);
+    }
+  }
   const { gitignoreRepaired } = ensureElpisDataScaffold(dataDirectory);
   const now = opts.now ?? (() => new Date());
   const priorJournal = readJournal(layout.migrationJournal);
@@ -425,16 +448,10 @@ export function migrateDataLayout(
   delete journal.completedAt;
   writeJournal(layout.migrationJournal, journal);
 
-  const moved: string[] = [];
   for (const move of moves) {
     if (move.key === 'database' && fs.existsSync(move.source))
       prepareLegacyDatabase(move.source);
-    if (movePath(move)) {
-      moved.push(move.key);
-      opts.log?.(
-        `migrated ${path.relative(dataDirectory, move.source)} → ${path.relative(dataDirectory, move.target)}`,
-      );
-    }
+    moveAndRecord(move);
     if (!journal.completed.includes(move.key)) journal.completed.push(move.key);
     writeJournal(layout.migrationJournal, journal);
   }

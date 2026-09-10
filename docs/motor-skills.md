@@ -4,10 +4,10 @@ Motor skills are resident-selected instruction packages for the visual motor cor
 
 Elpis discovers motor-skill packages at boot from two owned roots:
 
-- `elpis-data/motor-skills/<name>/SKILL.md` for private inhabitant-authored skills;
+- `elpis-data/config/motor-skills/<name>/SKILL.md` for private inhabitant-authored skills;
 - bundled `dist/motor-skills/<name>/SKILL.md`, copied from repository `motor-skills/` during build.
 
-The package directory and frontmatter `name` must match. Duplicate names across roots fail startup. Package resources are bounded regular UTF-8 text files; symlinks, special files, unsupported extensions, and traversal-shaped names are rejected.
+On the first boot after upgrading, an existing `elpis-data/motor-skills` root is atomically renamed into `elpis-data/config/motor-skills` before discovery. If either authored destination already exists beside its old root, boot fails before moving either authored skill root. The package directory and frontmatter `name` must match. Duplicate names across roots fail startup. Package resources are bounded regular UTF-8 text files; symlinks, special files, unsupported extensions, and traversal-shaped names are rejected.
 
 The resident-facing `elpis.motor.start` documentation always includes the bounded name-and-description catalog, not full bodies. The resident selects up to four packages with `start(goal, { skills: [...] })`. Selection order is preserved and combined main bodies may not exceed 32 KiB. Motor skills supply instructions only; they cannot widen the separately validated motor authority envelope. The bounded `press` grammar includes semantic `GAMEPAD_A`, `GAMEPAD_B`, `GAMEPAD_START`, and `GAMEPAD_SELECT` keys for keyboard-driven emulators; arbitrary key emission remains unavailable.
 

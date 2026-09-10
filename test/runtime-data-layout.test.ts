@@ -4,7 +4,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { ContextResources } from '../src/context-resources.js';
 import { createElpisRuntime } from '../src/index.js';
+import { MotorSkills } from '../src/motor-skills.js';
 import { resolveDataLayout } from '../src/store/data-layout.js';
 import { makeConfig } from './helpers.js';
 
@@ -26,6 +28,30 @@ test('runtime migrates legacy state before opening consumers', async () => {
   fs.writeFileSync(
     path.join(dataDirectory, 'sessions', 'discord', 'main', 'proof.jsonl'),
     'legacy transcript',
+  );
+  const skill = path.join(
+    dataDirectory,
+    'elpis-data',
+    'skills',
+    'resident-check',
+    'SKILL.md',
+  );
+  const motorSkill = path.join(
+    dataDirectory,
+    'elpis-data',
+    'motor-skills',
+    'pixel-check',
+    'SKILL.md',
+  );
+  fs.mkdirSync(path.dirname(skill), { recursive: true });
+  fs.mkdirSync(path.dirname(motorSkill), { recursive: true });
+  fs.writeFileSync(
+    skill,
+    '---\nname: resident-check\ndescription: Resident check\n---\n\nCHECK\n',
+  );
+  fs.writeFileSync(
+    motorSkill,
+    '---\nname: pixel-check\ndescription: Pixel check\n---\n\nMOVE\n',
   );
   fs.writeFileSync(path.join(dataDirectory, 'unknown-work.txt'), 'inhabitant');
   const legacy = new DatabaseSync(path.join(dataDirectory, 'agent.db'));
@@ -84,6 +110,31 @@ test('runtime migrates legacy state before opening consumers', async () => {
             ),
             'inhabitant',
           );
+          assert.equal(
+            fs.existsSync(path.join(dataDirectory, 'elpis-data', 'skills')),
+            false,
+          );
+          assert.equal(
+            fs.existsSync(
+              path.join(dataDirectory, 'elpis-data', 'motor-skills'),
+            ),
+            false,
+          );
+          const contextResources = new ContextResources({
+            dataDirectory,
+            bundledSkillsDirectory: null,
+          });
+          assert.deepEqual(
+            contextResources.catalog().map(({ name }) => name),
+            ['resident-check'],
+          );
+          const motorSkills = new MotorSkills({
+            dataDirectory,
+            bundledSkillsDirectory: null,
+          });
+          assert.deepEqual(motorSkills.catalog(), [
+            { name: 'pixel-check', description: 'Pixel check' },
+          ]);
           const migrated = new DatabaseSync(layout.database, {
             readOnly: true,
           });

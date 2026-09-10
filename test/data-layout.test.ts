@@ -25,8 +25,8 @@ test('resolveDataLayout keeps inhabitant root separate from harness state and co
   assert.equal(layout.sessions, '/agent/elpis-data/sessions');
   assert.equal(layout.extensions, '/agent/elpis-data/config/extensions');
   assert.equal(layout.wordlists, '/agent/elpis-data/config/wordlists');
-  assert.equal(layout.skills, '/agent/elpis-data/skills');
-  assert.equal(layout.motorSkills, '/agent/elpis-data/motor-skills');
+  assert.equal(layout.skills, '/agent/elpis-data/config/skills');
+  assert.equal(layout.motorSkills, '/agent/elpis-data/config/motor-skills');
   assert.equal(layout.policyDenials, '/agent/elpis-data/policy-denials');
   assert.equal(layout.playwrightCli, '/agent/elpis-data/playwright-cli');
 });
@@ -70,6 +70,71 @@ test('fresh layout scaffolds without manufacturing a migration journal', () => {
   assert.deepEqual(result.moved, []);
   assert.equal(fs.existsSync(result.layout.gitignore), true);
   assert.equal(fs.existsSync(result.layout.migrationJournal), false);
+});
+
+test('migrateDataLayout atomically relocates authored skill roots with bytes and modes intact', () => {
+  const root = tmpDir();
+  const oldSkills = path.join(root, 'elpis-data', 'skills');
+  const oldMotorSkills = path.join(root, 'elpis-data', 'motor-skills');
+  const skill = path.join(oldSkills, 'release-check', 'SKILL.md');
+  const motorSkill = path.join(oldMotorSkills, 'pixel-game', 'SKILL.md');
+  fs.mkdirSync(path.dirname(skill), { recursive: true });
+  fs.mkdirSync(path.dirname(motorSkill), { recursive: true });
+  fs.writeFileSync(skill, 'resident skill bytes\n');
+  fs.writeFileSync(motorSkill, 'resident motor bytes\n');
+  fs.chmodSync(skill, 0o640);
+  fs.chmodSync(motorSkill, 0o600);
+
+  const result = migrateDataLayout(root);
+
+  assert.deepEqual(result.moved, ['skills', 'motor-skills']);
+  assert.equal(fs.existsSync(oldSkills), false);
+  assert.equal(fs.existsSync(oldMotorSkills), false);
+  const movedSkill = path.join(
+    result.layout.skills,
+    'release-check',
+    'SKILL.md',
+  );
+  const movedMotorSkill = path.join(
+    result.layout.motorSkills,
+    'pixel-game',
+    'SKILL.md',
+  );
+  assert.equal(fs.readFileSync(movedSkill, 'utf8'), 'resident skill bytes\n');
+  assert.equal(
+    fs.readFileSync(movedMotorSkill, 'utf8'),
+    'resident motor bytes\n',
+  );
+  assert.equal(fs.statSync(movedSkill).mode & 0o777, 0o640);
+  assert.equal(fs.statSync(movedMotorSkill).mode & 0o777, 0o600);
+});
+
+test('migrateDataLayout rejects all authored-root conflicts before moving either root', () => {
+  const root = tmpDir();
+  const oldSkills = path.join(root, 'elpis-data', 'skills');
+  const newSkills = path.join(root, 'elpis-data', 'config', 'skills');
+  const oldMotorSkills = path.join(root, 'elpis-data', 'motor-skills');
+  fs.mkdirSync(oldSkills, { recursive: true });
+  fs.mkdirSync(newSkills, { recursive: true });
+  fs.mkdirSync(oldMotorSkills, { recursive: true });
+  fs.writeFileSync(path.join(oldSkills, 'old'), 'old');
+  fs.writeFileSync(path.join(newSkills, 'new'), 'new');
+  fs.writeFileSync(path.join(oldMotorSkills, 'motor'), 'motor');
+
+  assert.throws(
+    () => migrateDataLayout(root),
+    /data layout conflict for skills/,
+  );
+  assert.equal(fs.readFileSync(path.join(oldSkills, 'old'), 'utf8'), 'old');
+  assert.equal(fs.readFileSync(path.join(newSkills, 'new'), 'utf8'), 'new');
+  assert.equal(
+    fs.readFileSync(path.join(oldMotorSkills, 'motor'), 'utf8'),
+    'motor',
+  );
+  assert.equal(
+    fs.existsSync(path.join(root, 'elpis-data', 'config', 'motor-skills')),
+    false,
+  );
 });
 
 test('migrateDataLayout moves known state, preserves unknown corpus, and rewrites embedded paths', () => {
@@ -167,6 +232,13 @@ test('nested gitignore tracks inhabitant config and ignores runtime state', () =
     path.join(layout.extensions, 'x.ext.ts'),
     'export default {}',
   );
+  fs.mkdirSync(path.join(layout.skills, 'resident'), { recursive: true });
+  fs.writeFileSync(path.join(layout.skills, 'resident', 'SKILL.md'), 'skill');
+  fs.mkdirSync(path.join(layout.motorSkills, 'resident'), { recursive: true });
+  fs.writeFileSync(
+    path.join(layout.motorSkills, 'resident', 'SKILL.md'),
+    'motor skill',
+  );
   fs.writeFileSync(layout.database, 'runtime');
   assert.equal(
     spawnSync('git', ['check-ignore', '-q', layout.database], { cwd: root })
@@ -178,14 +250,16 @@ test('nested gitignore tracks inhabitant config and ignores runtime state', () =
       .status,
     1,
   );
-  assert.equal(
-    spawnSync(
-      'git',
-      ['check-ignore', '-q', path.join(layout.extensions, 'x.ext.ts')],
-      { cwd: root },
-    ).status,
-    1,
-  );
+  for (const authored of [
+    path.join(layout.extensions, 'x.ext.ts'),
+    path.join(layout.skills, 'resident', 'SKILL.md'),
+    path.join(layout.motorSkills, 'resident', 'SKILL.md'),
+  ]) {
+    assert.equal(
+      spawnSync('git', ['check-ignore', '-q', authored], { cwd: root }).status,
+      1,
+    );
+  }
 });
 
 test('migrateDataLayout blocks before mutation when a live process references process-coupled state', () => {

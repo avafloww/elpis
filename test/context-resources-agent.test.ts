@@ -83,7 +83,14 @@ async function settle(ms = 120): Promise<void> {
 
 function skillFixture(): { dir: string; cleanup(): void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-agent-skill-'));
-  const file = path.join(dir, 'elpis-data', 'skills', 'alpha', 'SKILL.md');
+  const file = path.join(
+    dir,
+    'elpis-data',
+    'config',
+    'skills',
+    'alpha',
+    'SKILL.md',
+  );
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(
     file,
@@ -220,6 +227,7 @@ test('restart restores only resource descriptors whose files still match', () =>
   const skillFile = path.join(
     f.dir,
     'elpis-data',
+    'config',
     'skills',
     'alpha',
     'SKILL.md',

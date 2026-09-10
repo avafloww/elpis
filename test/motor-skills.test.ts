@@ -14,7 +14,7 @@ import {
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-motor-skills-'));
   const data = path.join(root, 'data');
-  const dataSkills = path.join(data, 'elpis-data', 'motor-skills');
+  const dataSkills = path.join(data, 'elpis-data', 'config', 'motor-skills');
   const bundled = path.join(root, 'bundled');
   const ambient = path.join(data, '.agents', 'skills');
   fs.mkdirSync(dataSkills, { recursive: true });

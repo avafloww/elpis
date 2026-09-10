@@ -18,7 +18,7 @@ function fixture() {
   const data = path.join(root, 'work', 'nested');
   const harness = path.join(root, 'harness');
   const home = path.join(root, 'home');
-  const dataSkills = path.join(data, 'elpis-data', 'skills');
+  const dataSkills = path.join(data, 'elpis-data', 'config', 'skills');
   const bundled = path.join(root, 'bundled-skills');
   fs.mkdirSync(dataSkills, { recursive: true });
   fs.mkdirSync(harness, { recursive: true });
