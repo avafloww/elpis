@@ -1,4 +1,4 @@
-import type { Config } from '../config.js';
+import { isResolvedGatewayConfig, type MaterializedConfig } from '../config.js';
 
 const MIN_SECRET_LENGTH = 8;
 const MAX_SECRET_BYTES = 4096;
@@ -48,9 +48,9 @@ export class SecretRegistry {
 
 /** Config is the boot source. Later credential state registers through the same
  * instance instead of rebuilding a stale snapshot. */
-export function collectSecretValues(config: Config): string[] {
+export function collectSecretValues(config: MaterializedConfig): string[] {
   const candidates = [
-    config.llm.apiKey,
+    isResolvedGatewayConfig(config) ? null : config.llm.apiKey,
     config.discord.botToken,
     config.kagi.apiKey,
     config.bluesky?.appPassword,
@@ -66,7 +66,9 @@ export function collectSecretValues(config: Config): string[] {
   return out;
 }
 
-export function createSecretRegistry(config: Config): SecretRegistry {
+export function createSecretRegistry(
+  config: MaterializedConfig,
+): SecretRegistry {
   return new SecretRegistry(collectSecretValues(config));
 }
 

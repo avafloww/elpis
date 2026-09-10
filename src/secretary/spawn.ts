@@ -1,4 +1,4 @@
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import type { Database } from '../store/db.js';
 import type { MindId } from '../store/mind-id.js';
 import {

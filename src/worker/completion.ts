@@ -1,6 +1,8 @@
-import type { Config } from '../config.js';
+import {
+  configForLlmRef,
+  type MaterializedConfig as Config,
+} from '../config.js';
 import { WORKER_RUN_TOOL } from '../kernel/run-tool.js';
-import { configForLlmRef } from '../config.js';
 import {
   createLLM,
   type ChatMessage,

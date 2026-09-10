@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import type { Logger } from '../lib/log.js';
 import type { Database } from '../store/db.js';
 import type { MindService } from '../store/mind.js';

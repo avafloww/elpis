@@ -15,7 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import type { ConsoleHub, HubClient } from './hub.js';
 import type { McpHttpEndpoint } from '../mcp/server.js';
 import { createConsoleMediaReader } from './media.js';

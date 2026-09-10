@@ -77,7 +77,7 @@ import {
   COMPACTION_FLUSH_NUDGE,
   compactionEscalationNudge,
 } from './llm/prompt.js';
-import type { Config } from './config.js';
+import { isResolvedGatewayConfig, type MaterializedConfig } from './config.js';
 import type { ContextResources } from './context-resources.js';
 import type { MotorSkills } from './motor-skills.js';
 import type { LlmToolRuntime } from './llm/tool-runtime.js';
@@ -650,7 +650,7 @@ export interface InboundMessage {
 }
 
 export interface AgentDeps {
-  config: Config;
+  config: MaterializedConfig;
   /** Shared live redaction state. Production passes one instance so credential
    * lifecycle code can register and unregister values after Agent construction. */
   secretRegistry?: SecretRegistry;
@@ -727,11 +727,33 @@ export interface AgentDeps {
   emotes?: { resetSeen(): void };
 }
 
+function mainLlmSettings(config: MaterializedConfig): {
+  model: string;
+  externalThinking: boolean;
+  reasoningEffort: string | null;
+  callTimeoutMs: number;
+} {
+  if (isResolvedGatewayConfig(config)) {
+    return {
+      model: config.llm.target.model,
+      externalThinking: config.llm.target.externalThinking,
+      reasoningEffort: config.llm.target.reasoningEffort,
+      callTimeoutMs: config.llm.target.callTimeoutMs,
+    };
+  }
+  return {
+    model: config.llm.model,
+    externalThinking: config.llm.externalThinking,
+    reasoningEffort: config.llm.reasoningEffort,
+    callTimeoutMs: config.llm.callTimeoutMs,
+  };
+}
+
 /** effectiveTrigger = min(configured trigger, usable window − reserve margin).
  * A smaller-window deployment must trigger compaction BEFORE the API 400s on
  * context-length, else start never fires (review S3). */
 export function computeEffectiveTrigger(
-  config: Config,
+  config: MaterializedConfig,
   tracker: ContextTracker,
 ): number {
   return Math.max(
@@ -2206,8 +2228,9 @@ export class Agent {
       // Person-shaped turns get one required scratchpad opening. Synthetic and
       // harness-generated wakes keep the think tool available without forcing
       // an autonomous scratchpad chain.
+      const llmSettings = mainLlmSettings(this.config);
       const forceThinkForRequest =
-        this.config.llm.externalThinking &&
+        llmSettings.externalThinking &&
         this.personInputTurn &&
         !this.externalThinkForcedThisTurn;
 
@@ -2225,7 +2248,7 @@ export class Agent {
               skillTool: SKILL_TOOL,
               signal: callController.signal,
             });
-            if (this.config.llm.callTimeoutMs <= 0) {
+            if (llmSettings.callTimeoutMs <= 0) {
               resp = await completion;
             } else {
               const timeout = new Promise<never>((_resolve, reject) => {
@@ -2234,11 +2257,11 @@ export class Agent {
                   reject(
                     new RetriableError(
                       new Error(
-                        `LLM call exceeded ${this.config.llm.callTimeoutMs}ms outer deadline`,
+                        `LLM call exceeded ${llmSettings.callTimeoutMs}ms outer deadline`,
                       ),
                     ),
                   );
-                }, this.config.llm.callTimeoutMs);
+                }, llmSettings.callTimeoutMs);
                 callTimer.unref();
               });
               resp = await Promise.race([completion, timeout]);
@@ -3279,6 +3302,7 @@ export class Agent {
   }
 
   private buildSystemMessage(): ChatMessage {
+    const llmSettings = mainLlmSettings(this.config);
     // The frontmatter envelope (agent name — src/store/soul.ts) is harness
     // metadata, not identity prose: only the body reaches the prompt.
     const soul = parseSoul(readFileOr(this.config.paths.soulPath)).body;
@@ -3290,7 +3314,7 @@ export class Agent {
       dataDirectory: this.config.paths.dataDirectory,
       workersEnabled: this.deps.workersAvailable?.() ?? false,
       guildCount: this.config.discord.guilds.length,
-      externalThinking: this.config.llm.externalThinking,
+      externalThinking: llmSettings.externalThinking,
       extensionPrompt: this.deps.extensionPrompt,
       modules: this.deps.modules,
       profile: this.deps.profile,
@@ -3298,8 +3322,8 @@ export class Agent {
       motorSkills: this.deps.motorSkills?.catalog(),
       llmTools: this.deps.llmTool?.list(),
     });
-    const externalThinkingHint = this.config.llm.externalThinking
-      ? `\n\n# Juice: ${externalThinkingJuice(this.config.llm.reasoningEffort)} !important`
+    const externalThinkingHint = llmSettings.externalThinking
+      ? `\n\n# Juice: ${externalThinkingJuice(llmSettings.reasoningEffort)} !important`
       : '';
     return system(prompt + externalThinkingHint);
   }
@@ -3321,18 +3345,19 @@ export class Agent {
    * reflected. */
   contextSnapshot(): ContextSnapshot {
     const prepared = prepareForApi(this.buildRequestMessages());
+    const llmSettings = mainLlmSettings(this.config);
     const snap: ContextSnapshot = {
-      model: this.config.llm.model,
+      model: llmSettings.model,
       tools: activeModelTools(
-        this.config.llm.externalThinking,
+        llmSettings.externalThinking,
         this.llm.runTool,
         SKILL_TOOL,
       ),
       messages: prepared.map((m) => elideLargeImageUrls(toApiMessage(m))),
     };
-    if (this.config.llm.externalThinking) snap.reasoning_effort = 'none';
-    else if (this.config.llm.reasoningEffort)
-      snap.reasoning_effort = this.config.llm.reasoningEffort;
+    if (llmSettings.externalThinking) snap.reasoning_effort = 'none';
+    else if (llmSettings.reasoningEffort)
+      snap.reasoning_effort = llmSettings.reasoningEffort;
     return snap;
   }
 

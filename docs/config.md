@@ -68,6 +68,25 @@ Choose a compaction model with room for the entire assembled fold, including the
 
 `tool_tier` changes only query exposure. Role selection remains independent, so a role model is not queryable unless explicitly opted in and a query-only model need not hold a runtime role.
 
+### Gateway-managed catalog
+
+`llm.gateway_managed: true` replaces direct provider definitions with role references resolved from the enrolled Elpis Gateway catalog:
+
+```yaml
+llm:
+  gateway_managed: true
+  roles:
+    main: primary/main
+    classifier: primary/classifier
+    compaction: primary/main # optional
+```
+
+The setting cannot be mixed with `llm.providers` or legacy flat provider keys. `main` and `classifier` remain required; `motor`, `secretary`, and `compaction` remain optional. `completion_reserve_tokens` may still be configured.
+
+Managed mode requires `dashboard.remote.url` and an active resident Gateway credential already enrolled in `elpis-data/elpis.db`. Parsing is side-effect free. During boot, Elpis opens the resident database, creates the Gateway resident store, fetches and validates the exact authority-bound catalog, and freezes its models, roles, routes, tool tiers, generation, and protocol metadata before module checks, compaction resolution, replay identity, or any LLM consumer runs. Missing or rotating credentials, authority drift, stale generation, unknown roles, incompatible tool tiers, or unknown required context size fail boot and close the newly opened database. Direct configurations cross the same materialization seam without contacting Gateway.
+
+Catalog materialization does not itself provide a managed generation adapter. This release still refuses managed provider requests with `Gateway LLM adapter is unavailable`; do not enable `gateway_managed` for a production resident until the request adapter is shipped and documented.
+
 ## `operator`
 
 `operator.name`, optional pronouns, and `discord_id` describe and authorize the human administrator. The name is display metadata; the Discord ID gates operator-only commands.

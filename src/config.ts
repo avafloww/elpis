@@ -80,6 +80,7 @@ export interface PendingGatewayLlmConfig {
 export type ParsedLlmConfig = LlmConfig | PendingGatewayLlmConfig;
 export type ParsedConfig = Omit<Config, 'llm'> & { llm: ParsedLlmConfig };
 export type RuntimeConfig = ParsedConfig | ResolvedGatewayConfig;
+export type MaterializedConfig = Config | ResolvedGatewayConfig;
 export { isResolvedGatewayConfig, requireResolvedGatewayConfig };
 
 export function isMaterializedConfig(config: ParsedConfig): config is Config {
@@ -986,6 +987,10 @@ export function configForLlmTarget(
   target: ResolvedLlmTarget,
 ): Config;
 export function configForLlmTarget(
+  parsed: MaterializedConfig,
+  target: ResolvedLlmTarget | ResolvedGatewayLlmTarget,
+): MaterializedConfig;
+export function configForLlmTarget(
   parsed: RuntimeConfig,
   target: ResolvedLlmTarget | ResolvedGatewayLlmTarget,
 ): Config | ResolvedGatewayConfig {
@@ -1034,6 +1039,10 @@ export function configForLlmRef(
 ): ResolvedGatewayConfig;
 export function configForLlmRef(parsed: ParsedConfig, ref: string): Config;
 export function configForLlmRef(
+  parsed: MaterializedConfig,
+  ref: string,
+): MaterializedConfig;
+export function configForLlmRef(
   parsed: RuntimeConfig,
   ref: string,
 ): Config | ResolvedGatewayConfig {
@@ -1054,6 +1063,10 @@ export function configForLlmRole(
   role: LlmRole,
 ): ResolvedGatewayConfig;
 export function configForLlmRole(parsed: ParsedConfig, role: LlmRole): Config;
+export function configForLlmRole(
+  parsed: MaterializedConfig,
+  role: LlmRole,
+): MaterializedConfig;
 export function configForLlmRole(
   parsed: RuntimeConfig,
   role: LlmRole,

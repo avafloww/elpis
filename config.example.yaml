@@ -18,17 +18,17 @@ llm:
   #   codex-oauth         — a ChatGPT Codex subscription over the Codex Responses
   #                        backend. Run `npm run oauth-login -- codex` once.
   #                        See docs/codex-oauth.md.
-  provider_type: openai-compatible   # openai-compatible | anthropic-oauth | codex-oauth
-  api_key: sk-...                    # REQUIRED for openai-compatible (unused for OAuth providers)
-  base_url: https://api.openai.com/v1  # REQUIRED for openai-compatible — any OpenAI-compatible endpoint
-  model: gpt-4o                      # REQUIRED — endpoint/provider model id
+  provider_type: openai-compatible # openai-compatible | anthropic-oauth | codex-oauth
+  api_key: sk-... # REQUIRED for openai-compatible (unused for OAuth providers)
+  base_url: https://api.openai.com/v1 # REQUIRED for openai-compatible — any OpenAI-compatible endpoint
+  model: gpt-4o # REQUIRED — endpoint/provider model id
   # Context window, in tokens. Omit (or null) to probe <base_url>/models/info.
   # Set explicitly for endpoints that don't implement that route — it is then
   # the ONLY way the harness learns the window.
   context_size: null
   # Reasoning models: chain-of-thought goes to reasoning_content, not content.
-  reasoning_effort: high             # none | low | medium | high
-  external_thinking: false            # Codex Responses: force visible think tool, native reasoning off
+  reasoning_effort: high # none | low | medium | high
+  external_thinking: false # Codex Responses: force visible think tool, native reasoning off
   # stream_idle_timeout_ms: 60000      # no-meaningful-progress watchdog; default 60s external-thinking, 180s otherwise; 0 disables
   # call_timeout_ms: 120000            # whole-call fail-safe; default 120s external-thinking, 20m otherwise; 0 disables
   # Which API surface to speak. auto = try the OpenAI Responses API (preserves
@@ -87,6 +87,19 @@ llm:
   #   compaction: primary/main # optional; needs room for the full fold
   # completion_reserve_tokens: 8192
   #
+  # --- Gateway-managed catalog (materialization only in this release) ---
+  # Requires dashboard.remote.url plus an active resident Gateway enrollment.
+  # Direct provider keys/providers cannot be mixed with gateway_managed. Boot
+  # resolves and freezes the authority-bound catalog before any model consumer,
+  # but managed generation remains fail-closed until its request adapter ships.
+  #
+  # gateway_managed: true
+  # roles:
+  #   main: primary/main
+  #   classifier: primary/classifier
+  #   compaction: primary/main
+  # completion_reserve_tokens: 8192
+  #
   # --- anthropic-oauth (Claude Pro/Max subscription) ---
   # To use a subscription instead of the above, run `npm run oauth-login` once,
   # then replace the whole llm block with just these two keys:
@@ -113,12 +126,12 @@ llm:
   # context_size is set. See docs/codex-oauth.md.
 
 operator:
-  name: operator                     # Display name for console-authored speech
-  pronouns: null                     # Optional free-text identity metadata
-  discord_id: null                   # Discord user id authorized for slash commands
+  name: operator # Display name for console-authored speech
+  pronouns: null # Optional free-text identity metadata
+  discord_id: null # Discord user id authorized for slash commands
 
 discord:
-  bot_token: ...                     # REQUIRED
+  bot_token: ... # REQUIRED
   # Bot application id for slash-command registration. Omit to derive it from
   # the bot token.
   application_id: null
@@ -159,7 +172,7 @@ discord:
   # "HHMM-HHMM" (24h, wraparound allowed, e.g. "2300-0900"); timezone is an
   # IANA name used to interpret it (defaults to host tz).
   guilds:
-    - id: "111111111111111111"
+    - id: '111111111111111111'
       slug: home
       # Slash commands register per-guild and are all operator-gated (a
       # non-operator gets a refusal, not an effect) — but a guild with
@@ -174,9 +187,9 @@ discord:
       # slower proxy round-trips cannot let the original enter history first.
       pluralkit: false
       channels:
-        "222222222222222222": direct
-        "333333333333333333": social
-    - id: "444444444444444444"
+        '222222222222222222': direct
+        '333333333333333333': social
+    - id: '444444444444444444'
       slug: friends
       # Listen everywhere at the ambient cadence, but send only to one explicit
       # output room. This is the conservative digest-agent pattern.
@@ -184,13 +197,13 @@ discord:
       allow_send: true
       default_allow_send: false
       slash_commands: false
-      quiet_hours: "2300-0900"
+      quiet_hours: '2300-0900'
       timezone: America/New_York
       channels:
-        "555555555555555555":
+        '555555555555555555':
           tier: drop
           allow_send: true
-        "666666666666666666": quiet
+        '666666666666666666': quiet
 
 compaction:
   # Tokens of real context at which a compaction cycle triggers. Clamped at
@@ -207,14 +220,14 @@ memory:
   consolidation_target_tokens: 24000
 
 heartbeat:
-  interval_ms: 3600000               # base autonomous wake interval (1h); 0 disables
-  max_interval_ms: 14400000          # upper bound for idle-tick backoff (4h)
-  reflection_min_messages: 3         # min real user messages between reflection beats
-  social_nudge_ms: 43200000          # reach-out nudge after this much outbound silence (12h); 0 disables
+  interval_ms: 3600000 # base autonomous wake interval (1h); 0 disables
+  max_interval_ms: 14400000 # upper bound for idle-tick backoff (4h)
+  reflection_min_messages: 3 # min real user messages between reflection beats
+  social_nudge_ms: 43200000 # reach-out nudge after this much outbound silence (12h); 0 disables
 
 sandbox:
-  sync_timeout_ms: 15000             # sync VM watchdog (kills while(true){})
-  async_deadline_ms: 120000          # detach a run's promise into bg after this long
+  sync_timeout_ms: 15000 # sync VM watchdog (kills while(true){})
+  async_deadline_ms: 120000 # detach a run's promise into bg after this long
   preview_max_bytes: 16384
   log_max_bytes: 32768
 
@@ -311,7 +324,8 @@ paths:
   # elpis-data/. This remains the sandbox cwd, so relative writes land here.
   data_directory: ../data
 
-log_level: info                      # debug | info | warn | error | silent
+log_level: info # debug | info | warn | error | silent
+
 
 # --- alternate provider profile (uncomment to switch) ---
 # llm:

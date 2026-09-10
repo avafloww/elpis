@@ -1,4 +1,7 @@
-import { configForLlmRef, type Config } from '../config.js';
+import {
+  configForLlmRef,
+  type MaterializedConfig as Config,
+} from '../config.js';
 import {
   createLLM,
   type ChatMessage,

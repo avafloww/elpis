@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import type { Config } from './config.js';
+import type { MaterializedConfig } from './config.js';
 
 export const RESTRICTED_SENTINEL = '/etc/elpis/restricted';
 
@@ -62,7 +62,7 @@ export function detectRuntimeProfile(
 }
 
 export function resolveBuiltinModules(
-  config: Config,
+  config: MaterializedConfig,
   profile: RuntimeProfile = { restricted: false, source: 'normal' },
 ): BuiltinModuleRegistry {
   const policy = config.modules ?? { enabled: null, disabled: [] };

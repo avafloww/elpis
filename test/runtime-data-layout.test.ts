@@ -49,6 +49,7 @@ test('runtime migrates legacy state before opening consumers', async () => {
     await assert.rejects(
       createElpisRuntime({
         loadConfigFile: () => config,
+        fetchContextWindow: async () => config.llm.contextSize,
         loadExtensions: async () => {
           assert.equal(
             fs.existsSync(path.join(dataDirectory, 'agent.db')),

@@ -25,6 +25,7 @@ import {
   configForLlmRole,
   isResolvedGatewayConfig,
   requireMaterializedConfig,
+  type MaterializedConfig,
   type ParsedConfig,
   type RuntimeConfig,
   type Config,
@@ -1249,7 +1250,7 @@ function standaloneConfig(
 }
 
 export function createLLMForRole(
-  config: Config,
+  config: MaterializedConfig,
   role: LlmRole,
   hub?: ConsoleHub,
   db?: DatabaseSync,
@@ -1266,12 +1267,16 @@ export interface LlmRoleClients {
 }
 
 export function createLlmRoleClients(
-  config: Config,
+  config: MaterializedConfig,
   options: {
     hub?: ConsoleHub;
     db?: DatabaseSync;
     motorActive: boolean;
-    create?: (config: Config, hub?: ConsoleHub, db?: DatabaseSync) => LLM;
+    create?: (
+      config: MaterializedConfig,
+      hub?: ConsoleHub,
+      db?: DatabaseSync,
+    ) => LLM;
   },
 ): LlmRoleClients {
   const create = options.create ?? createLLM;

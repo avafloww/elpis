@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import * as path from 'node:path';
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import { createLLM } from '../llm/llm.js';
 import type { Logger } from '../lib/log.js';
 import type { Database } from '../store/db.js';

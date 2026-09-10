@@ -129,6 +129,7 @@ for (const scenario of scenarios) {
           },
           fetchContextWindow: async (projected) => {
             events.push(`context lookup: ${projected.llm.model}`);
+            if (projected.llm.model === 'stub') return 128_000;
             assert.equal(projected.llm.model, 'wire-summary');
             if (scenario.expected) throw scenario.expected;
             return scenario.window;
@@ -171,6 +172,7 @@ for (const scenario of scenarios) {
 
       assert.deepEqual(events, [
         'database opened',
+        'context lookup: stub',
         'context lookup: wire-summary',
         'database closed',
       ]);

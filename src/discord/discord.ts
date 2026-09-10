@@ -65,7 +65,7 @@ import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createWriteStream, readFileSync } from 'node:fs';
 import type { Agent, InboundMessage } from '../agent.js';
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import {
   classifyEmoji,
   type FeedbackStore,

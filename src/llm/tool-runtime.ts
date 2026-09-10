@@ -1,7 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { types as utilTypes } from 'node:util';
 import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
-import { configForLlmTarget, type Config } from '../config.js';
+import {
+  configForLlmTarget,
+  isResolvedGatewayConfig,
+  type MaterializedConfig,
+} from '../config.js';
 import {
   LLM_TOOL_TIERS,
   resolveLlmModelTarget,
@@ -440,10 +444,14 @@ function sanitizedResult(
 }
 
 export function createLlmToolRuntime(
-  config: Config,
+  config: MaterializedConfig,
   options: RuntimeOptions = {},
 ): LlmToolRuntime | null {
-  if (config.llm.registrySource !== 'canonical') return null;
+  if (
+    !isResolvedGatewayConfig(config) &&
+    config.llm.registrySource !== 'canonical'
+  )
+    return null;
   const create = options.create ?? createLLM;
   const timeoutMs = options.timeoutMs ?? LLM_TOOL_TIMEOUT_MS;
   const maxTokens = options.maxTokens ?? LLM_TOOL_MAX_TOKENS;
@@ -451,41 +459,76 @@ export function createLlmToolRuntime(
   const clients = new Map<string, LLM>();
   const expectedSurfacesByRef = new Map<string, ReadonlySet<ApiSurface>>();
   const selectors = new Map<string, LlmToolCatalogEntry>();
-  for (const tier of LLM_TOOL_TIERS) {
-    for (const [providerId, provider] of Object.entries(
-      config.llm.registry.providers,
-    )) {
-      for (const [modelId, model] of Object.entries(provider.models)) {
-        if (model.toolTier !== tier) continue;
-        const ref = `${providerId}/${modelId}`;
-        if (selectors.has(tier))
-          throw new Error(`llm tool tier ${tier} is assigned more than once`);
-        const target = resolveLlmModelTarget(
-          config.llm.registry,
-          ref,
-          'llm tool model',
-        );
-        const entry = Object.freeze({
-          tier,
-          ref,
-          model: target.name,
-          providerType: target.provider.providerType,
-          contextSize: target.contextSize,
-        });
-        entries.push(entry);
-        selectors.set(tier, entry);
-        selectors.set(ref, entry);
-        clients.set(
-          ref,
-          create(configForLlmTarget(config, target), undefined, options.db),
-        );
-        expectedSurfacesByRef.set(
-          ref,
-          expectedApiSurfaces(
+  const register = (
+    tier: LlmToolTier,
+    ref: string,
+    model: string,
+    providerType: LlmProviderType,
+    contextSize: number | null,
+    projected: MaterializedConfig,
+    expectedSurfaces: ReadonlySet<ApiSurface>,
+  ) => {
+    if (selectors.has(tier))
+      throw new Error(`llm tool tier ${tier} is assigned more than once`);
+    if (selectors.has(ref))
+      throw new Error(
+        `llm tool model ${ref} is assigned to more than one tier`,
+      );
+    const entry = Object.freeze({
+      tier,
+      ref,
+      model,
+      providerType,
+      contextSize,
+    });
+    entries.push(entry);
+    selectors.set(tier, entry);
+    selectors.set(ref, entry);
+    clients.set(ref, create(projected, undefined, options.db));
+    expectedSurfacesByRef.set(ref, expectedSurfaces);
+  };
+  if (isResolvedGatewayConfig(config)) {
+    for (const tier of LLM_TOOL_TIERS) {
+      const target = config.llm.registry.toolTiers[tier];
+      if (!target) continue;
+      if (!target.apiSurface)
+        throw new Error(`Gateway llm tool tier ${tier} has no API surface`);
+      register(
+        tier,
+        target.modelRef,
+        target.model,
+        target.providerType,
+        target.contextSize,
+        configForLlmTarget(config, target),
+        new Set<ApiSurface>([target.apiSurface]),
+      );
+    }
+  } else {
+    for (const tier of LLM_TOOL_TIERS) {
+      for (const [providerId, provider] of Object.entries(
+        config.llm.registry.providers,
+      )) {
+        for (const [modelId, model] of Object.entries(provider.models)) {
+          if (model.toolTier !== tier) continue;
+          const ref = `${providerId}/${modelId}`;
+          const target = resolveLlmModelTarget(
+            config.llm.registry,
+            ref,
+            'llm tool model',
+          );
+          register(
+            tier,
+            ref,
+            target.name,
             target.provider.providerType,
-            target.provider.api,
-          ),
-        );
+            target.contextSize,
+            configForLlmTarget(config, target),
+            expectedApiSurfaces(
+              target.provider.providerType,
+              target.provider.api,
+            ),
+          );
+        }
       }
     }
   }

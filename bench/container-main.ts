@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { stringify as stringifyYaml } from 'yaml';
 import { createElpisRuntime } from '../src/index.js';
-import { loadConfigFile } from '../src/config.js';
+import { isResolvedGatewayConfig, loadConfigFile } from '../src/config.js';
 import { createSandbox } from '../src/sandbox/index.js';
 import type { DiscordWiring } from '../src/discord/discord.js';
 import type { ChatMessage, CompleteResult, LLM } from '../src/llm/llm.js';
@@ -655,6 +655,29 @@ async function main(): Promise<void> {
           code,
         ),
     ) && fs.readdirSync(CONTROL).every((name) => allowedControl.has(name));
+  const runtimeLlm = isResolvedGatewayConfig(runtime.config)
+    ? {
+        providerType: runtime.config.llm.target.providerType,
+        model: runtime.config.llm.target.model,
+        api: runtime.config.llm.target.apiSurface,
+        reasoningEffort: runtime.config.llm.target.reasoningEffort,
+        reasoningSummary: runtime.config.llm.target.reasoningSummary,
+        reasoningContext: runtime.config.llm.target.reasoningContext,
+        contextSize: runtime.config.llm.target.contextSize,
+      }
+    : {
+        providerType: runtime.config.llm.providerType,
+        model: runtime.config.llm.model,
+        api: runtime.config.llm.api,
+        reasoningEffort: runtime.config.llm.reasoningEffort,
+        reasoningSummary: runtime.config.llm.reasoningSummary ?? null,
+        reasoningContext: runtime.config.llm.reasoningContext ?? null,
+        contextSize: runtime.config.llm.contextSize,
+      };
+  const runtimeApi = runtimeLlm.api;
+  if (runtimeApi === null)
+    throw new Error('runtime LLM has no selected API surface');
+
   const record: RunRecord = {
     schemaVersion: SCHEMA_VERSION,
     runId: meta.runId,
@@ -702,13 +725,8 @@ async function main(): Promise<void> {
         sandbox: 'production-createSandbox-restart-seam-v1',
       },
       llm: {
-        providerType: runtime.config.llm.providerType,
-        model: runtime.config.llm.model,
-        api: runtime.config.llm.api,
-        reasoningEffort: runtime.config.llm.reasoningEffort,
-        reasoningSummary: runtime.config.llm.reasoningSummary ?? null,
-        reasoningContext: runtime.config.llm.reasoningContext ?? null,
-        contextSize: runtime.config.llm.contextSize,
+        ...runtimeLlm,
+        api: runtimeApi,
         completionReserveTokens: runtime.config.llm.completionReserveTokens,
       },
     },

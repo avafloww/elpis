@@ -1,5 +1,7 @@
-import type { Config } from '../config.js';
-import { resolveLlmModelTarget } from '../llm/model-registry.js';
+import {
+  configForLlmRef,
+  type MaterializedConfig as Config,
+} from '../config.js';
 import type { Database } from '../store/db.js';
 import { isMindId, type MindId } from '../store/mind-id.js';
 import type { MindDetail, MindService } from '../store/mind.js';
@@ -240,11 +242,7 @@ export class WorkerSpawnBroker {
     const modelRef =
       input.modelRef ?? this.options.config.llm.registry.roles.main;
     try {
-      resolveLlmModelTarget(
-        this.options.config.llm.registry,
-        modelRef,
-        'worker model',
-      );
+      configForLlmRef(this.options.config, modelRef);
     } catch (error) {
       throw new WorkerSpawnError('invalid_request', boundedError(error));
     }

@@ -17,7 +17,11 @@
 // failure) so the console re-broadcasts.
 // - fetch is injected for tests (fetchFn); default is the global fetch.
 
-import type { Config } from '../config.js';
+import {
+  isResolvedGatewayConfig,
+  type Config,
+  type MaterializedConfig,
+} from '../config.js';
 
 /** One rate-limit window as the UI renders it. */
 export interface UsageWindow {
@@ -187,12 +191,14 @@ const MIN_POLL_INTERVAL_MS = 60_000;
 /** Build the tracker, or null when the feature is inactive for this boot
  * (no provider matches llm.base_url, or usage_tracker.enabled is false). */
 export function createUsageTracker(
-  config: Config,
+  config: MaterializedConfig,
   onUpdate: () => void,
   fetchFn: typeof fetch = fetch,
 ): UsageTracker | null {
-  if (!config.usageTracker.enabled) return null;
-  const provider = PROVIDERS.find((p) => p.matches(config.llm.baseUrl));
+  if (!config.usageTracker.enabled || isResolvedGatewayConfig(config))
+    return null;
+  const directConfig = config;
+  const provider = PROVIDERS.find((p) => p.matches(directConfig.llm.baseUrl));
   if (!provider) return null;
 
   const logger = config.logger;
@@ -204,7 +210,7 @@ export function createUsageTracker(
     // Non-null: `provider` is guaranteed defined here (early return above),
     // but TS's control-flow narrowing doesn't cross this closure boundary.
     try {
-      const windows = await provider!.fetch(config.llm, fetchFn);
+      const windows = await provider!.fetch(directConfig.llm, fetchFn);
       current = {
         provider: provider!.id,
         label: provider!.label,

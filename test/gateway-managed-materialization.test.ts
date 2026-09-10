@@ -29,10 +29,12 @@ import {
   type GatewayResidentSnapshot,
 } from '../src/store/gateway-resident.js';
 import { createLLM, fetchContextWindow } from '../src/llm/llm.js';
+import { createLlmToolRuntime } from '../src/llm/tool-runtime.js';
 import {
   replayIdentityForConfig,
   TOOL_CONTRACT_VERSION,
 } from '../src/llm/provenance.js';
+import { makeStubLLM } from './helpers.js';
 
 // Proposed public boundary: materializeGatewayConfig(parsed, { store, fetch }).
 // The implementation constructs one real GatewayLlmClient from that exact store
@@ -603,6 +605,81 @@ test('registry retains every protocol field and full ref in a deeply frozen revi
     registry.models['team/main'].allowedRoutes.push('messages');
   }, TypeError);
 });
+test('managed tool runtime preserves exact catalog tiers and API surfaces', async () => {
+  const materialize = materializer();
+  const h = harness();
+  const resolved = await materialize(h.config, {
+    store: h.store,
+    fetch: h.fetch,
+  });
+  assert.throws(
+    () => createLlmToolRuntime(resolved),
+    /Gateway LLM adapter is unavailable/,
+  );
+  const created: Array<{ ref: string; apiSurface: string | null }> = [];
+  const runtime = createLlmToolRuntime(resolved, {
+    create(projected) {
+      assert.equal(projected.llm.registrySource, 'gateway');
+      if (projected.llm.registrySource !== 'gateway')
+        throw new Error('expected managed tool projection');
+      const target = projected.llm.target;
+      assert.equal(projected.llm.registry, resolved.llm.registry);
+      assert.equal(target, projected.llm.registry.models[target.modelRef]);
+      assert.ok(target.toolTier);
+      assert.equal(target, resolved.llm.registry.toolTiers[target.toolTier]);
+      assert.equal(Object.isFrozen(target), true);
+      created.push({ ref: target.modelRef, apiSurface: target.apiSurface });
+      return makeStubLLM({
+        model: target.model,
+        async completeStandalone() {
+          return {
+            content: 'managed answer',
+            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+            model: target.model,
+            providerType: target.providerType,
+            apiSurface: target.apiSurface ?? undefined,
+          };
+        },
+      });
+    },
+  });
+  assert.ok(runtime);
+  assert.deepEqual(runtime.list(), [
+    {
+      tier: 'weak',
+      ref: 'team/chat',
+      model: 'upstream-chat',
+      providerType: 'openai-compatible',
+      contextSize: 128000,
+    },
+    {
+      tier: 'medium',
+      ref: 'other/main',
+      model: 'upstream-main',
+      providerType: 'anthropic-oauth',
+      contextSize: 200000,
+    },
+    {
+      tier: 'strong',
+      ref: 'team/main',
+      model: 'upstream-main',
+      providerType: 'openai-compatible',
+      contextSize: 128000,
+    },
+  ]);
+  assert.deepEqual(created, [
+    { ref: 'team/chat', apiSurface: 'chat-completions' },
+    { ref: 'other/main', apiSurface: 'anthropic-messages' },
+    { ref: 'team/main', apiSurface: 'responses' },
+  ]);
+  const result = await runtime.query({ prompt: 'managed?', model: 'weak' });
+  assert.equal(result.text, 'managed answer');
+  assert.deepEqual(result.provenance, {
+    providerType: 'openai-compatible',
+    apiSurface: 'chat-completions',
+  });
+});
+
 for (const [ref, route, apiSurface] of [
   ['team/main', 'responses', 'responses'],
   ['team/chat', 'chat/completions', 'chat-completions'],

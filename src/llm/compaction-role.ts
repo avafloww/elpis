@@ -4,7 +4,12 @@
 // context probe and density selection testable, and lets boot fail before any
 // worker services or file watchers have started.
 
-import { configForLlmRole, type Config } from '../config.js';
+import {
+  configForLlmRole,
+  isResolvedGatewayConfig,
+  type Config,
+  type MaterializedConfig,
+} from '../config.js';
 import type { Database } from '../store/db.js';
 import { createDensityModel, type DensityModel } from './density.js';
 import { fetchContextWindow } from './llm.js';
@@ -38,7 +43,7 @@ export interface CompactionRoleBudgetDeps {
  * model, or budget is created.
  */
 export async function resolveCompactionRoleBudget(
-  config: Config,
+  config: MaterializedConfig,
   db: Database,
   deps: CompactionRoleBudgetDeps = {},
 ): Promise<SummaryInputBudget | undefined> {
@@ -50,9 +55,15 @@ export async function resolveCompactionRoleBudget(
   const contextWindowTokens = await (
     deps.fetchContextWindow ?? fetchContextWindow
   )(compactionConfig, db);
+  const model = isResolvedGatewayConfig(compactionConfig)
+    ? compactionConfig.llm.target.model
+    : compactionConfig.llm.model;
+  const providerType = isResolvedGatewayConfig(compactionConfig)
+    ? compactionConfig.llm.target.providerType
+    : compactionConfig.llm.providerType;
   const density = (deps.createDensityModel ?? createDensityModel)(
     db,
-    compactionConfig.llm.model,
+    model,
     compactionConfig.logger,
   );
 
@@ -60,7 +71,7 @@ export async function resolveCompactionRoleBudget(
   // native cap is 32k. Codex also reserves at least 12k of context headroom;
   // that reserve is admission accounting, not an enforced Codex output cap.
   const nativeSummaryHeadroom =
-    compactionConfig.llm.providerType === 'anthropic-oauth'
+    providerType === 'anthropic-oauth'
       ? ANTHROPIC_SUMMARY_OUTPUT_TOKENS
       : GENERIC_SUMMARY_OUTPUT_TOKENS;
   const budget: SummaryInputBudget = {

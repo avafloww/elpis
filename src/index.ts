@@ -5,10 +5,11 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   configForLlmRole,
+  isResolvedGatewayConfig,
   loadConfigFile,
-  requireMaterializedConfig,
   ensureDataDirectory,
-  type Config,
+  type MaterializedConfig,
+  type ParsedConfig,
 } from './config.js';
 import {
   fetchContextWindow,
@@ -101,6 +102,8 @@ import { createChannelDirectory } from './store/channels.js';
 import { createMuteStore } from './store/mutes.js';
 import { openDatabase } from './store/db.js';
 import { createGatewayResidentStore } from './store/gateway-resident.js';
+import type { GatewayLlmFetch } from './llm/gateway-client.js';
+import { materializeGatewayConfig } from './llm/gateway-managed-config.js';
 import { Scheduler } from './store/scheduler.js';
 import { MindService } from './store/mind.js';
 import { createFeedbackStore } from './store/feedback.js';
@@ -138,6 +141,9 @@ import { resolveBuildIdentity, type BuildIdentity } from './build-identity.js';
 export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
   openDatabase?: typeof openDatabase;
+  createGatewayResidentStore?: typeof createGatewayResidentStore;
+  materializeGatewayConfig?: typeof materializeGatewayConfig;
+  gatewayLlmFetch?: GatewayLlmFetch;
   fetchContextWindow?: typeof fetchContextWindow;
   createLLM?: typeof createLLM;
   createDiscord?: typeof createDiscord;
@@ -151,7 +157,7 @@ export interface ElpisRuntimeAdapters {
 }
 
 export interface ElpisRuntime {
-  config: Config;
+  config: MaterializedConfig;
   agent: Agent;
   discord: ReturnType<typeof createDiscord>;
   scheduler: Scheduler;
@@ -216,6 +222,18 @@ export function completeStandaloneForRole(
   return client.completeStandalone(messages, opts);
 }
 
+function llmRoleConfigured(config: MaterializedConfig, role: 'motor'): boolean {
+  return isResolvedGatewayConfig(config)
+    ? config.llm.roles[role] !== null
+    : config.llm.registry.targets[role] !== null;
+}
+
+function selectedLlmModel(config: MaterializedConfig): string {
+  return isResolvedGatewayConfig(config)
+    ? config.llm.target.model
+    : config.llm.model;
+}
+
 export async function createElpisRuntime(
   adapters: ElpisRuntimeAdapters = {},
 ): Promise<ElpisRuntime> {
@@ -223,48 +241,63 @@ export async function createElpisRuntime(
     Date.now(),
     process.uptime() * 1000,
   );
-  const config = requireMaterializedConfig(
-    (adapters.loadConfigFile ?? loadConfigFile)(),
-  );
+  const parsedConfig = (adapters.loadConfigFile ?? loadConfigFile)();
   const buildIdentity = await (
     adapters.resolveBuildIdentity ?? resolveBuildIdentity
-  )(config.paths.harnessRoot);
+  )(parsedConfig.paths.harnessRoot);
   const profile = detectRuntimeProfile();
-  const modules = resolveBuiltinModules(config, profile);
-  if (modules.isActive('motor') && !config.llm.registry.targets.motor) {
-    throw new Error(
-      'config: llm.roles.motor is required while the motor module is active',
-    );
-  }
-  ensureDataDirectory(config.paths.dataDirectory);
-  const migration = migrateDataLayout(config.paths.dataDirectory, {
-    log: (message) => config.logger.info(message),
+  ensureDataDirectory(parsedConfig.paths.dataDirectory);
+  const migration = migrateDataLayout(parsedConfig.paths.dataDirectory, {
+    log: (message) => parsedConfig.logger.info(message),
   });
   const dataLayout = migration.layout;
   if (migration.gitignoreRepaired)
-    config.logger.warn('repaired elpis-data/.gitignore');
+    parsedConfig.logger.warn('repaired elpis-data/.gitignore');
 
-  // The agent's structured-data store (channels + feedback signal). Opened once
-  // and shared; a failure here is a boot problem (channels depend on it), so it
-  // is intentionally NOT swallowed. See docs/persistence.md.
+  // Managed configuration needs the resident credential store before any
+  // consumer can inspect roles, replay identity, or provider metadata.
   const db = (adapters.openDatabase ?? openDatabase)(dataLayout.root);
+  let config!: MaterializedConfig;
+  let modules!: BuiltinModuleRegistry;
   let summaryInputBudget: SummaryInputBudget | undefined;
+  let secretRegistry!: ReturnType<typeof createSecretRegistry>;
+  let gatewayResidentStore!: ReturnType<typeof createGatewayResidentStore>;
+  let maxContextTokens!: number;
   try {
+    gatewayResidentStore = (
+      adapters.createGatewayResidentStore ?? createGatewayResidentStore
+    )(db);
+    config = await (
+      adapters.materializeGatewayConfig ?? materializeGatewayConfig
+    )(parsedConfig, {
+      store: gatewayResidentStore,
+      fetch: adapters.gatewayLlmFetch ?? ((input, init) => fetch(input, init)),
+    });
+    modules = resolveBuiltinModules(config, profile);
+    if (modules.isActive('motor') && !llmRoleConfigured(config, 'motor')) {
+      throw new Error(
+        'config: llm.roles.motor is required while the motor module is active',
+      );
+    }
+    maxContextTokens = await (
+      adapters.fetchContextWindow ?? fetchContextWindow
+    )(config, db);
     summaryInputBudget = await resolveCompactionRoleBudget(config, db, {
       fetchContextWindow: adapters.fetchContextWindow ?? fetchContextWindow,
     });
+    secretRegistry = createSecretRegistry(config);
+    for (const value of gatewayResidentStore.secretValues())
+      secretRegistry.register(value);
+    if (isResolvedGatewayConfig(config) && !adapters.createLLM)
+      throw new Error('Gateway LLM adapter is unavailable');
   } catch (error) {
     // Nothing else owns the newly opened database yet. Cleanup is best-effort:
-    // a close failure must not replace the budget error that made boot unsafe.
+    // a close failure must not replace the materialization/budget error.
     try {
       db.close();
     } catch {}
     throw error;
   }
-  const secretRegistry = createSecretRegistry(config);
-  const gatewayResidentStore = createGatewayResidentStore(db);
-  for (const value of gatewayResidentStore.secretValues())
-    secretRegistry.register(value);
 
   // Ensure SOUL.md and MEMORY.md exist with defaults if the agent hasn't
   // written them yet. Existing files are left untouched. The seeded SOUL.md
@@ -332,21 +365,20 @@ export async function createElpisRuntime(
     `extensions loaded: ${extensions.summaries.length}; skipped: ${extensions.failures.length}`,
   );
 
-  // The main context probe and most-recent transcript read are independent, so
-  // kick them off together rather than serially. Restart recovery: load the
-  // single most-recent monocontext transcript and prime the one history from it;
-  // returns null on first boot (no sessions/main stream yet — the cutover from
-  // per-channel files is clean).
+  // Restart recovery: load the single most-recent monocontext transcript and
+  // prime the one history from it. Main-model context validation already ran
+  // inside the protected startup phase above.
   const sessionsRoot = dataLayout.sessions;
-  log('fetching context window for', config.llm.model, '...');
-  const [maxContextTokens, initialTranscript] = await Promise.all([
-    (adapters.fetchContextWindow ?? fetchContextWindow)(config, db),
-    (async () =>
-      loadMostRecentMain(sessionsRoot, {
-        opaqueReplayIdentity: replayIdentityForConfig(config),
-      }))(),
-  ]);
-  log('context window:', maxContextTokens, 'tokens');
+  const initialTranscript = loadMostRecentMain(sessionsRoot, {
+    opaqueReplayIdentity: replayIdentityForConfig(config),
+  });
+  log(
+    'context window for',
+    selectedLlmModel(config),
+    ':',
+    maxContextTokens,
+    'tokens',
+  );
   const initialMessages = initialTranscript?.messages ?? [];
   if (initialMessages.length > 0) {
     log(`loaded prior transcript: ${initialMessages.length} messages`);
@@ -618,7 +650,11 @@ export async function createElpisRuntime(
     logger: config.logger,
   });
   workerSupervisor = workerRuntime?.api;
-  const density = createDensityModel(db, config.llm.model, config.logger);
+  const density = createDensityModel(
+    db,
+    selectedLlmModel(config),
+    config.logger,
+  );
   const memoryLimits = effectiveMemoryLimits(
     config.memory.consolidationThresholdTokens,
     config.memory.consolidationTargetTokens,
@@ -797,7 +833,7 @@ export async function createElpisRuntime(
           buildState: buildIdentity.state,
           startedAt: processStartedAt,
           uptimeMs: Math.round(process.uptime() * 1000),
-          model: config.llm.model,
+          model: selectedLlmModel(config),
           agentName: readAgentName(config.paths.soulPath),
         };
       },
