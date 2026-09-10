@@ -78,6 +78,13 @@ Configuration, OAuth credentials, transcripts, browser state, screenshots, polic
 6. Run `npm run test:unit` and `npm run build`.
 7. Update documentation in the same commit when behavior or configuration changes.
 8. For diagnostics, reproduce the real failure path after deployment; a unit test that never reaches the observer is not acceptance.
+9. For a significant harness change, add a plain-Markdown entry under `changelogs/` in the same commit. Follow [Harness changelogs](docs/changelogs.md).
+
+## Harness changelogs
+
+Coding agents must leave a changelog entry when a change affects runtime behavior, configuration or migration, provider/model behavior, persistence, deployment, security/privacy/authority boundaries, or agent-visible prompts and tools. This is how the resident learns what changed if another hand worked while it was offline.
+
+Do not create entries for typo-only edits, formatting, mechanical refactors with no behavior change, or tests that only preserve existing behavior. Do not edit an old entry to announce new work: seen-state is filename-based, so create a new dated file. Never include secrets, private runtime data, household paths, or real identities. See [Harness changelogs](docs/changelogs.md) for the filename and content contract.
 
 ## Test commands
 
