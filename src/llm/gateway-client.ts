@@ -104,9 +104,9 @@ const intrinsicBufferFrom = Buffer.from;
 const intrinsicBufferToString = Buffer.prototype.toString;
 const intrinsicArrayIsArray = Array.isArray;
 const intrinsicArrayPrototype = Array.prototype;
-const intrinsicArrayPush = Array.prototype.push;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicReflectOwnKeys = Reflect.ownKeys;
+const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectGetOwnPropertyDescriptors =
@@ -118,6 +118,34 @@ const intrinsicNumberIsInteger = Number.isInteger;
 const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
 const intrinsicRegExpTest = RegExp.prototype.test;
 const intrinsicURL = URL;
+const intrinsicURLProtocol = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'protocol',
+)?.get;
+const intrinsicURLUsername = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'username',
+)?.get;
+const intrinsicURLPassword = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'password',
+)?.get;
+const intrinsicURLPathname = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'pathname',
+)?.get;
+const intrinsicURLSearch = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'search',
+)?.get;
+const intrinsicURLHash = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'hash',
+)?.get;
+const intrinsicURLOrigin = intrinsicObjectGetOwnPropertyDescriptor(
+  intrinsicURL.prototype,
+  'origin',
+)?.get;
 const intrinsicIsPromise = nodeTypes.isPromise;
 const intrinsicIsProxy = nodeTypes.isProxy;
 const gatewayLlmClientBoundaryErrorPrototype =
@@ -525,6 +553,12 @@ function exactContentLength(value: string | null): number | null {
   return intrinsicNumberIsSafeInteger(result) ? result : -1;
 }
 
+function urlValue(getter: (() => string) | undefined, parsed: URL): string {
+  if (getter === undefined)
+    throw new GatewayResidentStateError('corrupt_state');
+  return intrinsicReflectApply(getter, parsed, []) as string;
+}
+
 function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
   try {
     const phase = snapshot.phase;
@@ -533,13 +567,13 @@ function canonicalEndpoint(snapshot: GatewayResidentSnapshot): string {
       throw new GatewayResidentStateError('invalid_state');
     const parsed = new intrinsicURL(endpoint);
     if (
-      parsed.protocol !== 'https:' ||
-      parsed.username !== '' ||
-      parsed.password !== '' ||
-      parsed.pathname !== '/' ||
-      parsed.search !== '' ||
-      parsed.hash !== '' ||
-      parsed.origin !== endpoint
+      urlValue(intrinsicURLProtocol, parsed) !== 'https:' ||
+      urlValue(intrinsicURLUsername, parsed) !== '' ||
+      urlValue(intrinsicURLPassword, parsed) !== '' ||
+      urlValue(intrinsicURLPathname, parsed) !== '/' ||
+      urlValue(intrinsicURLSearch, parsed) !== '' ||
+      urlValue(intrinsicURLHash, parsed) !== '' ||
+      urlValue(intrinsicURLOrigin, parsed) !== endpoint
     )
       throw new GatewayResidentStateError('corrupt_state');
     return endpoint;
@@ -750,7 +784,12 @@ async function readBoundedBody(
           return { ok: false };
         }
         size += byteLength;
-        intrinsicReflectApply(intrinsicArrayPush, chunks, [copy]);
+        intrinsicObjectDefineProperty(chunks, chunks.length, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: copy,
+        });
       } catch {
         if (signalAborted(signal)) throw abortReason(signal);
         cancelReaderAndCheckAbort(reader, signal);
@@ -992,16 +1031,19 @@ function snapshotRoutes(value: unknown): readonly LlmProxyRoute[] {
     if (keys.length !== length + 1) boundaryFailure();
     const routes: LlmProxyRoute[] = [];
     for (let index = 0; index < length; index += 1) {
-      const descriptor = descriptors[String(index)];
+      const descriptor = descriptors[index];
       if (
         descriptor === undefined ||
         !('value' in descriptor) ||
         descriptor.enumerable !== true
       )
         boundaryFailure();
-      intrinsicReflectApply(intrinsicArrayPush, routes, [
-        descriptor.value as LlmProxyRoute,
-      ]);
+      intrinsicObjectDefineProperty(routes, index, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: descriptor.value as LlmProxyRoute,
+      });
     }
     return intrinsicObjectFreeze(routes);
   } catch (error) {

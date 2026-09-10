@@ -47,6 +47,15 @@ function regexTest(expression: RegExp, value: string): boolean {
   return intrinsicReflectApply(intrinsicRegExpTest, expression, [value]);
 }
 
+function defineArrayValue<T>(array: T[], index: number, value: T): void {
+  intrinsicObjectDefineProperty(array, index, {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value,
+  });
+}
+
 function bufferFrom(
   value: string | Uint8Array,
   encoding?: BufferEncoding,
@@ -405,7 +414,11 @@ function jsonWithoutHooks(value: unknown, depth = 0): unknown {
       writable: false,
     });
     for (let index = 0; index < value.length; index += 1)
-      output[index] = jsonWithoutHooks(value[index], depth + 1);
+      defineArrayValue(
+        output,
+        index,
+        jsonWithoutHooks(value[index], depth + 1),
+      );
     return output;
   }
   const output = intrinsicObjectCreate(null) as Record<string, unknown>;
@@ -618,7 +631,7 @@ function normalizeRoutes(value: unknown): readonly LlmProxyRoute[] {
     invalid();
   const routes: LlmProxyRoute[] = [];
   for (let index = 0; index < value.length; index += 1)
-    routes[index] = routeValue(value[index]);
+    defineArrayValue(routes, index, routeValue(value[index]));
   for (let i = 1; i < routes.length; i += 1) {
     if (routes[i - 1] >= routes[i]) invalid();
   }
@@ -719,7 +732,7 @@ function normalizeCatalog(value: unknown): LlmProxyCatalog {
     invalid();
   const models: LlmProxyCatalogModel[] = [];
   for (let index = 0; index < input.models.length; index += 1)
-    models[index] = normalizeCatalogModel(input.models[index]);
+    defineArrayValue(models, index, normalizeCatalogModel(input.models[index]));
   const providerTypes = new intrinsicMapConstructor<
     string,
     LlmProxyProviderType
@@ -903,10 +916,14 @@ function normalizeResponseHeaders(
       invalid();
     if (!regexTest(headerValuePattern, input.value)) invalid();
     bytesIn(input.value, 1, LLM_PROXY_LIMITS.responseHeaderValueBytes);
-    headers[index] = intrinsicObjectFreeze({
-      name: input.name,
-      value: input.value,
-    });
+    defineArrayValue(
+      headers,
+      index,
+      intrinsicObjectFreeze({
+        name: input.name,
+        value: input.value,
+      }),
+    );
   }
   for (let i = 1; i < headers.length; i += 1) {
     if (headers[i - 1].name >= headers[i].name) invalid();

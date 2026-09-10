@@ -147,6 +147,62 @@ describe('GatewayLlmClient catalog boundary', () => {
     assert.throws(() => (result.models as LlmProxyCatalogModel[]).push(model));
   });
 
+  it('rejects endpoint path escape despite poisoned URL prototype getters', async () => {
+    const pathnameDescriptor = Object.getOwnPropertyDescriptor(
+      URL.prototype,
+      'pathname',
+    );
+    const originDescriptor = Object.getOwnPropertyDescriptor(
+      URL.prototype,
+      'origin',
+    );
+    assert.ok(pathnameDescriptor?.get);
+    assert.ok(originDescriptor?.get);
+    let fetchCalls = 0;
+    let hostileCalls = 0;
+    const escaped = ENDPOINT + '/escape';
+    const authority: GatewayLlmResidentStore = {
+      read: () => {
+        Object.defineProperty(URL.prototype, 'pathname', {
+          ...pathnameDescriptor,
+          get() {
+            hostileCalls += 1;
+            Object.defineProperty(
+              URL.prototype,
+              'pathname',
+              pathnameDescriptor,
+            );
+            return '/';
+          },
+        });
+        Object.defineProperty(URL.prototype, 'origin', {
+          ...originDescriptor,
+          get() {
+            hostileCalls += 1;
+            Object.defineProperty(URL.prototype, 'origin', originDescriptor);
+            return escaped;
+          },
+        });
+        return Object.freeze({ ...snapshot(), endpoint: escaped });
+      },
+      activeNodeToken: () => firstCredential.token,
+    };
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          return jsonResponse(serializeLlmProxyCatalog(catalog));
+        }, authority).fetchCatalog(),
+        GatewayResidentStateError,
+      );
+      assert.equal(fetchCalls, 0);
+      assert.equal(hostileCalls, 0);
+    } finally {
+      Object.defineProperty(URL.prototype, 'pathname', pathnameDescriptor);
+      Object.defineProperty(URL.prototype, 'origin', originDescriptor);
+    }
+  });
+
   it('rejects endpoint path escape despite store-poisoned URL constructor', async () => {
     const NativeURL = globalThis.URL;
     let fetchCalls = 0;
@@ -510,6 +566,50 @@ it('keeps validated authority independent of ambient Object.freeze', async () =>
 });
 
 describe('GatewayLlmClient request boundary', () => {
+  it('does not let inherited array setters replace model route authority', async () => {
+    const previous = Object.getOwnPropertyDescriptor(Array.prototype, '0');
+    let fetchCalls = 0;
+    let hostileCalls = 0;
+    const authority = store(() => {
+      Object.defineProperty(Array.prototype, '0', {
+        configurable: true,
+        set(value: unknown) {
+          const replacement =
+            value === 'responses' ? 'chat/completions' : value;
+          if (value === 'responses') {
+            hostileCalls += 1;
+            delete (Array.prototype as unknown as Record<string, unknown>)['0'];
+          }
+          Object.defineProperty(this, '0', {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: replacement,
+          });
+        },
+      });
+      return firstCredential.token;
+    });
+    try {
+      await assert.rejects(
+        client(async () => {
+          fetchCalls += 1;
+          return new Response('must not run');
+        }, authority).dispatch({
+          ...dispatchInput(),
+          route: 'chat/completions',
+        }),
+        GatewayLlmClientBoundaryError,
+      );
+      assert.equal(fetchCalls, 0);
+      assert.equal(hostileCalls, 0);
+    } finally {
+      if (previous === undefined)
+        delete (Array.prototype as unknown as Record<string, unknown>)['0'];
+      else Object.defineProperty(Array.prototype, '0', previous);
+    }
+  });
+
   it('does not let token callbacks expand model route authority', async () => {
     const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'map');
     assert.ok(descriptor && 'value' in descriptor);
