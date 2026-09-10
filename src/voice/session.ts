@@ -92,10 +92,10 @@ export class VoiceSession {
     if (event.type === 'inputCommitted') {
       if (this.inputs.has(event.itemId)) return;
       if (this.inputs.size >= 32) {
-        this.options.onNotice(
+        this.failClosed(
           'Voice input backlog exceeded its limit; the call ended.',
+          true,
         );
-        this.close();
         return;
       }
       const timer = setTimeout(() => {
@@ -152,7 +152,10 @@ export class VoiceSession {
       }
       this.responseOwners.set(event.responseId, event.requestToken);
       const pending = this.pending;
-      if (pending && event.requestToken === pending.requestToken) {
+      if (
+        this.isActivePending(pending) &&
+        event.requestToken === pending.requestToken
+      ) {
         if (!pending.responseId) {
           pending.responseId = event.responseId;
           return;
@@ -166,17 +169,16 @@ export class VoiceSession {
         /* connection may already be closing */
       }
     } else if (event.type === 'error' || event.type === 'closed') {
-      // Mark terminal before invoking an external notice sink. A reentrant
-      // callback must not start another send in a session being torn down.
+      // Claim and settle terminal state before invoking external notice code.
+      // Reentrant notice callbacks cannot override the failed/no-cancel policy.
       this.closed = true;
+      this.finishClose(false, 'failed');
       try {
         this.options.onNotice(
           'Voice connection ended; readable conversation remains available.',
         );
       } catch {
         /* shutdown is independent of notice delivery */
-      } finally {
-        this.finishClose(false, 'failed');
       }
     } else if (event.type === 'responseDone') {
       const owner = this.responseOwners.get(event.responseId);
@@ -184,7 +186,11 @@ export class VoiceSession {
         return;
       this.terminalResponses.add(event.responseId);
       const pending = this.pending;
-      if (!pending || event.responseId !== pending.responseId) return;
+      if (
+        !this.isActivePending(pending) ||
+        event.responseId !== pending.responseId
+      )
+        return;
       // A terminal provider response must never receive response.cancel. It
       // may still have locally buffered audio, which barge-in can interrupt.
       if (pending.generationDone) return;
@@ -193,7 +199,16 @@ export class VoiceSession {
         this.settlePending(pending, 'failed');
         return;
       }
-      if (!this.options.canSend()) {
+      let canSend: boolean;
+      try {
+        canSend = this.options.canSend();
+      } catch {
+        this.settlePending(pending, 'failed');
+        return;
+      }
+      // Policy and playback hooks are external and may synchronously reenter.
+      if (!this.isActivePending(pending)) return;
+      if (!canSend) {
         this.settlePending(pending, 'interrupted');
         return;
       }
@@ -210,15 +225,37 @@ export class VoiceSession {
         this.settlePending(pending, 'failed');
         return;
       }
-      void finished.then(
-        (playedMs) => this.settlePending(pending, 'played', playedMs),
-        () => this.settlePending(pending, 'failed'),
-      );
+      if (!this.isActivePending(pending)) {
+        void finished.catch(() => undefined);
+        return;
+      }
+      try {
+        void finished.then(
+          (playedMs) => this.settlePending(pending, 'played', playedMs),
+          () => this.settlePending(pending, 'failed'),
+        );
+      } catch {
+        this.settlePending(pending, 'failed');
+      }
     } else {
       const pending = this.pending;
-      if (!pending || event.responseId !== pending.responseId) return;
-      if (pending.generationDone) return;
-      if (!this.options.canSend()) {
+      if (
+        !pending ||
+        event.responseId !== pending.responseId ||
+        !this.isMediaEligible(pending)
+      )
+        return;
+      let canSend: boolean;
+      try {
+        canSend = this.options.canSend();
+      } catch {
+        this.settlePending(pending, 'failed');
+        return;
+      }
+      // canSend may synchronously close/settle the session or deliver
+      // response.done. Never resume a stale media handler afterward.
+      if (!this.isMediaEligible(pending)) return;
+      if (!canSend) {
         this.settlePending(pending, 'interrupted');
         return;
       }
@@ -249,7 +286,15 @@ export class VoiceSession {
   }
 
   async speak(text: string): Promise<VoiceDelivery> {
-    if (this.closed || !this.options.canSend())
+    if (this.closed || this.cleaned)
+      throw new Error('voice sending is disabled');
+    let canSend: boolean;
+    try {
+      canSend = this.options.canSend();
+    } catch {
+      throw new Error('voice sending is disabled');
+    }
+    if (!canSend || this.closed || this.cleaned)
       throw new Error('voice sending is disabled');
     if (this.pending) throw new Error('voice playback is already active');
     if (!text.trim() || text.length > 4_000)
@@ -277,13 +322,16 @@ export class VoiceSession {
         pending.requestSent = true;
         this.options.transport.speakText(text, requestToken);
       } catch {
-        pending.requestSent = false;
-        this.settlePending(pending, 'failed');
+        if (this.pending === pending && !pending.settling) {
+          pending.requestSent = false;
+          this.settlePending(pending, 'failed');
+        }
       }
     });
   }
 
   interrupt(): void {
+    if (this.closed || this.cleaned) return;
     const pending = this.pending;
     if (pending) this.settlePending(pending, 'interrupted');
   }
@@ -317,7 +365,11 @@ export class VoiceSession {
     } catch {
       /* best-effort shutdown */
     }
-    this.options.onClose?.();
+    try {
+      this.options.onClose?.();
+    } catch {
+      /* owner cleanup cannot compromise terminal session state */
+    }
   }
 
   private drain(): void {
@@ -331,8 +383,16 @@ export class VoiceSession {
       } catch {
         /* close handles transport failure */
       }
-      if (input.text && this.options.canReceive())
-        this.options.onUtterance(id, input.text);
+      if (this.closed || this.cleaned) return;
+      if (!input.text) continue;
+      let canReceive: boolean;
+      try {
+        canReceive = this.options.canReceive();
+      } catch {
+        return;
+      }
+      if (this.closed || this.cleaned || !canReceive) return;
+      this.options.onUtterance(id, input.text);
     }
   }
 
@@ -375,15 +435,30 @@ export class VoiceSession {
     });
   }
 
+  private isActivePending(
+    pending: PendingSpeech | undefined,
+  ): pending is PendingSpeech {
+    return (
+      pending !== undefined &&
+      this.pending === pending &&
+      !pending.settling &&
+      !this.closed &&
+      !this.cleaned
+    );
+  }
+
+  private isMediaEligible(pending: PendingSpeech): boolean {
+    return this.isActivePending(pending) && !pending.generationDone;
+  }
+
   private failClosed(message: string, cancelGeneration: boolean): void {
     if (this.closed) return;
     this.closed = true;
+    this.finishClose(cancelGeneration, 'failed');
     try {
       this.options.onNotice(message);
     } catch {
       /* shutdown is independent of notice delivery */
-    } finally {
-      this.finishClose(cancelGeneration, 'failed');
     }
   }
 }

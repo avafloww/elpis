@@ -490,6 +490,79 @@ describe('RealtimeVoiceTransport', () => {
     transport.close();
   });
 
+  it('coalesces identical updates onto one acknowledged state barrier', async () => {
+    const { transport, socket } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    socket.sent.length = 0;
+
+    const first = transport.updateInstructions('Shared update.');
+    const second = transport.updateInstructions('Shared update.');
+    assert.equal(socket.sent.length, 1);
+    assert.equal(
+      JSON.parse(socket.sent[0]).session.instructions,
+      'Shared update.',
+    );
+
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_shared',
+      session: effectiveSession('Shared update.'),
+    });
+    await Promise.all([first, second]);
+    assert.equal(socket.sent.length, 1);
+
+    // Once this exact safe effective state is acknowledged, another identical
+    // request resolves at the barrier without an ambiguous provider update.
+    await transport.updateInstructions('Shared update.');
+    assert.equal(socket.sent.length, 1);
+    transport.close();
+  });
+
+  it('does not let a delayed duplicate acknowledgement satisfy a distinct update', async () => {
+    const { transport, socket, events } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    socket.sent.length = 0;
+    events.length = 0;
+
+    const first = transport.updateInstructions('First state.');
+    const second = transport.updateInstructions('Second state.');
+    const secondRejected = assert.rejects(
+      second,
+      /invalid session\.updated fields/,
+    );
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_first',
+      session: effectiveSession('First state.'),
+    });
+    await first;
+    assert.equal(socket.sent.length, 2);
+
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_first_duplicate',
+      session: effectiveSession('First state.'),
+    });
+    await secondRejected;
+    assert.equal(transport.ready, false);
+    assert.deepEqual(socket.closed, [[1002, 'protocol error']]);
+    assert.equal((events.at(-1) as { type?: string }).type, 'error');
+  });
+
   it('bounds update acknowledgements and notifies the owner on terminal timeout', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { transport, socket, events } = setup({ updateTimeoutMs: 10 });

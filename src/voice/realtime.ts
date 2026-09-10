@@ -107,9 +107,13 @@ export interface RealtimeVoiceTransportOptions {
   onEvent?: (event: RealtimeVoiceEvent) => void;
 }
 
-type PendingUpdate = {
+type PendingUpdateWaiter = {
   resolve(): void;
   reject(error: Error): void;
+};
+
+type PendingUpdate = {
+  waiters: PendingUpdateWaiter[];
   initial: boolean;
   session: Record<string, unknown>;
   expectedInstructions: string;
@@ -226,6 +230,7 @@ export class RealtimeVoiceTransport {
   #connectReject: ((error: Error) => void) | null = null;
   #connectTimer: NodeJS.Timeout | null = null;
   #closeTimer: NodeJS.Timeout | null = null;
+  #acknowledgedInstructions: string | null = null;
   #clientEventSequence = 0;
 
   constructor(options: RealtimeVoiceTransportOptions) {
@@ -484,9 +489,28 @@ export class RealtimeVoiceTransport {
     initial = false,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // The protocol does not echo a client revision. Treat an acknowledged
+      // effective state as a barrier, and never send two consecutive updates
+      // whose acknowledgements would be indistinguishable.
+      if (
+        !initial &&
+        this.#pendingUpdates.length === 0 &&
+        this.#acknowledgedInstructions === expectedInstructions
+      ) {
+        resolve();
+        return;
+      }
+      const tail = this.#pendingUpdates.at(-1);
+      if (
+        tail &&
+        tail.initial === initial &&
+        tail.expectedInstructions === expectedInstructions
+      ) {
+        tail.waiters.push({ resolve, reject });
+        return;
+      }
       this.#pendingUpdates.push({
-        resolve,
-        reject,
+        waiters: [{ resolve, reject }],
         initial,
         session,
         expectedInstructions,
@@ -498,28 +522,39 @@ export class RealtimeVoiceTransport {
   }
 
   #pumpSessionUpdate(): void {
-    const pending = this.#pendingUpdates[0];
-    if (!pending || pending.sent || this.#state === 'closed') return;
-    pending.sent = true;
-    try {
-      this.#send({ type: 'session.update', session: pending.session }, true);
-    } catch (error) {
-      this.#terminalFailure(
-        error instanceof Error ? error : new Error('session update failed'),
-        { terminate: true },
-      );
+    while (true) {
+      const pending = this.#pendingUpdates[0];
+      if (!pending || pending.sent || this.#state === 'closed') return;
+      if (
+        !pending.initial &&
+        this.#acknowledgedInstructions === pending.expectedInstructions
+      ) {
+        this.#pendingUpdates.shift();
+        for (const waiter of pending.waiters) waiter.resolve();
+        continue;
+      }
+      pending.sent = true;
+      try {
+        this.#send({ type: 'session.update', session: pending.session }, true);
+      } catch (error) {
+        this.#terminalFailure(
+          error instanceof Error ? error : new Error('session update failed'),
+          { terminate: true },
+        );
+        return;
+      }
+      // A test adapter or unusual socket can synchronously deliver the
+      // acknowledgement from sendText. Do not arm a stale timer after it did.
+      if (this.#isClosed() || this.#pendingUpdates[0] !== pending) return;
+      pending.timer = setTimeout(() => {
+        this.#terminalFailure(
+          new Error('realtime voice session update timed out'),
+          { terminate: true },
+        );
+      }, this.#updateTimeoutMs);
+      pending.timer.unref?.();
       return;
     }
-    // A test adapter or unusual socket can synchronously deliver the
-    // acknowledgement from sendText. Do not arm a stale timer after it did.
-    if (this.#isClosed() || this.#pendingUpdates[0] !== pending) return;
-    pending.timer = setTimeout(() => {
-      this.#terminalFailure(
-        new Error('realtime voice session update timed out'),
-        { terminate: true },
-      );
-    }, this.#updateTimeoutMs);
-    pending.timer.unref?.();
   }
 
   #send(event: Record<string, unknown>, connecting = false): void {
@@ -576,13 +611,18 @@ export class RealtimeVoiceTransport {
     if (type === 'session.updated') {
       const session = requiredObject(event, 'session');
       const pending = this.#pendingUpdates[0];
-      if (!pending || pending.initial !== (this.#state === 'connecting')) {
+      if (
+        !pending ||
+        !pending.sent ||
+        pending.initial !== (this.#state === 'connecting')
+      ) {
         throw new Error('unexpected session update acknowledgement');
       }
       this.#validateAcknowledgedSession(session, pending);
       this.#pendingUpdates.shift();
       if (pending.timer) clearTimeout(pending.timer);
-      pending.resolve();
+      this.#acknowledgedInstructions = pending.expectedInstructions;
+      for (const waiter of pending.waiters) waiter.resolve();
       if (this.#state === 'connecting') {
         this.#state = 'ready';
         this.#clearConnectTimer();
@@ -803,7 +843,7 @@ export class RealtimeVoiceTransport {
   #rejectPending(error: Error): void {
     for (const pending of this.#pendingUpdates.splice(0)) {
       if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
+      for (const waiter of pending.waiters) waiter.reject(error);
     }
   }
 

@@ -341,7 +341,8 @@ test('a conflicting duplicate response identity fails closed without cancelling 
   const cancelled: string[] = [];
   let transportCloses = 0;
   const notices: string[] = [];
-  const session = new VoiceSession({
+  let session!: VoiceSession;
+  session = new VoiceSession({
     transport: {
       speakText: (_text, token) => requestTokens.push(token),
       cancelResponse: (id) => cancelled.push(id),
@@ -357,7 +358,11 @@ test('a conflicting duplicate response identity fails closed without cancelling 
     canReceive: () => true,
     canSend: () => true,
     onUtterance: () => {},
-    onNotice: (notice) => notices.push(notice),
+    onNotice: (notice) => {
+      notices.push(notice);
+      session.interrupt();
+      session.close();
+    },
   });
 
   const result = session.speak('Identity owner.');
@@ -529,6 +534,293 @@ test('settlement blocks reentrant sends until cancellation and playback cleanup 
   session.close();
 });
 
+test('settling is media-inert during cancellation and playback cleanup', async () => {
+  const tokens: string[] = [];
+  const writes: Buffer[] = [];
+  let session!: VoiceSession;
+  const injectLateMedia = () => {
+    session.handle({
+      type: 'audio',
+      responseId: 'settling-id',
+      itemId: 'late-item',
+      pcm: Buffer.alloc(240, 9),
+    });
+    session.handle({
+      type: 'outputTranscript',
+      responseId: 'settling-id',
+      itemId: 'late-item',
+      transcript: 'late mutation',
+      final: true,
+    });
+  };
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: injectLateMedia,
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: (pcm) => writes.push(Buffer.from(pcm)),
+      finish: async () => 0,
+      interrupt: () => {
+        injectLateMedia();
+        return 33;
+      },
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const result = session.speak('Settle once.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'settling-id',
+    requestToken: tokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'settling-id',
+    itemId: 'before-item',
+    pcm: Buffer.alloc(240, 1),
+  });
+  session.handle({
+    type: 'outputTranscript',
+    responseId: 'settling-id',
+    itemId: 'before-item',
+    transcript: 'before cleanup',
+    final: true,
+  });
+  session.interrupt();
+
+  assert.deepEqual(await result, {
+    status: 'interrupted',
+    transcript: 'before cleanup',
+    playedMs: 33,
+  });
+  assert.deepEqual(writes, [Buffer.alloc(240, 1)]);
+  session.close();
+});
+
+test('canSend reentry cannot resume a settled media handler', async () => {
+  const tokens: string[] = [];
+  const writes: Buffer[] = [];
+  let armed = false;
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => {},
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: (pcm) => writes.push(Buffer.from(pcm)),
+      finish: async () => 0,
+      interrupt: () => 17,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => {
+      if (armed) {
+        armed = false;
+        session.interrupt();
+      }
+      return true;
+    },
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const result = session.speak('Policy callback.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'policy-id',
+    requestToken: tokens[0],
+  });
+  armed = true;
+  session.handle({
+    type: 'audio',
+    responseId: 'policy-id',
+    itemId: 'policy-item',
+    pcm: Buffer.alloc(240, 2),
+  });
+
+  assert.deepEqual(await result, {
+    status: 'interrupted',
+    transcript: '',
+    playedMs: 17,
+  });
+  assert.deepEqual(writes, []);
+  session.close();
+});
+
+test('canSend response completion blocks the original audio handler', async () => {
+  const tokens: string[] = [];
+  const writes: Buffer[] = [];
+  let armed = false;
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => {},
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: (pcm) => writes.push(Buffer.from(pcm)),
+      finish: async () => 120,
+      interrupt: () => 0,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => {
+      if (armed) {
+        armed = false;
+        session.handle({
+          type: 'responseDone',
+          responseId: 'audio-done-id',
+          status: 'completed',
+        });
+      }
+      return true;
+    },
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const result = session.speak('No late audio.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'audio-done-id',
+    requestToken: tokens[0],
+  });
+  armed = true;
+  session.handle({
+    type: 'audio',
+    responseId: 'audio-done-id',
+    itemId: 'audio-item',
+    pcm: Buffer.alloc(240, 3),
+  });
+
+  assert.deepEqual(await result, {
+    status: 'failed',
+    transcript: '',
+    playedMs: 0,
+  });
+  assert.deepEqual(writes, []);
+  session.close();
+});
+
+test('canSend response completion blocks the original transcript handler', async () => {
+  const tokens: string[] = [];
+  const writes: Buffer[] = [];
+  let armed = false;
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => {},
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: (pcm) => writes.push(Buffer.from(pcm)),
+      finish: async () => 120,
+      interrupt: () => 0,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => {
+      if (armed) {
+        armed = false;
+        session.handle({
+          type: 'responseDone',
+          responseId: 'transcript-done-id',
+          status: 'completed',
+        });
+      }
+      return true;
+    },
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const result = session.speak('No late transcript.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'transcript-done-id',
+    requestToken: tokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'transcript-done-id',
+    itemId: 'transcript-item',
+    pcm: Buffer.alloc(240, 4),
+  });
+  armed = true;
+  session.handle({
+    type: 'outputTranscript',
+    responseId: 'transcript-done-id',
+    itemId: 'transcript-item',
+    transcript: 'must not be committed',
+    final: true,
+  });
+
+  assert.deepEqual(await result, {
+    status: 'played',
+    transcript: '',
+    playedMs: 120,
+  });
+  assert.deepEqual(writes, [Buffer.alloc(240, 4)]);
+  session.close();
+});
+
+test('terminal notice reentry cannot override failed no-cancel settlement', async () => {
+  const tokens: string[] = [];
+  const cancelled: string[] = [];
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: (id) => cancelled.push(id),
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: () => {},
+      finish: async () => 0,
+      interrupt: () => 12,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: () => {
+      session.interrupt();
+      session.close();
+    },
+  });
+
+  const result = session.speak('Terminal failure.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'terminal-failure-id',
+    requestToken: tokens[0],
+  });
+  session.handle({ type: 'error', message: 'synthetic terminal failure' });
+
+  assert.deepEqual(await result, {
+    status: 'failed',
+    transcript: '',
+    playedMs: 12,
+  });
+  assert.deepEqual(cancelled, []);
+});
+
 test('throwing notices and synchronous playback finish cannot strand a send', async () => {
   let transportCloses = 0;
   let playbackCloses = 0;
@@ -589,6 +881,66 @@ test('throwing notices and synchronous playback finish cannot strand a send', as
   await assert.rejects(noticeReentry, /disabled/);
   assert.equal(transportCloses, 1);
   assert.equal(playbackCloses, 1);
+});
+
+test('reentrant playback finish still observes its returned rejection', async () => {
+  const tokens: string[] = [];
+  let rejectionHandlerAttached = false;
+  let session!: VoiceSession;
+  const abandonedFinish = {
+    catch(handler: (error: Error) => unknown) {
+      rejectionHandlerAttached = true;
+      handler(new Error('late finish failure'));
+      return Promise.resolve();
+    },
+  } as unknown as Promise<number>;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => {},
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: () => {},
+      finish: () => {
+        session.interrupt();
+        return abandonedFinish;
+      },
+      interrupt: () => 13,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const result = session.speak('Observe the abandoned finish.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'finish-reentry-id',
+    requestToken: tokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'finish-reentry-id',
+    itemId: 'finish-reentry-item',
+    pcm: Buffer.alloc(240),
+  });
+  session.handle({
+    type: 'responseDone',
+    responseId: 'finish-reentry-id',
+    status: 'completed',
+  });
+
+  assert.deepEqual(await result, {
+    status: 'interrupted',
+    transcript: '',
+    playedMs: 13,
+  });
+  assert.equal(rejectionHandlerAttached, true);
+  session.close();
 });
 
 test('barge-in stops playback without replaying or retracting committed speech', async () => {
