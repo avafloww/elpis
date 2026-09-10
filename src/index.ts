@@ -288,8 +288,6 @@ export async function createElpisRuntime(
     secretRegistry = createSecretRegistry(config);
     for (const value of gatewayResidentStore.secretValues())
       secretRegistry.register(value);
-    if (isResolvedGatewayConfig(config) && !adapters.createLLM)
-      throw new Error('Gateway LLM adapter is unavailable');
   } catch (error) {
     // Nothing else owns the newly opened database yet. Cleanup is best-effort:
     // a close failure must not replace the materialization/budget error.

@@ -87,11 +87,12 @@ llm:
   #   compaction: primary/main # optional; needs room for the full fold
   # completion_reserve_tokens: 8192
   #
-  # --- Gateway-managed catalog (materialization only in this release) ---
+  # --- Gateway-managed catalog ---
   # Requires dashboard.remote.url plus an active resident Gateway enrollment.
   # Direct provider keys/providers cannot be mixed with gateway_managed. Boot
-  # resolves and freezes the authority-bound catalog before any model consumer,
-  # but managed generation remains fail-closed until its request adapter ships.
+  # resolves and freezes the authority-bound catalog before any model consumer;
+  # provider requests then use the exact catalog route through Gateway without
+  # local provider keys or OAuth credentials.
   #
   # gateway_managed: true
   # roles:

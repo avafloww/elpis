@@ -41,7 +41,6 @@ import { responsesCompletionStatus } from './completion-status.js';
 // import each other, so a module-load-time derivation would hit the TDZ).
 
 import type OpenAI from 'openai';
-import type { Config } from '../config.js';
 import type { ConsoleHub } from '../console/hub.js';
 import {
   addStandaloneOutputBytes,
@@ -58,6 +57,7 @@ import {
   type ChatMessage,
   type CompleteResult,
   type LLMUsage,
+  type LlmClientConfig,
   type RunTool,
   type SkillTool,
 } from './llm.js';
@@ -144,7 +144,7 @@ export function responsesThinkTool(): OpenAI.Responses.FunctionTool {
 }
 
 export function responsesModelTools(
-  config: Config,
+  config: LlmClientConfig,
   runTool: RunTool = RUN_TOOL,
   skillTool?: SkillTool,
 ): OpenAI.Responses.FunctionTool[] {
@@ -403,7 +403,7 @@ export function failureToError(error: unknown): Error {
  * knobs (newer-endpoint features; omitted = endpoint default) — `context` is
  * newer than the pinned SDK's Reasoning type, hence the widened cast. */
 function buildResponsesParams(
-  config: Config,
+  config: LlmClientConfig,
   prepared: ChatMessage[],
   tools: OpenAI.Responses.FunctionTool[],
 ): OpenAI.Responses.ResponseCreateParamsNonStreaming {
@@ -467,7 +467,7 @@ function assembleResult(
  * encrypted reasoning); deltas drive the console mirror and idle watchdog. */
 export async function streamResponsesComplete(
   client: OpenAI,
-  config: Config,
+  config: LlmClientConfig,
   messages: ChatMessage[],
   hub?: ConsoleHub,
   extraBody: Record<string, unknown> = {},
@@ -770,7 +770,7 @@ export async function streamResponsesComplete(
  * headroom for the model to think before writing the ~3k-token summary. */
 export async function responsesSummarize(
   client: OpenAI,
-  config: Config,
+  config: LlmClientConfig,
   systemPrompt: string,
   text: string,
 ): Promise<string> {

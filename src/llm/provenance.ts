@@ -399,16 +399,18 @@ export type ReplayIdentity = Pick<
   | 'gateway'
 >;
 
-/** Exact wire identity allowed to receive persisted opaque reasoning. `null`
- * means the configured surface cannot replay opaque state. */
-export function replayIdentityForConfig(
+/** Exact wire identity for a generated result. `surface` is used only when the
+ * direct OpenAI-compatible `auto` route has selected a concrete API surface. */
+export function generationIdentityForConfig(
   parsed: RuntimeConfig,
-): ReplayIdentity | null {
+  surface?: ApiSurface,
+): ReplayIdentity {
   if (isResolvedGatewayConfig(parsed)) {
     const target = parsed.llm.target;
-    if (target.apiSurface === 'chat-completions') return null;
     if (target.apiSurface === null || target.route === null)
-      throw new Error('Gateway model has no executable replay surface');
+      throw new Error('Gateway model has no executable generation surface');
+    if (surface !== undefined && surface !== target.apiSurface)
+      throw new Error('Gateway generation surface does not match its target');
     const authority = canonicalGatewayAuthority(parsed.llm.gatewayAuthority);
     const endpoint = new intrinsicURL(gatewayRequestPath, authority);
     return {
@@ -427,6 +429,8 @@ export function replayIdentityForConfig(
   const config = requireMaterializedConfig(parsed);
   const model = config.llm.model;
   if (config.llm.providerType === 'codex-oauth') {
+    if (surface !== undefined && surface !== 'codex-responses')
+      throw new Error('Codex generation surface mismatch');
     return {
       toolContractVersion: TOOL_CONTRACT_VERSION,
       providerType: 'codex-oauth',
@@ -436,6 +440,8 @@ export function replayIdentityForConfig(
     };
   }
   if (config.llm.providerType === 'anthropic-oauth') {
+    if (surface !== undefined && surface !== 'anthropic-messages')
+      throw new Error('Anthropic generation surface mismatch');
     return {
       toolContractVersion: TOOL_CONTRACT_VERSION,
       providerType: 'anthropic-oauth',
@@ -444,14 +450,29 @@ export function replayIdentityForConfig(
       apiEndpoint: endpointAt(config.llm.baseUrl, 'v1/messages'),
     };
   }
-  if (config.llm.api === 'chat') return null;
+  const selected =
+    surface ?? (config.llm.api === 'chat' ? 'chat-completions' : 'responses');
+  if (selected !== 'responses' && selected !== 'chat-completions')
+    throw new Error('OpenAI-compatible generation surface mismatch');
   return {
     toolContractVersion: TOOL_CONTRACT_VERSION,
     providerType: 'openai-compatible',
     model,
-    apiSurface: 'responses',
-    apiEndpoint: endpointAt(config.llm.baseUrl, 'responses'),
+    apiSurface: selected,
+    apiEndpoint: endpointAt(
+      config.llm.baseUrl,
+      selected === 'responses' ? 'responses' : 'chat/completions',
+    ),
   };
+}
+
+/** Exact wire identity allowed to receive persisted opaque reasoning. `null`
+ * means the configured surface cannot replay opaque state. */
+export function replayIdentityForConfig(
+  parsed: RuntimeConfig,
+): ReplayIdentity | null {
+  const identity = generationIdentityForConfig(parsed);
+  return identity.apiSurface === 'chat-completions' ? null : identity;
 }
 
 export function sameReplayIdentity(

@@ -31,6 +31,16 @@ import {
   type Config,
 } from '../config.js';
 import type { LlmRole } from './model-registry.js';
+import {
+  createGatewayManagedTransport,
+  type ResolvedGatewayConfig,
+} from './gateway-managed-config.js';
+import {
+  createGatewayCodexClientTransport,
+  createGatewayOpenAIClientTransport,
+  GATEWAY_CODEX_SDK_API_KEY,
+  GATEWAY_OPENAI_SDK_API_KEY,
+} from './gateway-openai-transport.js';
 import { addStandaloneOutputBytes } from './standalone-limits.js';
 import type { ConsoleHub } from '../console/hub.js';
 // llm.ts ⇄ responses.ts import each other (this module routes to the Responses
@@ -47,6 +57,7 @@ import {
 // inside createLLM (call time); anthropic-client.ts derives its run tool lazily
 // so this cross-import never reads an llm.ts export at module-load time.
 import {
+  createAnthropicLLM,
   createAnthropicOAuthLLM,
   anthropicContextWindow,
 } from './anthropic-client.js';
@@ -57,15 +68,18 @@ import {
   refreshOpenAICodexToken,
 } from './oauth/openai-codex.js';
 import {
+  createCodexLLM,
   createCodexOAuthLLM,
   fetchCodexContextWindow,
 } from './codex-client.js';
 import {
   endpointAt,
+  generationIdentityForConfig,
   stampGeneration,
   type ApiSurface,
   type GenerationProvenance,
   type ProviderType,
+  type ReplayIdentity,
 } from './provenance.js';
 import type { RunMessageMetadata } from '../sandbox/metadata.js';
 import {
@@ -77,6 +91,22 @@ import { isPolicyDenial } from './policy-flight-recorder.js';
 export type { GenerationProvenance } from './provenance.js';
 
 export type { ReasoningItemParam } from './responses.js';
+
+export type LlmClientConfig = Pick<Config, 'logger' | 'paths'> & {
+  readonly llm: Pick<
+    Config['llm'],
+    | 'model'
+    | 'contextSize'
+    | 'reasoningEffort'
+    | 'reasoningSummary'
+    | 'reasoningContext'
+    | 'externalThinking'
+    | 'completionReserveTokens'
+    | 'streamIdleTimeoutMs'
+    | 'callTimeoutMs'
+    | 'api'
+  >;
+};
 
 /** An Anthropic extended-thinking block as returned by the Messages API and
  * replayed verbatim. Two variants: a signed `thinking` block, and an opaque
@@ -207,6 +237,8 @@ export interface StandaloneCompleteResult {
   providerType?: ProviderType;
   apiSurface?: ApiSurface;
   apiEndpoint?: string;
+  toolContractVersion?: string;
+  gateway?: GenerationProvenance['gateway'];
   reasoningEffort?: string;
 }
 
@@ -312,7 +344,7 @@ export function toApiMessage(
  * unchanged. Shared by the three request-body builders (streaming complete,
  * non-streaming complete, summarize) so the opt-in stays in one place. */
 function withEffort<T extends object>(
-  config: Config,
+  config: LlmClientConfig,
   base: T,
 ): T & { reasoning_effort?: string } {
   return config.llm.reasoningEffort
@@ -1031,7 +1063,7 @@ function assembleToolCalls(
  * independent of any optional policy engine. */
 export async function streamComplete(
   client: OpenAI,
-  config: Config,
+  config: LlmClientConfig,
   messages: ChatMessage[],
   hub?: ConsoleHub,
   options: {
@@ -1203,8 +1235,8 @@ export async function streamComplete(
 
 function standaloneResult(
   result: CompleteResult,
-  config: Config,
-  surface: 'responses' | 'chat-completions',
+  config: LlmClientConfig,
+  identity: ReplayIdentity,
 ): StandaloneCompleteResult {
   return {
     content: result.message.content ?? '',
@@ -1219,13 +1251,12 @@ function standaloneResult(
       : {}),
     usage: result.usage,
     ...(result.requestId ? { requestId: result.requestId } : {}),
-    model: config.llm.model,
-    providerType: 'openai-compatible',
-    apiSurface: surface,
-    apiEndpoint: endpointAt(
-      config.llm.baseUrl,
-      surface === 'responses' ? 'responses' : 'chat/completions',
-    ),
+    model: identity.model,
+    providerType: identity.providerType,
+    apiSurface: identity.apiSurface,
+    apiEndpoint: identity.apiEndpoint,
+    toolContractVersion: identity.toolContractVersion,
+    ...(identity.gateway ? { gateway: identity.gateway } : {}),
     ...(config.llm.reasoningEffort
       ? { reasoningEffort: config.llm.reasoningEffort }
       : {}),
@@ -1233,9 +1264,9 @@ function standaloneResult(
 }
 
 function standaloneConfig(
-  config: Config,
+  config: LlmClientConfig,
   opts: StandaloneCompleteOptions,
-): Config {
+): LlmClientConfig {
   if (opts.model && opts.model !== config.llm.model) {
     throw new Error(
       `standalone model must use the configured role target ${config.llm.model}`,
@@ -1299,90 +1330,135 @@ export function createLlmRoleClients(
   };
 }
 
+function managedLlmClientConfig(
+  config: ResolvedGatewayConfig,
+): LlmClientConfig {
+  const target = config.llm.target;
+  const api = target.apiSurface === 'chat-completions' ? 'chat' : 'responses';
+  return Object.freeze({
+    logger: config.logger,
+    paths: config.paths,
+    llm: Object.freeze({
+      model: target.model,
+      contextSize: target.contextSize,
+      reasoningEffort: target.reasoningEffort,
+      reasoningSummary: target.reasoningSummary,
+      reasoningContext: target.reasoningContext,
+      externalThinking: target.externalThinking,
+      completionReserveTokens: config.llm.completionReserveTokens,
+      streamIdleTimeoutMs: target.streamIdleTimeoutMs,
+      callTimeoutMs: target.callTimeoutMs,
+      api,
+    }),
+  });
+}
+
 export function createLLM(
   parsed: RuntimeConfig,
   hub?: ConsoleHub,
   db?: DatabaseSync,
 ): LLM {
-  if (isResolvedGatewayConfig(parsed))
-    throw new Error('Gateway LLM adapter is unavailable');
-  const config = requireMaterializedConfig(parsed);
-  // Anthropic subscription path: no OpenAI client, native Messages API over the
-  // stored OAuth credential (in elpis.db, refresh handled by the store).
-  if (config.llm.providerType === 'anthropic-oauth') {
-    if (!db)
-      throw new Error(
-        'createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 3rd argument)',
-      );
-    const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
-    if (!store.isLoggedIn()) {
-      config.logger.warn(
-        `llm: no Anthropic OAuth credential in ${store.location} — run \`npm run oauth-login\` before the first turn (calls will fail until then)`,
-      );
-    }
-    return createAnthropicOAuthLLM(config, store, hub);
-  }
-
-  // ChatGPT Codex subscription path: the OpenAI SDK is retained only as the
-  // Responses stream parser; codex-client.ts owns OAuth/header injection and
-  // pins requests to the canonical ChatGPT backend.
-  if (config.llm.providerType === 'codex-oauth') {
-    if (!db)
-      throw new Error(
-        'createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 3rd argument)',
-      );
-    const store = new OAuthStore(
-      db,
-      OPENAI_CODEX_CREDENTIAL_KEY,
-      refreshOpenAICodexToken,
-    );
-    if (!store.isLoggedIn()) {
-      config.logger.warn(
-        `llm: no OpenAI Codex OAuth credential in ${store.location} — run \`npm run oauth-login -- codex\` before the first turn (calls will fail until then)`,
+  let config: LlmClientConfig;
+  let client: OpenAI;
+  let apiMode: 'responses' | 'chat';
+  let canFallBack: boolean;
+  let exposeClient = true;
+  if (isResolvedGatewayConfig(parsed)) {
+    exposeClient = false;
+    const transport = createGatewayManagedTransport(parsed);
+    config = managedLlmClientConfig(parsed);
+    if (transport.providerType === 'anthropic-oauth') {
+      return createAnthropicLLM(
+        config,
+        ({ body, signal }) =>
+          transport.dispatch(body, { kind: 'none' }, signal),
+        generationIdentityForConfig(parsed, 'anthropic-messages'),
+        hub,
       );
     }
-    return createCodexOAuthLLM(config, store, hub);
+    if (transport.providerType === 'codex-oauth') {
+      return createCodexLLM(
+        config,
+        (sessionId) => {
+          const bridge = createGatewayCodexClientTransport(
+            transport,
+            sessionId,
+          );
+          return new OpenAI({
+            apiKey: GATEWAY_CODEX_SDK_API_KEY,
+            baseURL: bridge.baseURL,
+            maxRetries: 0,
+            timeout: config.llm.callTimeoutMs,
+            fetch: bridge.fetch,
+          });
+        },
+        generationIdentityForConfig(parsed, 'codex-responses'),
+        hub,
+      );
+    }
+    if (transport.providerType !== 'openai-compatible')
+      throw new Error(`Unsupported Gateway provider ${transport.providerType}`);
+    const bridge = createGatewayOpenAIClientTransport(transport);
+    client = new OpenAI({
+      apiKey: GATEWAY_OPENAI_SDK_API_KEY,
+      baseURL: bridge.baseURL,
+      maxRetries: 0,
+      timeout: config.llm.callTimeoutMs,
+      fetch: bridge.fetch,
+    });
+    apiMode = transport.apiSurface === 'responses' ? 'responses' : 'chat';
+    canFallBack = false;
+  } else {
+    const direct = requireMaterializedConfig(parsed);
+    if (direct.llm.providerType === 'anthropic-oauth') {
+      if (!db)
+        throw new Error(
+          'createLLM: provider_type=anthropic-oauth requires the elpis.db handle (pass it as the 3rd argument)',
+        );
+      const store = new OAuthStore(db, 'anthropic', refreshAnthropicToken);
+      if (!store.isLoggedIn()) {
+        direct.logger.warn(
+          `llm: no Anthropic OAuth credential in ${store.location} — run \`npm run oauth-login\` before the first turn (calls will fail until then)`,
+        );
+      }
+      return createAnthropicOAuthLLM(direct, store, hub);
+    }
+    if (direct.llm.providerType === 'codex-oauth') {
+      if (!db)
+        throw new Error(
+          'createLLM: provider_type=codex-oauth requires the elpis.db handle (pass it as the 3rd argument)',
+        );
+      const store = new OAuthStore(
+        db,
+        OPENAI_CODEX_CREDENTIAL_KEY,
+        refreshOpenAICodexToken,
+      );
+      if (!store.isLoggedIn()) {
+        direct.logger.warn(
+          `llm: no OpenAI Codex OAuth credential in ${store.location} — run \`npm run oauth-login -- codex\` before the first turn (calls will fail until then)`,
+        );
+      }
+      return createCodexOAuthLLM(direct, store, hub);
+    }
+    config = direct;
+    const dispatcher = new Agent({
+      bodyTimeout: 1_200_000,
+      headersTimeout: 1_200_000,
+    });
+    client = new OpenAI({
+      apiKey: 'elpis-transport-owned',
+      baseURL: direct.llm.baseUrl,
+      maxRetries: 3,
+      timeout: 1_200_000,
+      fetch: createOpenAICompatibleFetch({
+        baseUrl: direct.llm.baseUrl,
+        apiKey: async () => direct.llm.apiKey,
+        dispatcher,
+      }),
+    });
+    apiMode = direct.llm.api === 'chat' ? 'chat' : 'responses';
+    canFallBack = direct.llm.api === 'auto';
   }
-
-  // Node's global fetch (undici) defaults `bodyTimeout` and `headersTimeout` to
-  // 300s each. A slow reasoning model can stay silent longer than that — either
-  // before the first body chunk or between chunks while it reasons — and undici
-  // then aborts the in-flight stream with `UND_ERR_BODY_TIMEOUT`, which surfaces
-  // as `TypeError: terminated`. The loop classifies that as retriable and burns
-  // a full (expensive) generation per attempt; after the 3 backoff retries it
-  // gives up and parks the agent on "say retry" until a human pokes it. We've
-  // observed legitimate generations run ~12 min, so 300s is far too tight.
-  //
-  // Raise both timeouts to 20 min. They are inter-event, not whole-request:
-  // each received chunk resets `bodyTimeout`, so an actively-streaming response
-  // never trips it, while a genuinely dead connection still errors eventually.
-  // The dispatcher is owned by the pinned provider fetch beneath the SDK
-  // (verified: a custom Agent's timeout fires in place of undici's default).
-  const dispatcher = new Agent({
-    bodyTimeout: 1_200_000,
-    headersTimeout: 1_200_000,
-  });
-  const client = new OpenAI({
-    apiKey: 'elpis-transport-owned',
-    baseURL: config.llm.baseUrl,
-    maxRetries: 3,
-    timeout: 1_200_000,
-    fetch: createOpenAICompatibleFetch({
-      baseUrl: config.llm.baseUrl,
-      apiKey: async () => config.llm.apiKey,
-      dispatcher,
-    }),
-  });
-
-  // API-surface selection (llm.api): 'responses' | 'chat' | 'auto'. Auto tries
-  // Responses first and permanently falls back only when the endpoint
-  // explicitly reports that the route is absent or unimplemented. Capacity,
-  // auth, model, and transient upstream failures stay on Responses and retain
-  // their original retry classification; Chat success is not evidence that a
-  // different API surface is unsupported.
-  let apiMode: 'responses' | 'chat' =
-    config.llm.api === 'chat' ? 'chat' : 'responses';
-  const canFallBack = config.llm.api === 'auto';
   let surfaceAnnounced = false;
   function flipToChat(reason: string): void {
     apiMode = 'chat';
@@ -1468,7 +1544,7 @@ export function createLLM(
   }
 
   return {
-    client,
+    ...(exposeClient ? { client } : {}),
     model: config.llm.model,
     runTool: RUN_TOOL,
     async completeStandalone(
@@ -1509,7 +1585,7 @@ export function createLLM(
             signal: opts.signal,
           }),
           isolated,
-          'chat-completions',
+          generationIdentityForConfig(parsed, 'chat-completions'),
         );
       }
       return routeCall(
@@ -1534,7 +1610,7 @@ export function createLLM(
               opts.maxOutputBytes,
             ),
             isolated,
-            'responses',
+            generationIdentityForConfig(parsed, 'responses'),
           ),
         async () =>
           standaloneResult(
@@ -1545,7 +1621,7 @@ export function createLLM(
               signal: opts.signal,
             }),
             isolated,
-            'chat-completions',
+            generationIdentityForConfig(parsed, 'chat-completions'),
           ),
       );
     },
@@ -1569,10 +1645,7 @@ export function createLLM(
             options.skillTool,
           );
           stampGeneration(result.message, {
-            providerType: 'openai-compatible',
-            model: config.llm.model,
-            apiSurface: 'responses',
-            apiEndpoint: endpointAt(config.llm.baseUrl, 'responses'),
+            ...generationIdentityForConfig(parsed, 'responses'),
             reasoningEffort: config.llm.reasoningEffort ?? undefined,
             requestId: result.requestId,
           });
@@ -1581,10 +1654,7 @@ export function createLLM(
         async () => {
           const result = await chatComplete(messages, options);
           stampGeneration(result.message, {
-            providerType: 'openai-compatible',
-            model: config.llm.model,
-            apiSurface: 'chat-completions',
-            apiEndpoint: endpointAt(config.llm.baseUrl, 'chat/completions'),
+            ...generationIdentityForConfig(parsed, 'chat-completions'),
             reasoningEffort: config.llm.reasoningEffort ?? undefined,
             requestId: result.requestId,
           });

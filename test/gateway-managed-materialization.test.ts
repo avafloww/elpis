@@ -612,10 +612,8 @@ test('managed tool runtime preserves exact catalog tiers and API surfaces', asyn
     store: h.store,
     fetch: h.fetch,
   });
-  assert.throws(
-    () => createLlmToolRuntime(resolved),
-    /Gateway LLM adapter is unavailable/,
-  );
+  const defaultRuntime = createLlmToolRuntime(resolved);
+  assert.equal(defaultRuntime.list().length, 3);
   const created: Array<{ ref: string; apiSurface: string | null }> = [];
   const runtime = createLlmToolRuntime(resolved, {
     create(projected) {
@@ -972,7 +970,7 @@ test('null context is retained, but context lookup refuses locally without provi
   assert.equal(probes, 0);
   assert.equal(h.fetches, 1);
 });
-test('createLLM refuses resolved Gateway configuration until the provider adapter child lands', async (t) => {
+test('createLLM constructs an authentic managed client without provider I/O', async (t) => {
   const materialize = materializer();
   const h = harness();
   const resolved = await materialize(h.config, {
@@ -984,7 +982,8 @@ test('createLLM refuses resolved Gateway configuration until the provider adapte
     probes++;
     throw new Error('unexpected provider probe');
   });
-  assert.throws(() => createLLM(resolved), /Gateway.*adapter.*unavailable/i);
+  const llm = createLLM(resolved);
+  assert.equal(llm.model, resolved.llm.target.model);
   assert.equal(probes, 0);
   assert.equal(h.fetches, 1);
 });

@@ -30,8 +30,10 @@ import {
   ANTHROPIC_CLAUDE_CODE_VERSION,
   AnthropicOAuthUnauthorizedError,
   createAnthropicOAuthTransport,
+  type AnthropicOAuthTransport,
 } from '@elpis/provider-transport';
 import type { Config } from '../config.js';
+import { TOOL_CONTRACT_VERSION } from './tool-contract.js';
 import type { ConsoleHub } from '../console/hub.js';
 import { addStandaloneOutputBytes } from './standalone-limits.js';
 import { segmentSystemPrompt, type SystemTier } from './prompt.js';
@@ -50,6 +52,7 @@ import {
   type CompleteOptions,
   type CompleteResult,
   type LLMUsage,
+  type LlmClientConfig,
   type RunTool,
   type SkillTool,
   type LLM,
@@ -57,7 +60,11 @@ import {
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
 } from './llm.js';
-import { endpointAt, stampGeneration } from './provenance.js';
+import {
+  endpointAt,
+  stampGeneration,
+  type ReplayIdentity,
+} from './provenance.js';
 
 // ─── Claude Code fingerprint constants (matched to oh-my-pi's reversed values) ─
 const CLAUDE_CODE_VERSION = ANTHROPIC_CLAUDE_CODE_VERSION;
@@ -333,19 +340,12 @@ function toLLMUsage(u: AnthropicUsage): LLMUsage {
 }
 
 async function postAnthropic(
-  config: Config,
-  store: OAuthStore,
+  transport: AnthropicOAuthTransport,
   body: Record<string, unknown>,
   stream: boolean,
   signal?: AbortSignal,
 ): Promise<Response> {
   const serialized = new TextEncoder().encode(patchCch(JSON.stringify(body)));
-  const transport = createAnthropicOAuthTransport({
-    baseUrl: config.llm.baseUrl,
-    credentials: store,
-    fetch,
-    dispatcher,
-  });
   let res: Response;
   try {
     res = await transport({ body: serialized, stream, signal });
@@ -369,8 +369,8 @@ async function postAnthropic(
 
 /** Streaming completion over Anthropic SSE. */
 async function anthropicComplete(
-  config: Config,
-  store: OAuthStore,
+  config: LlmClientConfig,
+  transport: AnthropicOAuthTransport,
   messages: ChatMessage[],
   hub: ConsoleHub | undefined,
   options: {
@@ -446,13 +446,7 @@ async function anthropicComplete(
       });
 
     try {
-      const res = await postAnthropic(
-        config,
-        store,
-        body,
-        true,
-        controller.signal,
-      );
+      const res = await postAnthropic(transport, body, true, controller.signal);
       requestId =
         res.headers.get('request-id') ??
         res.headers.get('x-request-id') ??
@@ -627,8 +621,8 @@ async function anthropicComplete(
 }
 
 async function anthropicSummarize(
-  config: Config,
-  store: OAuthStore,
+  config: LlmClientConfig,
+  transport: AnthropicOAuthTransport,
   text: string,
   systemPrompt = SOCIAL_SUMMARIZE_PROMPT,
 ): Promise<string> {
@@ -643,7 +637,7 @@ async function anthropicSummarize(
     messages: [{ role: 'user', content: [{ type: 'text', text }] }],
     stream: false,
   };
-  const res = await postAnthropic(config, store, body, false);
+  const res = await postAnthropic(transport, body, false);
   const data = (await res.json()) as {
     stop_reason?: string;
     content?: Array<{ type: string; text?: string }>;
@@ -719,21 +713,20 @@ export function anthropicContextWindow(model: string): number | undefined {
   return undefined;
 }
 
-/** Build an {@link LLM} backed by a Claude subscription over OAuth. Satisfies
- * the same interface as the OpenAI-backed client (minus the OpenAI `client`
- * handle, which nothing outside llm.ts consumes). */
-export function createAnthropicOAuthLLM(
-  config: Config,
-  store: OAuthStore,
+/** Build the resident Anthropic facade over a serialized-body transport. */
+export function createAnthropicLLM(
+  config: LlmClientConfig,
+  transport: AnthropicOAuthTransport,
+  identity: ReplayIdentity,
   hub: ConsoleHub | undefined,
+  accountIdentity?: { email?: string; orgName?: string } | null,
 ): LLM {
   config.logger.info(
-    `llm: using the Anthropic Messages surface (Claude subscription OAuth) | model=${config.llm.model}`,
+    `llm: using the Anthropic Messages surface | model=${config.llm.model}`,
   );
-  const identity = store.read();
-  if (identity?.email)
+  if (accountIdentity?.email)
     config.logger.info(
-      `llm: anthropic account ${identity.email}${identity.orgName ? ` (${identity.orgName})` : ''}`,
+      `llm: anthropic account ${accountIdentity.email}${accountIdentity.orgName ? ` (${accountIdentity.orgName})` : ''}`,
     );
   return {
     model: config.llm.model,
@@ -770,7 +763,7 @@ export function createAnthropicOAuthLLM(
             };
       const result = await anthropicComplete(
         isolated,
-        store,
+        transport,
         messages,
         undefined,
         {
@@ -787,10 +780,12 @@ export function createAnthropicOAuthLLM(
           : {}),
         usage: result.usage,
         ...(result.requestId ? { requestId: result.requestId } : {}),
-        model: isolated.llm.model,
-        providerType: 'anthropic-oauth',
-        apiSurface: 'anthropic-messages',
-        apiEndpoint: endpointAt(isolated.llm.baseUrl, 'v1/messages'),
+        model: identity.model,
+        providerType: identity.providerType,
+        apiSurface: identity.apiSurface,
+        apiEndpoint: identity.apiEndpoint,
+        toolContractVersion: identity.toolContractVersion,
+        ...(identity.gateway ? { gateway: identity.gateway } : {}),
         ...(isolated.llm.reasoningEffort
           ? { reasoningEffort: isolated.llm.reasoningEffort }
           : {}),
@@ -800,24 +795,48 @@ export function createAnthropicOAuthLLM(
       messages: ChatMessage[],
       options: CompleteOptions = {},
     ): Promise<CompleteResult> {
-      const result = await anthropicComplete(config, store, messages, hub, {
+      const result = await anthropicComplete(config, transport, messages, hub, {
         signal: options.signal,
         runTool: options.runTool,
         skillTool: options.skillTool,
         toolChoice: options.toolChoice,
       });
       stampGeneration(result.message, {
-        providerType: 'anthropic-oauth',
-        model: config.llm.model,
-        apiSurface: 'anthropic-messages',
-        apiEndpoint: endpointAt(config.llm.baseUrl, 'v1/messages'),
+        ...identity,
         reasoningEffort: config.llm.reasoningEffort ?? undefined,
         requestId: result.requestId,
       });
       return result;
     },
     async summarize(text: string, systemPrompt?: string): Promise<string> {
-      return anthropicSummarize(config, store, text, systemPrompt);
+      return anthropicSummarize(config, transport, text, systemPrompt);
     },
   };
+}
+
+/** Build an {@link LLM} backed by a Claude subscription over OAuth. */
+export function createAnthropicOAuthLLM(
+  config: Config,
+  store: OAuthStore,
+  hub: ConsoleHub | undefined,
+): LLM {
+  const transport = createAnthropicOAuthTransport({
+    baseUrl: config.llm.baseUrl,
+    credentials: store,
+    fetch,
+    dispatcher,
+  });
+  return createAnthropicLLM(
+    config,
+    transport,
+    {
+      toolContractVersion: TOOL_CONTRACT_VERSION,
+      providerType: 'anthropic-oauth',
+      model: config.llm.model,
+      apiSurface: 'anthropic-messages',
+      apiEndpoint: endpointAt(config.llm.baseUrl, 'v1/messages'),
+    },
+    hub,
+    store.read(),
+  );
 }

@@ -46,6 +46,7 @@ test('Anthropic completion sends the resident skill declaration in its wire body
   const config = makeConfig({
     llm: {
       ...makeConfig().llm,
+      providerType: 'anthropic-oauth',
       baseUrl: 'https://anthropic.invalid',
       model: 'test-anthropic',
     },
@@ -84,6 +85,7 @@ test('Anthropic 401 refreshes once without transport replay and stays retriable'
   const config = makeConfig({
     llm: {
       ...makeConfig().llm,
+      providerType: 'anthropic-oauth',
       baseUrl: 'https://anthropic.invalid',
       model: 'test-anthropic',
     },

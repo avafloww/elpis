@@ -1,0 +1,7 @@
+# Enable Gateway-managed resident provider adapters
+
+Residents using `llm.gateway_managed: true` can now execute catalog-selected OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Codex Responses requests through the exact authenticated Gateway client created during catalog materialization. Resident request shaping, streaming parsing, tools, usage, Codex session lanes, and replay rules remain local; workers and secretaries continue to call token-bound resident brokers rather than receiving provider authority.
+
+Managed provider construction no longer reads local provider credentials or OAuth stores. Each attempt is fixed to the catalog model reference, target generation, route, transport metadata, and API surface, with SDK retries and surface fallback disabled. Gateway provenance is stamped on returned generations, and cancellation propagates into the single Gateway dispatch. Direct provider configuration remains unchanged.
+
+Validation covers authentic materialization and lookalike rejection, all four provider surfaces, Codex main and standalone session identity, one-dispatch upstream failures, live abort propagation, direct provider regressions, worker and secretary broker boundaries, deterministic unit/build/benchmark gates, and privacy/secret review. After deployment, verify one managed provider request against an enrolled Gateway before treating the operational path as accepted.

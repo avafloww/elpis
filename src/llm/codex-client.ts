@@ -18,6 +18,7 @@ import {
   type CodexOAuthObserver,
 } from '@elpis/provider-transport';
 import type { Config } from '../config.js';
+import { TOOL_CONTRACT_VERSION } from './tool-contract.js';
 import type { ConsoleHub } from '../console/hub.js';
 import {
   addStandaloneOutputBytes,
@@ -45,11 +46,17 @@ import {
   type CompleteOptions,
   type CompleteResult,
   type LLM,
+  type LlmClientConfig,
   type ReasoningItemParam,
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
 } from './llm.js';
-import { endpointAt, stampGeneration } from './provenance.js';
+import {
+  endpointAt,
+  stampGeneration,
+  type ReplayIdentity,
+} from './provenance.js';
+
 import {
   isPolicyDenial,
   nonSecretHeaders,
@@ -419,7 +426,7 @@ function assertBalancedHistoricalToolMessages(messages: ChatMessage[]): void {
 /** Build a tool-declaration-free, monocontext-free request for the selected Codex wire
  * grammar. Closed historical calls may be replayed explicitly, but the new completion gets no tools. */
 export function buildCodexStandaloneRequest(
-  config: Config,
+  config: LlmClientConfig,
   messages: ChatMessage[],
   cacheKey: string,
   responsesLite: boolean,
@@ -464,7 +471,7 @@ export function buildCodexStandaloneRequest(
 
 export async function codexStandaloneComplete(
   client: OpenAI,
-  config: Config,
+  config: LlmClientConfig,
   messages: ChatMessage[],
   cacheKey: string,
   responsesLite: boolean,
@@ -622,7 +629,7 @@ export async function codexStandaloneComplete(
 
 async function codexSummarize(
   client: OpenAI,
-  config: Config,
+  config: LlmClientConfig,
   text: string,
   sessionId: string,
   responsesLite: boolean,
@@ -641,33 +648,30 @@ async function codexSummarize(
   return result.content;
 }
 
-/** Build the LLM facade for a ChatGPT Codex subscription. */
-export function createCodexOAuthLLM(
-  config: Config,
-  store: OAuthStore,
+export type CodexClientFactory = (
+  sessionId: () => string,
+  responsesLite: boolean,
+) => OpenAI;
+
+/** Build the resident Codex facade over session-scoped SDK clients. */
+export function createCodexLLM(
+  config: LlmClientConfig,
+  clientFactory: CodexClientFactory,
+  identity: ReplayIdentity,
   hub?: ConsoleHub,
-  fetchFn: FetchFn = fetch,
+  options: { allowModelOverride?: boolean; exposeClient?: boolean } = {},
 ): LLM {
   let sessionId = randomUUID();
   const responsesLite = usesCodexResponsesLite(config.llm.model);
-  const client = codexClient(
-    config,
-    store,
-    () => sessionId,
-    fetchFn,
-    responsesLite,
-  );
+  const client = clientFactory(() => sessionId, responsesLite);
   const standaloneLane = new AsyncLocalStorage<string>();
   const standaloneFallbackId = randomUUID();
-  const standaloneClient = codexClient(
-    config,
-    store,
+  const standaloneClient = clientFactory(
     () => standaloneLane.getStore() ?? standaloneFallbackId,
-    fetchFn,
     responsesLite,
   );
   return {
-    client,
+    ...(options.exposeClient ? { client } : {}),
     model: config.llm.model,
     runTool: RUN_TOOL,
     resetSession(): void {
@@ -686,13 +690,21 @@ export function createCodexOAuthLLM(
         throw new Error(
           'completeStandalone cacheKey must be a non-empty string',
         );
+      if (
+        !options.allowModelOverride &&
+        opts.model !== undefined &&
+        opts.model !== config.llm.model
+      )
+        throw new Error(
+          `standalone model must use the configured role target ${config.llm.model}`,
+        );
       const model = opts.model ?? config.llm.model;
       if (usesCodexResponsesLite(model) !== responsesLite) {
         throw new Error(
           `completeStandalone model ${model} uses a different Codex wire grammar than ${config.llm.model}`,
         );
       }
-      return standaloneLane.run(laneId, () =>
+      const result = await standaloneLane.run(laneId, () =>
         codexStandaloneComplete(
           standaloneClient,
           config,
@@ -702,16 +714,21 @@ export function createCodexOAuthLLM(
           opts,
         ),
       );
+      if (!identity.gateway) return result;
+      return {
+        ...result,
+        model: identity.model,
+        providerType: identity.providerType,
+        apiSurface: identity.apiSurface,
+        apiEndpoint: identity.apiEndpoint,
+        toolContractVersion: identity.toolContractVersion,
+        gateway: identity.gateway,
+      };
     },
     async complete(
       messages: ChatMessage[],
       options: CompleteOptions = {},
     ): Promise<CompleteResult> {
-      // The Codex backend requires streaming and rejects output caps. The
-      // shared Responses path adds neither; this provider contributes its
-      // stable cache key and the harness's tool-call invariants. An armed run wake
-      // is the only sanctioned yield, so automatic tool selection can strand Codex
-      // in the no-tool-call nudge loop.
       const sanitizeStart = Date.now();
       const sanitizedMessages = sanitizeCodexMessagesForReplay(messages);
       config.logger.info(
@@ -735,10 +752,7 @@ export function createCodexOAuthLLM(
         options.skillTool,
       );
       stampGeneration(result.message, {
-        providerType: 'codex-oauth',
-        model: config.llm.model,
-        apiSurface: 'codex-responses',
-        apiEndpoint: endpointAt(OPENAI_CODEX_BASE_URL, 'codex/responses'),
+        ...identity,
         reasoningEffort: config.llm.externalThinking
           ? 'none'
           : (config.llm.reasoningEffort ?? undefined),
@@ -757,6 +771,29 @@ export function createCodexOAuthLLM(
       );
     },
   };
+}
+
+/** Build the LLM facade for a ChatGPT Codex subscription. */
+export function createCodexOAuthLLM(
+  config: Config,
+  store: OAuthStore,
+  hub?: ConsoleHub,
+  fetchFn: FetchFn = fetch,
+): LLM {
+  return createCodexLLM(
+    config,
+    (sessionId, responsesLite) =>
+      codexClient(config, store, sessionId, fetchFn, responsesLite),
+    {
+      toolContractVersion: TOOL_CONTRACT_VERSION,
+      providerType: 'codex-oauth',
+      model: config.llm.model,
+      apiSurface: 'codex-responses',
+      apiEndpoint: endpointAt(OPENAI_CODEX_BASE_URL, 'codex/responses'),
+    },
+    hub,
+    { allowModelOverride: true, exposeClient: true },
+  );
 }
 
 function entryId(entry: Record<string, unknown>): string | undefined {

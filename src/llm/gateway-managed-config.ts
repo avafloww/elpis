@@ -2,6 +2,7 @@ import type {
   LlmProxyCatalog,
   LlmProxyCatalogModel,
   LlmProxyRoute,
+  LlmProxyTransportMetadata,
 } from '@elpis/gateway-protocol';
 import type {
   Config,
@@ -64,6 +65,17 @@ export interface GatewayConfigMaterializationOptions {
   readonly fetch: GatewayLlmFetch;
 }
 
+export interface GatewayManagedTransport {
+  readonly providerType: LlmProxyCatalogModel['providerType'];
+  readonly model: string;
+  readonly apiSurface: GatewayLlmApiSurface;
+  readonly dispatch: (
+    payload: Uint8Array,
+    transport: LlmProxyTransportMetadata,
+    signal?: AbortSignal,
+  ) => Promise<Response>;
+}
+
 type AuthoritySnapshot = Readonly<{
   instanceId: string;
   endpoint: string;
@@ -124,6 +136,8 @@ const roleKeys = [
 ] as const;
 const dashboardKeys = ['local', 'remote'] as const;
 const remoteKeys = ['url', 'enrollmentToken'] as const;
+const noTransportKeys = ['kind'] as const;
+const codexTransportKeys = ['kind', 'sessionId'] as const;
 
 const intrinsicArrayIncludes = Array.prototype.includes;
 const intrinsicArrayIsArray = Array.isArray;
@@ -140,7 +154,15 @@ const intrinsicReflectOwnKeys = Reflect.ownKeys;
 const intrinsicURL = URL;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
-const materializedRegistryAuthorities = new WeakMap<object, string>();
+type MaterializedRegistryBinding = Readonly<{
+  authority: string;
+  client: GatewayLlmClient;
+}>;
+const materializedRegistryBindings = new WeakMap<
+  object,
+  MaterializedRegistryBinding
+>();
+const materializedTargetModels = new WeakMap<object, LlmProxyCatalogModel>();
 const urlDescriptor = intrinsicObjectGetOwnPropertyDescriptor;
 const urlGetters = {
   protocol: urlDescriptor(URL.prototype, 'protocol')!.get!,
@@ -407,12 +429,26 @@ function candidateMaterialization(value: unknown): unknown {
   return 'invalid';
 }
 
-function registryAuthority(registry: object): string | undefined {
+function registryBinding(
+  registry: object,
+): MaterializedRegistryBinding | undefined {
   return intrinsicReflectApply(
     intrinsicWeakMapGet,
-    materializedRegistryAuthorities,
+    materializedRegistryBindings,
     [registry],
-  ) as string | undefined;
+  ) as MaterializedRegistryBinding | undefined;
+}
+
+function registryAuthority(registry: object): string | undefined {
+  return registryBinding(registry)?.authority;
+}
+
+function dispatchModel(
+  target: ResolvedGatewayLlmTarget,
+): LlmProxyCatalogModel | undefined {
+  return intrinsicReflectApply(intrinsicWeakMapGet, materializedTargetModels, [
+    target,
+  ]) as LlmProxyCatalogModel | undefined;
 }
 
 function validateResolvedGatewayConfig(
@@ -531,6 +567,70 @@ export function requireResolvedGatewayConfig(
   return config;
 }
 
+function scopedTransportMetadata(
+  providerType: LlmProxyCatalogModel['providerType'],
+  value: LlmProxyTransportMetadata,
+): LlmProxyTransportMetadata {
+  if (!value || typeof value !== 'object' || intrinsicArrayIsArray(value))
+    throw new Error('Gateway managed transport metadata is invalid');
+  const kind = ownData<unknown>(value, 'kind', 'managed transport kind');
+  if (providerType === 'codex-oauth') {
+    assertExactOwnDataKeys(
+      value,
+      codexTransportKeys,
+      'managed Codex transport',
+    );
+    const sessionId = ownData<unknown>(
+      value,
+      'sessionId',
+      'managed Codex session id',
+    );
+    if (kind !== 'codex' || typeof sessionId !== 'string' || !sessionId)
+      throw new Error('Gateway managed Codex transport metadata is invalid');
+    return intrinsicObjectFreeze({ kind: 'codex', sessionId });
+  }
+  assertExactOwnDataKeys(value, noTransportKeys, 'managed provider transport');
+  if (kind !== 'none')
+    throw new Error('Gateway managed provider transport metadata is invalid');
+  return intrinsicObjectFreeze({ kind: 'none' });
+}
+
+export function createGatewayManagedTransport(
+  value: ResolvedGatewayConfig,
+): GatewayManagedTransport {
+  const config = requireResolvedGatewayConfig(value);
+  const registry = config.llm.registry;
+  const binding = registryBinding(registry);
+  if (!binding || binding.authority !== config.llm.gatewayAuthority)
+    throw new Error('Gateway managed transport binding is unavailable');
+  const target = config.llm.target;
+  const model = dispatchModel(target);
+  const route = target.route;
+  const apiSurface = target.apiSurface;
+  if (!model || route === null || apiSurface === null)
+    throw new Error('Gateway model has no executable transport surface');
+  const providerType = target.providerType;
+  return intrinsicObjectFreeze({
+    providerType,
+    model: target.model,
+    apiSurface,
+    dispatch: async (
+      payload: Uint8Array,
+      transport: LlmProxyTransportMetadata,
+      signal?: AbortSignal,
+    ) =>
+      binding.client.dispatch(
+        {
+          model,
+          route,
+          transport: scopedTransportMetadata(providerType, transport),
+          payload,
+        },
+        signal,
+      ),
+  });
+}
+
 function activeAuthority(
   store: GatewayLlmResidentStore,
   expectedEndpoint: string,
@@ -621,6 +721,10 @@ function defineModel(
 ): ResolvedGatewayLlmTarget {
   const execution = executableRoute(model);
   const target = intrinsicObjectFreeze({ ...model, ...execution });
+  intrinsicReflectApply(intrinsicWeakMapSet, materializedTargetModels, [
+    target,
+    model,
+  ]);
   intrinsicObjectDefineProperty(models, model.modelRef, {
     value: target,
     enumerable: true,
@@ -651,6 +755,7 @@ function buildRegistry(
   catalog: LlmProxyCatalog,
   pending: PendingGatewayLlmConfig,
   authority: string,
+  client: GatewayLlmClient,
 ): GatewayLlmModelRegistry {
   const models = intrinsicObjectCreate(null) as Record<
     string,
@@ -698,9 +803,9 @@ function buildRegistry(
     targets,
     toolTiers: intrinsicObjectFreeze({ weak, medium, strong }),
   };
-  intrinsicReflectApply(intrinsicWeakMapSet, materializedRegistryAuthorities, [
+  intrinsicReflectApply(intrinsicWeakMapSet, materializedRegistryBindings, [
     registry,
-    authority,
+    intrinsicObjectFreeze({ authority, client }),
   ]);
   return intrinsicObjectFreeze(registry);
 }
@@ -759,7 +864,12 @@ export async function materializeGatewayConfig(
     throw new Error(
       'Gateway dashboard authority changed during materialization',
     );
-  const registry = buildRegistry(catalog, snapshot.pending, authority.endpoint);
+  const registry = buildRegistry(
+    catalog,
+    snapshot.pending,
+    authority.endpoint,
+    client,
+  );
   const llm = intrinsicObjectFreeze({
     registrySource: 'gateway' as const,
     gatewayManaged: true as const,
