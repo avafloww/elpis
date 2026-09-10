@@ -19,6 +19,8 @@ export interface InboundMessageAttachment {
   localPath: string | null;
   size: number;
   inlineText?: string | null;
+  /** Absent for legacy/direct attachments; forwarded means the first embedded snapshot. */
+  source?: 'direct' | 'forwarded';
 }
 
 /** Escape a string for use inside a double-quoted XML attribute. */
@@ -190,6 +192,7 @@ export function formatAttachmentParts(
     const inlined = a.inlineText !== null && a.inlineText !== undefined;
     parts.push(
       `attachment#${i + 1}: ${a.name} (${a.contentType ?? 'unknown/type'}, ${a.size} bytes)` +
+        `${a.source === 'forwarded' ? ' [forwarded]' : ''}` +
         `${a.localPath ? ` -> ${a.localPath}` : ''}${inlined ? ' (inlined below)' : ''}`,
     );
   });
@@ -198,7 +201,7 @@ export function formatAttachmentParts(
     const name = escapeXmlAttr(a.name);
     const body = a.inlineText;
     parts.push(
-      `<attachment-content name="${name}">${neutralizeEnvelopeTags(body)}</attachment-content>`,
+      `<attachment-content name="${name}"${a.source === 'forwarded' ? ' source="forwarded"' : ''}>${neutralizeEnvelopeTags(body)}</attachment-content>`,
     );
   }
   return parts;

@@ -86,6 +86,8 @@ The harness does not hardcode an inhabitant.
 
 Every committed message can carry its source channel. Inbound Discord content is wrapped in a structured envelope containing author, channel, time, reply, forwarding, mention, and attachment metadata. The console, scheduler, heartbeat, and internal notices use reserved provenance labels.
 
+Discord hydrates direct attachments first, followed by attachments from the first embedded forwarded snapshot, sharing one inline-text budget and local attachment index sequence. Snapshot attachments are marked as forwarded in inbound metadata and envelopes; snapshot authors and channels remain unknown. Forward references do not fetch original messages, and no further snapshots are traversed. Existing ingress gates apply before hydration.
+
 Room provenance controls rendering, moderation, reply targeting, and privacy. It does not create a second agent or a second conversation history.
 
 ## Persistence layers

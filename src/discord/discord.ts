@@ -50,6 +50,7 @@ import {
   SlashCommandBuilder,
   SlashCommandStringOption,
   MessageFlags,
+  MessageReferenceType,
   EmbedBuilder,
   AttachmentBuilder,
   ButtonBuilder,
@@ -57,6 +58,7 @@ import {
   ActionRowBuilder,
   ComponentType,
   type Message,
+  type MessageSnapshot,
   type Guild,
 } from 'discord.js';
 import { mkdir } from 'node:fs/promises';
@@ -202,10 +204,14 @@ export function guardInlineText(text: string): string | null {
 
 async function buildInboundAttachments(
   message: Message,
+  snapshot: MessageSnapshot | null,
   inlineBudgetBytes: number,
   log: { warn: (...a: unknown[]) => void; info: (...a: unknown[]) => void },
 ): Promise<import('../agent.js').InboundMessageAttachment[]> {
-  const attachments = [...message.attachments.values()];
+  const direct = [...message.attachments.values()];
+  // One flat list keeps direct ordering, local indices, and the inline budget
+  // shared with the first embedded snapshot. Never traverse or fetch origins.
+  const attachments = [...direct, ...(snapshot?.attachments.values() ?? [])];
   // The downloads themselves are independent network fetches, so run them
   // concurrently. The inline-budget decision below is NOT independent — it's
   // a per-MESSAGE cumulative budget that must be spent in the message's
@@ -263,6 +269,7 @@ async function buildInboundAttachments(
       localPath,
       size: a.size,
       inlineText,
+      ...(i >= direct.length ? { source: 'forwarded' as const } : {}),
     });
   }
   return out;
@@ -921,7 +928,7 @@ function nameMap<T extends { id: string }>(
 /** `MentionNames` off a live discord.js message. User names use the same
  * `displayName || username` expression as the envelope's `author` field, so a
  * mention of someone reads identically to that person speaking. */
-function mentionNamesFor(message: Message): MentionNames {
+function mentionNamesFor(message: Pick<Message, 'mentions'>): MentionNames {
   const m = message?.mentions;
   if (!m) return {};
   return {
@@ -1451,6 +1458,8 @@ export function createDiscord(
     // The reply-to fetch happens BEFORE classification — replyToMe feeds the
     // wake decision, so the classifier can't run until this resolves.
     const replyTo = await (async () => {
+      // A forward reference points to an origin, not a reply to hydrate.
+      if (message.reference?.type === MessageReferenceType.Forward) return null;
       const replyToId = message.reference?.messageId;
       if (!replyToId) return null;
       try {
@@ -1534,6 +1543,7 @@ export function createDiscord(
     // handle messages synchronously per-event; the loop is a single driver).
     // Ambient messages still enter history in full; they just don't wake a
     // turn — restraint lives in wakeClass, not in prompt instructions.
+    const snapshot = message.messageSnapshots?.first() ?? null;
     agent.enqueue({
       id: message.id,
       channelId: message.channelId,
@@ -1545,36 +1555,22 @@ export function createDiscord(
       content: resolveMentions(message.content, mentionNamesFor(message)),
       createdAt: message.createdAt.toISOString(),
       replyTo,
-      forwarded: (() => {
-        const snaps = (
-          message as unknown as {
-            messageSnapshots?: {
-              first?: () => {
-                author?: { displayName?: string; username?: string };
-                channel?: { name?: string };
-                content?: string;
-              } | null;
-            };
+      forwarded: snapshot
+        ? {
+            // discord.js MessageSnapshot does not retain author or channel.
+            author: 'unknown',
+            channelName: null,
+            content: resolveMentions(
+              snapshot.content,
+              mentionNamesFor(snapshot),
+            ),
           }
-        ).messageSnapshots;
-        const snap = snaps?.first?.() ?? null;
-        return snap
-          ? {
-              author:
-                snap.author?.displayName || snap.author?.username || 'unknown',
-              channelName: snap.channel?.name || null,
-              content: resolveMentions(
-                snap.content ?? '',
-                mentionNamesFor(snap as unknown as Message),
-              ),
-            }
-          : null;
-      })(),
+        : null,
       mentions: [
         ...message.mentions.users.map((u) => `@${u.displayName || u.username}`),
         ...message.mentions.roles.map((r) => `@${r.name}`),
       ],
-      // Regular attachments first, then any first-use custom emote/sticker
+      // Direct attachments, then first-snapshot attachments, then custom emote/sticker
       // images (src/discord/emotes.ts) — both ride the same envelope +
       // image-content-part pipeline. collect never throws (warn + skip
       // inside) and runs on the RAW content: mention rewriting doesn't touch
@@ -1582,6 +1578,7 @@ export function createDiscord(
       attachments: [
         ...(await buildInboundAttachments(
           message,
+          snapshot,
           config.discord.attachmentInlineMaxBytes,
           log,
         )),
