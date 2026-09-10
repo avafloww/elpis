@@ -12,30 +12,44 @@ class FakeSocket extends EventEmitter implements RealtimeVoiceSocket {
   sent: string[] = [];
   closed: Array<[number, string]> = [];
   terminated = 0;
+  detachCalls = 0;
+  throwOnSend = false;
+  throwOnDetach = false;
+  throwOnClose = false;
+  throwOnTerminate = false;
+  duringAttach?: (handlers: RealtimeVoiceSocketHandlers) => void;
+  afterSend?: (text: string) => void;
 
   attach(handlers: RealtimeVoiceSocketHandlers): () => void {
     this.on('open-event', handlers.open);
     this.on('message-event', handlers.message);
     this.on('error-event', handlers.error);
     this.on('close-event', handlers.close);
+    this.duringAttach?.(handlers);
     return () => {
+      this.detachCalls++;
       this.off('open-event', handlers.open);
       this.off('message-event', handlers.message);
       this.off('error-event', handlers.error);
       this.off('close-event', handlers.close);
+      if (this.throwOnDetach) throw new Error('synthetic detach failure');
     };
   }
 
   sendText(text: string): void {
+    if (this.throwOnSend) throw new Error('synthetic send failure');
     this.sent.push(text);
+    this.afterSend?.(text);
   }
 
   close(code: number, reason: string): void {
     this.closed.push([code, reason]);
+    if (this.throwOnClose) throw new Error('synthetic close failure');
   }
 
   terminate(): void {
     this.terminated += 1;
+    if (this.throwOnTerminate) throw new Error('synthetic terminate failure');
   }
 
   open(): void {
@@ -45,6 +59,27 @@ class FakeSocket extends EventEmitter implements RealtimeVoiceSocket {
   message(event: unknown): void {
     this.emit('message-event', Buffer.from(JSON.stringify(event)), false);
   }
+}
+
+function effectiveSession(instructions = 'You are Aster.') {
+  return {
+    type: 'realtime',
+    model: 'resolved-model-alias',
+    instructions,
+    audio: {
+      input: {
+        format: { type: 'audio/pcm', rate: 24_000 },
+        turn_detection: {
+          type: 'semantic_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+      },
+      output: {
+        format: { type: 'audio/pcm', rate: 24_000 },
+      },
+    },
+  };
 }
 
 function setup(
@@ -118,7 +153,11 @@ describe('RealtimeVoiceTransport', () => {
     });
     await Promise.resolve();
     assert.equal(settled, false);
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     assert.equal(settled, true);
   });
@@ -127,7 +166,11 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket } = setup({ maxAudioChunkBytes: 4 });
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     socket.sent.length = 0;
 
@@ -169,7 +212,11 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket, events } = setup({ maxServerEventBytes: 1024 });
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
@@ -241,7 +288,11 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket } = setup();
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     socket.sent.length = 0;
 
@@ -256,7 +307,11 @@ describe('RealtimeVoiceTransport', () => {
     });
     await Promise.resolve();
     assert.equal(settled, false);
-    socket.message({ type: 'session.updated', event_id: 'evt_2', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_2',
+      session: effectiveSession('Updated resident context.'),
+    });
     await updated;
 
     transport.cancelResponse('unknown-response');
@@ -290,17 +345,21 @@ describe('RealtimeVoiceTransport', () => {
   });
 
   it('closes on oversized or malformed server events without exposing payloads', async () => {
-    const { transport, socket, events } = setup({ maxServerEventBytes: 80 });
+    const { transport, socket, events } = setup({ maxServerEventBytes: 1_024 });
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
-    socket.emit('message-event', Buffer.alloc(81, 1), false);
+    socket.emit('message-event', Buffer.alloc(1_025, 1), false);
     assert.deepEqual(socket.closed, [[1009, 'realtime event too large']]);
     assert.deepEqual(events, [
-      { type: 'error', message: 'Realtime server event exceeded 80 bytes.' },
+      { type: 'error', message: 'Realtime server event exceeded 1024 bytes.' },
     ]);
   });
 
@@ -308,7 +367,11 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket, events } = setup();
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
@@ -346,11 +409,19 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket, events } = setup();
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
-    socket.message({ type: 'session.updated', event_id: 'evt_2', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_2',
+      session: effectiveSession(),
+    });
     assert.equal(transport.ready, false);
     assert.deepEqual(events, [
       {
@@ -360,12 +431,75 @@ describe('RealtimeVoiceTransport', () => {
     ]);
   });
 
+  it('requires acknowledged effective PCM and resident-owned VAD settings', async () => {
+    const { transport, socket, events } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    const unsafe = effectiveSession();
+    unsafe.audio.input.turn_detection.create_response = true;
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_unsafe',
+      session: unsafe,
+    });
+
+    await assert.rejects(connecting, /invalid session\.updated fields/);
+    assert.equal(transport.ready, false);
+    assert.deepEqual(socket.closed, [[1002, 'protocol error']]);
+    assert.equal((events.at(-1) as { type?: string }).type, 'error');
+  });
+
+  it('serializes later updates and validates each acknowledged instruction state', async () => {
+    const { transport, socket } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    socket.sent.length = 0;
+
+    const first = transport.updateInstructions('First update.');
+    const second = transport.updateInstructions('Second update.');
+    assert.equal(socket.sent.length, 1);
+    assert.equal(
+      JSON.parse(socket.sent[0]).session.instructions,
+      'First update.',
+    );
+
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_2',
+      session: effectiveSession('First update.'),
+    });
+    await first;
+    assert.equal(socket.sent.length, 2);
+    assert.equal(
+      JSON.parse(socket.sent[1]).session.instructions,
+      'Second update.',
+    );
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_3',
+      session: effectiveSession('Second update.'),
+    });
+    await second;
+    assert.equal(transport.ready, true);
+    transport.close();
+  });
+
   it('bounds update acknowledgements and notifies the owner on terminal timeout', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { transport, socket, events } = setup({ updateTimeoutMs: 10 });
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
@@ -385,7 +519,11 @@ describe('RealtimeVoiceTransport', () => {
     const { transport, socket, events } = setup();
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
     socket.sent.length = 0;
@@ -453,15 +591,98 @@ describe('RealtimeVoiceTransport', () => {
     );
   });
 
+  it('validates the complete error shape before benign cancellation handling', async () => {
+    const { transport, socket, events } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    events.length = 0;
+    socket.sent.length = 0;
+
+    socket.message({
+      type: 'response.created',
+      response: {
+        id: 'resp_1',
+        metadata: { elpis_voice_request: 'request-1' },
+      },
+    });
+    transport.cancelResponse('resp_1');
+    const cancel = JSON.parse(socket.sent[0]);
+    socket.message({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        code: 'response_cancel_not_active',
+        event_id: cancel.event_id,
+      },
+    });
+
+    assert.equal(transport.ready, false);
+    assert.deepEqual(socket.closed, [[1002, 'protocol error']]);
+    assert.equal((events.at(-1) as { type?: string }).type, 'error');
+  });
+
+  it('keeps response ownership immutable through terminal tombstones', async () => {
+    for (const terminal of [false, true]) {
+      const { transport, socket, events } = setup();
+      const connecting = transport.connect();
+      socket.open();
+      socket.message({
+        type: 'session.updated',
+        event_id: 'evt_1',
+        session: effectiveSession(),
+      });
+      await connecting;
+      events.length = 0;
+      socket.message({
+        type: 'response.created',
+        response: {
+          id: 'resp_reused',
+          metadata: { elpis_voice_request: 'original-request' },
+        },
+      });
+      if (terminal) {
+        socket.message({
+          type: 'response.done',
+          response: { id: 'resp_reused', status: 'completed' },
+        });
+      }
+      socket.message({
+        type: 'response.created',
+        response: {
+          id: 'resp_reused',
+          metadata: {
+            elpis_voice_request: terminal
+              ? 'original-request'
+              : 'conflicting-request',
+          },
+        },
+      });
+
+      assert.equal(transport.ready, false);
+      assert.deepEqual(socket.closed, [[1002, 'protocol error']]);
+      assert.equal((events.at(-1) as { type?: string }).type, 'error');
+    }
+  });
+
   it('fails closed instead of retaining unbounded active response IDs', async () => {
     const { transport, socket, events } = setup();
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 
-    for (let index = 0; index < 65; index++) {
+    for (let index = 0; index < 1_025; index++) {
       socket.message({
         type: 'response.created',
         response: {
@@ -479,12 +700,114 @@ describe('RealtimeVoiceTransport', () => {
     );
   });
 
+  it('terminalizes queued updates when a later serialized send throws', async () => {
+    const { transport, socket, events } = setup();
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    events.length = 0;
+    socket.sent.length = 0;
+
+    const first = transport.updateInstructions('First update.');
+    const second = transport.updateInstructions('Second update.');
+    const secondRejected = assert.rejects(second, /synthetic send failure/);
+    socket.throwOnSend = true;
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_2',
+      session: effectiveSession('First update.'),
+    });
+
+    await first;
+    await secondRejected;
+    assert.equal(transport.ready, false);
+    assert.equal(socket.detachCalls, 1);
+    assert.equal(socket.terminated, 1);
+    assert.equal((events.at(-1) as { type?: string }).type, 'error');
+    await assert.rejects(transport.connect(), /transport is closed/);
+  });
+
+  it('handles synchronous attach/update acknowledgements without stale timers', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { transport, socket } = setup({
+      connectTimeoutMs: 10,
+      updateTimeoutMs: 10,
+    });
+    socket.afterSend = (text) => {
+      const sent = JSON.parse(text);
+      if (sent.type !== 'session.update') return;
+      socket.message({
+        type: 'session.updated',
+        event_id: 'evt_sync',
+        session: effectiveSession(sent.session.instructions),
+      });
+    };
+    socket.duringAttach = (handlers) => handlers.open();
+
+    await transport.connect();
+    const first = transport.updateInstructions('First sync update.');
+    const second = transport.updateInstructions('Second sync update.');
+    await Promise.all([first, second]);
+    t.mock.timers.tick(100);
+    assert.equal(transport.ready, true);
+    transport.close();
+  });
+
+  it('detaches after a synchronous terminal callback during socket attach', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { transport, socket, events } = setup({ connectTimeoutMs: 10 });
+    socket.duringAttach = (handlers) => handlers.error();
+
+    await assert.rejects(transport.connect(), /socket error/);
+    assert.equal(transport.ready, false);
+    assert.equal(socket.detachCalls, 1);
+    assert.equal(socket.terminated, 1);
+    assert.deepEqual(events, [
+      { type: 'error', message: 'Realtime voice socket error.' },
+    ]);
+    t.mock.timers.tick(100);
+    assert.equal(socket.terminated, 1);
+  });
+
+  it('continues forced cleanup and owner notification through cleanup exceptions', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { transport, socket, events } = setup({ closeGraceMs: 10 });
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
+    await connecting;
+    events.length = 0;
+    socket.throwOnDetach = true;
+    socket.throwOnClose = true;
+    socket.throwOnTerminate = true;
+
+    assert.doesNotThrow(() => transport.close());
+    assert.deepEqual(events, [{ type: 'closed' }]);
+    assert.equal(socket.detachCalls, 1);
+    assert.equal(socket.closed.length, 1);
+    t.mock.timers.tick(10);
+    assert.equal(socket.terminated, 1);
+  });
+
   it('terminates if graceful close does not finish and emits no late events', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { transport, socket, events } = setup({ closeGraceMs: 10 });
     const connecting = transport.connect();
     socket.open();
-    socket.message({ type: 'session.updated', event_id: 'evt_1', session: {} });
+    socket.message({
+      type: 'session.updated',
+      event_id: 'evt_1',
+      session: effectiveSession(),
+    });
     await connecting;
     events.length = 0;
 

@@ -11,7 +11,7 @@ const DEFAULT_UPDATE_TIMEOUT_MS = 15_000;
 const DEFAULT_CLOSE_GRACE_MS = 1_000;
 const MAX_ID_LENGTH = 256;
 const MAX_REQUEST_TOKEN_LENGTH = 128;
-const MAX_ACTIVE_RESPONSES = 64;
+const MAX_RESPONSE_OWNERSHIPS = 1_024;
 const BENIGN_CANCEL_ERROR_CODES = new Set(['response_cancel_not_active']);
 
 export interface RealtimeVoiceSocketHandlers {
@@ -111,7 +111,15 @@ type PendingUpdate = {
   resolve(): void;
   reject(error: Error): void;
   initial: boolean;
-  timer: NodeJS.Timeout;
+  session: Record<string, unknown>;
+  expectedInstructions: string;
+  sent: boolean;
+  timer: NodeJS.Timeout | null;
+};
+
+type ResponseOwnership = {
+  requestToken: string;
+  terminal: boolean;
 };
 
 function positiveInteger(value: number, label: string): number {
@@ -208,7 +216,7 @@ export class RealtimeVoiceTransport {
   readonly #socketFactory: RealtimeVoiceSocketFactory;
   readonly #onEvent: (event: RealtimeVoiceEvent) => void;
   readonly #pendingUpdates: PendingUpdate[] = [];
-  readonly #knownResponses = new Set<string>();
+  readonly #responseOwnership = new Map<string, ResponseOwnership>();
   readonly #pendingCancelEvents = new Map<string, string>();
   #socket: RealtimeVoiceSocket | null = null;
   #detach: (() => void) | null = null;
@@ -262,9 +270,9 @@ export class RealtimeVoiceTransport {
   }
 
   connect(): Promise<void> {
-    if (this.#connectPromise) return this.#connectPromise;
     if (this.#state === 'closed')
       return Promise.reject(new Error('realtime voice transport is closed'));
+    if (this.#connectPromise) return this.#connectPromise;
 
     this.#state = 'connecting';
     this.#connectPromise = new Promise<void>((resolve, reject) => {
@@ -278,19 +286,26 @@ export class RealtimeVoiceTransport {
         authorization: `Bearer ${this.#apiKey}`,
         maxPayload: this.#maxServerEventBytes,
       });
-      this.#detach = this.#socket.attach({
+      const detach = this.#socket.attach({
         open: () => this.#onOpen(),
         message: (data, binary) => this.#onMessage(data, binary),
         error: () => this.#onSocketError(),
         close: () => this.#onClose(),
       });
-      this.#connectTimer = setTimeout(() => {
-        this.#terminalFailure(
-          new Error('realtime voice connection timed out'),
-          { terminate: true },
-        );
-      }, this.#connectTimeoutMs);
-      this.#connectTimer.unref?.();
+      if (this.#isClosed()) {
+        this.#callSafely(detach);
+      } else {
+        this.#detach = detach;
+        if (this.#state === 'connecting') {
+          this.#connectTimer = setTimeout(() => {
+            this.#terminalFailure(
+              new Error('realtime voice connection timed out'),
+              { terminate: true },
+            );
+          }, this.#connectTimeoutMs);
+          this.#connectTimer.unref?.();
+        }
+      }
     } catch (error) {
       this.#terminalFailure(
         error instanceof Error
@@ -334,10 +349,10 @@ export class RealtimeVoiceTransport {
 
   updateInstructions(instructions: string): Promise<void> {
     this.#requireReady();
-    return this.#sendSessionUpdate({
-      type: 'realtime',
+    return this.#queueSessionUpdate(
+      { type: 'realtime', instructions },
       instructions,
-    });
+    );
   }
 
   speakText(
@@ -378,7 +393,8 @@ export class RealtimeVoiceTransport {
 
   cancelResponse(responseId: string): void {
     this.#requireReady();
-    if (!this.#knownResponses.has(responseId)) return;
+    const ownership = this.#responseOwnership.get(responseId);
+    if (!ownership || ownership.terminal) return;
     const eventId = `elpis_voice_cancel_${++this.#clientEventSequence}`;
     this.#pendingCancelEvents.set(eventId, responseId);
     while (this.#pendingCancelEvents.size > 64) {
@@ -415,22 +431,20 @@ export class RealtimeVoiceTransport {
     if (this.#state === 'closed') return;
     this.#state = 'closed';
     this.#clearConnectTimer();
-    this.#clearUpdateTimers();
     this.#rejectPending(new Error('realtime voice transport closed'));
     this.#connectReject?.(new Error('realtime voice transport closed'));
     this.#connectReject = null;
     this.#connectResolve = null;
-    this.#detach?.();
-    this.#detach = null;
+    this.#detachSocket();
     const socket = this.#socket;
-    socket?.close(1000, 'voice session ended');
+    this.#closeSocket(socket, 1000, 'voice session ended');
     this.#scheduleTermination(socket);
     this.#emit({ type: 'closed' });
   }
 
   #onOpen(): void {
     if (this.#state !== 'connecting') return;
-    void this.#sendSessionUpdate(
+    void this.#queueSessionUpdate(
       {
         type: 'realtime',
         model: this.#model,
@@ -454,6 +468,7 @@ export class RealtimeVoiceTransport {
           },
         },
       },
+      this.#instructions,
       true,
     ).catch((error: unknown) => {
       this.#terminalFailure(
@@ -463,31 +478,48 @@ export class RealtimeVoiceTransport {
     });
   }
 
-  #sendSessionUpdate(
+  #queueSessionUpdate(
     session: Record<string, unknown>,
+    expectedInstructions: string,
     initial = false,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#terminalFailure(
-          new Error('realtime voice session update timed out'),
-          { terminate: true },
-        );
-      }, this.#updateTimeoutMs);
-      timer.unref?.();
-      const pending = { resolve, reject, initial, timer };
-      this.#pendingUpdates.push(pending);
-      try {
-        this.#send({ type: 'session.update', session }, true);
-      } catch (error) {
-        const index = this.#pendingUpdates.indexOf(pending);
-        if (index >= 0) this.#pendingUpdates.splice(index, 1);
-        clearTimeout(timer);
-        reject(
-          error instanceof Error ? error : new Error('session update failed'),
-        );
-      }
+      this.#pendingUpdates.push({
+        resolve,
+        reject,
+        initial,
+        session,
+        expectedInstructions,
+        sent: false,
+        timer: null,
+      });
+      this.#pumpSessionUpdate();
     });
+  }
+
+  #pumpSessionUpdate(): void {
+    const pending = this.#pendingUpdates[0];
+    if (!pending || pending.sent || this.#state === 'closed') return;
+    pending.sent = true;
+    try {
+      this.#send({ type: 'session.update', session: pending.session }, true);
+    } catch (error) {
+      this.#terminalFailure(
+        error instanceof Error ? error : new Error('session update failed'),
+        { terminate: true },
+      );
+      return;
+    }
+    // A test adapter or unusual socket can synchronously deliver the
+    // acknowledgement from sendText. Do not arm a stale timer after it did.
+    if (this.#isClosed() || this.#pendingUpdates[0] !== pending) return;
+    pending.timer = setTimeout(() => {
+      this.#terminalFailure(
+        new Error('realtime voice session update timed out'),
+        { terminate: true },
+      );
+    }, this.#updateTimeoutMs);
+    pending.timer.unref?.();
   }
 
   #send(event: Record<string, unknown>, connecting = false): void {
@@ -542,13 +574,14 @@ export class RealtimeVoiceTransport {
   #handleServerEvent(event: Record<string, unknown>): void {
     const type = typeof event.type === 'string' ? event.type : '';
     if (type === 'session.updated') {
-      requiredObject(event, 'session');
-      const pending = this.#pendingUpdates.shift();
-      if (pending) clearTimeout(pending.timer);
+      const session = requiredObject(event, 'session');
+      const pending = this.#pendingUpdates[0];
       if (!pending || pending.initial !== (this.#state === 'connecting')) {
-        pending?.reject(new Error('unexpected session update acknowledgement'));
         throw new Error('unexpected session update acknowledgement');
       }
+      this.#validateAcknowledgedSession(session, pending);
+      this.#pendingUpdates.shift();
+      if (pending.timer) clearTimeout(pending.timer);
       pending.resolve();
       if (this.#state === 'connecting') {
         this.#state = 'ready';
@@ -558,6 +591,7 @@ export class RealtimeVoiceTransport {
         this.#connectReject = null;
         this.#emit({ type: 'ready' });
       }
+      this.#pumpSessionUpdate();
       return;
     }
 
@@ -604,13 +638,18 @@ export class RealtimeVoiceTransport {
         'elpis_voice_request',
         MAX_REQUEST_TOKEN_LENGTH,
       );
-      if (
-        !this.#knownResponses.has(responseId) &&
-        this.#knownResponses.size >= MAX_ACTIVE_RESPONSES
-      ) {
-        throw new Error('too many active responses');
+      const existing = this.#responseOwnership.get(responseId);
+      if (existing) {
+        if (existing.requestToken !== requestToken || existing.terminal)
+          throw new Error('response ownership conflict');
+      } else {
+        if (this.#responseOwnership.size >= MAX_RESPONSE_OWNERSHIPS)
+          throw new Error('too many response ownership records');
+        this.#responseOwnership.set(responseId, {
+          requestToken,
+          terminal: false,
+        });
       }
-      this.#knownResponses.add(responseId);
       this.#emit({
         type: 'responseCreated',
         responseId,
@@ -656,11 +695,15 @@ export class RealtimeVoiceTransport {
     } else if (type === 'response.done') {
       const response = requiredObject(event, 'response');
       const responseId = requiredId(response, 'id');
-      this.#knownResponses.delete(responseId);
+      const status = boundedRequiredString(response, 'status', 64);
+      const ownership = this.#responseOwnership.get(responseId);
+      if (!ownership) throw new Error('unknown response completion');
+      if (ownership.terminal) return;
+      ownership.terminal = true;
       this.#emit({
         type: 'responseDone',
         responseId,
-        status: boundedRequiredString(response, 'status', 64),
+        status,
       });
     } else if (type === 'conversation.item.truncated') {
       this.#emit({
@@ -670,6 +713,8 @@ export class RealtimeVoiceTransport {
       });
     } else if (type === 'error') {
       const error = requiredObject(event, 'error');
+      boundedRequiredString(error, 'type', 128);
+      const message = boundedRequiredString(error, 'message', 4_096);
       const eventId = optionalId(error, 'event_id');
       const code = optionalId(error, 'code');
       if (
@@ -683,7 +728,7 @@ export class RealtimeVoiceTransport {
       }
       const normalized: RealtimeVoiceEvent = {
         type: 'error',
-        message: boundedRequiredString(error, 'message', 4_096),
+        message,
         ...(code ? { code } : {}),
         ...(eventId ? { eventId } : {}),
       };
@@ -732,17 +777,19 @@ export class RealtimeVoiceTransport {
     if (this.#state === 'closed') return;
     this.#state = 'closed';
     this.#clearConnectTimer();
-    this.#clearUpdateTimers();
-    this.#detach?.();
-    this.#detach = null;
+    this.#detachSocket();
     this.#connectReject?.(error);
     this.#connectReject = null;
     this.#connectResolve = null;
     this.#rejectPending(error);
     const socket = this.#socket;
-    if (options.terminate) socket?.terminate();
+    if (options.terminate) this.#terminateSocket(socket);
     else if (options.closeCode !== undefined) {
-      socket?.close(options.closeCode, options.closeReason ?? 'voice error');
+      this.#closeSocket(
+        socket,
+        options.closeCode,
+        options.closeReason ?? 'voice error',
+      );
       this.#scheduleTermination(socket);
     }
     this.#emit(
@@ -755,20 +802,69 @@ export class RealtimeVoiceTransport {
 
   #rejectPending(error: Error): void {
     for (const pending of this.#pendingUpdates.splice(0)) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
   }
 
-  #clearUpdateTimers(): void {
-    for (const pending of this.#pendingUpdates) clearTimeout(pending.timer);
+  #validateAcknowledgedSession(
+    session: Record<string, unknown>,
+    pending: PendingUpdate,
+  ): void {
+    if (
+      requiredString(session, 'instructions') !== pending.expectedInstructions
+    )
+      throw new Error('session instructions were not acknowledged');
+    const audio = requiredObject(session, 'audio');
+    const input = requiredObject(audio, 'input');
+    const output = requiredObject(audio, 'output');
+    const inputFormat = requiredObject(input, 'format');
+    const outputFormat = requiredObject(output, 'format');
+    const turnDetection = requiredObject(input, 'turn_detection');
+    if (
+      requiredString(inputFormat, 'type') !== 'audio/pcm' ||
+      requiredNumber(inputFormat, 'rate') !== REALTIME_PCM_SAMPLE_RATE ||
+      requiredString(outputFormat, 'type') !== 'audio/pcm' ||
+      requiredNumber(outputFormat, 'rate') !== REALTIME_PCM_SAMPLE_RATE ||
+      requiredString(turnDetection, 'type') !== 'semantic_vad' ||
+      turnDetection.create_response !== false ||
+      turnDetection.interrupt_response !== false
+    ) {
+      throw new Error('session safety settings were not acknowledged');
+    }
+  }
+
+  #detachSocket(): void {
+    const detach = this.#detach;
+    this.#detach = null;
+    if (detach) this.#callSafely(detach);
+  }
+
+  #closeSocket(
+    socket: RealtimeVoiceSocket | null,
+    code: number,
+    reason: string,
+  ): void {
+    if (socket) this.#callSafely(() => socket.close(code, reason));
+  }
+
+  #terminateSocket(socket: RealtimeVoiceSocket | null): void {
+    if (socket) this.#callSafely(() => socket.terminate());
+  }
+
+  #callSafely(operation: () => void): void {
+    try {
+      operation();
+    } catch {
+      /* terminal cleanup continues through independent best-effort steps */
+    }
   }
 
   #scheduleTermination(socket: RealtimeVoiceSocket | null): void {
     if (!socket) return;
     this.#closeTimer = setTimeout(() => {
       this.#closeTimer = null;
-      socket.terminate();
+      this.#terminateSocket(socket);
     }, this.#closeGraceMs);
     this.#closeTimer.unref?.();
   }
@@ -785,6 +881,12 @@ export class RealtimeVoiceTransport {
     if (!this.#connectTimer) return;
     clearTimeout(this.#connectTimer);
     this.#connectTimer = null;
+  }
+
+  // Socket adapters may invoke callbacks synchronously; re-read state after
+  // their calls instead of relying on TypeScript's pre-callback narrowing.
+  #isClosed(): boolean {
+    return this.#state === 'closed';
   }
 
   #requireReady(): void {

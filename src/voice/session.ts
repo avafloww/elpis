@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { VoiceDelivery } from '../types.js';
 import { MAX_VOICE_TRANSCRIPT_BYTES } from './receipt.js';
 
+const MAX_RESPONSE_IDENTITIES = 1_024;
+
 export type VoiceSessionEvent =
   | { type: 'ready' }
   | { type: 'inputCommitted'; itemId: string; previousItemId?: string }
@@ -54,12 +56,14 @@ type PendingSpeech = {
   bytes: number;
   requestSent: boolean;
   generationDone: boolean;
+  settling: boolean;
 };
 
 /** A transient media projection: finalized ingress and explicit sends remain
  * owned by the resident loop. No callback here invokes a model turn or tool. */
 export class VoiceSession {
   private closed = false;
+  private cleaned = false;
   private readonly inputs = new Map<
     string,
     {
@@ -69,6 +73,10 @@ export class VoiceSession {
     }
   >();
   private pending?: PendingSpeech;
+  /** Response ids are immutable for this session. Keeping terminal owners as
+   * tombstones prevents a late/replayed id from binding a later request. */
+  private readonly responseOwners = new Map<string, string>();
+  private readonly terminalResponses = new Set<string>();
 
   constructor(private readonly options: VoiceSessionOptions) {}
 
@@ -123,10 +131,32 @@ export class VoiceSession {
     } else if (event.type === 'speechStarted') {
       this.interrupt();
     } else if (event.type === 'responseCreated') {
+      const owner = this.responseOwners.get(event.responseId);
+      if (owner !== undefined) {
+        if (owner !== event.requestToken) {
+          this.failClosed(
+            'Voice provider reused a response identity; the call ended.',
+            false,
+          );
+          return;
+        }
+        // Identical active duplicates and terminal replays are inert.
+        return;
+      }
+      if (this.responseOwners.size >= MAX_RESPONSE_IDENTITIES) {
+        this.failClosed(
+          'Voice response identity limit reached; the call ended.',
+          true,
+        );
+        return;
+      }
+      this.responseOwners.set(event.responseId, event.requestToken);
       const pending = this.pending;
       if (pending && event.requestToken === pending.requestToken) {
-        if (!pending.responseId) pending.responseId = event.responseId;
-        if (pending.responseId === event.responseId) return;
+        if (!pending.responseId) {
+          pending.responseId = event.responseId;
+          return;
+        }
       }
       // An unmatched creation is never authorized to play. Once its concrete
       // id exists it can be cancelled without risking another response.
@@ -136,57 +166,72 @@ export class VoiceSession {
         /* connection may already be closing */
       }
     } else if (event.type === 'error' || event.type === 'closed') {
-      this.options.onNotice(
-        'Voice connection ended; readable conversation remains available.',
+      // Mark terminal before invoking an external notice sink. A reentrant
+      // callback must not start another send in a session being torn down.
+      this.closed = true;
+      try {
+        this.options.onNotice(
+          'Voice connection ended; readable conversation remains available.',
+        );
+      } catch {
+        /* shutdown is independent of notice delivery */
+      } finally {
+        this.finishClose(false, 'failed');
+      }
+    } else if (event.type === 'responseDone') {
+      const owner = this.responseOwners.get(event.responseId);
+      if (owner === undefined || this.terminalResponses.has(event.responseId))
+        return;
+      this.terminalResponses.add(event.responseId);
+      const pending = this.pending;
+      if (!pending || event.responseId !== pending.responseId) return;
+      // A terminal provider response must never receive response.cancel. It
+      // may still have locally buffered audio, which barge-in can interrupt.
+      if (pending.generationDone) return;
+      pending.generationDone = true;
+      if (event.status !== 'completed') {
+        this.settlePending(pending, 'failed');
+        return;
+      }
+      if (!this.options.canSend()) {
+        this.settlePending(pending, 'interrupted');
+        return;
+      }
+      if (pending.bytes === 0) {
+        this.settlePending(pending, 'failed');
+        return;
+      }
+      // Generation ending is not delivery: keep the send pending until the
+      // audio player drains, and let barge-in interrupt that drain too.
+      let finished: Promise<number>;
+      try {
+        finished = this.options.playback.finish();
+      } catch {
+        this.settlePending(pending, 'failed');
+        return;
+      }
+      void finished.then(
+        (playedMs) => this.settlePending(pending, 'played', playedMs),
+        () => this.settlePending(pending, 'failed'),
       );
-      this.close();
     } else {
       const pending = this.pending;
       if (!pending || event.responseId !== pending.responseId) return;
-      if (event.type === 'responseDone') {
-        // A terminal provider response must never receive response.cancel. It
-        // may still have locally buffered audio, which barge-in can interrupt.
-        if (pending.generationDone) return;
-        pending.generationDone = true;
-        if (event.status !== 'completed') {
-          this.settle('failed');
-          return;
-        }
-        if (!this.options.canSend()) {
-          this.interrupt();
-          return;
-        }
-        if (pending.bytes === 0) {
-          this.settle('failed');
-          return;
-        }
-        // Generation ending is not delivery: keep the send pending until the
-        // audio player drains, and let barge-in interrupt that drain too.
-        void this.options.playback.finish().then(
-          (playedMs) => {
-            if (this.pending === pending) this.settle('played', playedMs);
-          },
-          () => {
-            if (this.pending === pending) this.settle('failed');
-          },
-        );
-        return;
-      }
       if (pending.generationDone) return;
       if (!this.options.canSend()) {
-        this.interrupt();
+        this.settlePending(pending, 'interrupted');
         return;
       }
       if (event.type === 'audio') {
         pending.bytes += event.pcm.length;
         if (pending.bytes > 24_000 * 2 * 120) {
-          this.settle('failed');
+          this.settlePending(pending, 'failed');
           return;
         }
         try {
           this.options.playback.write(event.pcm);
         } catch {
-          this.settle('failed');
+          this.settlePending(pending, 'failed');
         }
       } else if (event.type === 'outputTranscript') {
         const transcript = event.final
@@ -195,7 +240,7 @@ export class VoiceSession {
         if (
           Buffer.byteLength(transcript, 'utf8') > MAX_VOICE_TRANSCRIPT_BYTES
         ) {
-          this.settle('failed');
+          this.settlePending(pending, 'failed');
           return;
         }
         pending.transcript = transcript;
@@ -211,12 +256,13 @@ export class VoiceSession {
       throw new Error('voice speech must contain 1..4000 characters');
     return new Promise<VoiceDelivery>((resolve) => {
       const requestToken = randomUUID();
+      let pending!: PendingSpeech;
       const timer = setTimeout(
-        () => this.settle('failed'),
+        () => this.settlePending(pending, 'failed'),
         this.options.responseTimeoutMs ?? 120_000,
       );
       timer.unref?.();
-      this.pending = {
+      pending = {
         resolve,
         requestToken,
         transcript: '',
@@ -224,27 +270,43 @@ export class VoiceSession {
         bytes: 0,
         requestSent: false,
         generationDone: false,
+        settling: false,
       };
+      this.pending = pending;
       try {
-        this.pending.requestSent = true;
+        pending.requestSent = true;
         this.options.transport.speakText(text, requestToken);
       } catch {
-        if (this.pending) this.pending.requestSent = false;
-        this.settle('failed');
+        pending.requestSent = false;
+        this.settlePending(pending, 'failed');
       }
     });
   }
 
   interrupt(): void {
-    this.settle('interrupted');
+    const pending = this.pending;
+    if (pending) this.settlePending(pending, 'interrupted');
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.settle('interrupted');
+    this.finishClose(true);
+  }
+
+  private finishClose(
+    cancelGeneration: boolean,
+    status: VoiceDelivery['status'] = 'interrupted',
+  ): void {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    const pending = this.pending;
+    if (pending)
+      this.settlePending(pending, status, undefined, cancelGeneration);
     for (const input of this.inputs.values()) clearTimeout(input.timer);
     this.inputs.clear();
+    this.responseOwners.clear();
+    this.terminalResponses.clear();
     try {
       this.options.playback.close();
     } catch {
@@ -274,13 +336,18 @@ export class VoiceSession {
     }
   }
 
-  private settle(status: VoiceDelivery['status'], playedMs?: number): void {
-    const pending = this.pending;
-    if (!pending) return;
-    this.pending = undefined;
+  private settlePending(
+    pending: PendingSpeech,
+    status: VoiceDelivery['status'],
+    playedMs?: number,
+    cancelGeneration = true,
+  ): void {
+    if (this.pending !== pending || pending.settling) return;
+    pending.settling = true;
     clearTimeout(pending.timer);
     if (status !== 'played') {
       if (
+        cancelGeneration &&
         pending.requestSent &&
         pending.responseId &&
         !pending.generationDone
@@ -297,10 +364,26 @@ export class VoiceSession {
         playedMs = 0;
       }
     }
+    // Keep the identity installed through every synchronous cleanup callback,
+    // so reentrant sends cannot overlap the response being settled.
+    if (this.pending !== pending) return;
+    this.pending = undefined;
     pending.resolve({
       status,
       transcript: pending.transcript,
       playedMs: Math.max(0, Math.round(playedMs ?? 0)),
     });
+  }
+
+  private failClosed(message: string, cancelGeneration: boolean): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.options.onNotice(message);
+    } catch {
+      /* shutdown is independent of notice delivery */
+    } finally {
+      this.finishClose(cancelGeneration, 'failed');
+    }
   }
 }

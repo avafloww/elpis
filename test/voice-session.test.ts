@@ -336,6 +336,261 @@ test('multi-byte output exceeding the durable receipt bound fails the active res
   session.close();
 });
 
+test('a conflicting duplicate response identity fails closed without cancelling its owner', async () => {
+  const requestTokens: string[] = [];
+  const cancelled: string[] = [];
+  let transportCloses = 0;
+  const notices: string[] = [];
+  const session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => requestTokens.push(token),
+      cancelResponse: (id) => cancelled.push(id),
+      deleteInput: () => {},
+      close: () => transportCloses++,
+    },
+    playback: {
+      write: () => {},
+      finish: async () => 0,
+      interrupt: () => 0,
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: (notice) => notices.push(notice),
+  });
+
+  const result = session.speak('Identity owner.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'shared-id',
+    requestToken: requestTokens[0],
+  });
+  // The identical active duplicate is idempotent.
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'shared-id',
+    requestToken: requestTokens[0],
+  });
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'shared-id',
+    requestToken: 'conflicting-token',
+  });
+
+  assert.equal((await result).status, 'failed');
+  assert.deepEqual(cancelled, []);
+  assert.equal(transportCloses, 1);
+  assert.match(notices[0], /reused a response identity/);
+  await assert.rejects(session.speak('closed'), /disabled/);
+});
+
+test('terminal response tombstones cannot settle or play into a later request', async () => {
+  const { session, requestTokens, played, cancelled } = setup();
+  const first = session.speak('First response.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'terminal-id',
+    requestToken: requestTokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'terminal-id',
+    itemId: 'first-item',
+    pcm: Buffer.alloc(240, 1),
+  });
+  session.handle({
+    type: 'responseDone',
+    responseId: 'terminal-id',
+    status: 'completed',
+  });
+  assert.equal((await first).status, 'played');
+
+  const second = session.speak('Second response.');
+  let secondSettled = false;
+  void second.then(() => {
+    secondSettled = true;
+  });
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'terminal-id',
+    requestToken: requestTokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'terminal-id',
+    itemId: 'resurrected-item',
+    pcm: Buffer.alloc(240, 2),
+  });
+  session.handle({
+    type: 'outputTranscript',
+    responseId: 'terminal-id',
+    itemId: 'resurrected-item',
+    transcript: 'resurrected',
+    final: true,
+  });
+  session.handle({
+    type: 'responseDone',
+    responseId: 'terminal-id',
+    status: 'completed',
+  });
+  await Promise.resolve();
+  assert.equal(secondSettled, false);
+
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'second-id',
+    requestToken: requestTokens[1],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'second-id',
+    itemId: 'second-item',
+    pcm: Buffer.alloc(480, 3),
+  });
+  session.handle({
+    type: 'outputTranscript',
+    responseId: 'second-id',
+    itemId: 'second-item',
+    transcript: 'second only',
+    final: true,
+  });
+  session.handle({
+    type: 'responseDone',
+    responseId: 'second-id',
+    status: 'completed',
+  });
+  assert.deepEqual(await second, {
+    status: 'played',
+    transcript: 'second only',
+    playedMs: 120,
+  });
+  assert.deepEqual(played, [Buffer.alloc(240, 1), Buffer.alloc(480, 3)]);
+  assert.deepEqual(cancelled, []);
+  session.close();
+});
+
+test('settlement blocks reentrant sends until cancellation and playback cleanup finish', async () => {
+  const tokens: string[] = [];
+  const reentrant: Array<Promise<unknown>> = [];
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => reentrant.push(session.speak('during cancel')),
+      deleteInput: () => {},
+      close: () => {},
+    },
+    playback: {
+      write: () => {},
+      finish: async () => 0,
+      interrupt: () => {
+        reentrant.push(session.speak('during interrupt'));
+        return 10;
+      },
+      close: () => {},
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: () => {},
+  });
+
+  const first = session.speak('First.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'first-id',
+    requestToken: tokens[0],
+  });
+  session.interrupt();
+  assert.equal((await first).status, 'interrupted');
+  assert.equal(reentrant.length, 2);
+  for (const attempt of reentrant)
+    await assert.rejects(attempt, /already active/);
+
+  const next = session.speak('Allowed after cleanup.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'next-id',
+    requestToken: tokens[1],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'next-id',
+    itemId: 'next-item',
+    pcm: Buffer.alloc(240),
+  });
+  session.handle({
+    type: 'responseDone',
+    responseId: 'next-id',
+    status: 'completed',
+  });
+  assert.equal((await next).status, 'played');
+  session.close();
+});
+
+test('throwing notices and synchronous playback finish cannot strand a send', async () => {
+  let transportCloses = 0;
+  let playbackCloses = 0;
+  const tokens: string[] = [];
+  let noticeReentry: Promise<unknown> | undefined;
+  let session!: VoiceSession;
+  session = new VoiceSession({
+    transport: {
+      speakText: (_text, token) => tokens.push(token),
+      cancelResponse: () => {},
+      deleteInput: () => {},
+      close: () => transportCloses++,
+    },
+    playback: {
+      write: () => {},
+      finish: () => {
+        throw new Error('finish failed synchronously');
+      },
+      interrupt: () => 0,
+      close: () => playbackCloses++,
+    },
+    canReceive: () => true,
+    canSend: () => true,
+    onUtterance: () => {},
+    onNotice: () => {
+      noticeReentry = session.speak('During terminal notice.');
+      throw new Error('notice sink failed');
+    },
+  });
+
+  const finishFailure = session.speak('Finish throws.');
+  session.handle({
+    type: 'responseCreated',
+    responseId: 'finish-id',
+    requestToken: tokens[0],
+  });
+  session.handle({
+    type: 'audio',
+    responseId: 'finish-id',
+    itemId: 'finish-item',
+    pcm: Buffer.alloc(240),
+  });
+  assert.doesNotThrow(() =>
+    session.handle({
+      type: 'responseDone',
+      responseId: 'finish-id',
+      status: 'completed',
+    }),
+  );
+  assert.equal((await finishFailure).status, 'failed');
+
+  const connectionFailure = session.speak('Connection closes.');
+  assert.doesNotThrow(() =>
+    session.handle({ type: 'error', message: 'socket failed' }),
+  );
+  assert.equal((await connectionFailure).status, 'failed');
+  assert.ok(noticeReentry);
+  await assert.rejects(noticeReentry, /disabled/);
+  assert.equal(transportCloses, 1);
+  assert.equal(playbackCloses, 1);
+});
+
 test('barge-in stops playback without replaying or retracting committed speech', async () => {
   const { session, requestTokens } = setup();
   const result = session.speak('A long reply.');
