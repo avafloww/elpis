@@ -96,7 +96,7 @@ Compaction does not erase source messages from transcripts. Restarts restore the
 
 Encrypted reasoning and signed thinking blocks are security-sensitive, model-specific working state. They are not confidential storage and should never contain secrets intentionally.
 
-At restoration, opaque state is retained only when its recorded provider/model/surface/endpoint identity matches the configured replay identity. Motor traces additionally require a local private source sidecar. Mismatches strip opaque fields while preserving readable content and actions.
+At restoration, opaque state is retained only when its recorded provider/model/surface/endpoint and tool-contract identity matches the configured replay identity. When Gateway attribution is present, its atomic tuple of canonical HTTPS authority, exact model ref, and immutable target generation must also match; missing or malformed tuples cannot authorize managed opaque replay. A target-generation or tool-contract change strips opaque state, while catalog revision, credential refresh, request ID, and harness commit are not replay identity. Actual upstream provider type, model, and API surface remain attribution fields even when the endpoint is the Gateway request endpoint. Motor traces additionally require a local private source sidecar. Mismatches strip opaque fields while preserving readable content and actions.
 
 ## Credentials and diagnostic captures
 

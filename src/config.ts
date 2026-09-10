@@ -15,6 +15,7 @@ import {
   legacyLlmModelRegistry,
   LLM_TOOL_TIERS,
   resolveLlmModelTarget,
+  parseLlmModelRef,
   type LegacyLlmDefinition,
   type LlmModelRegistry,
   type LlmProviderDefinition,
@@ -23,6 +24,13 @@ import {
   type LlmToolTier,
   type ResolvedLlmTarget,
 } from './llm/model-registry.js';
+import {
+  gatewayConfigKind,
+  isResolvedGatewayConfig,
+  requireResolvedGatewayConfig,
+  type ResolvedGatewayConfig,
+  type ResolvedGatewayLlmTarget,
+} from './llm/gateway-managed-config.js';
 
 /** A channel's wake tier — how eagerly the agent responds in it. Later tasks
  * (the wake classifier) consume this; only parses and carries it. */
@@ -57,6 +65,36 @@ export interface LlmConfig extends LegacyLlmDefinition {
   completionReserveTokens: number;
   registry: LlmModelRegistry;
   registrySource: 'canonical' | 'legacy';
+}
+
+/** Gateway selection is syntax-only until a separate materialization step. */
+export interface PendingGatewayLlmConfig {
+  registrySource: 'gateway';
+  gatewayManaged: true;
+  materialization: 'pending';
+  registry: null;
+  completionReserveTokens: number;
+  roles: LlmModelRegistry['roles'];
+}
+
+export type ParsedLlmConfig = LlmConfig | PendingGatewayLlmConfig;
+export type ParsedConfig = Omit<Config, 'llm'> & { llm: ParsedLlmConfig };
+export type RuntimeConfig = ParsedConfig | ResolvedGatewayConfig;
+export { isResolvedGatewayConfig, requireResolvedGatewayConfig };
+
+export function isMaterializedConfig(config: ParsedConfig): config is Config {
+  return gatewayConfigKind(config) === 'direct';
+}
+
+/** Runtime consumers must not interpret unresolved Gateway refs as providers. */
+export function requireMaterializedConfig(config: ParsedConfig): Config {
+  const kind = gatewayConfigKind(config);
+  if (kind === 'direct') return config as Config;
+  if (kind === 'pending')
+    throw new Error(
+      'Gateway-managed config requires materialization before runtime use',
+    );
+  throw new Error('Invalid Gateway configuration');
 }
 
 export interface DashboardLocalConfig {
@@ -920,10 +958,56 @@ function projectLlmRegistry(
   };
 }
 
+const configOwnDescriptor = Object.getOwnPropertyDescriptor;
+
+function resolvedGatewayTarget(
+  config: ResolvedGatewayConfig,
+  ref: string,
+  label: string,
+): ResolvedGatewayLlmTarget {
+  const descriptor = configOwnDescriptor(config.llm.registry.models, ref);
+  const target = descriptor?.value as ResolvedGatewayLlmTarget | undefined;
+  if (!target) throw new Error(`${label} references an unknown model ref`);
+  if (target.route === null || target.apiSurface === null)
+    throw new Error(
+      `${label} references a non-executable discovery-only model`,
+    );
+  if (target.toolContractVersion !== config.llm.toolContractVersion)
+    throw new Error(`${label} tool contract version mismatch`);
+  return target;
+}
+
 export function configForLlmTarget(
-  config: Config,
+  parsed: ResolvedGatewayConfig,
+  target: ResolvedGatewayLlmTarget,
+): ResolvedGatewayConfig;
+export function configForLlmTarget(
+  parsed: ParsedConfig,
   target: ResolvedLlmTarget,
-): Config {
+): Config;
+export function configForLlmTarget(
+  parsed: RuntimeConfig,
+  target: ResolvedLlmTarget | ResolvedGatewayLlmTarget,
+): Config | ResolvedGatewayConfig {
+  if (isResolvedGatewayConfig(parsed)) {
+    const modelRef = configOwnDescriptor(target, 'modelRef')?.value;
+    if (typeof modelRef !== 'string')
+      throw new Error('config: Gateway target must be catalog managed');
+    const managedTarget = resolvedGatewayTarget(
+      parsed,
+      modelRef,
+      'config: Gateway target',
+    );
+    if (target !== managedTarget)
+      throw new Error('config: Gateway target must be the catalog target');
+    return {
+      ...parsed,
+      llm: { ...parsed.llm, target: managedTarget },
+    };
+  }
+  const config = requireMaterializedConfig(parsed);
+  if (!('provider' in target))
+    throw new Error('config: direct target must include its provider');
   return {
     ...config,
     llm: {
@@ -944,14 +1028,42 @@ export function configForLlmTarget(
   };
 }
 
-export function configForLlmRef(config: Config, ref: string): Config {
+export function configForLlmRef(
+  parsed: ResolvedGatewayConfig,
+  ref: string,
+): ResolvedGatewayConfig;
+export function configForLlmRef(parsed: ParsedConfig, ref: string): Config;
+export function configForLlmRef(
+  parsed: RuntimeConfig,
+  ref: string,
+): Config | ResolvedGatewayConfig {
+  if (isResolvedGatewayConfig(parsed))
+    return configForLlmTarget(
+      parsed,
+      resolvedGatewayTarget(parsed, ref, 'config: worker model'),
+    );
+  const config = requireMaterializedConfig(parsed);
   return configForLlmTarget(
     config,
     resolveLlmModelTarget(config.llm.registry, ref, 'config: worker model'),
   );
 }
 
-export function configForLlmRole(config: Config, role: LlmRole): Config {
+export function configForLlmRole(
+  parsed: ResolvedGatewayConfig,
+  role: LlmRole,
+): ResolvedGatewayConfig;
+export function configForLlmRole(parsed: ParsedConfig, role: LlmRole): Config;
+export function configForLlmRole(
+  parsed: RuntimeConfig,
+  role: LlmRole,
+): Config | ResolvedGatewayConfig {
+  if (isResolvedGatewayConfig(parsed)) {
+    const ref = parsed.llm.roles[role];
+    if (!ref) throw new Error(`config: llm.roles.${role} is not configured`);
+    return configForLlmRef(parsed, ref);
+  }
+  const config = requireMaterializedConfig(parsed);
   const target = config.llm.registry.targets[role];
   if (!target) throw new Error(`config: llm.roles.${role} is not configured`);
   return configForLlmTarget(config, target);
@@ -961,13 +1073,70 @@ function parseLlmConfig(
   tree: YamlTree,
   file: string,
   logger: Logger,
-): LlmConfig {
+): ParsedLlmConfig {
   const completionReserveTokens = numOr(
     tree,
     'llm.completion_reserve_tokens',
     8192,
     file,
   );
+  const legacyKeys = [
+    'provider_type',
+    'api_key',
+    'base_url',
+    'model',
+    'context_size',
+    'reasoning_effort',
+    'external_thinking',
+    'stream_idle_timeout_ms',
+    'call_timeout_ms',
+    'api',
+    'reasoning_summary',
+    'reasoning_context',
+  ];
+  const llmRaw = at(tree, 'llm');
+  const has = (key: string) =>
+    llmRaw !== null && typeof llmRaw === 'object' && Object.hasOwn(llmRaw, key);
+  const gatewayManaged = at(tree, 'llm.gateway_managed');
+  if (has('gateway_managed') && typeof gatewayManaged !== 'boolean')
+    throw new Error(`${file}: llm.gateway_managed must be a boolean`);
+
+  if (gatewayManaged === true) {
+    const mixed = ['providers', ...legacyKeys].filter(has);
+    if (mixed.length)
+      throw new Error(
+        `${file}: llm.gateway_managed cannot be mixed with llm keys: ${mixed.join(', ')}`,
+      );
+    const raw = rawMap(at(tree, 'llm.roles'), 'llm.roles', file);
+    const allowed = ['main', 'classifier', 'motor', 'secretary', 'compaction'];
+    const unknown = Object.keys(raw).filter((key) => !allowed.includes(key));
+    if (unknown.length)
+      throw new Error(
+        `${file}: unknown llm.roles key(s): ${unknown.join(', ')}`,
+      );
+    const ref = (role: LlmRole): string | null => {
+      const required = role === 'main' || role === 'classifier';
+      const value = rawString(raw, role, `llm.roles.${role}`, file, required);
+      if (value !== null) parseLlmModelRef(value, `${file}: llm.roles.${role}`);
+      return value;
+    };
+    const roles = {
+      main: ref('main')!,
+      classifier: ref('classifier')!,
+      motor: ref('motor'),
+      secretary: ref('secretary'),
+      compaction: ref('compaction'),
+    };
+    return {
+      registrySource: 'gateway',
+      gatewayManaged: true,
+      materialization: 'pending',
+      registry: null,
+      completionReserveTokens,
+      roles,
+    };
+  }
+
   const canonical =
     at(tree, 'llm.providers') !== undefined ||
     at(tree, 'llm.roles') !== undefined;
@@ -1025,20 +1194,6 @@ function parseLlmConfig(
     );
   }
 
-  const legacyKeys = [
-    'provider_type',
-    'api_key',
-    'base_url',
-    'model',
-    'context_size',
-    'reasoning_effort',
-    'external_thinking',
-    'stream_idle_timeout_ms',
-    'call_timeout_ms',
-    'api',
-    'reasoning_summary',
-    'reasoning_context',
-  ];
   const mixed = legacyKeys.filter(
     (key) => at(tree, `llm.${key}`) !== undefined,
   );
@@ -1255,7 +1410,9 @@ function durOr(
  * a violated compaction invariant. Boot-time failure is deliberately fatal —
  * a half-configured agent is worse than one that refuses to start.
  */
-export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
+export function loadConfigFile(
+  filePath: string = defaultConfigPath(),
+): ParsedConfig {
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
@@ -1780,7 +1937,10 @@ export function loadConfigFile(filePath: string = defaultConfigPath()): Config {
         kubernetes.brokerUrl = broker.origin;
       }
       if (enabled) {
-        if (!llm.registry.roles.secretary)
+        if (
+          !(llm.registrySource === 'gateway' ? llm.roles : llm.registry.roles)
+            .secretary
+        )
           throw new Error(
             `${f}: secretary.enabled requires llm.roles.secretary`,
           );

@@ -21,7 +21,14 @@ import OpenAI from 'openai';
 import { createOpenAICompatibleFetch } from '@elpis/provider-transport';
 import { Agent } from 'undici';
 import type { DatabaseSync } from 'node:sqlite';
-import { configForLlmRole, type Config } from '../config.js';
+import {
+  configForLlmRole,
+  isResolvedGatewayConfig,
+  requireMaterializedConfig,
+  type ParsedConfig,
+  type RuntimeConfig,
+  type Config,
+} from '../config.js';
 import type { LlmRole } from './model-registry.js';
 import { addStandaloneOutputBytes } from './standalone-limits.js';
 import type { ConsoleHub } from '../console/hub.js';
@@ -1288,10 +1295,13 @@ export function createLlmRoleClients(
 }
 
 export function createLLM(
-  config: Config,
+  parsed: RuntimeConfig,
   hub?: ConsoleHub,
   db?: DatabaseSync,
 ): LLM {
+  if (isResolvedGatewayConfig(parsed))
+    throw new Error('Gateway LLM adapter is unavailable');
+  const config = requireMaterializedConfig(parsed);
   // Anthropic subscription path: no OpenAI client, native Messages API over the
   // stored OAuth credential (in elpis.db, refresh handled by the store).
   if (config.llm.providerType === 'anthropic-oauth') {
@@ -1630,9 +1640,16 @@ export async function fetchModelContextWindow(
  * implements it or `llm.context_size` must be set, and failing both throws.
  */
 export async function fetchContextWindow(
-  config: Config,
+  parsed: RuntimeConfig,
   db?: DatabaseSync,
 ): Promise<number> {
+  if (isResolvedGatewayConfig(parsed)) {
+    const contextSize = parsed.llm.target.contextSize;
+    if (contextSize === null)
+      throw new Error('Gateway model context size is unknown');
+    return contextSize;
+  }
+  const config = requireMaterializedConfig(parsed);
   if (config.llm.contextSize !== null) return config.llm.contextSize;
   // A subscription OAuth token cannot drive /models/info. Map the model id to a
   // known Claude window instead; `llm.context_size` (above) overrides it.

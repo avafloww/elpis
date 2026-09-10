@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import {
   configForLlmRole,
   loadConfigFile,
+  requireMaterializedConfig,
   ensureDataDirectory,
   type Config,
 } from './config.js';
@@ -222,7 +223,9 @@ export async function createElpisRuntime(
     Date.now(),
     process.uptime() * 1000,
   );
-  const config = (adapters.loadConfigFile ?? loadConfigFile)();
+  const config = requireMaterializedConfig(
+    (adapters.loadConfigFile ?? loadConfigFile)(),
+  );
   const buildIdentity = await (
     adapters.resolveBuildIdentity ?? resolveBuildIdentity
   )(config.paths.harnessRoot);

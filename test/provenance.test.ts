@@ -172,6 +172,7 @@ test('restart replay keeps opaque reasoning only for an exact provider/model/sur
   });
   store.append(MAIN_TRANSCRIPT_ID, message);
   const exact = {
+    toolContractVersion: TOOL_CONTRACT_VERSION,
     providerType: 'openai-compatible' as const,
     model: 'model-a',
     apiSurface: 'responses' as const,
@@ -226,6 +227,7 @@ test('configured replay identity is exact and Chat Completions has no opaque rep
     },
   });
   assert.deepEqual(replayIdentityForConfig(responses), {
+    toolContractVersion: TOOL_CONTRACT_VERSION,
     providerType: 'openai-compatible',
     model: 'm',
     apiSurface: 'responses',

@@ -6,9 +6,9 @@
 import * as readline from 'node:readline';
 import { createSandbox } from './sandbox/index.js';
 import { createMemory } from './store/memory.js';
-import { loadConfigFile } from './config.js';
+import { loadConfigFile, requireMaterializedConfig } from './config.js';
 
-const config = loadConfigFile();
+const config = requireMaterializedConfig(loadConfigFile());
 const memory = createMemory(config.paths.memoryPath);
 const sandbox = createSandbox({
   config,
