@@ -87,6 +87,7 @@ import {
   type ContextResourceDescriptor,
 } from '../context-resources.js';
 import { isPolicyDenial } from './policy-flight-recorder.js';
+import type { VoiceDelivery } from '../types.js';
 
 export type { GenerationProvenance } from './provenance.js';
 
@@ -180,7 +181,12 @@ export interface ChatMessage {
    * result is aged down at request-assembly time so the agent's outbound speech
    * survives even after the tool payload is stubbed. Persisted;
    * never sent to the API. */
-  sends?: { channel: string; text: string; replyTo?: string }[];
+  sends?: {
+    channel: string;
+    text: string;
+    replyTo?: string;
+    voice?: VoiceDelivery;
+  }[];
   /** Out-of-band generation attribution. Persisted for forensic/data use, but
    * deliberately ignored by every provider request translator. */
   provenance?: GenerationProvenance;

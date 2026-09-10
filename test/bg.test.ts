@@ -531,9 +531,10 @@ test('A5: notifyFutureSettled enqueues [bg <id> settled] into the one history', 
   agent.stop();
 });
 
-test('A5: notifyFutureSettled renders post-detach sends into the notice', () => {
-  const { agent } = buildTestAgent({
-    llm: scriptedLLM([EMPTY_WAKE]),
+test('A5: notifyFutureSettled retains post-detach voice receipts', async () => {
+  const llm = scriptedLLM([EMPTY_WAKE]);
+  const { agent, cleanup } = buildTestAgent({
+    llm,
     config: {
       sandbox: {
         syncTimeoutMs: 5000,
@@ -550,9 +551,29 @@ test('A5: notifyFutureSettled renders post-detach sends into the notice', () => 
     },
     tmpPrefix: 'harness-a5-sends-',
   });
+  llm.onCall = () => agent.stop();
   agent.notifyFutureSettled('f1', 'x', false, {
-    sends: [{ channel: 'c', text: 'late msg' }],
+    sends: [
+      {
+        channel: 'c',
+        text: 'late msg',
+        voice: {
+          status: 'interrupted',
+          transcript: 'late spoken text',
+          playedMs: 125,
+        },
+      },
+    ],
   });
   assert.ok(agent.inboundQueueLengthForTest > 0);
-  agent.stop();
+  await agent.loop();
+  const settled = agent.messagesForTest.find((message) =>
+    message.content.includes('[bg f1 settled]'),
+  );
+  assert.match(
+    settled?.content ?? '',
+    /Voice playback receipt: \{"status":"interrupted","transcript":"late spoken text","playedMs":125\}/,
+  );
+  assert.equal(settled?.sends?.[0].voice?.status, 'interrupted');
+  cleanup();
 });

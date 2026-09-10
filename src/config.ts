@@ -114,6 +114,17 @@ export interface DashboardRemoteConfig {
   enrollmentToken: string | null;
 }
 
+/** Optional Discord voice bridge settings. The transport endpoint is fixed by
+ * the runtime; configuration selects only the public Realtime model/voice. */
+export interface DiscordVoiceConfig {
+  enabled: boolean;
+  apiKey: string | null;
+  model: string;
+  voice: string;
+  transcriptionModel: string;
+  maxSessionMinutes: number;
+}
+
 export interface Config {
   llm: LlmConfig;
   operator: {
@@ -151,6 +162,9 @@ export interface Config {
     /** Every guild the bot is live in, each with safe receive/send defaults
      * and optional per-channel overrides. Unlisted guilds are never heard. */
     guilds: GuildConfig[];
+    /** Public OpenAI Realtime voice configuration. Omitted on hand-built legacy
+     * Config values; file parsing always populates the disabled/default shape. */
+    voice?: DiscordVoiceConfig;
   };
   compaction: {
     /** Absolute token count of REAL context at which a compaction cycle is
@@ -751,6 +765,68 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     });
   }
   return guilds;
+}
+
+function parseDiscordVoiceConfig(
+  tree: YamlTree,
+  f: string,
+  guilds: GuildConfig[],
+): DiscordVoiceConfig {
+  exactMapping(
+    tree,
+    'discord.voice',
+    [
+      'enabled',
+      'api_key',
+      'model',
+      'voice',
+      'transcription_model',
+      'max_session_minutes',
+    ],
+    f,
+    true,
+  );
+  const enabled = boolOr(tree, 'discord.voice.enabled', false, f);
+  const apiKey = optStr(tree, 'discord.voice.api_key', f);
+  const maxSessionMinutes = numOr(
+    tree,
+    'discord.voice.max_session_minutes',
+    60,
+    f,
+  );
+  if (
+    !Number.isInteger(maxSessionMinutes) ||
+    maxSessionMinutes <= 0 ||
+    maxSessionMinutes > 60
+  ) {
+    throw new Error(
+      `${f}: discord.voice.max_session_minutes must be an integer from 1 to 60`,
+    );
+  }
+  if (enabled) {
+    if (!apiKey)
+      throw new Error(
+        `${f}: missing required key \`discord.voice.api_key\` when Discord voice is enabled`,
+      );
+    if (!optStr(tree, 'operator.discord_id', f))
+      throw new Error(
+        `${f}: \`operator.discord_id\` is required when Discord voice is enabled`,
+      );
+    if (!guilds.some((guild) => guild.slug === 'home'))
+      throw new Error(
+        `${f}: Discord voice requires a configured guild with slug \`home\``,
+      );
+  }
+  return {
+    enabled,
+    apiKey,
+    model: optStr(tree, 'discord.voice.model', f) ?? 'gpt-realtime-2.1',
+    voice: optStr(tree, 'discord.voice.voice', f) ?? 'marin',
+    transcriptionModel:
+      optStr(tree, 'discord.voice.transcription_model', f) ??
+      'gpt-4o-mini-transcribe',
+    maxSessionMinutes,
+  };
 }
 
 function boolOr(
@@ -1518,6 +1594,7 @@ export function loadConfigFile(
             `${f}: key \`discord.ignored_user_ids[${i}]\` must be a raw Discord user id (digits)`,
           );
       }
+      const guilds = parseGuilds(tree, f);
       return {
         botToken,
         applicationId:
@@ -1534,7 +1611,8 @@ export function loadConfigFile(
         ambientAllowSend: boolOr(tree, 'discord.ambient_allow_send', true, f),
         emoteImages: boolOr(tree, 'discord.emote_images', true, f),
         emoteKeyframes: numOr(tree, 'discord.emote_keyframes', 4, f),
-        guilds: parseGuilds(tree, f),
+        guilds,
+        voice: parseDiscordVoiceConfig(tree, f, guilds),
       };
     })(),
     compaction: {

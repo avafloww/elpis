@@ -116,6 +116,21 @@ Outbound precedence is deny-only: guild `allow_send: false` denies every channel
 
 A listen-all digest agent can use `default_tier: social`, keep `default_allow_send: false`, and give only its digest channel `allow_send: true`. Other Discord settings control attachment inlining, animated emote keyframes, ambient draining, and the error-notice channel.
 
+`discord.voice` configures the optional Discord voice bridge. It defaults to
+disabled and performs no voice API access while disabled. When enabled,
+`api_key` is required, as are `operator.discord_id` and a configured guild with
+the slug `home`. The joined voice channel must be explicitly configured with
+receive and send permission.
+
+Voice uses OpenAI's public Realtime interface at a fixed official WebSocket
+endpoint; arbitrary endpoint overrides are not accepted. `model` is a
+configurable Realtime model identifier and defaults to `gpt-realtime-2.1`;
+`voice` defaults to `marin`, and `transcription_model` defaults to
+`gpt-4o-mini-transcribe`. `max_session_minutes` defaults to 60 and must be a
+positive integer no greater than 60. The voice API key participates in the same
+process-wide secret redaction as other configured credentials.
+See [Discord voice](voice.md) for `/join`, permissions, playback receipts, and live verification.
+
 ## `compaction`
 
 - `trigger_tokens`: requested fold threshold;

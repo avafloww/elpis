@@ -112,7 +112,7 @@ import type {
   RunWakeMetadata,
 } from './sandbox/metadata.js';
 import { TOOL_CONTRACT_VERSION } from './llm/provenance.js';
-import type { RunResult } from './types.js';
+import type { RunResult, VoiceDelivery } from './types.js';
 import type {
   ConsoleHub,
   RoomFact,
@@ -584,6 +584,8 @@ async function buildImageContentParts(
 }
 
 export interface InboundMessage {
+  /** Finalized ASR from an explicitly joined Discord voice session. */
+  source?: 'voice';
   id: string;
   channelId: string;
   channelName: string;
@@ -637,6 +639,9 @@ export interface InboundMessage {
    * hard-denies every outbound send for the outer turn unless a real person
    * wake is drained alongside it. */
   sendScope?: 'observe_only';
+  /** Synthetic delivery metadata to retain when an asynchronous send settles
+   * after its originating tool message has already been committed. */
+  sends?: NonNullable<ChatMessage['sends']>;
   /** Fired when the message is actually pushed into history (drain time), not
    * at enqueue — a message dropped before the drain (clear, crash, second
    * restart) never fires it. Used by the changelog notice to mark entries
@@ -701,7 +706,7 @@ export interface AgentDeps {
     channelId: string,
     text: string,
     opts?: import('./types.js').OutboundSendOptions,
-  ) => Promise<void>;
+  ) => Promise<void | import('./types.js').OutboundDelivery>;
   /** Called when the agent is about to make an LLM call (typing indicator). */
   onThinking?: (channelId: string) => void;
   /** Called when the loop reaches the wake-gate after a durable run wake, with an empty queue. */
@@ -973,6 +978,13 @@ export class Agent {
     this.deps.send = send;
   }
 
+  private closeMedia?: () => void;
+
+  /** Reset transient media whenever the authoritative conversation is reset. */
+  setMediaCleanup(close: () => void): void {
+    this.closeMedia = close;
+  }
+
   /** Replace the typing-indicator callbacks (wired by the Discord layer on
    * start — same ordering reason as setSend: the Discord client doesn't
    * exist yet when the Agent/sandbox are constructed). */
@@ -1012,7 +1024,7 @@ export class Agent {
     channelId: string,
     content: string,
     opts?: import('./types.js').OutboundSendOptions,
-  ): Promise<void> {
+  ): Promise<void | import('./types.js').OutboundDelivery> {
     if (this.turnSendScope === 'observe_only') {
       throw new Error(
         'sending is disabled for this ambient observation turn (discord.ambient_allow_send=false)',
@@ -1071,7 +1083,7 @@ export class Agent {
       );
     }
     this.sendsThisTurn++;
-    await this.deps.send(channelId, content, opts);
+    const delivery = await this.deps.send(channelId, content, opts);
     // After the await: a failed delivery must not count as having spoken
     // (the social nudge reads this as "when did anything last reach a room").
     // A channel outside any configured guild policy (e.g. a legacy NULL-guild
@@ -1080,6 +1092,7 @@ export class Agent {
     if (slug) this.lastSendAt.set(slug, Date.now());
     this.recentSends.push(content);
     if (this.recentSends.length > 20) this.recentSends.shift();
+    return delivery;
   }
 
   /** Effective delay for the next heartbeat, accounting for tick-beat backoff. */
@@ -1306,6 +1319,7 @@ export class Agent {
   /** Break the main loop and release any parked wake-gate promise. */
   stop(): void {
     this.stopped = true;
+    this.closeMedia?.();
     this.stopHeartbeat();
     if (this.ambientTimer) {
       clearInterval(this.ambientTimer);
@@ -1530,6 +1544,7 @@ export class Agent {
       onDelivered?: () => void;
       sendScope?: 'observe_only';
       channelId?: string;
+      sends?: NonNullable<ChatMessage['sends']>;
     },
   ): void {
     const author = extras.author ?? 'harness';
@@ -1547,6 +1562,7 @@ export class Agent {
       attachments: extras.attachments ?? [],
       kind,
       onDelivered: extras.onDelivered,
+      ...(extras.sends ? { sends: extras.sends } : {}),
     };
     if (extras.sendScope) message.sendScope = extras.sendScope;
     this.enqueue(message);
@@ -1669,7 +1685,12 @@ export class Agent {
     extra?: {
       logs?: string;
       label?: string;
-      sends?: { channel: string; text: string; replyTo?: string }[];
+      sends?: {
+        channel: string;
+        text: string;
+        replyTo?: string;
+        voice?: VoiceDelivery;
+      }[];
     },
   ): void {
     const label = extra?.label ?? (rejected ? 'rejected' : 'settled');
@@ -1683,7 +1704,19 @@ export class Agent {
       extra?.sends && extra.sends.length > 0
         ? '\n--- sent after detach ---\n' +
           extra.sends
-            .map((s) => `→ #${s.channel}: ${JSON.stringify(s.text)}`)
+            .map((s) => {
+              const voiceReceipt = s.voice
+                ? `\n  Voice playback receipt: ${JSON.stringify({
+                    status: s.voice.status,
+                    transcript: s.voice.transcript.slice(0, 16_000),
+                    playedMs: Math.max(
+                      0,
+                      Math.min(3_600_000, Math.round(s.voice.playedMs)),
+                    ),
+                  })}`
+                : '';
+              return `→ #${s.channel}: ${JSON.stringify(s.text)}${voiceReceipt}`;
+            })
             .join('\n')
         : '';
     this.enqueueInternal(
@@ -1692,6 +1725,7 @@ export class Agent {
       `[bg ${id} ${label}] ${previewStr}${logsSuffix}${sendsSuffix}`,
       {
         id: `bg-settle-${id}`,
+        ...(extra?.sends ? { sends: extra.sends } : {}),
       },
     );
     this.logger.info(
@@ -1885,6 +1919,7 @@ export class Agent {
    * state, and unseen-ambient bookkeeping. The epoch guard discards any
    * in-flight completion/summary. */
   clearContext(): boolean {
+    this.closeMedia?.();
     const had =
       this.messages.length > 0 || this.hasNewInput || this.inbound.length > 0;
     // Write an empty sentinel so a restart right after the clear honors the wipe
@@ -2057,6 +2092,7 @@ export class Agent {
                 ],
               }
             : { role: 'user', content: contentText };
+        if (m.sends) userMsg.sends = m.sends;
         if (isDiscord && m.authorId) {
           const person = { authorId: m.authorId, author: m.author };
           this.ensurePersonMemory(person);
@@ -2688,16 +2724,17 @@ export class Agent {
             try {
               const target = this.resolveChannelRef(header.target);
               if (!target) throw new Error('unknown header destination');
-              await this.send(target, header.text, {
+              const delivery = await this.send(target, header.text, {
                 ...(header.replyTo ? { replyTo: header.replyTo } : {}),
               });
               headerOutcome.receipt = {
                 role: 'user',
-                content: `[harness: header message delivered to ${this.qualifiedChannelLabel(target)}. This is a delivery receipt, not a request to send again.]`,
+                content: `[harness: header message delivered to ${this.qualifiedChannelLabel(target)}. This is a delivery receipt, not a request to send again.]${delivery ? `\nVoice playback receipt: ${JSON.stringify(delivery.voice)}` : ''}`,
                 sends: [
                   {
                     channel: target,
                     text: header.text,
+                    ...(delivery ? { voice: delivery.voice } : {}),
                     ...(header.replyTo ? { replyTo: header.replyTo } : {}),
                   },
                 ],

@@ -75,7 +75,12 @@ export type RunProcessErrorKind = 'unhandledRejection' | 'uncaughtException';
 export interface RunScope {
   logbuf: string[];
   childPids: Set<number>;
-  sends: { channel: string; text: string; replyTo?: string }[];
+  sends: {
+    channel: string;
+    text: string;
+    replyTo?: string;
+    voice?: import('../types.js').VoiceDelivery;
+  }[];
   operationReceipts: RunOperationReceipt[];
   operationReceiptsDropped: number;
   llmToolCalls: number;
@@ -1711,7 +1716,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
                 typeof (f as { path?: unknown }).path === 'string',
             )
           : undefined;
-        await deps.send(channelId, text, {
+        const delivery = await deps.send(channelId, text, {
           files,
           ...(sendOpts?.replyTo !== undefined
             ? { replyTo: sendOpts.replyTo }
@@ -1724,7 +1729,9 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           text: string;
           files?: string[];
           replyTo?: string;
+          voice?: import('../types.js').VoiceDelivery;
         } = { channel: channelId, text };
+        if (delivery) sendRecord.voice = delivery.voice;
         if (sendOpts?.replyTo !== undefined)
           sendRecord.replyTo = sendOpts.replyTo;
         if (files && files.length > 0)
@@ -1737,6 +1744,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         return {
           ok: true,
           channelId,
+          ...(delivery ? { voice: delivery.voice } : {}),
           note: `message delivered to ${label}. anything you return in this turn's content block will be ignored`,
         };
       },

@@ -57,6 +57,8 @@ import {
   ButtonStyle,
   ActionRowBuilder,
   ComponentType,
+  ChannelType,
+  PermissionFlagsBits,
   type Message,
   type MessageSnapshot,
   type Guild,
@@ -104,6 +106,10 @@ import {
   type MindStatus,
 } from '../store/mind.js';
 import type { MindId } from '../store/mind-id.js';
+import {
+  createDiscordVoice,
+  type DiscordVoiceController,
+} from '../voice/discord-voice.js';
 
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 MB Discord limit for non-nitro
 
@@ -321,6 +327,8 @@ export const SLASH_COMMAND_NAMES = [
   'deafen',
   'undeafen',
   'mind',
+  'join',
+  'leave',
 ] as const;
 export type SlashCommandName = (typeof SLASH_COMMAND_NAMES)[number];
 
@@ -344,6 +352,14 @@ export function clearThinkingCancelCustomId(userId: string): string {
 /** Build the guild slash-command definitions as REST JSON. Pure; tested. */
 export function buildCommandDefinitions() {
   return [
+    new SlashCommandBuilder()
+      .setName('join')
+      .setDescription('Join your home voice channel for a conversation')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('leave')
+      .setDescription('End the current voice call')
+      .toJSON(),
     new SlashCommandBuilder()
       .setName('clear')
       .setDescription(
@@ -1254,6 +1270,8 @@ export function createDiscord(
     /** Custom emote/sticker registry (first-use-per-context-window image
      * attachment). Absent = feature disabled; ingest attaches nothing. */
     emotes?: EmoteRegistry;
+    /** Injected voice bridge for deterministic gateway tests. */
+    voice?: DiscordVoiceController;
   },
 ): DiscordWiring {
   const log = config.logger;
@@ -1262,6 +1280,9 @@ export function createDiscord(
   // channels listed in a guild's `channels` map reach the classifier at all.
   const guildIndex = buildGuildIndex(config.discord.guilds);
   const ignoredUserIds = new Set(config.discord.ignoredUserIds);
+  const voice =
+    deps?.voice ?? createDiscordVoice(config, agent, { mutes: deps?.mutes });
+  agent.setMediaCleanup?.(() => voice.leave());
   const pluralKit = new PluralKitResolver();
   // Unlisted-channel and deafened-channel drops are logged once per
   // `<policyChannelId>:<reason>` per boot — the log line is how the operator
@@ -1282,6 +1303,7 @@ export function createDiscord(
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
     ],
     partials: [
       Partials.Message,
@@ -1293,6 +1315,17 @@ export function createDiscord(
 
   client.on(Events.ClientReady, () => {
     log.info(`discord client ready: ${client.user?.tag ?? 'unknown'}`);
+  });
+
+  client.on(Events.VoiceStateUpdate, (before, after) => {
+    const channelId = voice.channelId;
+    if (!channelId || before.channelId !== channelId) return;
+    if (
+      (after.id === config.operator.discordId ||
+        after.id === client.user?.id) &&
+      after.channelId !== channelId
+    )
+      voice.leave();
   });
 
   // ---- typing indicator (the ONE implementation — see docs/architecture.md's
@@ -1716,6 +1749,93 @@ export function createDiscord(
           flags: MessageFlags.Ephemeral,
         }),
       );
+      return;
+    }
+
+    if (name === 'join' || name === 'leave') {
+      if (!isMindHomeGuild(config, interaction.guildId)) {
+        await safeReply(log, name, () =>
+          interaction.reply({
+            content: 'Voice commands are available only in the home server.',
+            flags: MessageFlags.Ephemeral,
+          }),
+        );
+        return;
+      }
+      if (name === 'leave') {
+        voice.leave();
+        await safeReply(log, name, () =>
+          interaction.reply({
+            content: 'Voice call ended.',
+            flags: MessageFlags.Ephemeral,
+          }),
+        );
+        return;
+      }
+      if (!config.discord.voice?.enabled) {
+        await safeReply(log, name, () =>
+          interaction.reply({
+            content:
+              'Voice is disabled. Configure discord.voice with its dedicated OpenAI API key first.',
+            flags: MessageFlags.Ephemeral,
+          }),
+        );
+        return;
+      }
+      await safeReply(log, name, () =>
+        interaction.deferReply({ flags: MessageFlags.Ephemeral }),
+      );
+      try {
+        const member = await interaction.guild?.members.fetch(
+          interaction.user.id,
+        );
+        const channel = member?.voice.channel;
+        if (!channel || channel.type !== ChannelType.GuildVoice) {
+          await safeReply(log, name, () =>
+            interaction.editReply({
+              content:
+                'Join a regular voice channel in this server, then use /join.',
+            }),
+          );
+          return;
+        }
+        const permissions = channel.permissionsFor(client.user!);
+        if (
+          !permissions?.has([
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.Connect,
+            PermissionFlagsBits.Speak,
+            PermissionFlagsBits.SendMessages,
+          ])
+        ) {
+          await safeReply(log, name, () =>
+            interaction.editReply({
+              content:
+                'The bot needs View Channel, Connect, Speak, and Send Messages permissions in that voice channel.',
+            }),
+          );
+          return;
+        }
+        await voice.join(channel);
+        await safeReply(log, name, () =>
+          interaction.editReply({
+            content:
+              'Joined. Your microphone feeds the resident conversation; replies arrive as speech and readable text in the voice channel. Use /leave to end the call.',
+          }),
+        );
+      } catch {
+        // Provider and Discord exceptions may carry request internals. Keep the
+        // public failure bounded; transport diagnostics are separately sanitized.
+        log.warn(
+          'Voice join failed; verify voice configuration, channel policy, permissions, and provider access.',
+        );
+        await safeReply(log, name, () =>
+          interaction.editReply({
+            content:
+              'Could not join voice. Check the dedicated voice configuration, explicit home channel receive/send policy, bot permissions, and provider access. If already joined, use /leave first.',
+          }),
+        );
+      }
       return;
     }
 
@@ -2174,6 +2294,10 @@ export function createDiscord(
     opts?: import('../types.js').OutboundSendOptions,
   ) => {
     validateReplyTo(opts?.replyTo);
+    // Bind optional acoustic delivery to the call that exists before any
+    // channel fetch/text-send await. A later join or rejoin must not receive
+    // speech authored for an earlier call state.
+    const capturedSpeech = text.trim() ? voice.captureSpeech(channelId) : null;
     log.debug(`outbound send #${channelId} (${text.length} chars)`);
     const channel = await client.channels.fetch(channelId);
     if (!channel || !channel.isTextBased() || !('send' in channel)) {
@@ -2233,6 +2357,17 @@ export function createDiscord(
       };
       if (i === 0 && attachments.length > 0) payload.files = attachments;
       await channel.send(payload);
+    }
+    if (capturedSpeech) {
+      try {
+        return { voice: await capturedSpeech(text) };
+      } catch {
+        // The readable send has already succeeded. Acoustic failure must not
+        // erase that receipt or invite an automatic duplicate text send.
+        return {
+          voice: { status: 'failed' as const, transcript: '', playedMs: 0 },
+        };
+      }
     }
   };
 

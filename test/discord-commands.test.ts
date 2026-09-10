@@ -40,7 +40,9 @@ test('SLASH_COMMAND_NAMES: includes clear, new, compact, exec, restart, usage, c
   assert.ok(SLASH_COMMAND_NAMES.includes('cache'));
   assert.ok(SLASH_COMMAND_NAMES.includes('clear-thinking'));
   assert.ok(SLASH_COMMAND_NAMES.includes('mind'));
-  assert.equal(SLASH_COMMAND_NAMES.length, 13, 'exactly thirteen commands');
+  assert.ok(SLASH_COMMAND_NAMES.includes('join'));
+  assert.ok(SLASH_COMMAND_NAMES.includes('leave'));
+  assert.equal(SLASH_COMMAND_NAMES.length, 15, 'exactly fifteen commands');
 });
 
 test('SLASH_COMMAND_NAMES includes the killswitch four', () => {
@@ -50,9 +52,9 @@ test('SLASH_COMMAND_NAMES includes the killswitch four', () => {
 
 // ---------- buildCommandDefinitions ----------
 
-test('buildCommandDefinitions: returns exactly 13 commands', () => {
+test('buildCommandDefinitions: returns exactly 15 commands', () => {
   const defs = buildCommandDefinitions();
-  assert.equal(defs.length, 13);
+  assert.equal(defs.length, 15);
   const names = defs.map((d) => d.name);
   assert.deepEqual(names.sort(), [
     'cache',
@@ -61,6 +63,8 @@ test('buildCommandDefinitions: returns exactly 13 commands', () => {
     'compact',
     'deafen',
     'exec',
+    'join',
+    'leave',
     'mind',
     'mute',
     'new',

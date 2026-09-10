@@ -234,6 +234,33 @@ function selectedLlmModel(config: MaterializedConfig): string {
     : config.llm.model;
 }
 
+/** Stop transient media before the shutdown transcript flush and begin
+ * best-effort gateway teardown. Observe asynchronous destroy failures without
+ * making process shutdown depend on the network finishing its close. */
+export function shutdownRuntimeMedia(
+  agent: Pick<Agent, 'stop'>,
+  discordClient: { destroy(): void | Promise<void> },
+  reportError: (error: unknown) => void = () => undefined,
+): void {
+  const report = (error: unknown): void => {
+    try {
+      reportError(error);
+    } catch {
+      /* shutdown observers cannot be allowed to escape */
+    }
+  };
+  try {
+    agent.stop();
+  } catch (error) {
+    report(error);
+  }
+  try {
+    void Promise.resolve(discordClient.destroy()).catch(report);
+  } catch (error) {
+    report(error);
+  }
+}
+
 export async function createElpisRuntime(
   adapters: ElpisRuntimeAdapters = {},
 ): Promise<ElpisRuntime> {
@@ -993,6 +1020,9 @@ export async function createElpisRuntime(
     } catch {
       /* non-fatal */
     }
+    shutdownRuntimeMedia(agent, discord.client, () =>
+      log('shutdown Discord cleanup failed'),
+    );
     try {
       agent.flushTranscripts();
     } catch (e) {

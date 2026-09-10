@@ -159,6 +159,17 @@ discord:
   # comprehend the motion. Clamped to [1, 8]; 1 = a single static frame.
   # ffmpeg missing/failing degrades to the raw first frame automatically.
   emote_keyframes: 4
+  # Optional Discord voice bridge through OpenAI's public Realtime interface.
+  # The WebSocket endpoint is fixed by Elpis and cannot be overridden. Enabling
+  # voice requires this API key, operator.discord_id, and a guild slug of home.
+  # The operator must join an explicitly configured receive/send voice channel.
+  voice:
+    enabled: false
+    api_key: null # REQUIRED only when enabled
+    model: gpt-realtime-2.1 # Configurable public Realtime model id
+    voice: marin
+    transcription_model: gpt-4o-mini-transcribe
+    max_session_minutes: 60 # integer in [1, 60]
   # REQUIRED — every guild the bot lives in. Unlisted guilds are never heard.
   # default_tier controls unlisted channels and defaults to drop (the historical
   # exhaustive-allowlist behavior). Modes are drop, direct, social, and quiet.

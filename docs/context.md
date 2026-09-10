@@ -27,6 +27,8 @@ Discord messages are serialized into `<incoming-message>` envelopes. Envelopes c
 
 Console messages carry console provenance. Scheduler, heartbeat, watch, and harness notices are marked synthetic. Worker progress crosses the durable mailbox rather than resident conversation ingress.
 
+Finalized Discord voice transcriptions carry `source="voice"` in the inbound envelope and enter this same queue in audio commit order. Partials and raw audio remain transient. Explicit sends to the joined voice channel preserve readable text alongside a bounded playback receipt. Voice does not start an independent resident loop; see [Discord voice](voice.md).
+
 ## Explicit resident speech
 
 Ordinary text may use an exact leading header, followed by a newline and the message body:

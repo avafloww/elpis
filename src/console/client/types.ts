@@ -77,7 +77,16 @@ export interface StreamEntry {
     }>;
   }>;
   tool_call_id?: string;
-  sends?: Array<{ channel: string; text: string; replyTo?: string }>;
+  sends?: Array<{
+    channel: string;
+    text: string;
+    replyTo?: string;
+    voice?: {
+      status: 'played' | 'interrupted' | 'failed';
+      transcript: string;
+      playedMs: number;
+    };
+  }>;
   run?: JsonObject;
   replaced?: number;
   rewritten?: number;

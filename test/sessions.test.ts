@@ -296,6 +296,69 @@ test('sessions: reply targets survive send provenance recovery', () => {
   assert.deepEqual(loaded.messages[0].sends, sends);
 });
 
+test('sessions: bounded voice delivery receipts survive recovery', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  const voice = {
+    status: 'interrupted' as const,
+    transcript: 'A partial spoken reply.',
+    playedMs: 725,
+  };
+  store.append('main', {
+    role: 'tool',
+    tool_call_id: 'voice-run',
+    content: '[run ok]',
+    sends: [{ channel: '12345', text: 'full reply', voice }],
+  });
+  const loaded = loadMostRecentForChannel(root, 'main');
+  assert.ok(loaded);
+  assert.deepEqual(loaded.messages[0].sends, [
+    { channel: '12345', text: 'full reply', voice },
+  ]);
+});
+
+test('sessions: voice delivery metadata is sanitized and malformed values are stripped', () => {
+  const root = tmpRoot();
+  const file = path.join(root, 'hostile.jsonl');
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      role: 'tool',
+      content: '[run ok]',
+      sends: [
+        {
+          channel: '12345',
+          text: 'bounded receipt',
+          voice: {
+            status: 'failed',
+            transcript: '',
+            playedMs: 0,
+            private: 'discard me',
+          },
+        },
+        {
+          channel: '12345',
+          text: 'still delivered',
+          voice: {
+            status: 'played',
+            transcript: 'x'.repeat(32 * 1024 + 1),
+            playedMs: 10,
+            private: 'discard me',
+          },
+        },
+      ],
+    }) + '\n',
+  );
+  assert.deepEqual(parseTranscriptFile(file)[0].sends, [
+    {
+      channel: '12345',
+      text: 'bounded receipt',
+      voice: { status: 'failed', transcript: '', playedMs: 0 },
+    },
+    { channel: '12345', text: 'still delivered' },
+  ]);
+});
+
 test('sessions: run execution and wake metadata round-trip', () => {
   const root = tmpRoot();
   const store = createTranscriptStore(root);

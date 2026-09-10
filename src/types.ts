@@ -60,6 +60,17 @@ export interface OutboundSendOptions {
   replyTo?: string;
 }
 
+/** Text delivery and acoustic playback are distinct outcomes. */
+export interface VoiceDelivery {
+  status: 'played' | 'interrupted' | 'failed';
+  transcript: string;
+  playedMs: number;
+}
+
+export interface OutboundDelivery {
+  voice: VoiceDelivery;
+}
+
 export interface RunResult {
   ok: boolean;
   preview?: string;
@@ -77,7 +88,12 @@ export interface RunResult {
   note?: string;
   /** The channel().send() calls made during this run, retained for console
    * rendering, feedback localization, transcript recovery, and detached futures. */
-  sends?: { channel: string; text: string; replyTo?: string }[];
+  sends?: {
+    channel: string;
+    text: string;
+    replyTo?: string;
+    voice?: VoiceDelivery;
+  }[];
   /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
   operationReceipts?: RunOperationReceipt[];
   operationReceiptsDropped?: number;
@@ -138,7 +154,7 @@ export interface SandboxDeps {
     channelId: string,
     content: string,
     opts?: OutboundSendOptions,
-  ) => Promise<void>;
+  ) => Promise<void | OutboundDelivery>;
   logbuf: string[];
   /** Hot-reloaded inhabitant name (SOUL.md frontmatter), used for self-authored records. */
   agentName?: () => string;
@@ -283,7 +299,12 @@ export interface SandboxDeps {
     value: unknown,
     rejected: boolean,
     logs?: string,
-    sends?: { channel: string; text: string; replyTo?: string }[],
+    sends?: {
+      channel: string;
+      text: string;
+      replyTo?: string;
+      voice?: VoiceDelivery;
+    }[],
   ) => void;
   /** A callback owned by a completed run fired later from a leaked async resource. */
   onLateProcessError?: (event: SandboxLateProcessError) => void;

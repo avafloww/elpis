@@ -52,6 +52,7 @@ export function collectSecretValues(config: MaterializedConfig): string[] {
   const candidates = [
     isResolvedGatewayConfig(config) ? null : config.llm.apiKey,
     config.discord.botToken,
+    config.discord.voice?.apiKey,
     config.kagi.apiKey,
     config.bluesky?.appPassword,
     config.dashboard.remote?.enrollmentToken,

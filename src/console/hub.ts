@@ -181,7 +181,7 @@ export interface StreamEntry {
   tool_call_id?: string;
   /** Harness-only run attribution for the private operator console. */
   run?: RunMessageMetadata;
-  sends?: { channel: string; text: string; replyTo?: string }[];
+  sends?: ChatMessage['sends'];
   /** Author parsed from a user envelope, when present. */
   author?: string;
   /** Backend-owned provenance for user-role entries; the client does not infer it. */

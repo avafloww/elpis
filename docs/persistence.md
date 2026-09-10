@@ -88,6 +88,10 @@ Trusted extensions declare migrations alongside their prompt and activation. The
 
 `elpis-data/sessions/` contains JSONL streams. Each record is appended as history is committed. Transcripts preserve visible content, tool calls/results, channel provenance, send receipts, usage, and provider working-state envelopes where available.
 
+Voice send receipts retain bounded playback status, final transcript, and
+played duration. Restoration rebuilds only those public fields and discards
+malformed or oversized voice metadata while preserving the text-send record.
+
 Transcript directories are hardened to mode `0700` and files to `0600`, including pre-existing paths adopted at startup.
 
 Compaction does not erase source messages from transcripts. Restarts restore the newest main stream.

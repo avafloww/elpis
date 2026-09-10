@@ -10,10 +10,24 @@ import {
   isUnannouncedRestart,
   formatProcessErrorNotice,
   formatSandboxLateProcessErrorNotice,
+  shutdownRuntimeMedia,
 } from '../src/index.js';
 
 test('production runtime composition is exported without booting on import', () => {
   assert.equal(typeof createElpisRuntime, 'function');
+});
+
+test('shutdownRuntimeMedia stops the agent before destroying Discord', () => {
+  const calls: string[] = [];
+  shutdownRuntimeMedia(
+    { stop: () => calls.push('agent') },
+    {
+      destroy: () => {
+        calls.push('discord');
+      },
+    },
+  );
+  assert.deepEqual(calls, ['agent', 'discord']);
 });
 
 test('isUnannouncedRestart: non-empty resume + no marker → true', () => {

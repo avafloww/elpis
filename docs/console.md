@@ -23,6 +23,8 @@ The room rail filters one shared history rather than creating separate conversat
 
 The Thread composer enqueues console-provenance person speech into the same inbound FIFO as Discord. Worker and secretary operations use fixed request-correlated Hub controls. The UI renders unavailable, stale, ambiguous, failed, and empty states honestly instead of inventing fixture data.
 
+Sent-message cards include voice playback status, elapsed playback time, and an expandable generated speech transcript when available. An interrupted transcript may include words that had not yet played; readable text delivery remains separate from acoustic playback.
+
 ## Privacy and isolation
 
 Context may expose system prompts, durable memory, conversation history, and tool schemas. Thread, Mind, worker receipts, secretary history, and logs may expose private work. Treat the entire console as a private administrative surface.

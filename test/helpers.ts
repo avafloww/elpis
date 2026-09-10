@@ -323,7 +323,7 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
     scheduler,
     mind,
     send: async (channelId, text, options) => {
-      await agentRef.current!.send(channelId, text, options);
+      return agentRef.current!.send(channelId, text, options);
     },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),

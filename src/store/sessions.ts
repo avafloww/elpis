@@ -34,6 +34,7 @@ import {
 } from '../llm/provenance.js';
 import { parseRunMessageMetadata } from '../sandbox/metadata.js';
 import type { ContextResourceDescriptor } from '../context-resources.js';
+import { normalizeVoiceDelivery } from '../voice/receipt.js';
 
 /** Reserved transcript id for the single monocontext stream. */
 export const MAIN_TRANSCRIPT_ID = 'main';
@@ -480,17 +481,19 @@ function parseChatMessage(
     if (contextResources.length > 0) msg.contextResources = contextResources;
   }
   if (Array.isArray(obj.sends)) {
-    const sends: { channel: string; text: string; replyTo?: string }[] = [];
+    const sends: NonNullable<ChatMessage['sends']> = [];
     for (const s of obj.sends) {
       if (typeof s !== 'object' || s === null) continue;
       const so = s as Record<string, unknown>;
       if (typeof so.channel === 'string' && typeof so.text === 'string') {
+        const voice = normalizeVoiceDelivery(so.voice);
         sends.push({
           channel: so.channel,
           text: so.text,
           ...(typeof so.replyTo === 'string' && /^[0-9]{1,20}$/.test(so.replyTo)
             ? { replyTo: so.replyTo }
             : {}),
+          ...(voice ? { voice } : {}),
         });
       }
     }

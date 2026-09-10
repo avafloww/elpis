@@ -66,6 +66,7 @@ export interface EnvelopeMessage {
   /** The Discord guild's slug, when known. Omitted from the envelope entirely
    * when absent (internal/harness notices have no guild). */
   guildSlug?: string | null;
+  source?: 'voice';
   /** Whether the author is another bot. Omitted from the envelope entirely
    * when unknown (internal/harness notices carry no author-kind signal). */
   bot?: boolean;
@@ -96,6 +97,7 @@ export function formatInboundEnvelope(
     ...(m.guildSlug != null ? [`guild="${escapeXmlAttr(m.guildSlug)}"`] : []),
     `channel="${escapeXmlAttr(m.channelName)}"`,
     `author="${escapeXmlAttr(m.author)}"`,
+    ...(m.source === 'voice' ? ['source="voice"'] : []),
     ...(m.bot !== undefined ? [`bot="${m.bot ? 'true' : 'false'}"`] : []),
     `time="${escapeXmlAttr(m.createdAt)}"`,
     `local-time="${escapeXmlAttr(localTime)}"`,

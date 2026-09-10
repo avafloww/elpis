@@ -710,7 +710,15 @@ function WakeCard({ entry }: { entry: StreamEntry }) {
   );
 }
 
-function SendCard({ channel, value }: { channel: string; value: string }) {
+function SendCard({
+  channel,
+  value,
+  voice,
+}: {
+  channel: string;
+  value: string;
+  voice?: NonNullable<StreamEntry['sends']>[number]['voice'];
+}) {
   return (
     <div class='send-surface'>
       <header>
@@ -720,6 +728,21 @@ function SendCard({ channel, value }: { channel: string; value: string }) {
         <span>delivered ✓</span>
       </header>
       <Markdown value={value} className='send-body' />
+      {voice ? (
+        <details>
+          <summary>
+            Voice {voice.status} · {(voice.playedMs / 1000).toFixed(1)}s played
+          </summary>
+          <p>
+            Generated speech transcript; interruption may have stopped playback
+            before all these words were heard.
+          </p>
+          <Markdown
+            value={voice.transcript || '(no speech transcript received)'}
+            className='send-body'
+          />
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -1110,6 +1133,7 @@ function Entry({
                 key={`${send.channel}-${index}`}
                 channel={send.channel}
                 value={send.text}
+                voice={send.voice}
               />
             ))}
             {result ? <WakeCard entry={result} /> : null}
@@ -1121,6 +1145,7 @@ function Entry({
           key={`${send.channel}-${index}`}
           channel={send.channel}
           value={send.text}
+          voice={send.voice}
         />
       ))}
     </Item>

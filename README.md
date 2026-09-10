@@ -35,7 +35,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 ## Requirements
 
 - A fresh dedicated Debian 13 VM or machine is the supported deployment target.
-- Node.js 22 or newer; the installer provisions Node.js 24.
+- Node.js 22.12 or newer; the installer provisions Node.js 24.
 - A Discord application and bot token.
 - One configured LLM provider.
 - For the full desktop surface, a VM with a virtual display supported by Xorg.

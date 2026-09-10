@@ -1,0 +1,11 @@
+# Discord voice bridge
+
+The operator can use `/join` and `/leave` in the configured home guild. The optional public OpenAI Realtime bridge transcribes the operator's microphone into the existing ordered conversation and renders explicit resident sends as speech plus readable Discord text. It does not create a second resident agent or copy opaque reasoning. Interrupted and failed playback have separate, durable receipts visible in the Console. Unique request tokens prevent delayed or unsolicited provider responses from attaching to another reply.
+
+Voice defaults to disabled. Enabling it requires a dedicated `discord.voice.api_key`, an explicitly configured home voice channel with receive/send permission, and the bot's voice/text permissions. Credentials are included in redaction; raw audio remains bounded in memory. Mute stops playback, deafen ends capture, and leave/disconnect/context clear/shutdown discard transient media. Calls are capped at one hour. Node.js 22.12 or newer is now required; the installer already provisions Node.js 24. Install the new Discord voice, DAVE, and native Opus dependencies before building. The native installer uses a pinned, patched archive extractor; the production dependency audit is clean.
+
+The supported public API bridge is groundwork for the requested desktop voice experience. An isolated Codex CLI experiment with native `gpt-live-1-codex` V3 and `cove` stopped at `realtime conversation requires API key auth`; no native voice session started. Native desktop protocol equivalence and a human Discord call remain unverified.
+
+Validation includes focused command, authorization, ASR-ordering, stream-drain, interruption, stale-call, codec, and transcript-recovery regressions; the deterministic unit suite, build, and benchmark typecheck. Stock synthetic speech generation and native Opus/DAVE checks ran locally. The live provider smoke check stops at missing dedicated voice configuration.
+
+After a voice credential is configured, run `npx tsx scripts/voice-smoke.ts`, then verify a real `/join` call, barge-in, mute/deafen, `/leave`, and the Console receipts. See `docs/voice.md` for configuration, scope, limits, and outstanding acceptance work. Do not treat this entry as proof that the native desktop port or live audio acceptance is complete.
