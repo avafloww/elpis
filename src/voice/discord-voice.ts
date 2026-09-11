@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { VoiceChannel } from 'discord.js';
 import type { Agent, InboundMessage } from '../agent.js';
-import type { Config } from '../config.js';
+import type { MaterializedConfig as Config } from '../config.js';
 import type { MuteStore } from '../store/mutes.js';
 import type { VoiceDelivery } from '../types.js';
 import { buildGuildIndex, resolveChannelPolicy } from '../discord/wake.js';
