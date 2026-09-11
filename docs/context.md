@@ -46,7 +46,6 @@ Restored history, inbound text, and tool results are never replayed as sends. A 
 
 ## Request projection
 
-
 The durable transcript is the record; the provider request is a projection of it.
 
 Before each call, `prepareForApi()` may:
