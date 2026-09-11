@@ -88,6 +88,22 @@ test('official image hard-codes the restricted non-root runtime contract', () =>
   assert.doesNotMatch(docker, /\bsudo\b/);
 });
 
+test('resident image compiles native dependencies only in the build stage', () => {
+  const docker = read('Dockerfile');
+  const [buildStage, runtimeStage] = docker.split(
+    'FROM node:24-trixie-slim AS runtime',
+  );
+  assert.ok(buildStage && runtimeStage);
+  assert.match(
+    buildStage,
+    /apt-get install -y --no-install-recommends[\s\S]*\bpython3\b[\s\S]*\bbuild-essential\b/,
+  );
+  assert.ok(
+    buildStage.indexOf('apt-get install') < buildStage.indexOf('npm ci'),
+  );
+  assert.doesNotMatch(runtimeStage, /\b(?:build-essential|g\+\+|make)\b/);
+});
+
 test('container entrypoint fails closed around sentinel config and writable data', () => {
   const entry = read('deploy/container-entrypoint.sh');
   assert.match(entry, /! -r \/etc\/elpis\/restricted/);

@@ -2,7 +2,7 @@
 
 The official container is published as `ghcr.io/avafloww/elpis:latest`. It is a deliberately narrower deployment profile than the dedicated-host installer.
 
-The image runs as uid/gid `10001`, keeps the harness and dependencies root-owned under `/opt/elpis`, and carries a root-owned `/etc/elpis/restricted` sentinel. That sentinel wins over environment configuration: the sandbox omits `elpis.sudo`, `elpis.restart`, and `elpis.deploy`, and the prompt does not claim host ownership or self-deployment authority. The inhabitant still gets Bash and a practical non-root workbench (`git`, SSH, `curl`, `wget`, `jq`, Python with pip/venv, ripgrep, `file`, `less`, and `procps`). The image does not include a desktop or browser runtime. It is also the fixed restricted body used by native workers.
+The image runs as uid/gid `10001`, keeps the harness and dependencies root-owned under `/opt/elpis`, and carries a root-owned `/etc/elpis/restricted` sentinel. Native Node dependencies are compiled in the disposable build stage with Python and the standard compiler toolchain; those compiler packages are not copied into the runtime image. That sentinel wins over environment configuration: the sandbox omits `elpis.sudo`, `elpis.restart`, and `elpis.deploy`, and the prompt does not claim host ownership or self-deployment authority. The inhabitant still gets Bash and a practical non-root workbench (`git`, SSH, `curl`, `wget`, `jq`, Python with pip/venv, ripgrep, `file`, `less`, and `procps`). The image does not include a desktop or browser runtime. It is also the fixed restricted body used by native workers.
 
 ## Prepare data
 

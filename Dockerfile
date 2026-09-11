@@ -1,5 +1,8 @@
 FROM node:24-trixie-slim AS build
 WORKDIR /opt/elpis
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 build-essential \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY packages/gateway-protocol/package.json ./packages/gateway-protocol/package.json
 COPY packages/provider-transport/package.json ./packages/provider-transport/package.json
