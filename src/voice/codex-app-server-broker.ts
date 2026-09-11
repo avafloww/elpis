@@ -8,6 +8,11 @@ import {
 
 type ClientInfo = { name: string; title: string; version: string };
 type TimerHandle = unknown;
+type StartingClose = {
+  promise: Promise<void>;
+  resolve(): void;
+  reject(error: Error): void;
+};
 type Signal = 'SIGTERM' | 'SIGKILL';
 
 type Emitter = {
@@ -43,9 +48,13 @@ export interface CodexAppServerVoiceBrokerOptions {
   killTimeoutMs: number;
   maxJsonLineBytes: number;
   maxIpcMessageBytes: number;
+  maxAudioFrameBytes: number;
   callIdFactory(): string;
   setTimeout(callback: () => void, delayMs: number): TimerHandle;
   clearTimeout(handle: TimerHandle): void;
+  onAudio?(audio: Uint8Array): void;
+  onEvent?(text: string): void;
+  onError?(error: Error): void;
 }
 
 type Phase =
@@ -67,14 +76,20 @@ type Session = {
   app: AppChild;
   client: AppServerClient;
   media?: MediaChild;
+  mediaFactoryPending: boolean;
   callId?: string;
   threadId?: string;
   startupTimer?: TimerHandle;
   mediaTimer?: TimerHandle;
   mediaTimerVersion: number;
   mediaExited: boolean;
+  mediaPendingSendBytes: number;
+  mediaCloseAcknowledged: boolean;
+  mediaCloseForced: boolean;
+  mediaCloseError?: Error;
   appExited: boolean;
   startSettled: boolean;
+  failureNotified: boolean;
   resolveStart(value: { threadId: string }): void;
   rejectStart(error: Error): void;
   startPromise: Promise<{ threadId: string }>;
@@ -98,6 +113,15 @@ const own = (value: object, key: PropertyKey): boolean =>
 function asError(value: unknown, prefix: string): Error {
   if (value instanceof Error) return value;
   return new Error(`${prefix}: ${String(value)}`);
+}
+
+function strictBase64(value: unknown, label: string): Buffer {
+  if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0)
+    throw new TypeError(`${label} must be canonical base64`);
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length === 0 || decoded.toString('base64') !== value)
+    throw new TypeError(`${label} must be canonical base64`);
+  return decoded;
 }
 
 function requireDeadline(value: number, label: string): void {
@@ -209,6 +233,9 @@ function adaptedAppProcess(child: AppChild): AppServerProcess {
 export class CodexAppServerVoiceBroker {
   readonly #options: CodexAppServerVoiceBrokerOptions;
   #generation = 0;
+  #starting = false;
+  #startingCancelled = false;
+  #startingClose?: StartingClose;
   #session?: Session;
 
   constructor(options: CodexAppServerVoiceBrokerOptions) {
@@ -217,7 +244,12 @@ export class CodexAppServerVoiceBroker {
     requireDeadline(options.killTimeoutMs, 'killTimeoutMs');
     requireDeadline(options.maxJsonLineBytes, 'maxJsonLineBytes');
     requireDeadline(options.maxIpcMessageBytes, 'maxIpcMessageBytes');
-    if (options.maxJsonLineBytes === 0 || options.maxIpcMessageBytes === 0)
+    requireDeadline(options.maxAudioFrameBytes, 'maxAudioFrameBytes');
+    if (
+      options.maxJsonLineBytes === 0 ||
+      options.maxIpcMessageBytes === 0 ||
+      options.maxAudioFrameBytes === 0
+    )
       throw new TypeError('message size limits must be positive');
     // v0.26 exposes one audited JSONL limit. Requiring that exact value keeps
     // framing and byte accounting delegated to AppServerClient rather than
@@ -228,13 +260,19 @@ export class CodexAppServerVoiceBroker {
   }
 
   start(): Promise<{ threadId: string }> {
+    if (this.#starting)
+      return Promise.reject(new Error('one call is already starting'));
     if (this.#session && this.#session.phase !== 'done')
       return Promise.reject(new Error('one call is already active'));
 
+    this.#starting = true;
+    this.#startingCancelled = false;
     let app: AppChild;
     try {
       app = this.#options.appServerFactory();
     } catch (error) {
+      this.#starting = false;
+      this.#settleStartingClose();
       return Promise.reject(asError(error, 'app-server factory failed'));
     }
 
@@ -262,15 +300,25 @@ export class CodexAppServerVoiceBroker {
       setTimeout: this.#options.setTimeout,
       clearTimeout: this.#options.clearTimeout,
     };
-    const client = new AppServerClient(adaptedAppProcess(app), {
-      timers,
-      sigtermAfterMs: this.#options.shutdownTimeoutMs,
-      sigkillAfterMs: this.#options.killTimeoutMs,
-      reapAfterMs: this.#options.killTimeoutMs,
-      onNotification: (method, params) => {
-        if (this.#current(session)) this.#notification(session, method, params);
-      },
-    });
+    let client: AppServerClient;
+    try {
+      client = new AppServerClient(adaptedAppProcess(app), {
+        timers,
+        sigtermAfterMs: this.#options.shutdownTimeoutMs,
+        sigkillAfterMs: this.#options.killTimeoutMs,
+        reapAfterMs: this.#options.killTimeoutMs,
+        onNotification: (method, params) => {
+          if (this.#current(session))
+            this.#notification(session, method, params);
+        },
+      });
+    } catch (error) {
+      const failure = asError(error, 'app-server adoption failed');
+      const disposalFailure = this.#disposeUnadoptedApp(app);
+      this.#starting = false;
+      this.#settleStartingClose(disposalFailure ?? failure);
+      return Promise.reject(failure);
+    }
     session = {
       generation,
       phase: 'initializing',
@@ -278,8 +326,13 @@ export class CodexAppServerVoiceBroker {
       client,
       mediaTimerVersion: 0,
       mediaExited: false,
+      mediaFactoryPending: false,
+      mediaPendingSendBytes: 0,
+      mediaCloseAcknowledged: false,
+      mediaCloseForced: false,
       appExited: false,
       startSettled: false,
+      failureNotified: false,
       resolveStart,
       rejectStart,
       startPromise,
@@ -308,8 +361,41 @@ export class CodexAppServerVoiceBroker {
       },
     };
     this.#session = session;
-    app.on('error', session.onAppError);
-    app.on('exit', session.onAppExit);
+    try {
+      app.on('error', session.onAppError);
+      app.on('exit', session.onAppExit);
+    } catch (error) {
+      this.#session = undefined;
+      const failure = asError(error, 'app-server adoption failed');
+      this.#settleStart(session, failure);
+      this.#finishMediaClose(session);
+      for (const [event, listener] of [
+        ['error', session.onAppError],
+        ['exit', session.onAppExit],
+      ] as const) {
+        try {
+          app.removeListener(event, listener);
+        } catch {
+          // Disposal below remains authoritative when detachment is unavailable.
+        }
+      }
+      const disposalFailure = this.#disposeUnadoptedApp(app);
+      this.#starting = false;
+      this.#settleStartingClose(disposalFailure ?? failure);
+      return startPromise;
+    }
+    this.#starting = false;
+    if (this.#startingCancelled) {
+      this.#startingCancelled = false;
+      this.#settleStart(session, new Error('voice startup cancelled by close'));
+      const shutdown = this.#shutdown(session);
+      const pending = this.#startingClose;
+      this.#startingClose = undefined;
+      if (pending) void shutdown.then(pending.resolve, pending.reject);
+      return startPromise;
+    }
+    this.#startingCancelled = false;
+    this.#settleStartingClose();
 
     try {
       let fired = false;
@@ -336,7 +422,52 @@ export class CodexAppServerVoiceBroker {
     return startPromise;
   }
 
+  appendAudio(audio: Uint8Array): void {
+    const session = this.#requireOpenSession();
+    if (!(audio instanceof Uint8Array))
+      throw new TypeError('media audio must be bytes');
+    if (audio.byteLength === 0) return;
+    if (audio.byteLength > this.#options.maxAudioFrameBytes)
+      throw new RangeError('media audio frame is too large');
+    const message = {
+      type: 'audio.append',
+      callId: session.callId!,
+      audio: Buffer.from(audio).toString('base64'),
+    };
+    this.#requireMediaMessageBound(message, 'media audio');
+    this.#sendMedia(session, message);
+  }
+
+  sendEvent(text: string): void {
+    const session = this.#requireOpenSession();
+    if (typeof text !== 'string')
+      throw new TypeError('media event must be text');
+    if (Buffer.byteLength(text, 'utf8') > this.#options.maxIpcMessageBytes)
+      throw new RangeError('media event is too large');
+    const message = {
+      type: 'event.send',
+      callId: session.callId!,
+      text,
+    };
+    this.#requireMediaMessageBound(message, 'media event');
+    this.#sendMedia(session, message);
+  }
+
   close(): Promise<void> {
+    if (this.#starting) {
+      this.#startingCancelled = true;
+      if (!this.#startingClose) {
+        let resolve!: () => void;
+        let reject!: (error: Error) => void;
+        const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+          resolve = resolvePromise;
+          reject = rejectPromise;
+        });
+        void promise.catch(() => undefined);
+        this.#startingClose = { promise, resolve, reject };
+      }
+      return this.#startingClose.promise;
+    }
     const session = this.#session;
     if (!session || session.phase === 'done') return Promise.resolve();
     if (!session.startSettled)
@@ -345,6 +476,49 @@ export class CodexAppServerVoiceBroker {
         asError('broker closed', 'voice startup cancelled'),
       );
     return this.#shutdown(session);
+  }
+
+  #settleStartingClose(error?: Error): void {
+    this.#startingCancelled = false;
+    const pending = this.#startingClose;
+    this.#startingClose = undefined;
+    if (!pending) return;
+    if (error) pending.reject(error);
+    else pending.resolve();
+  }
+
+  #disposeUnadoptedApp(app: AppChild): Error | undefined {
+    let failure: Error | undefined;
+    try {
+      app.stdin.end();
+    } catch (error) {
+      failure = asError(error, 'unadopted app-server stdin close failed');
+    }
+    try {
+      if (!app.kill('SIGKILL'))
+        failure ??= new Error('unadopted app-server SIGKILL was not delivered');
+    } catch (error) {
+      failure ??= asError(error, 'unadopted app-server SIGKILL failed');
+    }
+    return failure;
+  }
+
+  #requireMediaMessageBound(
+    message: Record<string, unknown>,
+    label: string,
+  ): void {
+    if (
+      Buffer.byteLength(JSON.stringify(message)) >
+      this.#options.maxIpcMessageBytes
+    )
+      throw new RangeError(`${label} IPC message is too large`);
+  }
+
+  #requireOpenSession(): Session {
+    const session = this.#session;
+    if (!session || session.phase !== 'open' || session.shutdownStarted)
+      throw new Error('voice media is not open');
+    return session;
   }
 
   async #open(session: Session): Promise<void> {
@@ -372,19 +546,29 @@ export class CodexAppServerVoiceBroker {
         throw new Error('thread ID exceeds bounded shutdown framing');
       session.threadId = thread.id;
 
-      let media: MediaChild;
-      try {
-        media = this.#options.mediaChildFactory();
-      } catch (error) {
-        throw asError(error, 'media child factory failed');
-      }
-      this.#assertOpening(session, 'thread-starting');
-      session.media = media;
       const callId = this.#options.callIdFactory();
       if (typeof callId !== 'string' || callId.length === 0)
         throw new Error('call ID factory returned an invalid call ID');
       session.callId = callId;
+      this.#assertOpening(session, 'thread-starting');
+
+      let media: MediaChild;
+      session.mediaFactoryPending = true;
+      try {
+        media = this.#options.mediaChildFactory();
+      } catch (error) {
+        session.mediaFactoryPending = false;
+        if (session.shutdownStarted) this.#finishMediaClose(session);
+        throw asError(error, 'media child factory failed');
+      }
+      session.mediaFactoryPending = false;
+      session.media = media;
       this.#attachMedia(session, media);
+      if (session.shutdownStarted) {
+        this.#closeMedia(session);
+        return;
+      }
+      this.#assertOpening(session, 'thread-starting');
       session.phase = 'offer-waiting';
       this.#sendMedia(session, { type: 'offer.create', callId });
     } catch (error) {
@@ -443,21 +627,42 @@ export class CodexAppServerVoiceBroker {
 
   #attachMedia(session: Session, media: MediaChild): void {
     session.onMediaError = (error) => {
-      if (this.#current(session) && !session.shutdownStarted)
-        this.#fail(session, asError(error, 'media process error'));
+      if (!this.#current(session)) return;
+      const failure = asError(error, 'media process error');
+      if (session.shutdownStarted) {
+        this.#recordMediaCloseFailure(session, failure);
+      } else {
+        this.#fail(session, failure);
+      }
     };
     session.onMediaExit = (code, signal) => {
       if (!this.#current(session)) return;
       session.mediaExited = true;
-      this.#finishMediaClose(session);
       if (!session.shutdownStarted) {
-        this.#fail(
-          session,
-          new Error(
-            `media child exited unexpectedly (code ${String(code)}, signal ${String(signal)})`,
-          ),
+        const failure = new Error(
+          `media child exited unexpectedly (code ${String(code)}, signal ${String(signal)})`,
         );
+        this.#finishMediaClose(session, failure);
+        this.#fail(session, failure);
+        return;
       }
+      let failure = session.mediaCloseError;
+      if (!failure && session.mediaCloseForced) {
+        failure = new Error(
+          `media child required forced shutdown (code ${String(code)}, signal ${String(signal)})`,
+        );
+      } else if (!failure) {
+        if (code !== 0 || signal !== null) {
+          failure = new Error(
+            `media child failed during graceful shutdown (code ${String(code)}, signal ${String(signal)})`,
+          );
+        } else if (!session.mediaCloseAcknowledged) {
+          failure = new Error(
+            'media child exited without a truthful closed receipt',
+          );
+        }
+      }
+      this.#finishMediaClose(session, failure);
     };
     session.onMediaDisconnect = () => {
       if (this.#current(session) && !session.shutdownStarted)
@@ -473,42 +678,84 @@ export class CodexAppServerVoiceBroker {
   }
 
   #mediaMessage(session: Session, input: unknown): void {
-    if (session.shutdownStarted) return;
     try {
-      const copy = inertJson(input);
+      const copy = inertJson(input) as Record<string, unknown>;
       const encoded = JSON.stringify(copy);
       if (Buffer.byteLength(encoded) > this.#options.maxIpcMessageBytes)
         throw new RangeError('media IPC message is too large');
-      const base = exactRecord(
-        copy,
-        [
-          'type',
-          'callId',
-          ...(typeof (copy as Record<string, unknown>).sdp === 'string'
-            ? ['sdp']
-            : []),
-        ],
-        'media IPC message',
-      );
-      if (base.callId !== session.callId)
-        throw new Error('media IPC call correlation failed');
-      if (base.type === 'offer') {
-        if (session.phase !== 'offer-waiting' || typeof base.sdp !== 'string')
-          throw new Error('unexpected or duplicate media offer');
-        session.phase = 'realtime-starting';
-        void this.#startRealtime(session, base.sdp);
+      if (session.shutdownStarted) {
+        if (copy.type !== 'closed') return;
+        const closed = exactRecord(
+          copy,
+          ['type', 'callId'],
+          'media closed receipt',
+        );
+        if (closed.type !== 'closed' || closed.callId !== session.callId)
+          throw new Error('media closed receipt correlation failed');
+        if (session.mediaCloseAcknowledged)
+          throw new Error('duplicate media closed receipt');
+        session.mediaCloseAcknowledged = true;
         return;
       }
-      if (base.type === 'ready') {
-        if (session.phase !== 'ready-waiting' || own(base, 'sdp'))
-          throw new Error('unexpected or duplicate media ready');
+      if (copy.type === 'offer') {
+        const offer = exactRecord(
+          copy,
+          ['type', 'callId', 'sdp'],
+          'media offer',
+        );
+        if (
+          offer.callId !== session.callId ||
+          session.phase !== 'offer-waiting' ||
+          typeof offer.sdp !== 'string'
+        )
+          throw new Error('unexpected or uncorrelated media offer');
+        session.phase = 'realtime-starting';
+        void this.#startRealtime(session, offer.sdp);
+        return;
+      }
+      if (copy.type === 'ready') {
+        const ready = exactRecord(copy, ['type', 'callId'], 'media ready');
+        if (
+          ready.callId !== session.callId ||
+          session.phase !== 'ready-waiting'
+        )
+          throw new Error('unexpected or uncorrelated media ready');
         session.phase = 'open';
         this.#settleStart(session, undefined);
         return;
       }
+      if (copy.type === 'audio') {
+        const audio = exactRecord(
+          copy,
+          ['type', 'callId', 'audio'],
+          'media audio',
+        );
+        if (audio.callId !== session.callId || session.phase !== 'open')
+          throw new Error('unexpected or uncorrelated media audio');
+        this.#options.onAudio?.(strictBase64(audio.audio, 'media audio'));
+        return;
+      }
+      if (copy.type === 'event') {
+        const event = exactRecord(
+          copy,
+          ['type', 'callId', 'text'],
+          'media event',
+        );
+        if (
+          event.callId !== session.callId ||
+          session.phase !== 'open' ||
+          typeof event.text !== 'string'
+        )
+          throw new Error('unexpected or uncorrelated media event');
+        this.#options.onEvent?.(event.text);
+        return;
+      }
       throw new Error('unexpected media IPC message');
     } catch (error) {
-      this.#fail(session, asError(error, 'media IPC protocol failure'));
+      const failure = asError(error, 'media IPC protocol failure');
+      if (session.shutdownStarted)
+        this.#recordMediaCloseFailure(session, failure);
+      else this.#fail(session, failure);
     }
   }
 
@@ -542,33 +789,58 @@ export class CodexAppServerVoiceBroker {
   }
 
   #sendMedia(session: Session, message: Record<string, unknown>): void {
+    const copy = inertJson(message) as Record<string, unknown>;
+    const bytes = Buffer.byteLength(JSON.stringify(copy));
+    if (bytes > this.#options.maxIpcMessageBytes)
+      throw new RangeError('outbound media IPC message is too large');
+    if (
+      session.mediaPendingSendBytes + bytes >
+      this.#options.maxIpcMessageBytes
+    ) {
+      const failure = new RangeError('outbound media IPC backlog is too large');
+      this.#fail(session, failure);
+      throw failure;
+    }
+
+    session.mediaPendingSendBytes += bytes;
+    let callbackCalled = false;
+    let synchronous = true;
+    let synchronousFailure: Error | undefined;
+    const callback = (error: Error | null): void => {
+      if (callbackCalled) return;
+      callbackCalled = true;
+      session.mediaPendingSendBytes -= bytes;
+      if (!error || !this.#current(session) || session.shutdownStarted) return;
+      const failure = asError(error, 'media IPC send failed');
+      this.#fail(session, failure);
+      if (synchronous) synchronousFailure = failure;
+    };
+
     try {
-      const copy = inertJson(message) as Record<string, unknown>;
-      if (
-        Buffer.byteLength(JSON.stringify(copy)) >
-        this.#options.maxIpcMessageBytes
-      )
-        throw new RangeError('outbound media IPC message is too large');
-      let callbackCalled = false;
-      const accepted = session.media!.send(copy, (error) => {
-        if (callbackCalled) return;
-        callbackCalled = true;
-        if (error && this.#current(session) && !session.shutdownStarted)
-          this.#fail(session, asError(error, 'media IPC send failed'));
-      });
-      if (
-        !accepted &&
-        callbackCalled === false &&
-        session.media!.connected === false
-      )
+      const accepted = session.media!.send(copy, callback);
+      if (!accepted && !callbackCalled && session.media!.connected === false)
         throw new Error('media IPC send was not accepted');
     } catch (error) {
-      this.#fail(session, asError(error, 'media IPC send failed'));
+      if (!callbackCalled) callback(asError(error, 'media IPC send failed'));
+      const failure = asError(error, 'media IPC send failed');
+      this.#fail(session, failure);
+      throw failure;
+    } finally {
+      synchronous = false;
     }
+    if (synchronousFailure) throw synchronousFailure;
   }
 
   #fail(session: Session, error: Error): void {
     if (!this.#current(session) || session.shutdownStarted) return;
+    if (session.phase === 'open' && !session.failureNotified) {
+      session.failureNotified = true;
+      try {
+        this.#options.onError?.(error);
+      } catch {
+        // Cleanup remains owned here even if the observer fails.
+      }
+    }
     this.#settleStart(session, error);
     void this.#shutdown(session);
   }
@@ -642,6 +914,7 @@ export class CodexAppServerVoiceBroker {
   }
 
   #closeMedia(session: Session): void {
+    if (session.mediaFactoryPending) return;
     const media = session.media;
     if (!media || session.mediaExited) {
       this.#finishMediaClose(session);
@@ -651,27 +924,44 @@ export class CodexAppServerVoiceBroker {
       try {
         const close = { type: 'close', callId: session.callId };
         if (
-          Buffer.byteLength(JSON.stringify(close)) <=
+          Buffer.byteLength(JSON.stringify(close)) >
           this.#options.maxIpcMessageBytes
         )
-          media.send(close, () => undefined);
-      } catch {
-        // Signal escalation below still guarantees bounded cleanup.
+          throw new RangeError('media close IPC message is too large');
+        const accepted = media.send(close, (error) => {
+          if (error)
+            this.#recordMediaCloseFailure(
+              session,
+              asError(error, 'media close IPC send failed'),
+            );
+        });
+        if (!accepted && media.connected === false)
+          this.#recordMediaCloseFailure(
+            session,
+            new Error('media close IPC send was not accepted'),
+          );
+      } catch (error) {
+        this.#recordMediaCloseFailure(
+          session,
+          asError(error, 'media close IPC send failed'),
+        );
       }
     }
-    try {
-      media.disconnect?.();
-    } catch {
-      // Signal escalation below still guarantees bounded cleanup.
-    }
-    if (session.mediaExited) return;
+    if (session.mediaExited || session.mediaCloseForced) return;
     this.#scheduleMedia(session, this.#options.shutdownTimeoutMs, () => {
       this.#signalMedia(session, 'SIGTERM');
     });
   }
 
+  #recordMediaCloseFailure(session: Session, error: Error): void {
+    if (session.mediaClosedSettled) return;
+    session.mediaCloseError ??= error;
+    this.#signalMedia(session, 'SIGTERM');
+  }
+
   #signalMedia(session: Session, signal: Signal): void {
     if (session.mediaExited || session.mediaClosedSettled) return;
+    session.mediaCloseForced = true;
     let delivered = false;
     try {
       delivered = session.media!.kill(signal);

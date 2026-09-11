@@ -142,11 +142,42 @@ export class AppServerClient {
     this.#deadlines = [options.sigtermAfterMs ?? 1000, options.sigkillAfterMs ?? 1000, options.reapAfterMs ?? 1000];
     // prettier-ignore
     must(!this.#deadlines.some((n) => !Number.isSafeInteger(n) || n < 0), 'invalid close deadline');
-    process.stdout.on('data', this.#onData);
-    process.stdout.on('error', this.#onError);
-    process.stdin.on('error', this.#onError);
-    process.on('error', this.#onError);
-    process.on('exit', this.#onExit);
+    const rollback: Array<() => void> = [];
+    const attach = (add: () => void, remove: () => void): void => {
+      rollback.push(remove);
+      add();
+    };
+    try {
+      attach(
+        () => process.stdout.on('data', this.#onData),
+        () => process.stdout.removeListener('data', this.#onData),
+      );
+      attach(
+        () => process.stdout.on('error', this.#onError),
+        () => process.stdout.removeListener('error', this.#onError),
+      );
+      attach(
+        () => process.stdin.on('error', this.#onError),
+        () => process.stdin.removeListener('error', this.#onError),
+      );
+      attach(
+        () => process.on('error', this.#onError),
+        () => process.removeListener('error', this.#onError),
+      );
+      attach(
+        () => process.on('exit', this.#onExit),
+        () => process.removeListener('exit', this.#onExit),
+      );
+    } catch (error) {
+      for (const remove of rollback.reverse()) {
+        try {
+          remove();
+        } catch {
+          // Preserve the registration failure that made construction impossible.
+        }
+      }
+      throw error;
+    }
   }
   request(method: string, params?: unknown): Promise<unknown> {
     let line: string;

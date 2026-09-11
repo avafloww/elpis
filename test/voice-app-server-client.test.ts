@@ -81,6 +81,30 @@ async function closeByExit(
   process.exit(null, 'SIGKILL');
   await closing;
 }
+test('constructor rolls back listeners when registration then throws', () => {
+  const appProcess = new FakeProcess();
+  const timers = new ManualTimers();
+  const inheritedOn = appProcess.stdout.on.bind(appProcess.stdout);
+  appProcess.stdout.on = ((
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => {
+    const result = inheritedOn(event, listener);
+    if (event === 'error')
+      throw new Error('synthetic post-registration failure');
+    return result;
+  }) as typeof appProcess.stdout.on;
+  assert.throws(
+    () => new AppServerClient(appProcess, options(timers)),
+    /post-registration|subscription|listener/i,
+  );
+  assert.equal(appProcess.stdout.listenerCount('data'), 0);
+  assert.equal(appProcess.stdout.listenerCount('error'), 0);
+  assert.equal(appProcess.stdin.listenerCount('error'), 0);
+  assert.equal(appProcess.listenerCount('error'), 0);
+  assert.equal(appProcess.listenerCount('exit'), 0);
+});
+
 test('writes exact JSON-RPC methods, monotonic IDs, results, errors and notifications', async () => {
   const process = new FakeProcess();
   const timers = new ManualTimers();
