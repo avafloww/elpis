@@ -438,6 +438,18 @@ test('network frame limits, handshake timeout, and service shutdown close links'
 
   const live = await open(f.url + RESIDENT_CONTROL_PATHS.link, bearer);
   const shutdownClose = close(live);
+  const liveAck = message(live);
+  live.send(hello(f.instanceId, CONNECTIONS[0]!), { binary: false });
+  const first = await Promise.race([
+    liveAck.then((wire) => ({ type: 'message' as const, wire })),
+    shutdownClose.then((result) => ({ type: 'close' as const, result })),
+  ]);
+  if (first.type === 'close')
+    assert.fail(
+      `live link closed before hello.ack (code ${first.result.code})`,
+    );
+  assert.equal(JSON.parse(first.wire).type, 'hello.ack');
+  assert.equal(f.registry.summary(f.instanceId)?.state, 'ready');
   await f.service.stop();
   assert.equal((await shutdownClose).code, 1001);
   assert.equal(f.registry.stopped, true);
