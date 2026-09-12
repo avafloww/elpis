@@ -234,7 +234,11 @@ export function WorkersView({
     state.workers.sessions.find(
       (session) => workerRef(session) === state.selectedWorkerRef,
     ) ?? null;
-  const detail = state.workerDetail ?? selected;
+  const detail =
+    state.workerDetail &&
+    workerRef(state.workerDetail) === state.selectedWorkerRef
+      ? state.workerDetail
+      : selected;
   const groups = useMemo(
     () =>
       [
@@ -254,8 +258,15 @@ export function WorkersView({
       ].filter((group) => group.items.length),
     [state.workers.sessions],
   );
-  if (selected && detail)
-    return <WorkerDetail state={state} actions={actions} detail={detail} />;
+  if (state.selectedWorkerRef && detail)
+    return (
+      <WorkerDetail
+        key={state.selectedWorkerRef ?? ''}
+        state={state}
+        actions={actions}
+        detail={detail}
+      />
+    );
   return (
     <div class='reference-scroll'>
       <div class='workers-list-view reference-column'>
@@ -274,6 +285,7 @@ export function WorkersView({
               const ref = workerRef(session);
               return (
                 <button
+                  key={ref}
                   class='worker-row'
                   onClick={() => actions.selectWorker(ref)}
                 >

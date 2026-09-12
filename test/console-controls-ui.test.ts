@@ -226,7 +226,7 @@ test('image viewer and worker mandate use real bounded content', () => {
   assert.match(workers, /actions\.control\('worker', 'followup'/);
 });
 
-test('Secretary pending state drives bounded refresh and honest activity labels', () => {
+test('Secretary pending state renders honest activity labels without client polling', () => {
   const snapshot = {
     available: true,
     sessions: [
@@ -246,13 +246,12 @@ test('Secretary pending state drives bounded refresh and honest activity labels'
   );
   const socket = read('src/console/client/use-console.ts');
   const view = read('src/console/client/components/secretary.tsx');
-  assert.match(socket, /frame\.op !== 'snapshot'/);
   assert.match(
     socket,
     /frame\.lane === 'secretary'[\s\S]*frame\.op === 'snapshot'[\s\S]*secretary: controlSnapshot\(frame\.result\)/,
   );
-  assert.match(socket, /state\.view !== 'secretary'/);
-  assert.match(socket, /}, 750\)/);
+  assert.match(socket, /t: 'watch'/);
+  assert.doesNotMatch(socket, /}, 750\)/);
   assert.match(view, /Waiting for Secretary/);
   assert.match(view, /Secretary is thinking/);
 });

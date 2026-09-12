@@ -154,6 +154,7 @@ export interface ConsoleState {
   logs: LogLine[];
   context: JsonObject | null;
   contextReqId: number;
+  snapshotVersion: number;
   mindAvailable: boolean;
   mindItems: MindItem[];
   mindStats: JsonObject | null;

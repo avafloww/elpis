@@ -14,6 +14,7 @@ import type {
   ViewName,
 } from './types.js';
 import { array, number, object, text } from './types.js';
+import { applyCollectionPatch } from '../sync.js';
 
 const EMPTY_CONTROL: ControlSnapshot = { available: false, sessions: [] };
 
@@ -26,7 +27,7 @@ const VIEWS: readonly ViewName[] = [
   'logs',
 ];
 
-const initialState: ConsoleState = {
+export const initialState: ConsoleState = {
   connection: 'connecting',
   view: 'thread',
   room: 'all',
@@ -42,6 +43,7 @@ const initialState: ConsoleState = {
   logs: [],
   context: null,
   contextReqId: 0,
+  snapshotVersion: 0,
   mindAvailable: false,
   mindItems: [],
   mindStats: null,
@@ -140,7 +142,11 @@ export function appendSecretaryTurn(
       text(session.id) === sessionId
         ? {
             ...session,
-            turns: [...array<JsonObject>(session.turns), turn].slice(-20),
+            turns: array<JsonObject>(session.turns).some(
+              (existing) => existing.id === turn.id,
+            )
+              ? session.turns
+              : [...array<JsonObject>(session.turns), turn].slice(-20),
           }
         : session,
     ),
@@ -152,27 +158,98 @@ function workerRefFromSession(value: unknown): string | null {
   return text(session.worker, text(session.slug, text(session.id))) || null;
 }
 
+function workerMatches(value: unknown, ref: string | null): boolean {
+  const session = object(value);
+  return (
+    ref !== null && [session.worker, session.slug, session.id].includes(ref)
+  );
+}
+
+function mergeMessages(
+  before: StreamEntry[],
+  incoming: StreamEntry[],
+): StreamEntry[] {
+  if (
+    incoming.length === 1 &&
+    (!before.length || incoming[0].id > before[before.length - 1].id)
+  )
+    return [...before, ...incoming];
+  return [
+    ...new Map(
+      [...before, ...incoming].map((entry) => [entry.id, entry]),
+    ).values(),
+  ].sort((a, b) => a.id - b.id);
+}
+
 function mindSnapshot(state: ConsoleState, value: unknown): ConsoleState {
   const source = object(value);
   const items = array<MindItem>(source.items);
-  const selectedMindId =
-    state.selectedMindId &&
-    items.some((item) => item.id === state.selectedMindId)
-      ? state.selectedMindId
-      : state.selectedMindId;
   return {
     ...state,
     mindAvailable: source.available === true,
     mindItems: items,
     mindStats: source.stats ? object(source.stats) : null,
-    selectedMindId,
     notice: typeof source.error === 'string' ? source.error : state.notice,
   };
 }
 
 function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
   switch (frame.t) {
+    case 'sync': {
+      let next = { ...state };
+      for (const key of ['workers', 'secretary'] as const) {
+        if (frame[key])
+          next[key] = applyCollectionPatch(
+            next[key],
+            object(frame[key]),
+            'sessions',
+          ) as ControlSnapshot;
+      }
+      if (frame.mind)
+        next = mindSnapshot(
+          next,
+          applyCollectionPatch(
+            { items: state.mindItems },
+            object(frame.mind),
+            'items',
+          ),
+        );
+      if ('meta' in frame) next.meta = frame.meta ? object(frame.meta) : null;
+      if ('usage' in frame) next.usage = frame.usage as ConsoleState['usage'];
+      if ('subUsage' in frame)
+        next.subUsage = frame.subUsage ? object(frame.subUsage) : null;
+      if ('rooms' in frame) next.rooms = array<RoomFact>(frame.rooms);
+      if ('participants' in frame)
+        next.participants = number(frame.participants);
+      if ('context' in frame && state.view === 'context')
+        next.context = frame.context ? object(frame.context) : null;
+      const worker = object(frame.workerDetail);
+      if (worker.ref === state.selectedWorkerRef) {
+        next.workerDetail = worker.result
+          ? workerDetailFromControl(worker.result)
+          : null;
+        if (worker.error) next.notice = text(worker.error);
+      } else if (frame.workers && next.workerDetail) {
+        const session = next.workers.sessions.find((s) =>
+          workerMatches(s, next.selectedWorkerRef),
+        );
+        next.workerDetail = session
+          ? { ...next.workerDetail, ...session }
+          : null;
+      }
+      const mind = object(frame.mindDetail);
+      if (mind.id === state.selectedMindId)
+        next.mindDetail = mind.item ? (object(mind.item) as MindItem) : null;
+      return next;
+    }
     case 'snapshot': {
+      const incoming = array<StreamEntry>(frame.messages);
+      const sameProcess =
+        state.meta?.startedAt != null &&
+        state.meta.startedAt === object(frame.meta).startedAt;
+      const overlaps = incoming.some((entry) =>
+        state.messages.some((old) => old.id === entry.id),
+      );
       let next: ConsoleState = {
         ...state,
         usage: frame.usage
@@ -182,8 +259,17 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
         meta: frame.meta ? object(frame.meta) : null,
         rooms: array<RoomFact>(frame.rooms),
         participants: number(frame.participants),
-        messages: array<StreamEntry>(frame.messages),
-        hasMore: frame.hasMore === true,
+        messages:
+          sameProcess && overlaps
+            ? mergeMessages(state.messages, incoming)
+            : incoming,
+        hasMore:
+          sameProcess && overlaps ? state.hasMore : frame.hasMore === true,
+        loadingHistory: false,
+        snapshotVersion: state.snapshotVersion + 1,
+        context: null,
+        mindDetail: null,
+        workerDetail: null,
         live: frame.stream
           ? (object(frame.stream) as unknown as LiveStream)
           : null,
@@ -191,7 +277,7 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
         workers: controlSnapshot(frame.workers),
         secretary: controlSnapshot(frame.secretary),
       };
-      if (frame.mind) next = mindSnapshot(next, frame.mind);
+      next = mindSnapshot(next, frame.mind);
       const sessions = next.secretary.sessions;
       const selectedStillPresent = sessions.some(
         (session) => text(session.id) === next.selectedSecretaryId,
@@ -206,16 +292,18 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
     case 'message':
       return {
         ...state,
-        messages: [
-          ...state.messages,
+        messages: mergeMessages(state.messages, [
           object(frame.msg) as unknown as StreamEntry,
-        ],
-        live: null,
+        ]),
+        live: object(frame.msg).role === 'assistant' ? null : state.live,
       };
     case 'history':
       return {
         ...state,
-        messages: [...array<StreamEntry>(frame.messages), ...state.messages],
+        messages: mergeMessages(
+          state.messages,
+          array<StreamEntry>(frame.messages),
+        ),
         hasMore: frame.hasMore === true,
         loadingHistory: false,
       };
@@ -249,7 +337,9 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
       };
     }
     case 'streamEnd':
-      return { ...state, live: null };
+      return state.live?.streamId === number(frame.streamId)
+        ? { ...state, live: null }
+        : state;
     case 'usage':
       return {
         ...state,
@@ -275,7 +365,7 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
     case 'mindSnapshot':
       return mindSnapshot(state, frame);
     case 'mindDetail':
-      return number(frame.reqId) >= 0
+      return object(frame.item).id === state.selectedMindId
         ? {
             ...state,
             mindDetail: frame.item ? (object(frame.item) as MindItem) : null,
@@ -309,12 +399,20 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
             workers: controlSnapshot(frame.result),
             notice: null,
           };
-        if (frame.op === 'status')
+        if (frame.op === 'status') {
+          if (
+            !workerMatches(
+              object(frame.result).session,
+              state.selectedWorkerRef,
+            )
+          )
+            return state;
           return {
             ...state,
             workerDetail: workerDetailFromControl(frame.result),
             notice: null,
-          } as ConsoleState;
+          };
+        }
         if (frame.op === 'start' || frame.op === 'followup') {
           const result = object(frame.result);
           const session =
@@ -335,15 +433,21 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
         if (frame.op === 'send')
           return {
             ...state,
-            workerDetail: state.workerDetail
-              ? {
-                  ...state.workerDetail,
-                  messages: [
-                    ...array<JsonObject>(state.workerDetail.messages),
-                    object(frame.result),
-                  ].slice(-20),
-                }
-              : state.workerDetail,
+            workerDetail:
+              state.workerDetail &&
+              state.workerDetail.id === object(frame.result).sessionId
+                ? {
+                    ...state.workerDetail,
+                    messages: [
+                      ...new Map(
+                        [
+                          ...array<JsonObject>(state.workerDetail.messages),
+                          object(frame.result),
+                        ].map((message) => [message.id, message]),
+                      ).values(),
+                    ].slice(-20),
+                  }
+                : state.workerDetail,
             notice: null,
           };
         if (frame.op === 'dismiss') {
@@ -397,10 +501,10 @@ function applyFrame(state: ConsoleState, frame: ServerFrame): ConsoleState {
   }
 }
 
-function reducer(state: ConsoleState, action: Action): ConsoleState {
+export function reducer(state: ConsoleState, action: Action): ConsoleState {
   switch (action.type) {
     case 'connection':
-      return { ...state, connection: action.value };
+      return { ...state, connection: action.value, loadingHistory: false };
     case 'frame':
       return applyFrame(state, action.frame);
     case 'view':
@@ -415,11 +519,17 @@ function reducer(state: ConsoleState, action: Action): ConsoleState {
       return {
         ...state,
         selectedMindId: action.id,
-        mindDetail: action.id ? state.mindDetail : null,
+        mindDetail:
+          action.id === state.selectedMindId ? state.mindDetail : null,
         mindOrigin: action.id ? action.origin : null,
       };
     case 'select-worker':
-      return { ...state, selectedWorkerRef: action.ref };
+      return {
+        ...state,
+        selectedWorkerRef: action.ref,
+        workerDetail:
+          action.ref === state.selectedWorkerRef ? state.workerDetail : null,
+      };
     case 'select-secretary':
       return { ...state, selectedSecretaryId: action.id };
     case 'notice':
@@ -448,6 +558,23 @@ export interface ConsoleActions {
   clearNotice(): void;
 }
 
+function readRequestKey(frame: JsonObject): string | null {
+  if (frame.t === 'context') return 'context';
+  if (frame.t === 'mindDetail' || (frame.t === 'mind' && frame.op === 'get'))
+    return 'mind:get';
+  if (
+    frame.t === 'mindSnapshot' ||
+    (frame.t === 'mind' && frame.op === 'snapshot')
+  )
+    return 'mind:snapshot';
+  if (
+    (frame.t === 'control' || frame.t === 'controlResult') &&
+    ['snapshot', 'list', 'status'].includes(text(frame.op))
+  )
+    return `${text(frame.lane)}:${text(frame.op)}`;
+  return null;
+}
+
 export function useConsole(
   transport: ConsoleTransport,
   preferences?: ConsoleViewPreferences,
@@ -469,13 +596,16 @@ export function useConsole(
     },
   );
   const requestId = useRef(0);
-  const contextRefreshTimer = useRef<number | null>(null);
+  const pendingReads = useRef(new Map<string, number>());
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const send = useCallback(
     (frame: JsonObject): boolean => {
+      const key = readRequestKey(frame);
+      if (key) pendingReads.current.set(key, number(frame.reqId));
       if (transport.send(frame)) return true;
+      if (key) pendingReads.current.delete(key);
       dispatch({ type: 'notice', value: 'Backend is not connected.' });
       return false;
     },
@@ -485,6 +615,7 @@ export function useConsole(
   useEffect(() => {
     const unsubscribe = transport.subscribe((event: ConsoleTransportEvent) => {
       if (event.type === 'connection') {
+        if (event.value !== 'connected') pendingReads.current.clear();
         dispatch({ type: 'connection', value: event.value });
         return;
       }
@@ -497,66 +628,49 @@ export function useConsole(
       }
 
       const frame = event.frame;
+      const key = readRequestKey(frame);
+      if (key && pendingReads.current.get(key) !== frame.reqId) return;
+      if (key) pendingReads.current.delete(key);
+      if (frame.t === 'snapshot') pendingReads.current.clear();
+      if (frame.t === 'sync') {
+        if ('context' in frame) pendingReads.current.delete('context');
+        if ('mindDetail' in frame) pendingReads.current.delete('mind:get');
+        if ('workerDetail' in frame)
+          pendingReads.current.delete('worker:status');
+        if ('mind' in frame) pendingReads.current.delete('mind:snapshot');
+        for (const lane of ['worker', 'secretary']) {
+          if ((lane === 'worker' ? 'workers' : 'secretary') in frame) {
+            pendingReads.current.delete(`${lane}:snapshot`);
+            pendingReads.current.delete(`${lane}:list`);
+          }
+        }
+      }
       dispatch({ type: 'frame', frame });
-      if (frame.t === 'message' && stateRef.current.view === 'context') {
-        if (contextRefreshTimer.current !== null)
-          window.clearTimeout(contextRefreshTimer.current);
-        contextRefreshTimer.current = window.setTimeout(() => {
-          const reqId = ++requestId.current;
-          dispatch({ type: 'context-request', reqId });
-          send({ t: 'context', reqId });
-          contextRefreshTimer.current = null;
-        }, 150);
-      }
-      if (frame.t === 'mindResult') {
-        send({ t: 'mind', op: 'snapshot', reqId: ++requestId.current });
-        const selected = stateRef.current.selectedMindId;
-        if (selected)
-          send({
-            t: 'mind',
-            op: 'get',
-            id: selected,
-            reqId: ++requestId.current,
-          });
-      }
-      if (
-        frame.t === 'controlResult' &&
-        frame.ok !== false &&
-        frame.op !== 'snapshot'
-      ) {
-        const lane = frame.lane === 'secretary' ? 'secretary' : 'worker';
-        send({
-          t: 'control',
-          lane,
-          op: 'snapshot',
-          reqId: ++requestId.current,
-        });
-      }
     });
-    return () => {
-      unsubscribe();
-      if (contextRefreshTimer.current !== null)
-        window.clearTimeout(contextRefreshTimer.current);
-    };
+    return unsubscribe;
   }, [send, transport]);
 
   useEffect(() => {
-    if (
-      state.connection !== 'connected' ||
-      state.view !== 'secretary' ||
-      !secretarySnapshotHasPending(state.secretary)
-    )
-      return;
-    const timer = window.setTimeout(() => {
-      send({
-        t: 'control',
-        lane: 'secretary',
-        op: 'snapshot',
-        reqId: ++requestId.current,
-      });
-    }, 750);
-    return () => window.clearTimeout(timer);
-  }, [send, state.connection, state.secretary, state.view]);
+    if (state.connection !== 'connected') return;
+    send({
+      t: 'watch',
+      workerRef: state.view === 'workers' ? state.selectedWorkerRef : null,
+      mindId: state.view === 'mind' ? state.selectedMindId : null,
+      context: state.view === 'context',
+    });
+    if (state.view === 'context') {
+      const reqId = ++requestId.current;
+      dispatch({ type: 'context-request', reqId });
+      send({ t: 'context', reqId });
+    }
+  }, [
+    send,
+    state.connection,
+    state.view,
+    state.selectedWorkerRef,
+    state.selectedMindId,
+    state.snapshotVersion,
+  ]);
 
   const setView = useCallback(
     (view: ViewName) => {
@@ -564,15 +678,8 @@ export function useConsole(
         preferences?.write(view);
       } catch {}
       dispatch({ type: 'view', value: view });
-      if (view === 'context') {
-        const reqId = ++requestId.current;
-        dispatch({ type: 'context-request', reqId });
-        send({ t: 'context', reqId });
-      }
-      if (view === 'mind')
-        send({ t: 'mind', op: 'snapshot', reqId: ++requestId.current });
     },
-    [preferences, send],
+    [preferences],
   );
 
   const actions: ConsoleActions = {

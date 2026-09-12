@@ -244,6 +244,7 @@ export function SecretaryView({
           ) : null}
           {active ? (
             <ChatComposer
+              key={sessionId(selected)}
               contextLabel='secretary'
               disabled={pending !== null}
               placeholder='Ask the secretary…'
@@ -279,6 +280,7 @@ export function SecretaryView({
             const id = sessionId(session);
             return (
               <button
+                key={id}
                 class={id === sessionId(selected ?? {}) ? 'selected' : ''}
                 onClick={() => {
                   actions.selectSecretary(id);

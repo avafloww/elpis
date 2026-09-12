@@ -38,22 +38,34 @@ export function createStandaloneConsoleTransport(): ConsoleTransport {
         const ws = new WebSocket(`${protocol}://${location.host}/ws`);
         socket = ws;
         ws.onopen = () => {
+          if (disposed || socket !== ws) return;
           retry = 500;
           listener({ type: 'connection', value: 'connected' });
         };
         ws.onmessage = (event) => {
+          if (disposed || socket !== ws) return;
           let frame: ServerFrame;
           try {
             frame = JSON.parse(String(event.data)) as ServerFrame;
+            if (
+              !frame ||
+              typeof frame !== 'object' ||
+              Array.isArray(frame) ||
+              typeof frame.t !== 'string'
+            )
+              throw new Error('invalid console frame');
           } catch {
             listener({ type: 'malformed' });
             return;
           }
           listener({ type: 'frame', frame });
         };
-        ws.onerror = () => ws.close();
+        ws.onerror = () => {
+          if (!disposed && socket === ws) ws.close();
+        };
         ws.onclose = () => {
-          if (disposed) return;
+          if (disposed || socket !== ws) return;
+          socket = null;
           listener({ type: 'connection', value: 'reconnecting' });
           const delay = retry;
           retry = Math.min(8000, delay * 2);

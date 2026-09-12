@@ -108,6 +108,21 @@ test('standalone Console transport preserves same-origin /ws framing and retries
       () => transport.subscribe(() => {}),
       /already has an active subscriber/,
     );
+    const eventCount = events.length;
+    sockets[0].onmessage?.({ data: '{"t":"snapshot"}' });
+    sockets[0].onopen?.();
+    sockets[0].onclose?.();
+    assert.equal(
+      events.length,
+      eventCount,
+      'superseded sockets cannot publish late events',
+    );
+    for (const data of ['null', '[]', '42', '{}'])
+      sockets[1].onmessage?.({ data });
+    assert.deepEqual(
+      events.slice(-4),
+      Array.from({ length: 4 }, () => ({ type: 'malformed' })),
+    );
     unsubscribe();
     assert.equal(transport.send({ t: 'context', reqId: 2 }), false);
   } finally {

@@ -205,6 +205,7 @@ export function MindView({
             <div class='mind-list'>
               {group.items.map((item) => (
                 <button
+                  key={item.id}
                   class={`mind-row ${item.status === 'proposal' ? 'proposal-row' : ''}`}
                   onClick={() => actions.selectMind(item.id, null)}
                 >

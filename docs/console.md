@@ -23,10 +23,18 @@ The room rail filters one shared history rather than creating separate conversat
 
 The Thread composer enqueues console-provenance person speech into the same inbound FIFO as Discord. Worker and secretary operations use fixed request-correlated Hub controls. The UI renders unavailable, stale, ambiguous, failed, and empty states honestly instead of inventing fixture data.
 
+Connected viewers receive incremental `sync` frames for worker and Secretary sessions, Mind items, metadata, room state, and usage. Collection patches carry changed records by stable ID plus their authoritative order, including removals. Unchanged records and mounted controls retain their identity. Thread messages, streaming deltas, and logs keep their existing event paths.
+
+One Hub observer pass runs 750 ms after the previous pass finishes while viewers are attached. It reads the bounded public worker and Secretary projections so changes from every runtime writer reach both local and Gateway dashboards, including completion and failure outside a console command. Unchanged state sends no frame. The observer stops when the last viewer disconnects and never starts agent turns. Existing session, turn, mailbox, artifact-preview, and credential/path filtering limits apply equally to incremental updates.
+
+The client's `watch` frame selects at most one worker detail, one Mind detail, and the Context projection. The UI watches its open view; worker mailbox/artifact receipts and Mind comments/dependencies then update without reopening the detail. Context keeps its shared one-second build throttle and sends a projection only when it changes. Reconnection reestablishes these watches and releases interrupted backfill requests. Late replies from superseded requests, selections, or socket attachments cannot repaint a different selection. Within the same process, an overlapping reconnect snapshot preserves already loaded Thread history; a new process establishes a fresh history baseline.
+
 Sent-message cards include voice playback status, elapsed playback time, and an expandable generated speech transcript when available. An interrupted transcript may include words that had not yet played; readable text delivery remains separate from acoustic playback.
 
 ## Privacy and isolation
 
 Context may expose system prompts, durable memory, conversation history, and tool schemas. Thread, Mind, worker receipts, secretary history, and logs may expose private work. Treat the entire console as a private administrative surface.
+
+Run `npm run build && node test/console-sync.acceptance.mjs` for a real Chromium acceptance pass against the built console with synthetic runtime data. This checks background updates across the views, draft preservation, and websocket reconnects without reloading the page; it requires the Playwright Chromium browser installed for the repository's browser tooling.
 
 The server binds to loopback by default. Remote access requires an authenticated TLS reverse proxy. Same-origin WebSocket checks, bounded attachment routes, and explicit Hub mutation handlers remain server-owned. Console bind or client failures do not stop the agent.

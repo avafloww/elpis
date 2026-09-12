@@ -1447,7 +1447,7 @@ test('Preact Mind detail follows the rendered-first reference without v1 edit ch
   assert.doesNotMatch(source, /MindForm|editing|copy raw|copy\(item\.body/);
 });
 
-test('Preact context pane quietly debounces committed-message refreshes', () => {
+test('Preact context pane subscribes to live projection updates without resetting scroll', () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const hook = fs.readFileSync(
     path.join(here, '../src/console/client/use-console.ts'),
@@ -1457,11 +1457,8 @@ test('Preact context pane quietly debounces committed-message refreshes', () => 
     path.join(here, '../src/console/client/components/context.tsx'),
     'utf8',
   );
-  assert.match(
-    hook,
-    /frame\.t === 'message' && stateRef\.current\.view === 'context'/,
-  );
-  assert.match(hook, /contextRefreshTimer[\s\S]*window\.setTimeout[\s\S]*150/);
+  assert.match(hook, /t: 'watch'[\s\S]*context: state\.view === 'context'/);
+  assert.match(hook, /state\.snapshotVersion/);
   assert.match(
     hook,
     /dispatch\(\{ type: 'context-request', reqId \}\)[\s\S]*send\(\{ t: 'context', reqId \}\)/,

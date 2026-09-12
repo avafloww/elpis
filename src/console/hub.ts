@@ -42,6 +42,15 @@ import type { SandboxDeps } from '../types.js';
 import type { SecretarySpawnBroker } from '../secretary/spawn.js';
 import type { SecretaryConversationStore } from '../secretary/conversation.js';
 import { isSecretarySessionId } from '../secretary/session.js';
+import { collectionPatch } from './sync.js';
+
+interface ConsoleWatch {
+  workerRef: string | null;
+  mindId: ReturnType<typeof parseMindId> | null;
+  context: boolean;
+}
+
+const SYNC_INTERVAL_MS = 750;
 
 /** A room (Discord channel or the reserved #internal), as the agent reports
  * it — everything except the rail's accent color, which is pure presentation
@@ -308,6 +317,10 @@ export class ConsoleHub {
   private thinkCallIds = new Set<string>();
   private chatNonces = new Set<string>();
   private chatNonceOrder: string[] = [];
+  private clientState = new Map<HubClient, Record<string, unknown>>();
+  private clientWatches = new Map<HubClient, ConsoleWatch>();
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncing = false;
 
   constructor(initial: ChatMessage[] = []) {
     for (const m of initial) this.pushEntry(this.serialize(m, 0, null));
@@ -520,6 +533,7 @@ export class ConsoleHub {
       this.clientGenerations.set(client, this.nextClientGeneration++);
     }
     await this.sendSnapshot(client);
+    this.scheduleSync();
   }
 
   removeClient(client: HubClient): void {
@@ -544,6 +558,157 @@ export class ConsoleHub {
     if (m.t === 'mind') this.handleMind(client, m);
     if (m.t === 'chat') this.handleChat(client, m);
     if (m.t === 'control') void this.handleControl(client, m);
+    if (m.t === 'watch') {
+      try {
+        const watch: ConsoleWatch = {
+          workerRef: m.workerRef == null ? null : controlWorkerRef(m.workerRef),
+          mindId: m.mindId == null ? null : parseMindId(m.mindId),
+          context: m.context === true,
+        };
+        this.clientWatches.set(client, watch);
+        // A new selection must get its own initial detail even if an earlier
+        // subscription to the same item had identical bytes.
+        const previous = this.clientState.get(client);
+        if (previous) {
+          const { workerDetail, mindDetail, context, ...rest } = previous;
+          this.clientState.set(client, rest);
+        }
+      } catch {
+        // Invalid observation selectors grant no new authority.
+      }
+    }
+  }
+
+  /** One bounded observer loop per Hub, shared by local and Gateway viewers.
+   * Durable worker/secretary mutations also arrive outside Console controls;
+   * sampling their public projections catches every writer without coupling
+   * runtime execution to UI listeners. Only changed records cross the socket. */
+  private scheduleSync(): void {
+    if (this.syncTimer || this.syncing || this.clients.size === 0) return;
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      this.syncing = true;
+      void this.refreshClients()
+        .catch(() => {
+          // Observer failures cannot interrupt runtime work; retry next pass.
+        })
+        .finally(() => {
+          this.syncing = false;
+          this.scheduleSync();
+        });
+    }, SYNC_INTERVAL_MS);
+    this.syncTimer.unref();
+  }
+
+  private async refreshClients(): Promise<void> {
+    for (const client of this.clients)
+      if (client.closed) this.detachClient(client);
+    const clients = [...this.clientState].map(([client, previous]) => ({
+      client,
+      previous,
+      watch: this.clientWatches.get(client),
+    }));
+    if (!clients.length || !this.sources) return;
+    const [workers, secretary, meta] = await Promise.all([
+      this.workerSnapshot(),
+      this.secretarySnapshot(),
+      Promise.resolve()
+        .then(() => this.sources?.meta() ?? null)
+        .catch(() => null),
+    ]);
+    const common: Record<string, unknown> = {
+      workers,
+      secretary,
+      meta,
+      mind: this.mindSnapshotPayload(),
+      usage: this.sources.usage(),
+      subUsage: this.sources.subUsage(),
+      rooms: withColors(this.sources.rooms()),
+      participants: this.sources.participants(),
+    };
+    const details = new Map<string, Promise<Record<string, unknown>>>();
+    for (const { watch } of clients) {
+      const ref = watch?.workerRef;
+      if (!ref || details.has(ref)) continue;
+      details.set(
+        ref,
+        this.runWorkerControl('status', { ref }).then(
+          (result) => ({ ref, result, error: null }),
+          (error) => ({ ref, result: null, error: boundedControlError(error) }),
+        ),
+      );
+    }
+    const resolvedDetails = new Map(
+      await Promise.all(
+        [...details].map(async ([ref, result]) => [ref, await result] as const),
+      ),
+    );
+    for (const { client, previous, watch } of clients) {
+      // Snapshots, reattachment and selection changes supersede in-flight reads.
+      if (
+        this.clientState.get(client) !== previous ||
+        this.clientWatches.get(client) !== watch ||
+        this.clientSnapshotRequests.has(client)
+      )
+        continue;
+      const next = { ...common };
+      if (watch?.workerRef)
+        next.workerDetail = resolvedDetails.get(watch.workerRef)!;
+      if (watch?.mindId) {
+        try {
+          next.mindDetail = {
+            id: watch.mindId,
+            item: this.sources.mind?.get(watch.mindId) ?? null,
+          };
+        } catch {
+          next.mindDetail = { id: watch.mindId, item: null };
+        }
+      }
+      if (watch?.context) next.context = this.readContext();
+      this.sendSync(client, previous, next);
+    }
+  }
+
+  private sendSync(
+    client: HubClient,
+    previous: Record<string, unknown>,
+    next: Record<string, unknown>,
+  ): void {
+    if (!this.clients.has(client) || client.closed) {
+      this.detachClient(client);
+      return;
+    }
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(next)) {
+      const comparable = (input: unknown): unknown => {
+        if (key !== 'meta' || !input) return input;
+        const { uptimeMs, ...stable } = input as Record<string, unknown>;
+        return stable;
+      };
+      if (
+        JSON.stringify(comparable(previous[key])) ===
+        JSON.stringify(comparable(value))
+      )
+        continue;
+      const collection =
+        key === 'mind'
+          ? 'items'
+          : key === 'workers' || key === 'secretary'
+            ? 'sessions'
+            : null;
+      patch[key] = collection
+        ? collectionPatch(
+            (previous[key] ?? { [collection]: [] }) as Record<string, unknown>,
+            value as Record<string, unknown>,
+            collection,
+          )
+        : value;
+    }
+    if (
+      !Object.keys(patch).length ||
+      this.safeSend(client, { t: 'sync', ...patch })
+    )
+      this.clientState.set(client, { ...previous, ...next });
   }
 
   /** Dispatch one request-correlated control frame. This method owns every
@@ -553,6 +718,7 @@ export class ConsoleHub {
     client: HubClient,
     m: Record<string, unknown>,
   ): Promise<void> {
+    const generation = this.clientGenerations.get(client);
     const reqId =
       Number.isSafeInteger(m.reqId) && Number(m.reqId) >= 0
         ? Number(m.reqId)
@@ -571,6 +737,7 @@ export class ConsoleHub {
       return;
     }
     const reply = (ok: boolean, value: unknown): void => {
+      if (this.clientGenerations.get(client) !== generation) return;
       this.safeSend(
         client,
         ok
@@ -594,8 +761,16 @@ export class ConsoleHub {
       return;
     }
     try {
-      if (lane === 'worker') reply(true, await this.runWorkerControl(op, m));
-      else reply(true, await this.runSecretaryControl(op, m));
+      const result =
+        lane === 'worker'
+          ? await this.runWorkerControl(op, m)
+          : await this.runSecretaryControl(op, m);
+      if (!['snapshot', 'list', 'status'].includes(op)) {
+        // A mutation receipt supersedes any observation that began before it.
+        for (const [viewer, previous] of this.clientState)
+          this.clientState.set(viewer, { ...previous });
+      }
+      reply(true, result);
     } catch (error) {
       reply(false, error);
     }
@@ -832,6 +1007,14 @@ export class ConsoleHub {
    * `context: null` rather than ever reaching the loop; requests within
    * CONTEXT_THROTTLE_MS of the last build are answered from that build. */
   private sendContext(client: HubClient, req: { reqId?: number }): void {
+    this.safeSend(client, {
+      t: 'context',
+      reqId: req.reqId ?? 0,
+      context: this.readContext(),
+    });
+  }
+
+  private readContext(): ContextSnapshot | null {
     const now = Date.now();
     let context: ContextSnapshot | null;
     if (this.lastContext && now - this.lastContext.at < CONTEXT_THROTTLE_MS) {
@@ -844,7 +1027,7 @@ export class ConsoleHub {
       }
       this.lastContext = { at: now, context };
     }
-    this.safeSend(client, { t: 'context', reqId: req.reqId ?? 0, context });
+    return context;
   }
 
   /** The console's write operation: killswitch moderation, delegated to
@@ -880,7 +1063,12 @@ export class ConsoleHub {
   /** Broadcast the authoritative work-graph list after any adapter mutates it. */
   mindChanged(): void {
     if (!this.sources?.mind || this.clients.size === 0) return;
-    this.broadcast(this.mindSnapshotPayload());
+    this.lastContext = null;
+    const mind = this.mindSnapshotPayload();
+    for (const [client, previous] of this.clientState) {
+      if (!this.clientSnapshotRequests.has(client))
+        this.sendSync(client, previous, { mind });
+    }
   }
 
   private mindSnapshotPayload(reqId = 0): Record<string, unknown> {
@@ -1104,7 +1292,7 @@ export class ConsoleHub {
     // finish, making an explicit resend as fresh as the ordinary snapshot can be.
     const start = Math.max(0, this.mirror.length - SNAPSHOT_MESSAGES);
     const messages = this.mirror.slice(start);
-    return this.safeSend(client, {
+    const snapshot = {
       t: 'snapshot',
       usage: this.sources?.usage() ?? null,
       subUsage: this.sources?.subUsage() ?? null,
@@ -1128,7 +1316,21 @@ export class ConsoleHub {
       mind: this.sources?.mind ? this.mindSnapshotPayload() : null,
       workers,
       secretary,
-    });
+    };
+    this.clientSnapshotRequests.delete(client);
+    const sent = this.safeSend(client, snapshot);
+    if (sent)
+      this.clientState.set(client, {
+        workers,
+        secretary,
+        meta,
+        mind: snapshot.mind ?? this.mindSnapshotPayload(),
+        usage: snapshot.usage,
+        subUsage: snapshot.subUsage,
+        rooms: snapshot.rooms,
+        participants: snapshot.participants,
+      });
+    return sent;
   }
 
   private sendBackfill(
@@ -1204,6 +1406,16 @@ export class ConsoleHub {
       }
       try {
         c.send(data);
+        const previous = this.clientState.get(c);
+        const frame = payload as Record<string, unknown>;
+        if (previous && (frame.t === 'usage' || frame.t === 'subUsage'))
+          this.clientState.set(c, { ...previous, [frame.t]: frame.usage });
+        if (previous && frame.t === 'rooms')
+          this.clientState.set(c, {
+            ...previous,
+            rooms: frame.rooms,
+            participants: frame.participants,
+          });
       } catch {
         this.detachClient(c);
       }
@@ -1214,6 +1426,12 @@ export class ConsoleHub {
     this.clients.delete(client);
     this.clientGenerations.delete(client);
     this.clientSnapshotRequests.delete(client);
+    this.clientState.delete(client);
+    this.clientWatches.delete(client);
+    if (this.clients.size === 0 && this.syncTimer) {
+      clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
   }
 
   private safeSend(client: HubClient, payload: unknown): boolean {

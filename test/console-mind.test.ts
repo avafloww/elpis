@@ -9,6 +9,7 @@ import {
 import { runMigrations } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
 import { makeConfig } from './helpers.js';
+import { initialState, reducer } from '../src/console/client/use-console.js';
 
 class Client implements HubClient {
   closed = false;
@@ -86,7 +87,7 @@ test('console snapshot includes the authoritative mind snapshot', async () => {
   db.close();
 });
 
-test('console mind mutations broadcast snapshots and return affected records', async () => {
+test('console mind mutations broadcast incremental records and return affected records', async () => {
   const { db, hub } = setup();
   const client = new Client();
   await hub.addClient(client);
@@ -104,7 +105,7 @@ test('console mind mutations broadcast snapshots and return affected records', a
   assert.equal(result.ok, true);
   assert.equal(result.result.title, 'build the pane');
   assert.ok(
-    client.frames.some((x) => x.t === 'mindSnapshot' && x.items.length === 1),
+    client.frames.some((x) => x.t === 'sync' && x.mind.items.length === 1),
   );
 
   client.frames.length = 0;
@@ -201,4 +202,54 @@ test('console mind unavailable and malformed operations do not throw', async () 
   const result = client.frames.at(-1);
   assert.equal(result.ok, false);
   assert.match(result.error, /unavailable/);
+});
+
+test('external Mind edits update open details, comments and dependencies for every observer', async (t) => {
+  const { db, hub, mind } = setup();
+  const dependency = mind.create({ title: 'Foundation' });
+  const item = mind.create({ title: 'Review', dependsOn: [dependency.id] });
+  const clients = [new Client(), new Client()];
+  t.after(() => {
+    for (const client of clients) hub.removeClient(client);
+    db.close();
+  });
+  const states = clients.map(() => ({
+    ...initialState,
+    selectedMindId: item.id,
+  }));
+  for (const [index, client] of clients.entries()) {
+    client.send = (data) => {
+      const frame = JSON.parse(data);
+      client.frames.push(frame);
+      states[index] = reducer(states[index], { type: 'frame', frame });
+    };
+    await hub.addClient(client);
+    hub.handleClientMessage(
+      client,
+      JSON.stringify({ t: 'watch', mindId: item.id }),
+    );
+  }
+  await t.waitFor(() => assert.equal(states[0].mindDetail?.title, 'Review'), {
+    timeout: 4000,
+  });
+  for (const client of clients) client.frames.length = 0;
+  mind.update(item.id, { title: 'Review updated', body: 'New mandate' });
+  mind.addComment(item.id, 'Background progress', 'worker:quiet-fox');
+  mind.setStatus(dependency.id, 'done');
+  await t.waitFor(
+    () => {
+      for (const state of states) {
+        assert.equal(state.mindDetail?.title, 'Review updated');
+        assert.equal(state.mindDetail?.body, 'New mandate');
+        assert.equal(
+          state.mindDetail?.comments?.[0].body,
+          'Background progress',
+        );
+        assert.equal(state.mindDetail?.effectiveStatus, 'open');
+      }
+    },
+    { timeout: 4000 },
+  );
+  for (const client of clients)
+    assert.ok(client.frames.every((frame) => frame.t === 'sync'));
 });

@@ -192,7 +192,12 @@ export function createConsoleServer(
       info: { origin: string; secure: boolean; req: http.IncomingMessage },
       cb: (res: boolean, code?: number, message?: string) => void,
     ) => {
-      if (isAllowedOrigin(info.origin, config.console.port)) {
+      const address = server.address();
+      const port =
+        address && typeof address === 'object'
+          ? address.port
+          : config.console.port;
+      if (isAllowedOrigin(info.origin, port)) {
         cb(true);
         return;
       }
@@ -224,7 +229,10 @@ export function createConsoleServer(
 
   return {
     get port() {
-      return config.console.port;
+      const address = server.address();
+      return address && typeof address === 'object'
+        ? address.port
+        : config.console.port;
     },
     start(): Promise<void> {
       return new Promise<void>((resolve) => {
