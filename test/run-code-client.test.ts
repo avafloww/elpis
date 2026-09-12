@@ -8,6 +8,7 @@ import {
   operationDisplayTarget,
   operationMindId,
   operationReceiptUseful,
+  operationHasRuntimeReceipt,
 } from '../src/console/client/components/thread.js';
 import {
   formatRunSource,
@@ -88,7 +89,7 @@ test('operation receipts optimize for human navigation instead of data volume', 
       target: 'path',
       targetLiteral: false,
     }),
-    false,
+    true,
   );
   assert.equal(
     operationReceiptUseful({
@@ -98,13 +99,37 @@ test('operation receipts optimize for human navigation instead of data volume', 
     }),
     true,
   );
-  assert.match(source, /if \(!mindId\) return null/);
-  assert.match(source, /item\?\.title \|\| mindId/);
+  assert.doesNotMatch(source, /if \(!mindId\) return null/);
+  assert.match(source, /item\?\.title\s*\|\|\s*mindId/);
   assert.match(source, /onOpenMind\(mindId\)/);
   assert.match(styles, /\.operation-compact/);
   assert.match(styles, /min-height: 38px/);
   assert.doesNotMatch(source, /resultSummary\(result\.content, 260\)/);
   assert.doesNotMatch(styles, /operation-mind-body|operation-desktop-body/);
+});
+
+test('runtime ledgers replace only the source actions they actually instrument', () => {
+  assert.equal(operationHasRuntimeReceipt({ name: 'elpis.read' }), true);
+  assert.equal(operationHasRuntimeReceipt({ name: 'elpis.grep' }), true);
+  assert.equal(operationHasRuntimeReceipt({ name: 'elpis.sh' }), true);
+  assert.equal(operationHasRuntimeReceipt({ name: 'elpis.git.diff' }), true);
+  assert.equal(operationHasRuntimeReceipt({ name: 'fs.writeFileSync' }), false);
+  assert.equal(
+    operationHasRuntimeReceipt({ name: 'fs.promises.readFile' }),
+    false,
+  );
+  assert.equal(
+    operationHasRuntimeReceipt({ name: 'elpis.worker.start' }),
+    false,
+  );
+});
+
+test('result status comes from the leading run header, never echoed output', () => {
+  assert.equal(
+    splitRunResult('[run ok]\nlogged [run FAILED] as an example').ok,
+    true,
+  );
+  assert.equal(splitRunResult('[run FAILED]\nboom').ok, false);
 });
 
 test('rich edit cards produce a bounded line diff with stable line numbers', () => {

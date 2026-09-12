@@ -18,7 +18,7 @@ export function splitRunResult(content: string): RunResultParts {
   const index = content.indexOf(separator);
   const head = index < 0 ? content : content.slice(0, index);
   return {
-    ok: !/\[run FAILED\]/.test(content),
+    ok: !/^\[run FAILED\]/.test(content.trimStart()),
     value: head
       .trim()
       .replace(/^\[run [^\]]*\]\n?/, '')

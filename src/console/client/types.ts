@@ -60,6 +60,7 @@ export interface StreamEntry {
   ts?: number | null;
   toolCalls?: Array<{
     id: string;
+    name?: string;
     code: string;
     detail?: string;
     display?: {
@@ -67,7 +68,18 @@ export interface StreamEntry {
       heredocs: Array<{ token: string; source: string }>;
     };
     operations?: Array<{
-      kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
+      kind:
+        | 'edit'
+        | 'mind'
+        | 'shell'
+        | 'file'
+        | 'git'
+        | 'computer'
+        | 'web'
+        | 'schedule'
+        | 'worker'
+        | 'memory'
+        | 'api';
       name: string;
       target: string;
       targetLiteral?: boolean;

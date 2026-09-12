@@ -31,6 +31,12 @@ The client's `watch` frame selects at most one worker detail, one Mind detail, a
 
 Sent-message cards include voice playback status, elapsed playback time, and an expandable generated speech transcript when available. An interrupted transcript may include words that had not yet played; readable text delivery remains separate from acoustic playback.
 
+Tool cards expand source/arguments and results independently. Returned values, console output, and the original tool result have separate copy and line-wrap controls; output stays literal text. Non-`run` tools retain their names and arguments. A result whose call is outside loaded history remains inspectable until backfill pairs it with its call.
+
+Action summaries cover filesystem operations, Mind, browser/desktop, web search/extraction, scheduling, workers, memory, and other `elpis.*` calls. These bounded source previews are marked **in source**: a call appearing in code does not establish that it executed. Only literal Mind IDs become navigation links. Runtime command/read receipts show their own status, duration, output preview, and expandable streams; a run's aggregate result is never attributed to an individual command. Runtime truncation is explicit, and expanding cannot recover bytes the runtime did not retain. Edit cards offer before/after inspection even for short edits.
+
+For browser acceptance, build, run `node test/fixtures/console-ui-server.mjs`, and open `http://127.0.0.1:8799` with `playwright-cli`. Then run `playwright-cli run-code --filename test/console-tool-cards.browser.js` in that browser session. The fixture uses the built Console server and Hub with synthetic history; it does not connect to an inhabitant. Checks cover full output, copying, wrapping, literal rendering, receipt attribution, keyboard controls, and narrow screens. Screenshots stay in ignored `.playwright-cli/` storage.
+
 ## Privacy and isolation
 
 Context may expose system prompts, durable memory, conversation history, and tool schemas. Thread, Mind, worker receipts, secretary history, and logs may expose private work. Treat the entire console as a private administrative surface.

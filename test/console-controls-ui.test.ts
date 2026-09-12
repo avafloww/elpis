@@ -276,11 +276,11 @@ test('runtime command cards use only per-invocation receipts', () => {
   assert.match(thread, /hasRuntimeOperationLedger\(result\)/);
   assert.match(
     thread,
-    /operation\.kind !== 'shell'[\s\S]*operation\.kind !== 'git'[\s\S]*operation\.kind !== 'file'/,
+    /!hasRuntimeCommands \|\|[\s\S]*!operationHasRuntimeReceipt\(operation\)/,
   );
-  assert.match(thread, /<pre>\{receipt\.stdout\}<\/pre>/);
-  assert.match(thread, /<pre>\{receipt\.stderr\}<\/pre>/);
-  assert.match(thread, /<pre>\{receipt\.error\}<\/pre>/);
+  assert.match(thread, /value=\{receipt\.stdout\}/);
+  assert.match(thread, /value=\{receipt\.stderr\}/);
+  assert.match(thread, /value=\{receipt\.error\}/);
   assert.match(thread, /runtime-operation-omitted/);
   assert.doesNotMatch(
     thread,

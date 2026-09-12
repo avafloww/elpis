@@ -600,6 +600,60 @@ test('sandbox operation extraction types direct Mind, edit, shell, file, and des
   ]);
 });
 
+test('action summaries cover capability groups and filesystem writes without inventing execution', () => {
+  const source = [
+    "await elpis.search('durable queues')",
+    "await elpis.extract('https://example.com/guide')",
+    "elpis.schedule({ after: '2h', reason: 'review' })",
+    'await elpis.worker.status(workerId)',
+    "elpis.remember('A synthetic note')",
+    'await elpis.ext.example.inspect(target)',
+    "fs.appendFileSync(path, 'hello')",
+    "// elpis.restart('ignored comment')",
+    'const text = \'elpis.search("ignored literal")\'',
+  ].join('\n');
+  const operations = extractSandboxOperations(source);
+  assert.deepEqual(
+    operations.map(({ kind, name }) => [kind, name]),
+    [
+      ['web', 'elpis.search'],
+      ['web', 'elpis.extract'],
+      ['schedule', 'elpis.schedule'],
+      ['worker', 'elpis.worker.status'],
+      ['memory', 'elpis.remember'],
+      ['api', 'elpis.ext.example.inspect'],
+      ['file', 'fs.appendFileSync'],
+    ],
+  );
+  assert.equal(operations[3]?.targetLiteral, false);
+  assert.equal(operations[3]?.target, 'workerId');
+  assert.equal(extractSandboxOperations(source.repeat(100)).length, 40);
+});
+
+test('non-run tools keep their name and arguments in inspectable cards', () => {
+  const entry = serializeMessage(
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'call-skill',
+          type: 'function',
+          function: {
+            name: 'skill',
+            arguments: '{"names":["example"]}',
+          },
+        },
+      ],
+    },
+    1,
+    null,
+  );
+  assert.deepEqual(entry.toolCalls, [
+    { id: 'call-skill', name: 'skill', code: '{"names":["example"]}' },
+  ]);
+});
+
 test('serializeMessage delivers backend-owned person, harness, and watch provenance', () => {
   const person = serializeMessage(
     {

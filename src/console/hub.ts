@@ -179,9 +179,10 @@ export interface StreamEntry {
   channel: string;
   content: string;
   reasoning_content?: string;
-  /** For assistant turns: executable run calls remain action cards. */
+  /** Assistant tool calls remain inspectable alongside their results. */
   toolCalls?: {
     id: string;
+    name?: string;
     code: string;
     detail?: string;
     display?: { code: string; heredocs: DisplayHeredoc[] };
@@ -211,7 +212,18 @@ export interface StreamEntry {
 }
 
 export interface SandboxOperation {
-  kind: 'edit' | 'mind' | 'shell' | 'file' | 'git' | 'computer';
+  kind:
+    | 'edit'
+    | 'mind'
+    | 'shell'
+    | 'file'
+    | 'git'
+    | 'computer'
+    | 'web'
+    | 'schedule'
+    | 'worker'
+    | 'memory'
+    | 'api';
   name: string;
   target: string;
   targetLiteral?: boolean;
@@ -1726,14 +1738,7 @@ function operationKind(name: string): SandboxOperation['kind'] | null {
   if (name.startsWith('elpis.mind.')) return 'mind';
   if (name === 'elpis.sh' || name === 'elpis.sudo') return 'shell';
   if (name.startsWith('elpis.git.')) return 'git';
-  if (
-    name === 'elpis.read' ||
-    name === 'elpis.grep' ||
-    name.startsWith('fs.read') ||
-    name.startsWith('fs.write') ||
-    name.startsWith('fs.promises.read') ||
-    name.startsWith('fs.promises.write')
-  )
+  if (name === 'elpis.read' || name === 'elpis.grep' || name.startsWith('fs.'))
     return 'file';
   if (
     name.startsWith('elpis.computer.') ||
@@ -1741,6 +1746,14 @@ function operationKind(name: string): SandboxOperation['kind'] | null {
     name.startsWith('elpis.browser.')
   )
     return 'computer';
+  if (name === 'elpis.search' || name === 'elpis.extract') return 'web';
+  if (name === 'elpis.schedule' || name.startsWith('elpis.schedule.'))
+    return 'schedule';
+  if (name.startsWith('elpis.worker.') || name.startsWith('elpis.secretary.'))
+    return 'worker';
+  if (/^elpis\.(remember|memory|focus|state|ponder)(\.|$)/.test(name))
+    return 'memory';
+  if (name.startsWith('elpis.')) return 'api';
   return null;
 }
 
@@ -1923,6 +1936,12 @@ export function serializeMessage(
           ...(detail ? { detail } : {}),
           ...(display ? { display } : {}),
           ...(operations.length ? { operations } : {}),
+        });
+      } else {
+        runCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          code: tc.function.arguments,
         });
       }
     }

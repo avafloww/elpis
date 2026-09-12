@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useId,
 } from 'preact/hooks';
 import type { ConsoleActions } from '../use-console.js';
 import type { ConsoleState, MindItem, StreamEntry } from '../types.js';
@@ -25,6 +26,7 @@ import {
 } from '../run.js';
 import { isNearBottom, preservePrependScrollTop } from '../scroll.js';
 import { clock, duration, Markdown } from './common.js';
+import { ToolOutput } from './tool-output.js';
 
 function roomMatches(entry: StreamEntry, room: string): boolean {
   if (room === 'all' || entry.channel === room) return true;
@@ -259,33 +261,110 @@ function CodeCard({
   startedAt?: number | null;
 }) {
   const [open, setOpen] = useState(false);
-  const detail = call.detail || 'run code';
+  const sourceId = useId();
+  const isRun = !call.name || call.name === 'run';
+  const detail = call.detail || (isRun ? 'run code' : `${call.name} tool`);
   const count = statementCount(call.code);
-  const elapsed = duration(startedAt, result?.ts);
+  const elapsed =
+    typeof startedAt === 'number' && typeof result?.ts === 'number'
+      ? duration(startedAt, result.ts)
+      : '';
   const outcome = result ? splitRunResult(result.content) : null;
   return (
     <div
       class={`code-card ${outcome && !outcome.ok ? 'code-card-failed' : ''}`}
     >
-      <button class='code-card-head' onClick={() => setOpen(!open)}>
+      <button
+        class='code-card-head'
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls={sourceId}
+      >
         <span class='code-caret'>{open ? '▾' : '▸'}</span>
-        <span class='surface-label'>ran code</span>
-        <span class='code-summary'>
-          {count} {count === 1 ? 'statement' : 'statements'} · {detail}
-        </span>
+        <span class='surface-label'>{call.name || 'run'}</span>
+        <strong class='code-summary'>{detail}</strong>
         <span class='surface-spacer' />
+        <span
+          class={`tool-status ${!result ? 'tool-status-pending' : outcome && !outcome.ok ? 'tool-status-failed' : ''}`}
+        >
+          {!result
+            ? 'awaiting result'
+            : object(result.run).detached === true
+              ? 'background'
+              : !isRun
+                ? 'result received'
+                : outcome?.ok
+                  ? 'completed'
+                  : 'failed'}
+        </span>
         <span class='surface-time'>{elapsed}</span>
       </button>
       {open ? (
-        <pre class='code-body'>
-          <FormattedCode call={call} />
-        </pre>
+        <div id={sourceId}>
+          <ToolOutput
+            label={isRun ? 'Source' : 'Arguments'}
+            value={call.code}
+            meta={
+              isRun
+                ? `${count} ${count === 1 ? 'statement' : 'statements'}`
+                : undefined
+            }
+          >
+            {isRun ? <FormattedCode call={call} /> : call.code}
+          </ToolOutput>
+        </div>
       ) : null}
-      <div class='code-result'>
-        <span>result</span>
-        <strong>{result ? resultSummary(result.content) : 'running…'}</strong>
-        <code title={call.id}>{call.id}</code>
-      </div>
+      {result ? (
+        <RunResult result={result} />
+      ) : (
+        <div class='tool-result-pending'>No result received yet.</div>
+      )}
+    </div>
+  );
+}
+
+function RunResult({ result }: { result: StreamEntry }) {
+  const [open, setOpen] = useState(false);
+  const resultId = useId();
+  const outcome = splitRunResult(result.content);
+  return (
+    <div class={`run-result ${outcome.ok ? '' : 'run-result-failed'}`}>
+      <button
+        class='code-result'
+        aria-expanded={open}
+        aria-controls={resultId}
+        onClick={() => setOpen(!open)}
+      >
+        <span class='code-caret'>{open ? '▾' : '▸'}</span>
+        <span>{outcome.ok ? 'result' : 'error'}</span>
+        <strong>{resultSummary(result.content, 360)}</strong>
+        <span class='tool-disclosure'>{open ? 'Collapse' : 'Expand'}</span>
+      </button>
+      {open ? (
+        <div id={resultId} class='run-result-detail'>
+          {outcome.value ? (
+            <ToolOutput
+              label={outcome.ok ? 'Returned value' : 'Error'}
+              value={outcome.value}
+            />
+          ) : null}
+          {outcome.console ? (
+            <ToolOutput label='Console' value={outcome.console} />
+          ) : null}
+          {!outcome.value && !outcome.console ? (
+            <p class='runtime-no-output'>
+              No returned value or console output.
+            </p>
+          ) : null}
+          <details class='raw-receipt'>
+            <summary>
+              Raw tool result
+              {result.tool_call_id ? ` · ${result.tool_call_id}` : ''}
+            </summary>
+            <ToolOutput label='Raw result' value={result.content} />
+          </details>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -416,41 +495,29 @@ export function runtimeOperationReceiptsDropped(
     : 0;
 }
 
-function mindOperationLabel(name: string): string {
-  const action = name.split('.').at(-1) ?? 'operation';
-  return (
-    (
-      {
-        add: 'created Mind item',
-        done: 'completed Mind item',
-        cancel: 'cancelled Mind item',
-        comment: 'commented on Mind',
-        reply: 'replied in Mind',
-        update: 'updated Mind item',
-        status: 'changed Mind status',
-        get: 'read Mind item',
-        list: 'listed Mind items',
-        ready: 'read ready Mind items',
-        graph: 'read Mind graph',
-        depends: 'linked Mind dependency',
-        unlinks: 'removed Mind dependency',
-        tag: 'tagged Mind item',
-        untag: 'untagged Mind item',
-        remind: 'set Mind reminder',
-      } as Record<string, string>
-    )[action] ?? `Mind · ${action}`
-  );
+function operationLabel(operation: OperationReceipt): string {
+  const action = operation.name.split('.').at(-1) ?? 'operation';
+  if (operation.kind === 'edit') return 'file edit';
+  if (operation.kind === 'shell') return 'command';
+  if (operation.kind === 'mind') return `Mind · ${action}`;
+  if (operation.kind === 'file') return `file · ${action}`;
+  if (operation.kind === 'git') return `git · ${action}`;
+  if (operation.kind === 'web')
+    return action === 'search' ? 'web search' : 'read webpage';
+  if (operation.kind === 'schedule')
+    return action === 'schedule' ? 'schedule' : `schedule · ${action}`;
+  return operation.name.replace(/^elpis\./, '').replaceAll('.', ' · ');
 }
 
-function operationLabel(operation: OperationReceipt): string {
-  if (operation.kind === 'edit') return 'edited file';
-  if (operation.kind === 'shell') return 'ran command';
-  if (operation.kind === 'mind') return mindOperationLabel(operation.name);
-  if (operation.kind === 'file')
-    return /write|append/i.test(operation.name) ? 'wrote file' : 'read file';
-  if (operation.kind === 'git')
-    return `git · ${operation.name.split('.').at(-1) ?? 'operation'}`;
-  return 'desktop';
+// An empty ledger is meaningful, but it does not instrument arbitrary fs calls.
+export function operationHasRuntimeReceipt(operation: {
+  name: string;
+}): boolean {
+  return (
+    ['elpis.sh', 'elpis.sudo', 'elpis.read', 'elpis.grep'].includes(
+      operation.name,
+    ) || operation.name.startsWith('elpis.git.')
+  );
 }
 
 export function operationMindId(operation: {
@@ -470,60 +537,102 @@ export function operationReceiptUseful(operation: {
   target: string;
   targetLiteral?: boolean;
 }): boolean {
-  if (operation.kind === 'mind') return operationMindId(operation) !== null;
-  if (operation.kind === 'file') return operation.targetLiteral === true;
+  if (!operation.target.trim()) return false;
   return true;
 }
 
 function OperationCard({
   operation,
   callId,
-  detail,
   mindItems,
   onOpenMind,
 }: {
   operation: OperationReceipt;
-  result?: StreamEntry;
   callId: string;
-  detail?: string;
   mindItems: MindItem[];
   onOpenMind(id: string): void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const target = operationDisplayTarget(operation.target);
   const mindId = operationMindId(operation);
-  if (operation.kind === 'mind') {
-    if (!mindId) return null;
-    const item = mindItems.find((candidate) => candidate.id === mindId);
-    return (
-      <button
-        class='operation-compact operation-mind-link'
-        onClick={() => onOpenMind(mindId)}
-        title={`Open ${mindId} in Mind`}
-      >
-        <span class='surface-label'>{operationLabel(operation)}</span>
-        <strong>{item?.title || mindId}</strong>
-        {item?.status ? <span>{item.status.replaceAll('_', ' ')}</span> : null}
-        <code>{mindId}</code>
-        <i>→</i>
-      </button>
-    );
-  }
+  const item = mindId
+    ? mindItems.find((candidate) => candidate.id === mindId)
+    : undefined;
   if (!operationReceiptUseful(operation)) return null;
   if (operation.kind !== 'edit') {
     const summary =
-      operation.kind === 'computer'
-        ? detail || target
-        : operation.kind === 'git' && target === '—'
-          ? operation.name.split('.').at(-1) || 'operation'
-          : target;
+      item?.title ||
+      mindId ||
+      (operation.target === '—'
+        ? 'No arguments'
+        : operation.kind === 'file'
+          ? target
+          : operation.target);
+    const args =
+      operation.args ?? (operation.target === '—' ? [] : [operation.target]);
     return (
       <div
-        class={`operation-compact operation-${operation.kind}-compact`}
-        title={`${operation.name} · ${callId}`}
+        class={`operation-card operation-action operation-${operation.kind}`}
       >
-        <span class='surface-label'>{operationLabel(operation)}</span>
-        <strong>{summary}</strong>
+        <button
+          class={`operation-compact operation-${operation.kind}-compact`}
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
+          <span class='surface-label'>{operationLabel(operation)}</span>
+          <strong title={summary}>{summary}</strong>
+          <span
+            class='operation-provenance'
+            title='This action appears in the run source. It is not an execution receipt.'
+          >
+            in source
+          </span>
+          <i>{expanded ? '▾' : '▸'}</i>
+        </button>
+        {!expanded && args.length > 1 ? (
+          <pre class='operation-argument-preview'>
+            {args.slice(1).join(' · ')}
+          </pre>
+        ) : null}
+        {mindId ? (
+          <button
+            class='operation-mind-link'
+            onClick={() => onOpenMind(mindId)}
+            title={`Open ${mindId} in Mind`}
+          >
+            Open in Mind →{' '}
+            {item?.status ? (
+              <span>{item.status.replaceAll('_', ' ')}</span>
+            ) : null}
+          </button>
+        ) : null}
+        {expanded ? (
+          <div class='operation-action-detail'>
+            <div class='operation-detail-meta'>
+              <code>{operation.name}</code>
+              <span>Source summary · {callId}</span>
+            </div>
+            {args.map((arg, index) => (
+              <ToolOutput
+                key={index}
+                label={`Argument ${index + 1}`}
+                value={arg}
+                meta={
+                  index === 0 && !operation.targetLiteral
+                    ? 'expression'
+                    : undefined
+                }
+              />
+            ))}
+            {!args.length ? (
+              <p class='runtime-no-output'>Called without arguments.</p>
+            ) : null}
+            <p class='operation-source-note'>
+              Arguments are bounded source previews. Open the run source and
+              result for full context.
+            </p>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -534,11 +643,13 @@ function OperationCard({
   const language = codeLanguageForPath(operation.target);
   const added = diff.filter((line) => line.kind === 'add').length;
   const removed = diff.filter((line) => line.kind === 'remove').length;
-  const canExpand = (operation.after?.split('\n').length ?? 0) > 8;
+  const canExpand =
+    operation.before !== undefined && operation.after !== undefined;
   return (
     <div class='operation-card operation-edit'>
       <header>
-        <span class='surface-label'>edited file</span>
+        <span class='surface-label'>file edit</span>
+        <span class='operation-provenance'>in source</span>
         <strong>{target}</strong>
         <span class='surface-spacer' />
         <span class='operation-counts'>
@@ -546,10 +657,15 @@ function OperationCard({
           <i>−{removed}</i>
         </span>
       </header>
-      {expanded && operation.after ? (
-        <pre class='operation-full-value'>
-          <HighlightedCode value={operation.after} language={language} />
-        </pre>
+      {expanded && canExpand ? (
+        <div>
+          <ToolOutput label='Before' value={operation.before!}>
+            <HighlightedCode value={operation.before!} language={language} />
+          </ToolOutput>
+          <ToolOutput label='After' value={operation.after!}>
+            <HighlightedCode value={operation.after!} language={language} />
+          </ToolOutput>
+        </div>
       ) : diff.length ? (
         <pre class='operation-diff'>
           {diff.map((line, index) => (
@@ -566,10 +682,10 @@ function OperationCard({
       <footer>
         {canExpand ? (
           <button onClick={() => setExpanded(!expanded)}>
-            {expanded ? '− collapse' : '+ show full value'}
+            {expanded ? 'Show diff' : 'Show before / after'}
           </button>
         ) : (
-          <span>edit receipt</span>
+          <span>See run source for edit arguments</span>
         )}
         <span class='surface-spacer' />
         <code title={callId}>{callId}</code>
@@ -613,7 +729,7 @@ function RuntimeOperationCard({
   callId: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const canExpand = receipt.state !== 'running';
+  const outputId = useId();
   const label =
     receipt.kind === 'git'
       ? `git · ${receipt.name}`
@@ -624,14 +740,20 @@ function RuntimeOperationCard({
         : 'ran command';
   const state = runtimeReceiptState(receipt);
   const elapsed = runtimeReceiptDuration(receipt);
+  const preview =
+    receipt.error ||
+    (receipt.ok === false
+      ? receipt.stderr || receipt.stdout
+      : receipt.stdout || receipt.stderr);
   return (
     <div
       class={`runtime-operation runtime-operation-${receipt.state} ${receipt.ok === false ? 'runtime-operation-bad' : ''}`}
     >
       <button
         class={`operation-compact operation-${receipt.kind}-compact`}
-        onClick={() => canExpand && setExpanded(!expanded)}
-        aria-expanded={canExpand ? expanded : undefined}
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        aria-controls={outputId}
         title={`${receipt.name} · ${callId} · invocation ${receipt.sequence + 1}`}
       >
         <span class='surface-label'>{label}</span>
@@ -639,55 +761,93 @@ function RuntimeOperationCard({
           {receipt.command}
           {receipt.commandTruncated ? '…' : ''}
         </strong>
-        <span>{state}</span>
+        <span
+          class={`tool-status ${receipt.ok === false ? 'tool-status-failed' : ''}`}
+        >
+          {state}
+        </span>
         {elapsed ? <code>{elapsed}</code> : null}
-        {canExpand ? <i>{expanded ? '▾' : '▸'}</i> : null}
+        <i>{expanded ? '▾' : '▸'}</i>
       </button>
-      {expanded ? (
-        <div class='runtime-operation-output'>
+      {!expanded ? (
+        <div class='runtime-operation-preview'>
+          {preview ? (
+            <pre>{preview.slice(0, 500)}</pre>
+          ) : (
+            <span>
+              {receipt.state === 'running'
+                ? 'Waiting for output…'
+                : 'No output'}
+            </span>
+          )}
+          <button
+            onClick={() => setExpanded(true)}
+            aria-expanded={false}
+            aria-controls={outputId}
+          >
+            Expand output
+          </button>
+        </div>
+      ) : (
+        <div class='runtime-operation-output' id={outputId}>
+          <ToolOutput
+            label={receipt.kind === 'file' ? 'Target' : 'Command'}
+            value={receipt.command}
+            meta={`Invocation ${receipt.sequence + 1}`}
+            warning={
+              receipt.commandTruncated
+                ? 'Command preview was truncated by the runtime.'
+                : undefined
+            }
+          />
           {receipt.stdout ? (
-            <section>
-              <header>
-                <span>stdout</span>
-                <code>
-                  {streamLabel(
-                    receipt.stdout,
-                    receipt.stdoutBytes,
-                    receipt.stdoutTruncated,
-                  )}
-                </code>
-              </header>
-              <pre>{receipt.stdout}</pre>
-            </section>
+            <ToolOutput
+              label={receipt.kind === 'file' ? 'Content' : 'stdout'}
+              value={receipt.stdout}
+              meta={streamLabel(
+                receipt.stdout,
+                receipt.stdoutBytes,
+                receipt.stdoutTruncated,
+              )}
+              warning={
+                receipt.stdoutTruncated
+                  ? 'Output was truncated by the runtime. Only the retained portion is available.'
+                  : undefined
+              }
+            />
           ) : null}
           {receipt.stderr ? (
-            <section class='runtime-stderr'>
-              <header>
-                <span>stderr</span>
-                <code>
-                  {streamLabel(
-                    receipt.stderr,
-                    receipt.stderrBytes,
-                    receipt.stderrTruncated,
-                  )}
-                </code>
-              </header>
-              <pre>{receipt.stderr}</pre>
-            </section>
+            <div class='runtime-stderr'>
+              <ToolOutput
+                label='stderr'
+                value={receipt.stderr}
+                meta={streamLabel(
+                  receipt.stderr,
+                  receipt.stderrBytes,
+                  receipt.stderrTruncated,
+                )}
+                warning={
+                  receipt.stderrTruncated
+                    ? 'Output was truncated by the runtime. Only the retained portion is available.'
+                    : undefined
+                }
+              />
+            </div>
           ) : null}
           {receipt.error ? (
-            <section class='runtime-stderr'>
-              <header>
-                <span>error</span>
-              </header>
-              <pre>{receipt.error}</pre>
-            </section>
+            <div class='runtime-stderr'>
+              <ToolOutput label='Error' value={receipt.error} />
+            </div>
           ) : null}
           {!receipt.stdout && !receipt.stderr && !receipt.error ? (
-            <div class='runtime-no-output'>no output</div>
+            <div class='runtime-no-output'>
+              {receipt.state === 'running'
+                ? 'Waiting for output…'
+                : 'no output'}
+            </div>
           ) : null}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
@@ -1022,6 +1182,7 @@ function Divider({ entry }: { entry: StreamEntry }) {
 function Entry({
   entry,
   resultByCall,
+  callIds,
   room,
   agent,
   mindItems,
@@ -1029,12 +1190,35 @@ function Entry({
 }: {
   entry: StreamEntry;
   resultByCall: Map<string, StreamEntry>;
+  callIds: Set<string>;
   room: string;
   agent: string;
   mindItems: MindItem[];
   onOpenMind(id: string): void;
 }) {
-  if (entry.kind === 'think-result' || entry.kind === 'tool') return null;
+  if (entry.kind === 'think-result') return null;
+  if (entry.kind === 'tool') {
+    if (entry.tool_call_id && callIds.has(entry.tool_call_id)) return null;
+    return (
+      <Item entry={entry} room={room}>
+        <div class='code-card'>
+          <div class='orphan-result-label'>
+            Tool result · call outside loaded history
+          </div>
+          <RunResult result={entry} />
+        </div>
+        {(entry.sends ?? []).map((send, index) => (
+          <SendCard
+            key={index}
+            channel={send.channel}
+            value={send.text}
+            voice={send.voice}
+          />
+        ))}
+        <WakeCard entry={entry} />
+      </Item>
+    );
+  }
   if (['compaction', 'cachebust', 'cleared', 'yieldnudge'].includes(entry.kind))
     return (
       <Item entry={entry} room={room}>
@@ -1098,18 +1282,13 @@ function Entry({
             {(call.operations ?? [])
               .filter(
                 (operation) =>
-                  !hasRuntimeCommands ||
-                  (operation.kind !== 'shell' &&
-                    operation.kind !== 'git' &&
-                    operation.kind !== 'file'),
+                  !hasRuntimeCommands || !operationHasRuntimeReceipt(operation),
               )
               .map((operation, index) => (
                 <OperationCard
                   key={`${operation.name}-${index}`}
                   operation={operation}
-                  result={result}
                   callId={call.id}
-                  detail={call.detail}
                   mindItems={mindItems}
                   onOpenMind={onOpenMind}
                 />
@@ -1176,6 +1355,15 @@ export function ThreadStream({
       ),
     [entries],
   );
+  const callIds = useMemo(
+    () =>
+      new Set(
+        entries.flatMap((entry) =>
+          (entry.toolCalls ?? []).map((call) => call.id),
+        ),
+      ),
+    [entries],
+  );
   return (
     <div class='thread-stream'>
       {entries.map((entry) => (
@@ -1183,6 +1371,7 @@ export function ThreadStream({
           key={entry.id}
           entry={entry}
           resultByCall={resultByCall}
+          callIds={callIds}
           room={room}
           agent={agent}
           mindItems={mindItems}
