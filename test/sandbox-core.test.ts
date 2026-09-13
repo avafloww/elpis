@@ -45,6 +45,7 @@ const CORE_KEYS = [
   'inbound',
   'memory',
   'mind',
+  'personSettings',
   'ponder',
   'preview',
   'remember',

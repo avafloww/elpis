@@ -96,7 +96,7 @@ Elpis uses distinct stores for distinct kinds of continuity:
 
 - **Markdown and files:** identity, memory, people, open questions, self-authored notes.
 - **JSONL transcripts:** complete ordered message history and provider working-state envelopes.
-- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, density estimates, native worker sessions/mailbox, historical fleet rows, and Mind.
+- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, guild-scoped Discord person notification preferences, density estimates, native worker sessions/mailbox, historical fleet rows, and Mind.
 - **process memory:** the active message list and persistent JavaScript bindings.
 
 See [`persistence.md`](persistence.md).

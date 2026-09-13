@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    26,
+    27,
   );
   assert.deepEqual(
     (
@@ -193,6 +193,7 @@ test('current migration prefix preserves fleet history and creates resident stat
         component: 'core',
         name: '0026-gateway-rotation-proposal-checkpoint',
       },
+      { component: 'core', name: '0027-discord-person-settings' },
     ],
   );
   db.close();
@@ -253,7 +254,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    26,
+    27,
   );
   assert.deepEqual(
     (
@@ -277,6 +278,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0024-global-secretary-authority',
       '0025-gateway-resident-state',
       '0026-gateway-rotation-proposal-checkpoint',
+      '0027-discord-person-settings',
     ],
   );
   runMigrations(db);
@@ -308,7 +310,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    13,
+    14,
   );
   db.close();
 });
@@ -348,7 +350,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 26);
+  assert.equal(version, 27);
   assert.equal(
     (
       reopened

@@ -100,6 +100,7 @@ import {
 } from './store/changelog.js';
 import { createChannelDirectory } from './store/channels.js';
 import { createMuteStore } from './store/mutes.js';
+import { createDiscordPersonSettingsStore } from './store/discord-person-settings.js';
 import { openDatabase } from './store/db.js';
 import { createGatewayResidentStore } from './store/gateway-resident.js';
 import type { GatewayLlmFetch } from './llm/gateway-client.js';
@@ -142,6 +143,7 @@ export interface ElpisRuntimeAdapters {
   loadConfigFile?: typeof loadConfigFile;
   openDatabase?: typeof openDatabase;
   createGatewayResidentStore?: typeof createGatewayResidentStore;
+  createDiscordPersonSettingsStore?: typeof createDiscordPersonSettingsStore;
   materializeGatewayConfig?: typeof materializeGatewayConfig;
   gatewayLlmFetch?: GatewayLlmFetch;
   fetchContextWindow?: typeof fetchContextWindow;
@@ -442,6 +444,10 @@ export async function createElpisRuntime(
   // Logged now — not merely constructed silently — so a restart never hides an
   // active mute from the operator.
   const mutes = createMuteStore(db);
+  const discordPersonSettings = (
+    adapters.createDiscordPersonSettingsStore ??
+    createDiscordPersonSettingsStore
+  )(db);
   const activeMutes = mutes.all();
   if (activeMutes.length > 0) {
     log(
@@ -562,6 +568,7 @@ export async function createElpisRuntime(
       ? replayIdentityForConfig(configForLlmRole(config, 'motor'))
       : null,
     memory,
+    personSettings: { discord: discordPersonSettings },
     extensions,
     modules,
     profile,
@@ -788,6 +795,7 @@ export async function createElpisRuntime(
     feedback,
     usage: usageTracker ? () => usageTracker.fetchNow() : undefined,
     mutes,
+    personSettings: discordPersonSettings,
     mind,
     emotes,
   });

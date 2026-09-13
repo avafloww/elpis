@@ -88,11 +88,20 @@ test('Discord replies use first chunk only and never retry a rejected reference'
       messageReference: '123',
       failIfNotExists: true,
     });
-    assert.deepEqual(payloads[0].allowedMentions, { repliedUser: false });
+    assert.deepEqual(payloads[0].allowedMentions, {
+      parse: [],
+      users: [],
+      repliedUser: false,
+    });
     assert.equal(payloads[0].files.length, 1);
     for (const payload of payloads.slice(1)) {
       assert.equal(payload.reply, undefined);
       assert.equal(payload.files, undefined);
+      assert.deepEqual(payload.allowedMentions, {
+        parse: [],
+        users: [],
+        repliedUser: false,
+      });
     }
     payloads.length = 0;
     fail = true;
@@ -104,7 +113,12 @@ test('Discord replies use first chunk only and never retry a rejected reference'
     fail = false;
     payloads.length = 0;
     await agent.send('1002', 'plain');
-    assert.deepEqual(payloads, [{ content: 'plain' }]);
+    assert.deepEqual(payloads, [
+      {
+        content: 'plain',
+        allowedMentions: { parse: [], users: [], repliedUser: false },
+      },
+    ]);
   } finally {
     agent.stop();
     client.destroy();

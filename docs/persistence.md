@@ -71,7 +71,7 @@ The consolidation prompt treats the data directory as the inhabitant's private r
 
 `elpis-data/elpis.db` uses Node's SQLite binding in WAL mode. Current tables cover:
 
-- channel directory and moderation state;
+- channel directory, moderation state, and guild-scoped Discord person notification preferences;
 - feedback and message localization;
 - scheduled tasks;
 - OAuth credentials;

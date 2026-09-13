@@ -9,13 +9,17 @@ test('reply ID validation is decimal, nonempty and bounded', () => {
   for (const value of [undefined, '123', '1'.repeat(20)])
     validateReplyTo(value);
 });
-test('only first chunk references original without reply ping; no-reply stays unchanged', () => {
+test('only first chunk references original while every chunk suppresses implicit mentions', () => {
   assert.deepEqual(discordReplyOptions('123', 0), {
     reply: { messageReference: '123', failIfNotExists: true },
-    allowedMentions: { repliedUser: false },
+    allowedMentions: { parse: [], users: [], repliedUser: false },
   });
-  assert.deepEqual(discordReplyOptions('123', 1), {});
-  assert.deepEqual(discordReplyOptions(undefined, 0), {});
+  assert.deepEqual(discordReplyOptions('123', 1), {
+    allowedMentions: { parse: [], users: [], repliedUser: false },
+  });
+  assert.deepEqual(discordReplyOptions(undefined, 0), {
+    allowedMentions: { parse: [], users: [], repliedUser: false },
+  });
 });
 test('Agent rejects console reply metadata before accounting', async () => {
   const agent = { turnSendScope: null, sendsThisTurn: 0 };

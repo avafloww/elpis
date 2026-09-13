@@ -1,4 +1,8 @@
-import { validateReplyTo, discordReplyOptions } from '../lib/outbound.js';
+import {
+  discordMentionUserIds,
+  discordMessageOptions,
+  validateReplyTo,
+} from '../lib/outbound.js';
 // discord.ts — gateway wiring, message in/out, chunking, slash commands.
 //
 // - intents: Guilds, GuildMessages, MessageContent, GuildMessageReactions (the
@@ -83,6 +87,7 @@ import {
   type GuildIndex,
 } from './wake.js';
 import type { MuteStore } from '../store/mutes.js';
+import type { DiscordPersonSettingsStore } from '../store/discord-person-settings.js';
 import type { EmoteRegistry } from './emotes.js';
 import { restartHarnessService } from '../lib/lifecycle.js';
 import { sniffFileMediaType } from '../lib/image.js';
@@ -882,8 +887,9 @@ export function resolveMentions(content: string, names: MentionNames): string {
 }
 
 /** The reverse of `resolveMentions`: rewrite outbound `@Name` tokens to
- * Discord's `<@id>` markup for names the guild's member directory already
- * knows about, so a mention the agent writes as prose actually pings. Only
+ * Discord's clickable `<@id>` markup for names the guild's member directory
+ * already knows about. Notification remains separately gated by the persisted
+ * guild+user preference applied after chunking. Only
  * an EXACT key match in `nameToId` converts — `@aster` becomes `<@123>` only
  * when `'aster'` is a key; a typo or someone not in the directory is left as
  * plain text rather than guessed at (same conservatism as the inbound
@@ -1265,6 +1271,11 @@ export function createDiscord(
     usage?: () => Promise<ProviderUsageSnapshot | null>;
     /** Killswitch mute/deafen state, consulted by the wake classifier. */
     mutes?: MuteStore;
+    /** Guild-scoped user mention notification preferences. */
+    personSettings?: Pick<
+      DiscordPersonSettingsStore,
+      'allowsMentionNotification'
+    >;
     /** Private dependency-aware work graph, exposed through /mind in home only. */
     mind?: MindService;
     /** Custom emote/sticker registry (first-use-per-context-window image
@@ -1298,6 +1309,12 @@ export function createDiscord(
   const droppedLogged = new Set<string>();
 
   const client = new Client({
+    allowedMentions: {
+      parse: [],
+      users: [],
+      roles: [],
+      repliedUser: false,
+    },
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
@@ -2343,17 +2360,38 @@ export function createDiscord(
       outboundMentionDirectory(guild),
     );
     const chunks = chunkText(outboundText);
+    const notifiedUsers = new Set<string>();
+    if (guildId && deps?.personSettings) {
+      const mentionedUsers = new Set(
+        chunks.flatMap((chunk) => discordMentionUserIds(chunk)),
+      );
+      try {
+        for (const userId of mentionedUsers) {
+          if (deps.personSettings.allowsMentionNotification(guildId, userId)) {
+            notifiedUsers.add(userId);
+          }
+        }
+      } catch {
+        notifiedUsers.clear();
+        log.warn(
+          `Discord mention preference lookup failed for guild ${guildId}; sending without notifications`,
+        );
+      }
+    }
     const attachments = (opts?.files || []).map((f) => {
       const name = f.name || path.basename(f.path);
       return new AttachmentBuilder(f.path, { name });
     });
     for (let i = 0; i < chunks.length; i++) {
+      const users = discordMentionUserIds(chunks[i]).filter((id) =>
+        notifiedUsers.has(id),
+      );
       const payload: {
         content: string;
         files?: AttachmentBuilder[];
-      } & ReturnType<typeof discordReplyOptions> = {
+      } & ReturnType<typeof discordMessageOptions> = {
         content: chunks[i],
-        ...discordReplyOptions(opts?.replyTo, i),
+        ...discordMessageOptions(opts?.replyTo, i, users),
       };
       if (i === 0 && attachments.length > 0) payload.files = attachments;
       await channel.send(payload);

@@ -1,4 +1,4 @@
-import { validateReplyTo } from '../lib/outbound.js';
+import { validateDiscordId, validateReplyTo } from '../lib/outbound.js';
 // globals.ts — injected tools, consolidated under the `elpis` namespace.
 // Every harness verb becomes a property of `elpis`, so the agent writes
 // `elpis.sh("whoami")`, not a bare `sh(...)` and not `tools.sh(...)`. Functions
@@ -443,6 +443,28 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     enumerable: true,
     configurable: true,
   });
+
+  e.personSettings = {
+    discord: {
+      get: (guildId: unknown, userId: unknown) => {
+        validateDiscordId(guildId, 'guildId');
+        validateDiscordId(userId, 'userId');
+        const store = deps.personSettings?.discord;
+        if (!store) throw new Error('Discord person settings are not wired');
+        return store.get(guildId, userId);
+      },
+      set: (guildId: unknown, userId: unknown, notifyOnMention: unknown) => {
+        validateDiscordId(guildId, 'guildId');
+        validateDiscordId(userId, 'userId');
+        if (typeof notifyOnMention !== 'boolean') {
+          throw new Error('notifyOnMention must be a boolean');
+        }
+        const store = deps.personSettings?.discord;
+        if (!store) throw new Error('Discord person settings are not wired');
+        return store.set(guildId, userId, notifyOnMention);
+      },
+    },
+  };
 
   // console capture → the CURRENT run's buffer. Reads runScope so each
   // run(code) writes to its own buffer end-to-end (reentrant; a detached run's
@@ -2283,6 +2305,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   if (deps.surface === 'core') {
     const coreElpis = new Set([
       'inbound',
+      'personSettings',
       'channel',
       'memory',
       'remember',

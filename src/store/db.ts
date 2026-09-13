@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 26;
+const SCHEMA_VERSION = 27;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -983,6 +983,21 @@ export function runMigrations(db: DatabaseSync): void {
             AND NEW.rotation_proposed_at IS NULL)
         )
         BEGIN SELECT RAISE(ABORT, 'gateway rotation proposal checkpoint is immutable'); END;
+      `,
+    },
+    {
+      name: '0027-discord-person-settings',
+      sql: `
+        CREATE TABLE discord_person_settings (
+          guild_id TEXT NOT NULL
+            CHECK (length(guild_id) BETWEEN 1 AND 20 AND guild_id NOT GLOB '*[^0-9]*'),
+          user_id TEXT NOT NULL
+            CHECK (length(user_id) BETWEEN 1 AND 20 AND user_id NOT GLOB '*[^0-9]*'),
+          notify_on_mention INTEGER NOT NULL DEFAULT 0
+            CHECK (typeof(notify_on_mention) = 'integer' AND notify_on_mention IN (0, 1)),
+          updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 40),
+          PRIMARY KEY (guild_id, user_id)
+        ) WITHOUT ROWID;
       `,
     },
   ]);

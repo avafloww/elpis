@@ -30,6 +30,7 @@ import type {
 } from './context-resources.js';
 import type { MotorSkills } from './motor-skills.js';
 import type { LlmToolRuntime } from './llm/tool-runtime.js';
+import type { DiscordPersonSettingsStore } from './store/discord-person-settings.js';
 
 export type { SandboxExecutionMetadata } from './sandbox/metadata.js';
 
@@ -140,6 +141,10 @@ export interface SandboxDeps {
     read(): string;
     append(text: string): unknown;
     overwrite(text: string): unknown;
+  };
+  /** Resident-controlled notification preferences, always scoped to exact Discord identities. */
+  personSettings?: {
+    discord: Pick<DiscordPersonSettingsStore, 'get' | 'set'>;
   };
   /** Best-effort repository instruction gate for supported elpis file verbs. */
   contextResources?: Pick<

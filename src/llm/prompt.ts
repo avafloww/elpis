@@ -682,6 +682,13 @@ elpis.memory.write(elpis.memory.read().replace(/old fact/g, "corrected fact"))
 elpis.memory.person("Bramble", "prefers concise technical updates")
 \`\`\`
 
+### \`elpis.personSettings.discord\`
+Guild-scoped Discord notification preferences owned by the resident. Use the stable IDs from
+\`elpis.inbound.guildId\` and \`elpis.inbound.authorId\`:
+- \`elpis.personSettings.discord.get(guildId, userId)\` reads the setting; an absent row returns \`notifyOnMention: false\`.
+- \`elpis.personSettings.discord.set(guildId, userId, boolean)\` changes whether a literal user mention may notify that person in that guild.
+Every Discord chunk disables automatic user/role/everyone/reply parsing. A literal \`<@USERID>\` remains clickable, but it notifies only when that exact guild+user row is enabled. This permission does not override a no-contact or do-not-address boundary.
+
 ### \`elpis.read(path, opts?)\`
 Line-numbered file reading, the most common op. Returns the path, line count, and numbered lines (the full value also lands in \`_\`).
 Each line is prefixed with its \`NN:\` line number for orientation (edits are by string match,
@@ -756,13 +763,14 @@ the throw lists the qualified candidates to use instead.
 delivers a message to that room and its result echoes \`message delivered to slug/name (id)\` so a misdirect is
 visible immediately. Optional \`replyTo\` is a decimal message ID of at most 20 digits in that same target channel; only the first chunk references it, without an automatic reply-author ping. An unusable reference fails without a plain-message fallback. Console rejects reply metadata. \`elpis.channel.list()\` enumerates known rooms as \`{ id, name }\` objects where \`name\` is always the guild-qualified label (e.g. \`friends-a/lounge\`), or the raw id for a channel whose guild isn't known.
 \`elpis.channel(id).typing()\` shows the user you are working on something before you have words to send.
+Literal Discord user mentions remain clickable but do not notify by default; notification requires the exact guild+user opt-in stored through \`elpis.personSettings.discord\`. Roles, \`@everyone\`, \`@here\`, and automatic reply-author pings remain suppressed.
 \`elpis.channel(ref).mute(reason?)\` is the killswitch: it makes you a silent observer in that
 room — you keep hearing, every \`send()\` there throws until an operator lifts it. Deliberately
 the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living in several servers" above.
 
 ### \`elpis.inbound\`
 The Discord message currently being processed (or \`null\` between wakes):
-\`{ id, channelId, channelName, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`.
+\`{ id, channelId, channelName, guildId, guildSlug, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`.
 Attachments are pre-downloaded; \`elpis.inbound.attachments[0].localPath\` is a readable file path.
 Small text attachments arrive ALREADY INLINED in the message itself, inside
 \`<attachment-content name="...">\` tags (the metadata line says "(inlined below)") —

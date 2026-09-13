@@ -23,6 +23,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     DROP TRIGGER gateway_resident_state_no_delete;
     DROP TRIGGER gateway_resident_state_binding_no_update;
     DROP TRIGGER gateway_resident_state_transition_guard;
+    DROP TABLE discord_person_settings;
     DROP TABLE gateway_resident_state;
     DROP TABLE secretary_turns;
     DROP TABLE secretary_sessions;
@@ -87,7 +88,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -147,7 +148,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    26,
+    27,
   );
   assert.equal(
     (

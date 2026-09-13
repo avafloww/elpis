@@ -218,7 +218,11 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component='core'
-        AND name='0026-gateway-rotation-proposal-checkpoint';
+        AND name IN (
+          '0026-gateway-rotation-proposal-checkpoint',
+          '0027-discord-person-settings'
+        );
+    DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;
     PRAGMA user_version=25;
   `);

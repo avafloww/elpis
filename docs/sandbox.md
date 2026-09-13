@@ -111,6 +111,16 @@ A `run` result is internal. The inhabitant speaks through explicit programmatic 
 
 Browser profiles, screenshots, Xauthority, motor traces, and desktop runtime state live under the private data directory. They must never be committed with source.
 
+### Discord person notification settings
+
+`elpis.personSettings.discord.get(guildId, userId)` reads the typed, persistent
+`notifyOnMention` preference. `set(guildId, userId, boolean)` changes it. Both IDs
+must be explicit decimal Discord IDs; use the trusted `guildId` and `authorId` on
+`elpis.inbound` rather than inferring from display names or whichever room was last active.
+An absent row is false. Settings are scoped by guild and user, and the API is available
+in both fresh core and persistent full sandboxes. Mention permission is narrower than
+permission to contact or address someone and never overrides a stronger boundary.
+
 ### Explicit Discord replies
 
 Programmatic `elpis.channel(ref).send(text, { replyTo, files? })` accepts an optional
@@ -119,8 +129,10 @@ The reference belongs only to the explicitly selected channel; it does not resol
 or authorize a destination. All normal send gates still apply. Discord must accept
 the reference or the send fails, without a plain-message fallback or original-message
 lookup. Only the first chunk references it; attachments retain their existing first-chunk
-behavior. Replies do not ping the original author automatically. Existing explicit
-mention behavior is unchanged. Console rejects reply metadata. Successful send
-provenance includes the reply target. Omitting `replyTo` preserves ordinary sends.
+behavior. Every chunk disables automatic user, role, everyone, and reply-author
+mention parsing. Literal `<@USERID>` markup remains clickable and notifies only when
+that exact guild+user preference is enabled through `elpis.personSettings.discord`.
+Console rejects reply metadata. Successful send provenance includes the reply target.
+Omitting `replyTo` preserves ordinary sends except for the same fail-closed mention policy.
 Missing or non-sendable fetched Discord channels reject both ordinary sends and replies;
 a fulfilled send must not stand in for a silently skipped delivery.
