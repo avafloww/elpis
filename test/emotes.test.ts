@@ -325,7 +325,7 @@ test('registry: per-message cap defers the excess to the next use', async () => 
   assert.equal(second[0].name, 'emote-a5-100005.png');
 });
 
-test('registry: soft deadline — a slow first-use download does not block collect, attaches on next use', async () => {
+test('registry: soft deadline — a slow first-use download does not block collect, attaches on next use', async (t) => {
   const calls: string[] = [];
   let release!: () => void;
   const gate = new Promise<void>((res) => {
@@ -344,10 +344,11 @@ test('registry: soft deadline — a slow first-use download does not block colle
         ),
     };
   }) as unknown as typeof fetch;
+  const cacheDir = tmpCache();
   const reg = createEmoteRegistry({
     log: noopLogger,
     keyframes: 4,
-    cacheDir: tmpCache(),
+    cacheDir,
     fetchFn: slowFetch,
     collectDeadlineMs: 50,
   });
@@ -365,9 +366,15 @@ test('registry: soft deadline — a slow first-use download does not block colle
     'a timed-out ref must NOT be marked seen',
   );
 
-  // let the in-flight download finish priming the cache
   release();
-  await new Promise((res) => setTimeout(res, 50));
+  await t.waitFor(
+    () =>
+      assert.equal(
+        fs.existsSync(path.join(cacheDir, 'emote-777777', 'attach.json')),
+        true,
+      ),
+    { timeout: 4000 },
+  );
 
   const second = await reg.collect({ content: '<:slow:777777>' });
   assert.equal(second.length, 1, 'next use attaches from the primed cache');
