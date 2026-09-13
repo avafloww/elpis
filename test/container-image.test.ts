@@ -36,6 +36,10 @@ test('Gateway builds and packages its local provider transport dependency', () =
       'COPY packages/provider-transport/src packages/provider-transport/src',
     ),
   );
+  assert.ok(
+    docker.includes('COPY src/console/sync.ts src/console/sync.ts'),
+    'Gateway image includes console modules imported outside client/',
+  );
   assert.match(
     docker,
     /RUN npm ci[^\n]*--workspace @elpis\/provider-transport/,
@@ -258,6 +262,7 @@ test('resident image owns exactly the shared resident workspace dependencies', (
   );
   assert.deepEqual(gatewayDocker.match(/^COPY src\/[^\n]+$/gm), [
     'COPY src/console/client src/console/client',
+    'COPY src/console/sync.ts src/console/sync.ts',
     'COPY src/console/public src/console/public',
   ]);
   assert.doesNotMatch(gatewayDocker, /COPY src(?:\s|\/(?!console\/))/);

@@ -10,6 +10,7 @@ COPY packages/gateway/client packages/gateway/client
 COPY packages/gateway/public packages/gateway/public
 COPY packages/gateway/src packages/gateway/src
 COPY src/console/client src/console/client
+COPY src/console/sync.ts src/console/sync.ts
 COPY src/console/public src/console/public
 COPY packages/gateway-protocol/tsconfig.json packages/gateway-protocol/tsconfig.json
 COPY packages/gateway-protocol/src packages/gateway-protocol/src
