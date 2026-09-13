@@ -278,12 +278,14 @@ test('sessions: channel stamp + sends round-trip (V1 whitelist, review N6)', () 
   );
 });
 
-test('sessions: reply targets survive send provenance recovery', () => {
+test('sessions: reply and mention options survive send provenance recovery', () => {
   const root = tmpRoot();
   const store = createTranscriptStore(root);
   const sends = [
     { channel: '12345', text: 'ordinary message' },
     { channel: '12345', text: 'explicit reply', replyTo: '67890' },
+    { channel: '12345', text: 'quiet mention', mentions: false },
+    { channel: '12345', text: 'enabled mention', mentions: true },
   ];
   store.append('main', {
     role: 'tool',

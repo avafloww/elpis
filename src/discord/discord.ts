@@ -1,6 +1,7 @@
 import {
   discordMentionUserIds,
   discordMessageOptions,
+  validateMentionNotifications,
   validateReplyTo,
 } from '../lib/outbound.js';
 // discord.ts — gateway wiring, message in/out, chunking, slash commands.
@@ -2311,6 +2312,7 @@ export function createDiscord(
     opts?: import('../types.js').OutboundSendOptions,
   ) => {
     validateReplyTo(opts?.replyTo);
+    validateMentionNotifications(opts?.mentions);
     // Bind optional acoustic delivery to the call that exists before any
     // channel fetch/text-send await. A later join or rejoin must not receive
     // speech authored for an earlier call state.
@@ -2361,7 +2363,7 @@ export function createDiscord(
     );
     const chunks = chunkText(outboundText);
     const notifiedUsers = new Set<string>();
-    if (guildId && deps?.personSettings) {
+    if (opts?.mentions !== false && guildId && deps?.personSettings) {
       const mentionedUsers = new Set(
         chunks.flatMap((chunk) => discordMentionUserIds(chunk)),
       );

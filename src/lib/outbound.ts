@@ -23,6 +23,15 @@ export function validateReplyTo(
   if (replyTo !== undefined) validateDiscordId(replyTo, 'replyTo');
 }
 
+/** A per-send mention option may suppress notification handling, never widen it. */
+export function validateMentionNotifications(
+  mentions: unknown,
+): asserts mentions is boolean | undefined {
+  if (mentions !== undefined && typeof mentions !== 'boolean') {
+    throw new Error('mentions must be a boolean when provided');
+  }
+}
+
 /** Exact user-mention markup present in one already-chunked Discord message. */
 export function discordMentionUserIds(text: string): string[] {
   const ids: string[] = [];

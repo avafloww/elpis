@@ -759,9 +759,9 @@ leading # on the name optional). A BARE name (no \`slug/\` prefix) THROWS even
 when it uniquely matches exactly one room — qualification is never optional,
 because guessing wrong here delivers a private message to the wrong server;
 the throw lists the qualified candidates to use instead.
-\`elpis.channel(ref).send(text, { files?: [{ path, name? }], replyTo?: string })\`
+\`elpis.channel(ref).send(text, { files?: [{ path, name? }], replyTo?: string, mentions?: boolean })\`
 delivers a message to that room and its result echoes \`message delivered to slug/name (id)\` so a misdirect is
-visible immediately. Optional \`replyTo\` is a decimal message ID of at most 20 digits in that same target channel; only the first chunk references it, without an automatic reply-author ping. An unusable reference fails without a plain-message fallback. Console rejects reply metadata. \`elpis.channel.list()\` enumerates known rooms as \`{ id, name }\` objects where \`name\` is always the guild-qualified label (e.g. \`friends-a/lounge\`), or the raw id for a channel whose guild isn't known.
+visible immediately. Optional \`replyTo\` is a decimal message ID of at most 20 digits in that same target channel; only the first chunk references it, without an automatic reply-author ping. An unusable reference fails without a plain-message fallback. Console rejects reply metadata. \`mentions: false\` suppresses every user notification for that send while leaving literal user tags clickable. Omitted or \`mentions: true\` uses the normal exact guild+user preferences; it never forces a notification to someone who has not opted in. \`elpis.channel.list()\` enumerates known rooms as \`{ id, name }\` objects where \`name\` is always the guild-qualified label (e.g. \`friends-a/lounge\`), or the raw id for a channel whose guild isn't known.
 \`elpis.channel(id).typing()\` shows the user you are working on something before you have words to send.
 Literal Discord user mentions remain clickable but do not notify by default; notification requires the exact guild+user opt-in stored through \`elpis.personSettings.discord\`. Roles, \`@everyone\`, \`@here\`, and automatic reply-author pings remain suppressed.
 \`elpis.channel(ref).mute(reason?)\` is the killswitch: it makes you a silent observer in that

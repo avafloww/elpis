@@ -59,6 +59,8 @@ export interface OutboundSendOptions {
   files?: OutboundAttachment[];
   /** Message in the explicitly targeted Discord channel. */
   replyTo?: string;
+  /** False suppresses user notifications for this send; true/omitted still requires stored opt-in. */
+  mentions?: boolean;
 }
 
 /** Text delivery and acoustic playback are distinct outcomes. */
@@ -93,6 +95,7 @@ export interface RunResult {
     channel: string;
     text: string;
     replyTo?: string;
+    mentions?: boolean;
     voice?: VoiceDelivery;
   }[];
   /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
@@ -308,6 +311,7 @@ export interface SandboxDeps {
       channel: string;
       text: string;
       replyTo?: string;
+      mentions?: boolean;
       voice?: VoiceDelivery;
     }[],
   ) => void;

@@ -185,6 +185,7 @@ export interface ChatMessage {
     channel: string;
     text: string;
     replyTo?: string;
+    mentions?: boolean;
     voice?: VoiceDelivery;
   }[];
   /** Out-of-band generation attribution. Persisted for forensic/data use, but

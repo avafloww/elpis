@@ -120,10 +120,13 @@ must be explicit decimal Discord IDs; use the trusted `guildId` and `authorId` o
 An absent row is false. Settings are scoped by guild and user, and the API is available
 in both fresh core and persistent full sandboxes. Mention permission is narrower than
 permission to contact or address someone and never overrides a stronger boundary.
+A send may add `mentions: false` to suppress all user notifications for that delivery
+while preserving clickable literal tags. Omitted or `mentions: true` evaluates the same
+stored opt-ins; it never widens them.
 
 ### Explicit Discord replies
 
-Programmatic `elpis.channel(ref).send(text, { replyTo, files? })` accepts an optional
+Programmatic `elpis.channel(ref).send(text, { replyTo, files?, mentions? })` accepts an optional
 `replyTo`: a nonempty decimal Discord message-ID string of at most 20 digits.
 The reference belongs only to the explicitly selected channel; it does not resolve
 or authorize a destination. All normal send gates still apply. Discord must accept
@@ -132,7 +135,10 @@ lookup. Only the first chunk references it; attachments retain their existing fi
 behavior. Every chunk disables automatic user, role, everyone, and reply-author
 mention parsing. Literal `<@USERID>` markup remains clickable and notifies only when
 that exact guild+user preference is enabled through `elpis.personSettings.discord`.
-Console rejects reply metadata. Successful send provenance includes the reply target.
+`mentions: false` suppresses all such notifications for this send; `true` or omission
+keeps the preference filter and cannot force an unapproved notification. Console rejects
+reply metadata. Successful send provenance includes the reply target and an explicit
+mention override.
 Omitting `replyTo` preserves ordinary sends except for the same fail-closed mention policy.
 Missing or non-sendable fetched Discord channels reject both ordinary sends and replies;
 a fulfilled send must not stand in for a silently skipped delivery.

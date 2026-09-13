@@ -90,6 +90,7 @@ test('Discord adapter applies exact guild, user, chunk, and failure notification
     warn: (...args: unknown[]) => warnings.push(args.map(String).join(' ')),
   };
   let lookupFails = false;
+  let lookupCount = 0;
   const optedInUsers = new Set<string>();
   const payloads = new Map<string, any[]>();
   const guildDirectory = {
@@ -109,6 +110,7 @@ test('Discord adapter applies exact guild, user, chunk, and failure notification
   const { client } = createDiscord(fixture.config, fixture.agent, {
     personSettings: {
       allowsMentionNotification: (guildId, userId) => {
+        lookupCount++;
         if (lookupFails) throw new Error('database unavailable');
         return guildId === guildOne && optedInUsers.has(userId);
       },
@@ -160,6 +162,25 @@ test('Discord adapter applies exact guild, user, chunk, and failure notification
       repliedUser: false,
     });
 
+    payloads.set(channelOne, []);
+    lookupFails = true;
+    const lookupsBeforeSuppressed = lookupCount;
+    await fixture.agent.send(channelOne, 'quiet @Aster', { mentions: false });
+    assert.equal(
+      payloads.get(channelOne)?.[0].content,
+      `quiet <@${allowedUser}>`,
+    );
+    assert.deepEqual(payloads.get(channelOne)?.[0].allowedMentions.users, []);
+    assert.equal(lookupCount, lookupsBeforeSuppressed);
+    assert.equal(warnings.length, 0);
+
+    lookupFails = false;
+    payloads.set(channelOne, []);
+    await fixture.agent.send(channelOne, `still quiet <@${deniedUser}>`, {
+      mentions: true,
+    });
+    assert.deepEqual(payloads.get(channelOne)?.[0].allowedMentions.users, []);
+
     await fixture.agent.send(channelTwo, `hi <@${allowedUser}>`);
     assert.deepEqual(payloads.get(channelTwo)?.[0].allowedMentions.users, []);
 
@@ -188,6 +209,19 @@ test('Discord adapter applies exact guild, user, chunk, and failure notification
       failIfNotExists: true,
     });
     assert.equal(chunked[1].reply, undefined);
+
+    payloads.set(channelOne, []);
+    const lookupsBeforeChunkSuppression = lookupCount;
+    await fixture.agent.send(channelOne, first + '\n' + second, {
+      mentions: false,
+    });
+    const quietChunks = payloads.get(channelOne) ?? [];
+    assert.equal(quietChunks.length, 2);
+    assert.deepEqual(
+      quietChunks.map((chunk) => chunk.allowedMentions.users),
+      [[], []],
+    );
+    assert.equal(lookupCount, lookupsBeforeChunkSuppression);
 
     payloads.set(channelOne, []);
     await fixture.agent.send(channelOne, 'reply without literal mention', {

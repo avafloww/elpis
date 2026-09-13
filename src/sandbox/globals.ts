@@ -1,4 +1,8 @@
-import { validateDiscordId, validateReplyTo } from '../lib/outbound.js';
+import {
+  validateDiscordId,
+  validateMentionNotifications,
+  validateReplyTo,
+} from '../lib/outbound.js';
 // globals.ts — injected tools, consolidated under the `elpis` namespace.
 // Every harness verb becomes a property of `elpis`, so the agent writes
 // `elpis.sh("whoami")`, not a bare `sh(...)` and not `tools.sh(...)`. Functions
@@ -1695,10 +1699,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         sendOpts?: {
           allowEscapes?: boolean;
           replyTo?: string;
+          mentions?: boolean;
           files?: { path: string; name?: string }[];
         },
       ) => {
         validateReplyTo(sendOpts?.replyTo);
+        validateMentionNotifications(sendOpts?.mentions);
         if (channelId === 'console' && sendOpts?.replyTo !== undefined)
           throw new Error('console reply metadata is not supported');
         const hasFiles =
@@ -1743,6 +1749,9 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ...(sendOpts?.replyTo !== undefined
             ? { replyTo: sendOpts.replyTo }
             : {}),
+          ...(sendOpts?.mentions !== undefined
+            ? { mentions: sendOpts.mentions }
+            : {}),
         });
         // Record the send on the current run scope for turn accounting, console
         // rendering, transcript recovery, and detached-future delivery.
@@ -1751,11 +1760,14 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           text: string;
           files?: string[];
           replyTo?: string;
+          mentions?: boolean;
           voice?: import('../types.js').VoiceDelivery;
         } = { channel: channelId, text };
         if (delivery) sendRecord.voice = delivery.voice;
         if (sendOpts?.replyTo !== undefined)
           sendRecord.replyTo = sendOpts.replyTo;
+        if (sendOpts?.mentions !== undefined)
+          sendRecord.mentions = sendOpts.mentions;
         if (files && files.length > 0)
           sendRecord.files = files
             .map((f) => f.name || String(f.path).split('/').pop())

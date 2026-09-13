@@ -493,6 +493,9 @@ function parseChatMessage(
           ...(typeof so.replyTo === 'string' && /^[0-9]{1,20}$/.test(so.replyTo)
             ? { replyTo: so.replyTo }
             : {}),
+          ...(typeof so.mentions === 'boolean'
+            ? { mentions: so.mentions }
+            : {}),
           ...(voice ? { voice } : {}),
         });
       }

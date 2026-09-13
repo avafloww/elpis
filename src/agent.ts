@@ -1,4 +1,7 @@
-import { validateReplyTo } from './lib/outbound.js';
+import {
+  validateMentionNotifications,
+  validateReplyTo,
+} from './lib/outbound.js';
 import { eligibleSpeechHeader } from './lib/speech-header.js';
 // agent.ts — orchestration: the one history, system prompt, tool dispatch, loop.
 //
@@ -1031,6 +1034,7 @@ export class Agent {
       );
     }
     validateReplyTo(opts?.replyTo);
+    validateMentionNotifications(opts?.mentions);
     if (channelId === CONSOLE_CHANNEL_ID) {
       if (opts?.replyTo !== undefined)
         throw new Error('console reply metadata is not supported');
@@ -1689,6 +1693,7 @@ export class Agent {
         channel: string;
         text: string;
         replyTo?: string;
+        mentions?: boolean;
         voice?: VoiceDelivery;
       }[];
     },

@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateReplyTo, discordReplyOptions } from '../src/lib/outbound.js';
+import {
+  validateReplyTo,
+  validateMentionNotifications,
+  discordReplyOptions,
+} from '../src/lib/outbound.js';
 import { Agent } from '../src/agent.js';
 
 test('reply ID validation is decimal, nonempty and bounded', () => {
@@ -8,6 +12,13 @@ test('reply ID validation is decimal, nonempty and bounded', () => {
     assert.throws(() => validateReplyTo(value), /replyTo/);
   for (const value of [undefined, '123', '1'.repeat(20)])
     validateReplyTo(value);
+});
+
+test('mention notification override validation accepts only booleans or omission', () => {
+  for (const value of ['', 0, 1, null, {}, 'false'])
+    assert.throws(() => validateMentionNotifications(value), /mentions/);
+  for (const value of [undefined, false, true])
+    validateMentionNotifications(value);
 });
 test('only first chunk references original while every chunk suppresses implicit mentions', () => {
   assert.deepEqual(discordReplyOptions('123', 0), {
@@ -28,6 +39,17 @@ test('Agent rejects console reply metadata before accounting', async () => {
       replyTo: '123',
     }),
     /console.*reply/i,
+  );
+  assert.equal(agent.sendsThisTurn, 0);
+});
+
+test('Agent rejects malformed mention override before accounting', async () => {
+  const agent = { turnSendScope: null, sendsThisTurn: 0 };
+  await assert.rejects(
+    Agent.prototype.send.call(agent as any, 'console', 'hello', {
+      mentions: 'false',
+    }),
+    /mentions/,
   );
   assert.equal(agent.sendsThisTurn, 0);
 });
@@ -55,15 +77,23 @@ test('sandbox preserves explicit routing, attachments, failure and no-reply opti
   } as any);
   const channel = (g.elpis as any).channel('room');
   const files = [{ path: '/tmp/example.txt' }];
-  await channel.send('hello', { files, replyTo: '123' });
-  assert.deepEqual(calls[0], ['111', 'hello', { files, replyTo: '123' }]);
+  await channel.send('hello', { files, replyTo: '123', mentions: false });
+  assert.deepEqual(calls[0], [
+    '111',
+    'hello',
+    { files, replyTo: '123', mentions: false },
+  ]);
   await channel.send('plain');
   assert.deepEqual(calls[1], ['111', 'plain', { files: undefined }]);
   await assert.rejects(channel.send('invalid', { replyTo: 'abc' }), /replyTo/);
+  await assert.rejects(
+    channel.send('invalid', { mentions: 'false' }),
+    /mentions/,
+  );
   assert.equal(calls.length, 2);
   fail = true;
   await assert.rejects(
-    channel.send('reply', { replyTo: '123' }),
+    channel.send('reply', { replyTo: '123', mentions: true }),
     /reference unavailable/,
   );
   assert.equal(calls.length, 3);
@@ -96,11 +126,19 @@ test('agent fixture forwards sandbox reply options through the shared send path'
   });
   try {
     const result = await fixture.sandbox.run(
-      "await elpis.channel('1001').send('hello', { replyTo: '123' })",
+      "await elpis.channel('1001').send('hello', { replyTo: '123', mentions: false })",
     );
     assert.equal(result.ok, true);
+    assert.deepEqual(result.sends, [
+      {
+        channel: '1001',
+        text: 'hello',
+        replyTo: '123',
+        mentions: false,
+      },
+    ]);
     assert.deepEqual(calls, [
-      ['1001', 'hello', { files: undefined, replyTo: '123' }],
+      ['1001', 'hello', { files: undefined, replyTo: '123', mentions: false }],
     ]);
   } finally {
     fixture.agent.stop();
