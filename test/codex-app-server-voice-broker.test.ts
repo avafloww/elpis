@@ -20,6 +20,7 @@ const FUTURE_MODULE_URL = new URL(
 
 interface VoiceBroker {
   start(): Promise<{ threadId: string }>;
+  appendSpeech(text: string): void;
   appendAudio(audio: Uint8Array): void;
   sendEvent(text: string): void;
   close(): Promise<void>;
@@ -63,7 +64,7 @@ function messageByMethod(
 
 function requestId(message: JsonObject): number {
   assert.equal(typeof message.id, 'number');
-  return message.id;
+  return message.id as number;
 }
 
 function startedParams(threadId: string): JsonObject {
@@ -481,6 +482,117 @@ describe('Codex app-server subscription voice broker contract', () => {
     assert.equal(harness.appServers.length, 1);
     assert.equal(harness.mediaChildren.length, 1);
     await terminate(harness, state.app, state.threadId, state.media);
+  });
+
+  it('sends one exact appendSpeech request without serializing a resident token', async () => {
+    const harness = setup();
+    const state = await reachNotificationWait(harness, 'thread-speech');
+    await finishOpen(state);
+
+    harness.broker.appendSpeech('read this exactly');
+    const append = messageByMethod(state.app, 'thread/realtime/appendSpeech');
+    assert.deepEqual(append, {
+      jsonrpc: '2.0',
+      id: append.id,
+      method: 'thread/realtime/appendSpeech',
+      params: { threadId: 'thread-speech', text: 'read this exactly' },
+    });
+    assert.equal(
+      state.app
+        .requests()
+        .filter((message) => message.method === 'thread/realtime/appendSpeech')
+        .length,
+      1,
+    );
+    assert.equal(JSON.stringify(append).includes('requestToken'), false);
+    state.app.result(requestId(append), {});
+    await tick();
+    assert.deepEqual(harness.errors, []);
+    await terminate(harness, state.app, state.threadId, state.media);
+  });
+
+  it('contains a response delivered reentrantly during appendSpeech write', async () => {
+    const harness = setup();
+    const state = await reachNotificationWait(
+      harness,
+      'thread-reentrant-speech',
+    );
+    await finishOpen(state);
+    const input = state.app.stdin as unknown as {
+      write(
+        value: string | Uint8Array,
+        callback?: (error?: Error | null) => void,
+      ): boolean;
+    };
+    const originalWrite = input.write.bind(input);
+    input.write = (value, callback?) => {
+      const accepted = originalWrite(value);
+      const message = JSON.parse(
+        Buffer.from(value).toString('utf8'),
+      ) as JsonObject;
+      if (message.method === 'thread/realtime/appendSpeech')
+        state.app.result(requestId(message), {});
+      callback?.(null);
+      return accepted;
+    };
+
+    assert.doesNotThrow(() => harness.broker.appendSpeech('reentrant reply'));
+    await tick();
+    assert.deepEqual(harness.errors, []);
+    assert.equal(
+      state.app
+        .requests()
+        .filter((message) => message.method === 'thread/realtime/appendSpeech')
+        .length,
+      1,
+    );
+    await terminate(harness, state.app, state.threadId, state.media);
+  });
+
+  it('contains appendSpeech rejection in the exact active broker generation', async () => {
+    const harness = setup();
+    const state = await reachNotificationWait(harness, 'thread-reject');
+    await finishOpen(state);
+    harness.broker.appendSpeech('reject me');
+    const append = messageByMethod(state.app, 'thread/realtime/appendSpeech');
+    state.app.receive({
+      jsonrpc: '2.0',
+      id: requestId(append),
+      error: { code: -32000, message: 'synthetic append rejection' },
+    });
+    await tick();
+    assert.equal(harness.errors.length, 1);
+    assert.match(harness.errors[0]!.message, /append|synthetic/i);
+    assert.deepEqual(state.media.sent.at(-1), {
+      type: 'close',
+      callId: 'call-1',
+    });
+    state.media.receive({ type: 'closed', callId: 'call-1' });
+    state.media.exit(0, null);
+    state.app.exit(0, null);
+    await harness.broker.close();
+  });
+
+  it('enforces appendSpeech UTF-8 framing through AppServerClient', async () => {
+    const harness = setup();
+    const state = await reachNotificationWait(harness, 'thread-bound');
+    await finishOpen(state);
+    assert.doesNotThrow(() =>
+      harness.broker.appendSpeech('💥'.repeat(300_000)),
+    );
+    await tick();
+    assert.equal(
+      state.app
+        .requests()
+        .some((message) => message.method === 'thread/realtime/appendSpeech'),
+      false,
+    );
+    assert.equal(harness.errors.length, 1);
+    assert.match(harness.errors[0]!.message, /1 MiB|line|append/i);
+    state.media.receive({ type: 'closed', callId: 'call-1' });
+    state.media.exit(0, null);
+    state.app.exit(0, null);
+    await harness.broker.close();
   });
 
   it('forwards bounded opaque audio and event media in both directions', async () => {

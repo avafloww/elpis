@@ -422,6 +422,26 @@ export class CodexAppServerVoiceBroker {
     return startPromise;
   }
 
+  /** Queue one client-managed speech handoff on the exact active thread. */
+  appendSpeech(text: string): void {
+    const session = this.#requireOpenSession();
+    if (typeof text !== 'string' || text.length === 0)
+      throw new TypeError('spoken text must not be empty');
+
+    // AppServerClient owns inert JSON copying, UTF-8 framing, and the canonical
+    // 1 MiB JSONL bound. A request rejection is a failure of this call only;
+    // the generation fence prevents a stale rejection from closing a restart.
+    void session.client
+      .request('thread/realtime/appendSpeech', {
+        threadId: session.threadId!,
+        text,
+      })
+      .catch((error: unknown) => {
+        if (this.#current(session) && !session.shutdownStarted)
+          this.#fail(session, asError(error, 'append speech failed'));
+      });
+  }
+
   appendAudio(audio: Uint8Array): void {
     const session = this.#requireOpenSession();
     if (!(audio instanceof Uint8Array))
