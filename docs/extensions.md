@@ -4,7 +4,9 @@ Elpis loads trusted local extensions from `DATA_DIRECTORY/elpis-data/config/exte
 
 Extensions execute inside the harness process with the service user's full authority. They are not isolated by the JavaScript sandbox. Only install code trusted as much as the harness itself.
 
-## File and namespace
+## Sources and namespaces
+
+### Flat files
 
 Extension files use one of these suffixes:
 
@@ -18,7 +20,33 @@ The filename owns the namespace. Elpis strips the extension suffix, splits punct
 - `Aster.ext.ts` → `elpis.ext.aster`
 - `My tools.ext.ts` → `elpis.ext.myTools`
 
-Files are activated sequentially in normalized namespace order, independent of filesystem iteration order. If two files normalize to the same namespace, both are quarantined and recorded as failures while the rest of Elpis continues starting.
+Flat files remain fully compatible with the original discovery contract.
+
+### Package directories
+
+An immediate child directory can instead be an npm-shaped extension package. Its regular, UTF-8 `package.json` must contain an own plain `elpis` object with own string fields `extension` and `namespace`:
+
+```json
+{
+  "name": "local-weather-tools",
+  "private": true,
+  "type": "module",
+  "elpis": {
+    "extension": "./src/extension.ts",
+    "namespace": "weatherTools"
+  }
+}
+```
+
+`elpis.extension` is the only executable entry selected by Elpis. It is a relative path inside the package; Elpis never infers an entry from `main` or `exports`, even when those fields coexist. The entry can be TypeScript and is imported through the same tsx loader as a flat extension. Imports of dependencies already present in the package's own `node_modules/` resolve normally.
+
+`elpis.namespace` is exact rather than normalized. It must match `[A-Za-z_][A-Za-z0-9]*`, must not be `__proto__`, `prototype`, or `constructor`, and directly names `elpis.ext.<namespace>`. Package summaries and `activate(context).sourceFile` use stable root-relative slash form, for example `local-weather-tools/src/extension.ts`; absolute private paths are not exposed as provenance.
+
+Package directories and entry files are resolved through realpaths. Top-level package-directory symlinks are rejected without following their targets; symlinked entry components, absolute paths, dot-dot segments, missing/non-file entries, and entries that resolve outside the package are also rejected. Manifests are capped at 64 KiB and malformed or non-UTF-8 manifests are quarantined with bounded diagnostics. Ordinary helper directories with no `package.json`, and valid package manifests with no own `elpis` field, are ignored.
+
+Elpis does not run npm, install missing dependencies, or execute lifecycle scripts during boot. Install or vendor trusted dependencies separately before restart. A missing dependency fails import for only that package.
+
+Flat and package candidates are sorted together by exact final namespace and source display before activation. Every claimant in a flat/package or package/package namespace collision is quarantined before any colliding code executes. Otherwise extensions activate sequentially in namespace order, independent of filesystem iteration order.
 
 ## Module contract
 
@@ -32,10 +60,12 @@ import type { ExtensionDefinition } from '../src/extensions.js';
 export const extension = {
   description: 'Small example tools.',
   prompt: `\`elpis.ext.example.greet(name)\` returns a greeting.`,
-  migrations: [{
-    name: '0001-state',
-    sql: 'CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
-  }],
+  migrations: [
+    {
+      name: '0001-state',
+      sql: 'CREATE TABLE example_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
+    },
+  ],
   activate(context) {
     context.database.prepare('SELECT COUNT(*) FROM example_state').get();
     return {
@@ -51,8 +81,8 @@ All fields are optional, but a useful extension normally supplies `prompt`, `act
 
 `activate(context)` may be synchronous or asynchronous. Its context contains:
 
-- `namespace` — the normalized namespace;
-- `sourceFile` — the extension filename, without an absolute path;
+- `namespace` — the normalized flat-file namespace or exact package namespace;
+- `sourceFile` — the stable source display (a flat filename or `package/relative-entry`), never an absolute path;
 - `dataDirectory` and `harnessRoot`;
 - `agentName()` — reads the current `SOUL.md` frontmatter name;
 - `database` — the shared Node 24 `node:sqlite` `DatabaseSync`, after this extension's migrations have completed;
@@ -83,10 +113,10 @@ Each extension prompt is headed by its `elpis.ext.<namespace>` path, description
 
 ## Lifecycle and failure
 
-Extensions are discovered and activated before the sandbox, LLM, and Discord runtime are constructed. Discovery, namespace, import/TypeScript parse, definition, prompt, migration, activation, and API-shape errors are caught per extension. The broken extension contributes neither API nor prompt text, its failure is logged and exposed through `$failures()`, and Elpis continues loading the remaining extensions and starts normally. Namespace collisions quarantine every file claiming the collided namespace.
+Extensions are discovered and activated before the sandbox, LLM, and Discord runtime are constructed. Discovery, namespace, import/TypeScript parse, definition, prompt, migration, activation, and API-shape errors are caught per extension. The broken extension contributes neither API nor prompt text, its failure is logged and exposed through `$failures()`, and Elpis continues loading the remaining extensions and starts normally. Namespace collisions quarantine every flat file or package claiming the collided namespace before activation.
 
 A failed migration is transactionally rolled back. Activation can still perform arbitrary host side effects before throwing; Elpis can prevent exposure of a partial API and prompt, but cannot roll back non-migration effects made by trusted extension code.
 
 Changes take effect only after a harness restart. There is no hot reload: one process has one extension registry and one prompt projection.
 
-The loader creates `DATA_DIRECTORY/elpis-data/config/extensions/` with mode `0700` when it is absent. Extension files live with the agent's private data and should be included in encrypted backups. Keep secrets out of prompt strings because extension prompt text is sent to the configured model provider.
+The loader creates `DATA_DIRECTORY/elpis-data/config/extensions/` with mode `0700` when it is absent. Extension files and package directories live with the agent's private data and should be included in encrypted backups. Keep secrets out of prompt strings because extension prompt text is sent to the configured model provider.

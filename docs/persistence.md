@@ -52,7 +52,7 @@ Moves are same-filesystem atomic renames recorded in `elpis-data/layout-migratio
 - `people/*.md` holds person-specific memory with optional external IDs.
 - `NOW.md` records current focus.
 - `ponder/` holds unresolved thinking without turning it into a commitment.
-- `elpis-data/config/extensions/*.ext.ts` contains trusted local harness plugins; these execute with service-user authority and belong in encrypted backups.
+- `elpis-data/config/extensions/` contains trusted flat extension files and package directories; these execute with service-user authority and belong in encrypted backups.
 - `elpis-data/config/wordlists/{adverbs,adjectives,nouns}.txt` contains hot-reloaded persistent-sandbox naming pools. Missing files seed from bundled defaults; invalid authored files are preserved and bypassed with a warning.
 
 Existing inhabitant files are never replaced by boot defaults.

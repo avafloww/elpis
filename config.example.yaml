@@ -6,6 +6,13 @@
 #
 # Every key below shows its default. Required keys are marked REQUIRED; the
 # rest can be omitted entirely to take the default.
+#
+# Trusted extensions are filesystem configuration, not YAML keys. Flat `*.ext.ts`
+# files and immediate package directories belong under
+# DATA_DIRECTORY/elpis-data/config/extensions/. A package declares only its explicit
+# entry and exact public namespace in package.json, for example:
+#   "elpis": { "extension": "./src/extension.ts", "namespace": "weatherTools" }
+# Elpis never runs npm or lifecycle scripts at boot. See docs/extensions.md.
 
 llm:
   # Which wire surface backs the brain LLM. Default: openai-compatible.

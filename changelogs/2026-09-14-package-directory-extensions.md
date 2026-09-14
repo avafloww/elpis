@@ -1,0 +1,7 @@
+# Package-directory extensions
+
+Elpis now discovers npm-shaped extension packages placed as immediate directories under `elpis-data/config/extensions/`, while preserving flat `*.ext.{ts,mts,js,mjs}` files unchanged. A package opts in through an own `elpis` object in `package.json` with an explicit relative `extension` entry and exact `namespace`.
+
+The loader ignores package `main` and `exports`, never runs npm or lifecycle scripts, and resolves already-provisioned package-local dependencies naturally. Manifests and entry paths are bounded and validated; top-level package symlinks are rejected without following their targets, while entry symlinks, escapes, malformed input, invalid namespaces, and duplicate flat/package claims are quarantined before activation. Package provenance is shown as `package/relative-entry`, without private absolute paths. Existing definition, prompt, migration (`extension:<namespace>`), deep-freeze, and failure-stage behavior is shared by both source shapes.
+
+Validation covered real TypeScript package import with a local bare dependency, flat compatibility, collision ordering before activation, missing entries and dependencies, hostile manifests and paths, lifecycle non-execution, migration stability, API freezing, deterministic diagnostics, focused extension/sandbox/changelog tests, formatting, the production dependency audit, and repository privacy scans. After restart, verify any newly added package appears under `elpis.ext.<namespace>` or inspect `elpis.ext.$failures()`.

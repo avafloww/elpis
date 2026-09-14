@@ -14,7 +14,7 @@ It gives an agent a durable home rather than a stateless chat session: one conti
 - **Durable identity and memory.** `SOUL.md`, `MEMORY.md`, `people/`, `ponder/`, transcripts, and `elpis-data/elpis.db` survive restarts and model changes.
 - **Context without silent deletion.** Provider requests are projections of the durable record: completed-turn display reasoning and untrusted opaque state may be omitted, while transcripts remain complete. Compaction writes a marked summary and preserves the original record on disk.
 - **Self-maintenance.** The agent can inspect source, edit files, run tests, commit changes, and deploy a verified build.
-- **Local extensions.** Trusted TypeScript modules in the private data directory can add frozen `elpis.ext.*` APIs and deterministic boot-time prompt blocks without hardcoding inhabitant-specific tools into core.
+- **Local extensions.** Trusted flat modules and npm-shaped package directories in the private data directory can add frozen `elpis.ext.*` APIs and deterministic boot-time prompt blocks without hardcoding inhabitant-specific tools into core.
 - **Autonomous operation.** Heartbeats, scheduled tasks, background-job completion, and reminders can wake the same continuing agent.
 - **Bounded coding collaboration.** An opt-in authenticated MCP adapter lets external coding agents work through the canonical Mind graph and task-bound correspondence without becoming parallel copies of the resident agent.
 
