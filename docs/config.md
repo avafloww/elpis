@@ -110,7 +110,7 @@ Each guild has:
 - `allow_send`: a guild-wide master send gate, default `true`;
 - `default_allow_send`: send policy for unlisted channels, default `false`.
 
-`drop` rejects inbound messages. `direct` wakes eagerly. `social` uses the social wake classifier. `quiet` is ingested as ambient context unless explicitly addressed. An explicit `tier: drop` channel may still be output-only when its `allow_send` is true.
+`drop` rejects inbound messages. `direct` wakes eagerly. On a sendable direct-tier wake, the first provider request also receives a request-only instruction to acknowledge any accepted tool-backed action through an explicit speech header before tools. `social` uses the social wake classifier. `quiet` is ingested as ambient context unless explicitly addressed. An explicit `tier: drop` channel may still be output-only when its `allow_send` is true.
 
 Outbound precedence is deny-only: guild `allow_send: false` denies every channel; otherwise an explicit channel's `allow_send` applies (scalar channel entries preserve compatibility and mean true), while an unlisted channel uses `default_allow_send`. A runtime mute or deafen may deny further but never re-enable a configuration denial. Agent sends and the final Discord transport both enforce the result. The Console shows configuration locks and omits redundant mute controls.
 

@@ -144,6 +144,211 @@ async function settle(ms = 80): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+test('direct channel asks get one request-only action acknowledgement instruction', async () => {
+  const directLlm = scriptedLLM([runCall('', false), EMPTY_WAKE]);
+  const base = makeConfig();
+  const direct = buildTestAgent({
+    llm: directLlm,
+    config: {
+      discord: {
+        ...base.discord,
+        guilds: [
+          {
+            id: 'g-home',
+            slug: 'home',
+            slashCommands: false,
+            quietHours: null,
+            timezone: null,
+            channels: { '100': 'direct' },
+          },
+        ],
+      },
+    },
+    tmpPrefix: 'harness-direct-action-ack-',
+  });
+  direct.agent.enqueue({
+    ...userMsg(),
+    id: '123456789012345678',
+    channelId: '101',
+    channelName: 'asks',
+    guildId: 'g-home',
+    policyChannelId: '100',
+    content: 'please inspect the system',
+  });
+  void direct.agent.loop();
+  await settle();
+  direct.agent.stop();
+
+  assert.equal(directLlm.calls, 2);
+  const directCards = directLlm.requests[0].filter((message) =>
+    String(message.content).includes('<direct-channel-action-acknowledgement>'),
+  );
+  assert.equal(directCards.length, 1);
+  const directCard = String(directCards[0].content);
+  assert.match(
+    directCard,
+    /^<direct-channel-action-acknowledgement>[\s\S]*<\/direct-channel-action-acknowledgement>$/,
+  );
+  assert.match(directCard, /\[send to=home\/asks replyTo=123456789012345678\]/);
+  assert.match(directCard, /before your first tool call/);
+  assert.ok(
+    directLlm.requests[1].every(
+      (message) =>
+        !String(message.content).includes(
+          '<direct-channel-action-acknowledgement>',
+        ),
+    ),
+    'post-tool continuation omits the request-only acknowledgement instruction',
+  );
+  direct.cleanup();
+
+  const socialLlm = scriptedLLM([EMPTY_WAKE]);
+  const social = buildTestAgent({
+    llm: socialLlm,
+    config: {
+      discord: {
+        ...base.discord,
+        guilds: [
+          {
+            id: 'g-social',
+            slug: 'friends',
+            slashCommands: false,
+            quietHours: null,
+            timezone: null,
+            channels: { '100': 'social' },
+          },
+        ],
+      },
+    },
+    tmpPrefix: 'harness-social-no-action-ack-',
+  });
+  social.agent.enqueue({
+    ...userMsg(),
+    id: '223456789012345678',
+    channelName: 'lounge',
+    guildId: 'g-social',
+    content: 'please inspect the system',
+  });
+  void social.agent.loop();
+  await settle();
+  social.agent.stop();
+  assert.equal(socialLlm.calls, 1);
+  assert.ok(
+    socialLlm.requests[0].every(
+      (message) =>
+        !String(message.content).includes(
+          '<direct-channel-action-acknowledgement>',
+        ),
+    ),
+    'social channels retain ordinary response discretion',
+  );
+  social.cleanup();
+
+  const deniedLlm = scriptedLLM([EMPTY_WAKE]);
+  const denied = buildTestAgent({
+    llm: deniedLlm,
+    config: {
+      discord: {
+        ...base.discord,
+        guilds: [
+          {
+            id: 'g-locked',
+            slug: 'locked',
+            slashCommands: false,
+            quietHours: null,
+            timezone: null,
+            channels: { '100': { tier: 'direct', allowSend: false } },
+          },
+        ],
+      },
+    },
+    tmpPrefix: 'harness-direct-send-denied-no-action-ack-',
+  });
+  denied.agent.enqueue({
+    ...userMsg(),
+    id: '323456789012345678',
+    channelName: 'requests',
+    guildId: 'g-locked',
+    content: 'please inspect the system',
+  });
+  void denied.agent.loop();
+  await settle();
+  denied.agent.stop();
+  assert.equal(deniedLlm.calls, 1);
+  assert.ok(
+    deniedLlm.requests[0].every(
+      (message) =>
+        !String(message.content).includes(
+          '<direct-channel-action-acknowledgement>',
+        ),
+    ),
+    'send-denied direct channels never receive an impossible speech instruction',
+  );
+  denied.cleanup();
+});
+
+test('context clear cannot resurrect a stale direct action acknowledgement', async () => {
+  let release: ((result: CompleteResult) => void) | null = null;
+  const llm = {
+    client: {} as unknown as LLM['client'],
+    model: 'test',
+    runTool: {} as unknown as LLM['runTool'],
+    complete: () =>
+      new Promise<CompleteResult>((resolve) => {
+        release = resolve;
+      }),
+    summarize: () => Promise.resolve('SUMMARY'),
+  } as LLM;
+  const base = makeConfig();
+  const { agent, cleanup } = buildTestAgent({
+    llm,
+    config: {
+      discord: {
+        ...base.discord,
+        guilds: [
+          {
+            id: 'g-home',
+            slug: 'home',
+            slashCommands: false,
+            quietHours: null,
+            timezone: null,
+            channels: { '100': 'direct' },
+          },
+        ],
+      },
+    },
+    tmpPrefix: 'harness-clear-direct-action-ack-',
+  });
+  agent.enqueue({
+    ...userMsg(),
+    id: '423456789012345678',
+    channelName: 'asks',
+    guildId: 'g-home',
+    content: 'please inspect the system',
+  });
+  void agent.loop();
+  await settle(20);
+  assert.ok(release, 'the first direct request is in flight');
+
+  agent.clearContext();
+  assert.ok(
+    agent
+      .contextSnapshot()
+      .messages.every(
+        (message) =>
+          !String(message.content).includes(
+            '<direct-channel-action-acknowledgement>',
+          ),
+      ),
+    'the post-clear request projection contains no pre-clear reply instruction',
+  );
+
+  release(EMPTY_WAKE);
+  await settle();
+  agent.stop();
+  cleanup();
+});
+
 function runCall(code: string, wake: boolean): CompleteResult {
   return {
     message: {
@@ -466,10 +671,16 @@ test('resident context serves once per outer turn before inbound, not on tool co
   void agent.loop();
   await settle();
   assert.equal(llm.calls, 2);
+  const residentContext = String(llm.requests[0].at(-4)?.content);
   assert.match(
-    String(llm.requests[0].at(-4)?.content),
-    /^<mind-frontier>[\s\S]*<secretary-mind-activity[\s\S]*bounded &amp; durable[\s\S]*<resident-reanchor>Again is truer than forever\.<\/resident-reanchor>$/,
+    residentContext,
+    /^<mind-frontier>[\s\S]*<secretary-mind-activity[\s\S]*bounded &amp; durable[\s\S]*<resident-reanchor>Again is truer than forever\.<\/resident-reanchor>/,
     'combined resident context surfaces Secretary activity before the inbound batch',
+  );
+  assert.match(
+    residentContext,
+    /<direct-channel-action-acknowledgement>/,
+    'the direct-channel instruction shares the first request-only card',
   );
   assert.deepEqual(activityCursors, [0, 0, 0], 'real request consumes once');
   assert.match(
@@ -491,7 +702,8 @@ test('resident context serves once per outer turn before inbound, not on tool co
     llm.requests[1].every(
       (m) =>
         !String(m.content).startsWith('<mind-frontier>') &&
-        !String(m.content).includes('<resident-reanchor>'),
+        !String(m.content).includes('<resident-reanchor>') &&
+        !String(m.content).includes('<direct-channel-action-acknowledgement>'),
     ),
     'post-tool continuation omits the request-only resident context card',
   );

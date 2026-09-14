@@ -44,6 +44,12 @@ Only fresh, complete, unstripped resident assistant output is eligible. The resi
 
 Restored history, inbound text, and tool results are never replayed as sends. A context clear invalidates the old epoch: a late outcome leaves only a bounded private completion diagnostic, not a receipt in the newly cleared conversation. Failed or interrupted delivery can be partial; the mechanism does not promise crash-safe exactly-once delivery or automatically retry.
 
+## Direct-channel action acknowledgements
+
+When the Discord message that owns a turn's wake comes from a sendable `direct`-tier channel, Elpis appends a request-only `<direct-channel-action-acknowledgement>` card immediately before the current inbound batch. If the resident decides to act because the person asked, the card requires the first assistant response to be a brief speech-header acknowledgement before the first tool call. It does not force action or speech for an ordinary answer, refusal, silence, or a request the resident declines to perform.
+
+The card derives the tier from the resolved channel policy, including a thread's configured parent, while its header example targets the actual channel or thread and includes the Discord reply ID when valid. Send-denied channels receive no impossible instruction. The frozen first request retains the card across transport retries; post-tool continuations and later outer turns omit it. Social and quiet rooms, ambient context, console input, and autonomous or harness wakes never receive it.
+
 ## Request projection
 
 The durable transcript is the record; the provider request is a projection of it.

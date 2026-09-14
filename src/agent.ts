@@ -863,6 +863,13 @@ export class Agent {
   private turnChannel: string = INTERNAL_CHANNEL_ID;
   /** The channel of the message that woke the current turn — typing only. */
   private turnChannelId: string | null = null;
+  /** A sendable direct-tier Discord wake gets one request-only instruction to
+   * acknowledge accepted action before tools. Every later waking ingress
+   * replaces or clears it, so mixed batches cannot inherit stale authority. */
+  private directActionReply: {
+    channelId: string;
+    messageId: string | null;
+  } | null = null;
   /** elpis.sleep/wait pause depth. A counter, not a boolean, so
    * concurrent sleeps (Promise.all) don't resume typing when the first one
    * lands — only when all of them have. Reset to 0 at turn start so a sleep
@@ -1954,6 +1961,7 @@ export class Agent {
     this.mindFrontierTailMessagesThisTurn = 0;
     this.externalThinkForcedThisTurn = false;
     this.personInputTurn = false;
+    this.directActionReply = null;
     this.inbound = [];
     this.hasNewInput = false;
     // A leftover ambientUnseen entry outlives the messages it points at — the
@@ -2120,6 +2128,7 @@ export class Agent {
               ? m.channelId
               : INTERNAL_CHANNEL_ID;
             this.lastInbound = m;
+            this.directActionReply = null;
           }
         } else if (isAmbient) {
           // Ambient room chat: enters history with full provenance
@@ -2148,6 +2157,13 @@ export class Agent {
           if (wakes) {
             this.turnChannel = m.channelId;
             this.lastInbound = m;
+            this.directActionReply =
+              replyNotice === 'send' && sendPolicy?.tier === 'direct'
+                ? {
+                    channelId: m.channelId,
+                    messageId: /^\d{1,20}$/.test(m.id) ? m.id : null,
+                  }
+                : null;
           }
           if (m.authorId)
             this.participants.set(m.authorId, {
@@ -3019,6 +3035,7 @@ export class Agent {
     this.realUserTurn = false;
     this.personInputTurn = false;
     this.turnSendScope = 'normal';
+    this.directActionReply = null;
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;
@@ -3313,6 +3330,19 @@ export class Agent {
       sections.push(
         `<resident-reanchor>${escapeResidentContext(reanchor)}</resident-reanchor>`,
       );
+    }
+    if (this.directActionReply) {
+      const target = escapeResidentContext(
+        this.qualifiedChannelLabel(this.directActionReply.channelId),
+      );
+      const replyTo = this.directActionReply.messageId
+        ? ` replyTo=${this.directActionReply.messageId}`
+        : '';
+      sections.push(`<direct-channel-action-acknowledgement>
+This turn's waking inbound came from a channel configured as \`direct\`. If you decide to go do something because the person asked—such as using a tool or beginning multi-step work—your initial response to that ask must be a brief outward acknowledgement before your first tool call. Start the assistant content at its first character with exactly:
+[send to=${target}${replyTo}]
+Then put only the acknowledgement in that speech body; keep private reasoning outside it. This requirement does not apply when you are only answering now, refusing, staying silent, or not taking the requested action. Do not carry it into social or quiet rooms, autonomous wakes, later outer turns, or post-tool continuations.
+</direct-channel-action-acknowledgement>`);
     }
     return sections.length === 0 ? null : user(sections.join('\n'));
   }
