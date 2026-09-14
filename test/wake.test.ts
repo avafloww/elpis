@@ -16,7 +16,12 @@ const guilds: GuildConfig[] = [
     slashCommands: true,
     quietHours: null,
     timezone: null,
-    channels: { '1001': 'direct', '1002': 'social', '1003': 'quiet' },
+    channels: {
+      '1001': 'direct',
+      '1002': 'social',
+      '1003': 'quiet',
+      '1004': 'mentions',
+    },
   },
   {
     id: 'g2',
@@ -73,6 +78,46 @@ test('wake: mention or reply wakes on any tier', () => {
       noMutes,
     ),
     'wake',
+  );
+});
+test('wake: mentions tier wakes only an explicit human address', () => {
+  assert.equal(
+    classifyInbound(
+      { ...human, guildId: 'g1', channelId: '1004' },
+      idx,
+      noMutes,
+    ),
+    'ambient',
+  );
+  assert.equal(
+    classifyInbound(
+      { ...human, mentionsMe: true, guildId: 'g1', channelId: '1004' },
+      idx,
+      noMutes,
+    ),
+    'wake',
+  );
+  assert.equal(
+    classifyInbound(
+      { ...human, replyToMe: true, guildId: 'g1', channelId: '1004' },
+      idx,
+      noMutes,
+    ),
+    'wake',
+  );
+  assert.equal(
+    classifyInbound(
+      {
+        authorIsBot: true,
+        mentionsMe: true,
+        replyToMe: false,
+        guildId: 'g1',
+        channelId: '1004',
+      },
+      idx,
+      noMutes,
+    ),
+    'ambient',
   );
 });
 test('wake: social otherwise ambient; quiet ambient', () => {
@@ -238,6 +283,7 @@ test('countsForTick: social counts; quiet-tier and muted never; quiet-hours supp
   const now = new Date('2026-07-22T12:00:00Z');
   assert.equal(countsForTick('1002', idx, noMutes, now), true);
   assert.equal(countsForTick('1003', idx, noMutes, now), false);
+  assert.equal(countsForTick('1004', idx, noMutes, now), false);
   assert.equal(
     countsForTick('1002', idx, () => 'mute', now),
     false,

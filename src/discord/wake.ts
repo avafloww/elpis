@@ -162,7 +162,12 @@ export function countsForTick(
     channelId,
     index,
   );
-  if (!policy || policy.tier === 'drop' || policy.tier === 'quiet')
+  if (
+    !policy ||
+    policy.tier === 'drop' ||
+    policy.tier === 'quiet' ||
+    policy.tier === 'mentions'
+  )
     return false;
   if (muteType(channelId) !== null) return false;
   if (inQuietHours(policy.guild, now)) return false;

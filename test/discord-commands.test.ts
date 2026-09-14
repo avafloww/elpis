@@ -929,6 +929,187 @@ test('resolveMentions: non-mention angle-bracket text is not mangled', () => {
   );
 });
 
+test('mentions-turn Discord authorization is exact-channel and default-denial only', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const config = makeConfig();
+  config.discord.guilds = [
+    {
+      id: 'g1',
+      slug: 'example',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      defaultTier: 'mentions',
+      allowSend: true,
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  let send!: Parameters<Agent['setSend']>[0];
+  type Authorization = {
+    kind: 'mentions-turn';
+    channelId: string;
+    guildId: string;
+    isCurrent: () => boolean;
+  };
+  let issueAuthorization!: (
+    channelId: string,
+    guildId: string,
+    isCurrent: () => boolean,
+  ) => Authorization;
+  const agent = {
+    setSend: (fn: typeof send) => {
+      send = fn;
+    },
+    setOutboundSendAuthorizationIssuer: (fn: typeof issueAuthorization) => {
+      issueAuthorization = fn;
+    },
+    enqueue: () => {},
+  } as unknown as Agent;
+  const activeMutes = new Map<string, 'mute' | 'deafen'>();
+  const mutes = {
+    get: (channelId: string) => {
+      const type = activeMutes.get(channelId);
+      return type
+        ? {
+            channelId,
+            type,
+            setBy: 'operator' as const,
+            reason: null,
+            createdAt: '2026-01-01T00:00:00.000Z',
+          }
+        : null;
+    },
+  } as never;
+  const wiring = createDiscord(config, agent, { mutes });
+  t.after(() => {
+    wiring.stopTyping();
+    wiring.client.destroy();
+  });
+  let exactTyping = 0;
+  let otherTyping = 0;
+  let exactSends = 0;
+  let otherSends = 0;
+  wiring.client.channels.cache.set('100', {
+    guildId: 'g1',
+    isThread: () => false,
+    isTextBased: () => true,
+    sendTyping: async () => {
+      exactTyping++;
+    },
+    send: async () => {
+      exactSends++;
+    },
+  } as never);
+  wiring.client.channels.cache.set('101', {
+    guildId: 'g1',
+    isThread: () => false,
+    isTextBased: () => true,
+    sendTyping: async () => {
+      otherTyping++;
+    },
+    send: async () => {
+      otherSends++;
+    },
+  } as never);
+
+  let fetchGate:
+    | {
+        entered: ReturnType<typeof Promise.withResolvers<void>>;
+        release: ReturnType<typeof Promise.withResolvers<void>>;
+      }
+    | undefined;
+  t.mock.method(wiring.client.channels, 'fetch', async (channelId) => {
+    const gate = fetchGate;
+    if (gate) {
+      gate.entered.resolve();
+      await gate.release.promise;
+    }
+    return wiring.client.channels.cache.get(channelId);
+  });
+
+  let current = true;
+  const authorization = issueAuthorization('100', 'g1', () => current);
+  const typing = wiring.typing as (
+    channelId: string,
+    authorization?: typeof authorization,
+  ) => void;
+  typing('100');
+  typing('101', authorization);
+  typing('100', { ...authorization, guildId: 'wrong-guild' });
+  typing('100', authorization);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  activeMutes.set('100', 'deafen');
+  t.mock.timers.tick(8_000);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  activeMutes.clear();
+  assert.equal(exactTyping, 1, 'a mute stops the next repeating effect');
+
+  typing('100', authorization);
+  current = false;
+  t.mock.timers.tick(8_000);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(exactTyping, 2, 'revocation stops the next repeating effect');
+  current = true;
+
+  await assert.rejects(
+    send('100', 'wrong guild', undefined, {
+      ...authorization,
+      guildId: 'wrong-guild',
+    }),
+    /disabled by configuration/i,
+  );
+  await assert.rejects(
+    send('101', 'wrong room', undefined, authorization),
+    /disabled by configuration/i,
+  );
+  await assert.rejects(
+    send('100', 'forged lookalike', undefined, { ...authorization }),
+    /disabled by configuration/i,
+  );
+  await assert.rejects(
+    send(
+      '100',
+      'throwing validator',
+      undefined,
+      issueAuthorization('100', 'g1', () => {
+        throw new Error('validator fault');
+      }),
+    ),
+    /authorization.*expired/i,
+  );
+  await send('100', 'exact room', undefined, authorization);
+
+  assert.equal(exactTyping, 2);
+  assert.equal(otherTyping, 0);
+  assert.equal(exactSends, 1);
+  assert.equal(otherSends, 0);
+
+  fetchGate = {
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  };
+  const staleSend = send('100', 'stale after fetch', undefined, authorization);
+  await fetchGate.entered.promise;
+  current = false;
+  fetchGate.release.resolve();
+  await assert.rejects(staleSend, /authorization.*expired/i);
+  assert.equal(exactSends, 1);
+
+  current = true;
+  fetchGate = {
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  };
+  const mutedSend = send('100', 'muted after fetch', undefined, authorization);
+  await fetchGate.entered.promise;
+  activeMutes.set('100', 'mute');
+  fetchGate.release.resolve();
+  await assert.rejects(mutedSend, /muted/i);
+  assert.equal(exactSends, 1);
+});
+
 test('ignored authors cannot enter message, reply, or reaction paths', async (t) => {
   const received: InboundMessage[] = [];
   const feedback: unknown[] = [];

@@ -7,7 +7,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { buildTestAgent, makeConfig } from './helpers.js';
+import {
+  buildTestAgent,
+  EMPTY_WAKE,
+  makeConfig,
+  makeStubLLM,
+} from './helpers.js';
 import { createMuteStore, type MuteStore } from '../src/store/mutes.js';
 import { createChannelDirectory } from '../src/store/channels.js';
 import { openDatabase } from '../src/store/db.js';
@@ -234,6 +239,206 @@ test('roomsSnapshot: a configured-but-never-spoken-in channel still renders, car
   assert.equal(internal!.muteState, null);
 
   cleanup();
+});
+
+test('mentions tier permits only the exact waking room under default send denial', async () => {
+  const mentionGuilds: GuildConfig[] = [
+    {
+      id: 'g-mentions',
+      slug: 'mentions',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      defaultTier: 'mentions',
+      allowSend: true,
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  let agent!: Agent;
+  let exactError: unknown;
+  let otherError: unknown;
+  let issuedAuthorization:
+    { channelId: string; isCurrent: () => boolean } | undefined;
+  const completed = Promise.withResolvers<void>();
+  const afterTurn = Promise.withResolvers<void>();
+  let idleCount = 0;
+  const llm = makeStubLLM({
+    complete: async () => {
+      try {
+        await agent.send('5001', 'exact room');
+      } catch (error) {
+        exactError = error;
+      }
+      try {
+        await agent.send('5002', 'other room');
+      } catch (error) {
+        otherError = error;
+      }
+      completed.resolve();
+      return EMPTY_WAKE;
+    },
+  });
+  const built = buildTestAgent({
+    llm,
+    config: {
+      discord: { ...makeConfig().discord, guilds: mentionGuilds },
+    },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, mentionGuilds);
+      channels.set('5001', 'asked-here', 'g-mentions');
+      channels.set('5002', 'not-asked-here', 'g-mentions');
+      return {
+        channels,
+        onThinking: (_channelId, authorization) => {
+          if (authorization) issuedAuthorization = authorization;
+        },
+        onIdle: () => {
+          idleCount++;
+          if (idleCount === 2) afterTurn.resolve();
+        },
+      };
+    },
+    tmpPrefix: 'harness-mentions-send-qualifier-',
+  });
+  agent = built.agent;
+  agent.setOutboundSendAuthorizationIssuer((channelId, guildId, isCurrent) =>
+    Object.freeze({ kind: 'mentions-turn', channelId, guildId, isCurrent }),
+  );
+
+  await assert.rejects(
+    agent.send('5001', 'outside a turn'),
+    /disabled by configuration/i,
+  );
+  void agent.loop();
+  agent.enqueue({
+    id: 'mention-1',
+    channelId: '5001',
+    channelName: 'asked-here',
+    author: 'Aster',
+    authorId: 'person-1',
+    content: '@Agent answer this',
+    createdAt: '2026-09-14T12:00:00.000Z',
+    replyTo: null,
+    forwarded: null,
+    mentions: ['@Agent'],
+    attachments: [],
+    guildId: 'g-mentions',
+    guildSlug: 'mentions',
+    kind: 'discord',
+    wakeClass: 'wake',
+    policyChannelId: '5001',
+  });
+  await completed.promise;
+
+  assert.equal(exactError, undefined);
+  assert.match(String(otherError), /disabled by configuration/i);
+  assert.deepEqual(built.sent, [{ channelId: '5001', text: 'exact room' }]);
+  await afterTurn.promise;
+  await assert.rejects(
+    agent.send('5001', 'after the turn'),
+    /disabled by configuration/i,
+  );
+  assert.equal(issuedAuthorization?.isCurrent(), false);
+  const internals = agent as unknown as {
+    realUserTurn: boolean;
+    mentionsTurnChannelId: string | null;
+    mentionsTurnToken: object | null;
+  };
+  internals.realUserTurn = true;
+  internals.mentionsTurnChannelId = '5001';
+  internals.mentionsTurnToken = {};
+  assert.equal(
+    issuedAuthorization?.isCurrent(),
+    false,
+    'an old capability cannot revive in a later turn for the same room',
+  );
+  agent.stop();
+  built.cleanup();
+});
+
+test('mentions turn fails closed before a custom send callback without a Discord issuer', async () => {
+  const guilds: GuildConfig[] = [
+    {
+      id: 'g-mentions',
+      slug: 'mentions',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      allowSend: true,
+      defaultTier: 'mentions',
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  const built = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds } },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, guilds);
+      channels.set('5101', 'issuer-required', 'g-mentions');
+      return { channels };
+    },
+    tmpPrefix: 'harness-mentions-issuer-required-',
+  });
+  const internals = built.agent as unknown as {
+    realUserTurn: boolean;
+    mentionsTurnChannelId: string | null;
+    mentionsTurnToken: object | null;
+  };
+  internals.realUserTurn = true;
+  internals.mentionsTurnChannelId = '5101';
+  internals.mentionsTurnToken = {};
+
+  try {
+    await assert.rejects(
+      built.agent.send('5101', 'must not reach embedder'),
+      /disabled by configuration/i,
+    );
+    assert.equal(built.sent.length, 0);
+  } finally {
+    built.cleanup();
+  }
+});
+
+test('mentions-default send denial can still establish a runtime mute', () => {
+  const guilds: GuildConfig[] = [
+    {
+      id: 'g-mentions',
+      slug: 'mentions',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      allowSend: true,
+      defaultTier: 'mentions',
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  let mutes!: ReturnType<typeof createMuteStore>;
+  const { agent, cleanup } = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds } },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, guilds);
+      channels.set('4101', 'mentions-room', 'g-mentions');
+      mutes = createMuteStore(db);
+      return { mutes, channels };
+    },
+    tmpPrefix: 'harness-mentions-runtime-mute-',
+  });
+
+  try {
+    const muted = agent.moderateChannel('4101', 'mute', 'self', 'stop here');
+    assert.equal(muted.ok, true);
+    assert.equal(mutes.get('4101')?.type, 'mute');
+  } finally {
+    cleanup();
+  }
 });
 
 test('config send deny blocks delivery and makes runtime mute redundant', async () => {

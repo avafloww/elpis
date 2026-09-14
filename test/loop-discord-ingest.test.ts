@@ -30,7 +30,7 @@ const FIXTURE_GUILD: GuildConfig = {
   slashCommands: false,
   quietHours: null,
   timezone: null,
-  channels: { '1002': 'social', '1003': 'social' },
+  channels: { '1002': 'social', '1003': 'social', '1004': 'mentions' },
 };
 
 function scriptedLLM(
@@ -160,7 +160,24 @@ test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social cha
 
   void agent.loop();
 
-  // Muted channel first: classifyInbound downgrades it to 'ambient' (social
+  client.emit(
+    Events.MessageCreate,
+    fakeMessage({
+      id: 'm-mentions-unaddressed',
+      guildId: 'g1',
+      channelId: '1004',
+      content: 'ambient observation only',
+    }),
+  );
+  await flush();
+  assert.equal(
+    llm.calls,
+    0,
+    'an unaddressed mentions-tier message never uses the zero-tick escape hatch',
+  );
+  assert.equal(agent.inboundQueueLengthForTest, 1);
+
+  // Muted channel next: classifyInbound downgrades it to 'ambient' (social
   // tier, no mention), and the escape hatch's muteType recheck must refuse to
   // promote it to 'wake' even though ambientTickMs===0 would otherwise
   // promote every non-drop ambient message.
@@ -182,8 +199,8 @@ test('discord ingest: ambient_tick_ms=0 escape hatch wakes an unmuted social cha
   );
   assert.equal(
     agent.inboundQueueLengthForTest,
-    1,
-    'the muted message still entered the queue as ambient — read, not spoken to',
+    2,
+    'both the mentions-tier and muted messages stay queued as ambient history',
   );
 
   // Contrast: the SAME config, an UNMUTED social channel — proves the escape

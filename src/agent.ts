@@ -709,9 +709,13 @@ export interface AgentDeps {
     channelId: string,
     text: string,
     opts?: import('./types.js').OutboundSendOptions,
+    authorization?: import('./types.js').OutboundSendAuthorization,
   ) => Promise<void | import('./types.js').OutboundDelivery>;
   /** Called when the agent is about to make an LLM call (typing indicator). */
-  onThinking?: (channelId: string) => void;
+  onThinking?: (
+    channelId: string,
+    authorization?: import('./types.js').OutboundSendAuthorization,
+  ) => void;
   /** Called when the loop reaches the wake-gate after a durable run wake, with an empty queue. */
   onIdle?: () => void;
   /** Callback to publish the currently processed inbound message to the sandbox. */
@@ -863,6 +867,12 @@ export class Agent {
   private turnChannel: string = INTERNAL_CHANNEL_ID;
   /** The channel of the message that woke the current turn — typing only. */
   private turnChannelId: string | null = null;
+  /** Exact room authorized by an addressed mentions-tier wake when only the
+   * conservative default send policy denies it. Cleared at every turn boundary. */
+  private mentionsTurnChannelId: string | null = null;
+  private mentionsTurnToken: object | null = null;
+  private outboundSendAuthorizationIssuer:
+    import('./types.js').OutboundSendAuthorizationIssuer | null = null;
   /** A sendable direct-tier Discord wake gets one request-only instruction to
    * acknowledge accepted action before tools. Every later waking ingress
    * replaces or clears it, so mixed batches cannot inherit stale authority. */
@@ -995,6 +1005,15 @@ export class Agent {
     this.closeMedia = close;
   }
 
+  /** Install Discord's process-local nominal authorization issuer exactly once. */
+  setOutboundSendAuthorizationIssuer(
+    issuer: import('./types.js').OutboundSendAuthorizationIssuer,
+  ): void {
+    if (this.outboundSendAuthorizationIssuer !== null)
+      throw new Error('outbound send authorization issuer already wired');
+    this.outboundSendAuthorizationIssuer = issuer;
+  }
+
   /** Replace the typing-indicator callbacks (wired by the Discord layer on
    * start — same ordering reason as setSend: the Discord client doesn't
    * exist yet when the Agent/sandbox are constructed). */
@@ -1019,13 +1038,46 @@ export class Agent {
     return resolveChannelPolicy(guildId, policyChannelId, this.guildIndex);
   }
 
+  private mentionsTurnAllows(
+    channelId: string,
+    policy: ChannelPolicy,
+  ): boolean {
+    return (
+      this.mentionsTurnToken !== null &&
+      this.realUserTurn &&
+      this.mentionsTurnChannelId === channelId &&
+      policy.tier === 'mentions' &&
+      policy.sendDeniedBy === 'default'
+    );
+  }
+
+  private mentionsTurnAuthorization(
+    channelId: string,
+    policy: ChannelPolicy,
+  ): import('./types.js').OutboundSendAuthorization | undefined {
+    const token = this.mentionsTurnToken;
+    if (token === null || !this.mentionsTurnAllows(channelId, policy))
+      return undefined;
+    if (!this.outboundSendAuthorizationIssuer) return undefined;
+    const isCurrent = () =>
+      this.mentionsTurnToken === token &&
+      this.mentionsTurnAllows(channelId, policy);
+    return this.outboundSendAuthorizationIssuer(
+      channelId,
+      policy.guild.id,
+      isCurrent,
+    );
+  }
+
   /** Explicitly show typing only where configuration permits a later send. */
   typing(channelId: string): void {
     if (this.turnSendScope === 'observe_only') return;
     if (channelId === CONSOLE_CHANNEL_ID) return;
     const policy = this.policyForChannel(channelId);
-    if (!policy?.allowSend) return;
-    this.deps.onThinking?.(channelId);
+    if (!policy) return;
+    const authorization = this.mentionsTurnAuthorization(channelId, policy);
+    if (!policy.allowSend && !authorization) return;
+    this.deps.onThinking?.(channelId, authorization);
   }
 
   /** Shared routing and send accounting. Callers record their own outcome receipts
@@ -1061,7 +1113,11 @@ export class Agent {
         `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled because the channel is not configured`,
       );
     }
-    if (!configPolicy.allowSend) {
+    const mentionsAuthorization = this.mentionsTurnAuthorization(
+      channelId,
+      configPolicy,
+    );
+    if (!configPolicy.allowSend && !mentionsAuthorization) {
       throw new Error(
         `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
       );
@@ -1094,7 +1150,12 @@ export class Agent {
       );
     }
     this.sendsThisTurn++;
-    const delivery = await this.deps.send(channelId, content, opts);
+    const delivery = await this.deps.send(
+      channelId,
+      content,
+      opts,
+      mentionsAuthorization,
+    );
     // After the await: a failed delivery must not count as having spoken
     // (the social nudge reads this as "when did anything last reach a room").
     // A channel outside any configured guild policy (e.g. a legacy NULL-guild
@@ -1784,7 +1845,15 @@ export class Agent {
     const label = this.qualifiedChannelLabel(channelId);
     const existing = mutes.get(channelId);
     const configPolicy = this.policyForChannel(channelId);
-    if (action === 'mute' && configPolicy && !configPolicy.allowSend) {
+    if (
+      action === 'mute' &&
+      configPolicy &&
+      !configPolicy.allowSend &&
+      !(
+        configPolicy.tier === 'mentions' &&
+        configPolicy.sendDeniedBy === 'default'
+      )
+    ) {
       return {
         ok: false,
         note: `${label} sending is already disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
@@ -1924,7 +1993,7 @@ export class Agent {
   sleepResume(): void {
     this.sleepDepth = Math.max(0, this.sleepDepth - 1);
     if (this.sleepDepth === 0 && this.busy && this.turnChannelId)
-      this.deps.onThinking?.(this.turnChannelId);
+      this.typing(this.turnChannelId);
   }
 
   /** Clear the one conversation: drop history, queued inbound, tracker/compactor
@@ -1962,6 +2031,8 @@ export class Agent {
     this.externalThinkForcedThisTurn = false;
     this.personInputTurn = false;
     this.directActionReply = null;
+    this.mentionsTurnChannelId = null;
+    this.mentionsTurnToken = null;
     this.inbound = [];
     this.hasNewInput = false;
     // A leftover ambientUnseen entry outlives the messages it points at — the
@@ -2075,10 +2146,15 @@ export class Agent {
               this.guildIndex,
             );
         const isDiscord = m.kind === undefined || m.kind === 'discord';
+        const mentionsTurnAllowed =
+          isDiscord &&
+          m.wakeClass !== 'ambient' &&
+          sendPolicy?.tier === 'mentions' &&
+          sendPolicy.sendDeniedBy === 'default';
         const replyNotice =
           !isDiscord || drainMute
             ? null
-            : sendPolicy && !sendPolicy.allowSend
+            : sendPolicy && !sendPolicy.allowSend && !mentionsTurnAllowed
               ? ('config-denied' as const)
               : m.wakeClass === 'ambient' &&
                   !this.config.discord.ambientAllowSend
@@ -2228,6 +2304,20 @@ export class Agent {
       this.turnChannelId = this.realUserTurn
         ? (this.lastInbound?.channelId ?? null)
         : null;
+      const turnPolicy = this.turnChannelId
+        ? this.policyForChannel(this.turnChannelId)
+        : null;
+      const turnKind = this.lastInbound?.kind ?? 'discord';
+      this.mentionsTurnChannelId =
+        this.realUserTurn &&
+        turnKind === 'discord' &&
+        this.lastInbound?.wakeClass === 'wake' &&
+        this.turnChannelId !== null &&
+        turnPolicy?.tier === 'mentions' &&
+        turnPolicy.sendDeniedBy === 'default'
+          ? this.turnChannelId
+          : null;
+      this.mentionsTurnToken = this.mentionsTurnChannelId ? {} : null;
       this.sleepDepth = 0;
       this.deps.setCurrentInbound?.(this.lastInbound ?? null);
       this.logger.info(
@@ -2250,7 +2340,7 @@ export class Agent {
         this.logger.warn('context cleared before LLM call — restarting turn');
         continue turn;
       }
-      if (this.turnChannelId) this.deps.onThinking?.(this.turnChannelId);
+      if (this.turnChannelId) this.typing(this.turnChannelId);
       // Everything accumulated in ambientUnseen is about to be sent to the
       // model as part of `this.messages` — clear before the call, not after,
       // so a message that lands mid-call (via the epoch-guarded retry path)
@@ -2836,8 +2926,12 @@ export class Agent {
           ? this.deps.mutes?.get(turnParent)?.type
           : undefined) ??
         null;
+      const ghostTurnPolicy = this.policyForChannel(this.turnChannel);
       const turnSendAllowed =
-        this.policyForChannel(this.turnChannel)?.allowSend !== false;
+        ghostTurnPolicy !== null &&
+        (ghostTurnPolicy.allowSend ||
+          (this.outboundSendAuthorizationIssuer !== null &&
+            this.mentionsTurnAllows(this.turnChannel, ghostTurnPolicy)));
       if (
         this.realUserTurn &&
         !this.nudgeFired &&
@@ -3036,6 +3130,8 @@ export class Agent {
     this.personInputTurn = false;
     this.turnSendScope = 'normal';
     this.directActionReply = null;
+    this.mentionsTurnChannelId = null;
+    this.mentionsTurnToken = null;
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;

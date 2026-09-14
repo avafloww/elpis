@@ -63,6 +63,22 @@ export interface OutboundSendOptions {
   mentions?: boolean;
 }
 
+/** Harness-internal proof that the current addressed mentions-tier turn may reply
+ * to this exact channel despite the conservative default send policy. Never
+ * exposed through OutboundSendOptions or the sandbox API. */
+export interface OutboundSendAuthorization {
+  kind: 'mentions-turn';
+  channelId: string;
+  guildId: string;
+  isCurrent(): boolean;
+}
+
+export type OutboundSendAuthorizationIssuer = (
+  channelId: string,
+  guildId: string,
+  isCurrent: () => boolean,
+) => OutboundSendAuthorization;
+
 /** Text delivery and acoustic playback are distinct outcomes. */
 export interface VoiceDelivery {
   status: 'played' | 'interrupted' | 'failed';

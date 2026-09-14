@@ -1014,6 +1014,20 @@ test('configFile: guilds list parses with tiers, quiet hours, defaults', () => {
   });
 });
 
+test('configFile: mentions tier parses for guild defaults and channel overrides', () => {
+  const defaulted = loadConfigFile(
+    fixture(
+      GUILDS.replace('slug: home', 'slug: home\n      default_tier: mentions'),
+    ),
+  ).discord.guilds[0];
+  assert.equal(defaulted.defaultTier, 'mentions');
+
+  const explicit = loadConfigFile(
+    fixture(GUILDS.replace('"1002": social', '"1002": mentions')),
+  ).discord.guilds[0];
+  assert.equal(explicit.channels['1002'], 'mentions');
+});
+
 test('configFile: legacy discord.guild_id is a hard error naming discord.guilds', () => {
   assert.throws(
     () => loadConfigFile(fixture(MINIMAL)),
@@ -1208,7 +1222,7 @@ test('configFile: an invalid tier other than the special-cased "muted" throws li
   const body = GUILDS.replace('"1002": social', '"1002": loud');
   assert.throws(
     () => loadConfigFile(fixture(body)),
-    /tier must be one of drop\|direct\|social\|quiet \(got "loud"\)/,
+    /tier must be one of drop\|direct\|social\|quiet\|mentions \(got "loud"\)/,
   );
 });
 

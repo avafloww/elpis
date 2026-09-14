@@ -1,0 +1,7 @@
+# Add a mentions-only Discord receive tier
+
+Discord guild and channel policy now accepts `mentions`. Unaddressed human and bot messages remain available as ambient history, but never trigger an ambient tick; a non-bot direct mention or reply wakes the resident immediately.
+
+An addressed `mentions` turn may reply only to its exact inbound channel or thread when the sole send denial is the conservative unlisted-channel default. Discord mints a process-local nominal capability bound to the exact turn nonce, guild, and channel; copied lookalikes and capabilities from cleared, finished, or later same-room turns fail closed. The transport rechecks authorization and runtime mute/deafen immediately before each message chunk and repeating typing effect. Guild denial, explicit channel denial, other-room sends, synthetic turns, and later turns remain denied, while a default-denied `mentions` room can still establish a runtime mute. Existing tiers and configurations are unchanged, with no migration.
+
+Focused config, wake-classification, real Discord-ingress, exact-room authority, expiry, ghost-reply, moderation-race, and sleep-resume checks pass. Full unit, integration, build, benchmark typecheck, formatting, and diff gates pass, and an independent exact-diff review accepted the final authority design. After deployment, verify one real direct mention receives a reply and an unmentioned message does not wake or send.

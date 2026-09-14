@@ -34,7 +34,7 @@ import {
 
 /** A channel's wake tier — how eagerly the agent responds in it. Later tasks
  * (the wake classifier) consume this; only parses and carries it. */
-export type ChannelTier = 'direct' | 'social' | 'quiet';
+export type ChannelTier = 'direct' | 'social' | 'quiet' | 'mentions';
 export type ChannelMode = 'drop' | ChannelTier;
 
 /** One entry in `discord.guilds`. Explicit channels override the guild's
@@ -547,7 +547,7 @@ function optNum(tree: YamlTree, dotted: string, file: string): number | null {
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
-const TIER_VALUES = ['direct', 'social', 'quiet'] as const;
+const TIER_VALUES = ['direct', 'social', 'quiet', 'mentions'] as const;
 const CHANNEL_MODE_VALUES = ['drop', ...TIER_VALUES] as const;
 
 /** Parse `quiet_hours: "HHMM-HHMM"` into minutes-since-midnight. Wraparound
@@ -614,7 +614,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       !CHANNEL_MODE_VALUES.includes(defaultTier as ChannelMode)
     ) {
       throw new Error(
-        `${f}: guild \`default_tier\` must be one of drop|direct|social|quiet (got ${JSON.stringify(defaultTier)})`,
+        `${f}: guild \`default_tier\` must be one of drop|direct|social|quiet|mentions (got ${JSON.stringify(defaultTier)})`,
       );
     }
     const allowSend = g.allow_send === undefined ? true : g.allow_send;
@@ -708,7 +708,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
         !CHANNEL_MODE_VALUES.includes(tier as ChannelMode)
       ) {
         throw new Error(
-          `${f}: guild '${slug}' channel "${cid}" tier must be one of drop|direct|social|quiet (got ${JSON.stringify(tier)})`,
+          `${f}: guild '${slug}' channel "${cid}" tier must be one of drop|direct|social|quiet|mentions (got ${JSON.stringify(tier)})`,
         );
       }
       if (typeof channelSend !== 'boolean') {

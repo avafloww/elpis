@@ -312,7 +312,10 @@ export interface DiscordWiring {
    * channel — the Agent's onThinking hook (via agent.setTyping) and the
    * sandbox's channel(id).typing both drive this. See the TEMPORARY BODGE
    * note in createDiscord for the current first-guild gate. */
-  typing(channelId: string): void;
+  typing(
+    channelId: string,
+    authorization?: import('../types.js').OutboundSendAuthorization,
+  ): void;
   /** Stop the indicator (agent idle / turn end). */
   stopTyping(): void;
 }
@@ -1358,6 +1361,21 @@ export function createDiscord(
   // channels.fetch. Remove `typingGuildId` and its call sites below to
   // restore typing everywhere once the underlying bug is diagnosed.
   const typingGuildId = config.discord.guilds[0]?.id ?? null;
+  const issuedSendAuthorizations = new WeakSet<
+    import('../types.js').OutboundSendAuthorization
+  >();
+  const issueSendAuthorization: import('../types.js').OutboundSendAuthorizationIssuer =
+    (channelId, guildId, isCurrent) => {
+      const authorization = Object.freeze({
+        kind: 'mentions-turn' as const,
+        channelId,
+        guildId,
+        isCurrent,
+      });
+      issuedSendAuthorizations.add(authorization);
+      return authorization;
+    };
+  const muteType = (id: string) => deps?.mutes?.get(id)?.type ?? null;
   /** A THREAD's parent, resolved from the client's cache ONLY — discord.js
    * already caches every channel of a joined guild off the gateway's
    * GUILD_CREATE, well before any typing is needed — never a live fetch, so
@@ -1402,22 +1420,63 @@ export function createDiscord(
    * stopTyping. The gate is resolved ONCE at start (not re-checked per
    * tick — the efficiency win over the old per-tick channels.fetch), and the
    * channel is resolved from the cache once too and reused across ticks. */
-  const typing = (channelId: string): void => {
+  const typing = (
+    channelId: string,
+    authorization?: import('../types.js').OutboundSendAuthorization,
+  ): void => {
     stopTyping();
-    const resolvedGuildId = resolveTypingGuildId(
-      channelId,
-      guildIndex,
-      threadParentOf,
-    );
+    const ch = client.channels.cache.get(channelId);
+    const cachedGuildId =
+      ch && 'guildId' in ch && typeof ch.guildId === 'string'
+        ? ch.guildId
+        : null;
+    const authorizedGuildId =
+      authorization !== undefined &&
+      issuedSendAuthorizations.has(authorization) &&
+      authorization.kind === 'mentions-turn' &&
+      authorization.channelId === channelId &&
+      authorization.guildId === cachedGuildId
+        ? authorization.guildId
+        : null;
+    const resolvedGuildId =
+      resolveTypingGuildId(channelId, guildIndex, threadParentOf) ??
+      authorizedGuildId;
     if (resolvedGuildId !== typingGuildId) return;
     const policyChannelId = threadParentOf(channelId) ?? channelId;
-    if (
-      resolveChannelPolicy(resolvedGuildId, policyChannelId, guildIndex)
-        ?.allowSend !== true
-    )
-      return;
-    const ch = client.channels.cache.get(channelId);
-    const fire = () => fireTypingOn(ch);
+    const policy = resolveChannelPolicy(
+      resolvedGuildId,
+      policyChannelId,
+      guildIndex,
+    );
+    const mentionsAuthorizationMatches =
+      authorization !== undefined &&
+      issuedSendAuthorizations.has(authorization) &&
+      authorization.kind === 'mentions-turn' &&
+      authorization.channelId === channelId &&
+      authorization.guildId === resolvedGuildId &&
+      policy?.tier === 'mentions' &&
+      policy.sendDeniedBy === 'default';
+    const authorizationIsCurrent = (): boolean => {
+      if (!mentionsAuthorizationMatches) return false;
+      try {
+        return authorization.isCurrent() === true;
+      } catch {
+        return false;
+      }
+    };
+    const effectAllowed = (): boolean =>
+      policy !== null &&
+      (policy.allowSend || authorizationIsCurrent()) &&
+      muteType(channelId) === null &&
+      (policyChannelId === channelId || muteType(policyChannelId) === null);
+    if (!effectAllowed()) return;
+    const fire = () => {
+      if (!effectAllowed()) {
+        stopTyping();
+        return;
+      }
+      void fireTypingOn(ch);
+    };
     fire();
     typingInterval = setInterval(fire, 8000);
   };
@@ -1543,7 +1602,6 @@ export function createDiscord(
       }
     })();
 
-    const muteType = (id: string) => deps?.mutes?.get(id)?.type ?? null;
     const input = wakeInputFor(
       message.guildId,
       policyChannelId,
@@ -1585,6 +1643,7 @@ export function createDiscord(
     if (
       config.discord.ambientTickMs === 0 &&
       cls === 'ambient' &&
+      policy.tier !== 'mentions' &&
       muteType(policyChannelId) === null
     ) {
       cls = 'wake';
@@ -1668,7 +1727,10 @@ export function createDiscord(
     if (
       cls === 'wake' &&
       policy.guild.id === typingGuildId &&
-      policy.allowSend
+      muteType(message.channelId) === null &&
+      muteType(policyChannelId) === null &&
+      (policy.allowSend ||
+        (policy.tier === 'mentions' && policy.sendDeniedBy === 'default'))
     ) {
       fireTypingOn(channel);
     }
@@ -2310,6 +2372,7 @@ export function createDiscord(
     channelId: string,
     text: string,
     opts?: import('../types.js').OutboundSendOptions,
+    authorization?: import('../types.js').OutboundSendAuthorization,
   ) => {
     validateReplyTo(opts?.replyTo);
     validateMentionNotifications(opts?.mentions);
@@ -2347,11 +2410,45 @@ export function createDiscord(
         `sending to #${channelDisplayName(channel)} is disabled because the fetched channel is not configured`,
       );
     }
-    if (!configPolicy.allowSend) {
-      throw new Error(
-        `sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
-      );
-    }
+    const mentionsAuthorizationMatches =
+      authorization !== undefined &&
+      issuedSendAuthorizations.has(authorization) &&
+      authorization.kind === 'mentions-turn' &&
+      authorization.channelId === channelId &&
+      authorization.guildId === guildId &&
+      configPolicy.tier === 'mentions' &&
+      configPolicy.sendDeniedBy === 'default';
+    const authorizationIsCurrent = (): boolean => {
+      if (!mentionsAuthorizationMatches) return false;
+      try {
+        return authorization.isCurrent() === true;
+      } catch {
+        return false;
+      }
+    };
+    const assertEffectAllowed = (): void => {
+      if (!configPolicy.allowSend) {
+        if (!mentionsAuthorizationMatches) {
+          throw new Error(
+            `sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
+          );
+        }
+        if (!authorizationIsCurrent()) {
+          throw new Error(
+            'mentions-turn authorization expired before delivery',
+          );
+        }
+      }
+      const state =
+        muteType(channelId) ??
+        (policyChannelId === channelId ? null : muteType(policyChannelId));
+      if (state !== null) {
+        throw new Error(
+          `sending to #${channelDisplayName(channel)} is ${state === 'deafen' ? 'deafened' : 'muted'} — release is operator-only`,
+        );
+      }
+    };
+    assertEffectAllowed();
     // Rewrite @Name → <@id> against the target channel's own guild directory
     // (a DM/uncached channel has no 'guild' — outboundMentionDirectory(null)
     // is a no-op map, so text passes through unchanged).
@@ -2396,10 +2493,12 @@ export function createDiscord(
         ...discordMessageOptions(opts?.replyTo, i, users),
       };
       if (i === 0 && attachments.length > 0) payload.files = attachments;
+      assertEffectAllowed();
       await channel.send(payload);
     }
     if (capturedSpeech) {
       try {
+        assertEffectAllowed();
         return { voice: await capturedSpeech(text) };
       } catch {
         // The readable send has already succeeded. Acoustic failure must not
@@ -2411,7 +2510,8 @@ export function createDiscord(
     }
   };
 
-  // wire the agent's send → channel.send with chunking
+  // Wire the process-local nominal issuer before any Discord effect callback.
+  agent.setOutboundSendAuthorizationIssuer?.(issueSendAuthorization);
   agent.setSend(send);
 
   return {

@@ -6,8 +6,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSandbox } from '../src/sandbox/index.js';
+import { openDatabase } from '../src/store/db.js';
+import { createChannelDirectory } from '../src/store/channels.js';
 import type { SandboxDeps } from '../src/types.js';
-import { buildTestAgent, makeStubLLM, EMPTY_WAKE } from './helpers.js';
+import {
+  buildTestAgent,
+  makeConfig,
+  makeStubLLM,
+  EMPTY_WAKE,
+} from './helpers.js';
 
 /** A sandbox wired with just enough config/memory/logbuf to run, plus the two
  * sleep hooks under test. Centralizes the `as unknown as SandboxDeps` cast
@@ -93,16 +100,72 @@ test('sleep typing: pause clears typing, resume re-fires only while turn is live
 
     // Simulate a live turn (what the loop sets before the LLM call).
     a.busy = true;
-    a.turnChannelId = 'chan-1';
+    a.turnChannelId = '100';
     agent.sleepPause();
     assert.equal(idleCalls, 2);
     assert.deepEqual(thinking, [], 'still paused — no re-fire yet');
     agent.sleepResume();
     assert.deepEqual(
       thinking,
-      ['chan-1'],
+      ['100'],
       'resume re-fires onThinking(turnChannelId) while the turn is live',
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('sleep typing: mentions turn resume carries a live revocable authorization', () => {
+  const authorizations: unknown[] = [];
+  const guilds = [
+    {
+      id: 'g-mentions',
+      slug: 'mentions',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      allowSend: true,
+      defaultTier: 'mentions' as const,
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  const { agent, cleanup } = buildTestAgent({
+    config: { discord: { ...makeConfig().discord, guilds } },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, guilds);
+      channels.set('100', 'mentions-room', 'g-mentions');
+      return {
+        channels,
+        onThinking: (_channelId, authorization) => {
+          authorizations.push(authorization);
+        },
+      };
+    },
+  });
+  agent.setOutboundSendAuthorizationIssuer((channelId, guildId, isCurrent) =>
+    Object.freeze({ kind: 'mentions-turn', channelId, guildId, isCurrent }),
+  );
+  try {
+    const a = agent as any;
+    a.busy = true;
+    a.realUserTurn = true;
+    a.turnChannelId = '100';
+    a.mentionsTurnChannelId = '100';
+    a.mentionsTurnToken = {};
+    agent.sleepPause();
+    agent.sleepResume();
+
+    assert.equal(authorizations.length, 1);
+    const authorization = authorizations[0] as
+      | { channelId: string; guildId: string; isCurrent: () => boolean }
+      | undefined;
+    assert.equal(authorization?.channelId, '100');
+    assert.equal(authorization?.isCurrent(), true);
+    a.mentionsTurnToken = null;
+    assert.equal(authorization?.isCurrent(), false);
   } finally {
     cleanup();
   }
@@ -124,7 +187,7 @@ test('sleep typing: overlapping sleeps only resume after both settle, and never 
   try {
     const a = agent as any;
     a.busy = true;
-    a.turnChannelId = 'chan-2';
+    a.turnChannelId = '100';
 
     agent.sleepPause();
     agent.sleepPause();
@@ -140,7 +203,7 @@ test('sleep typing: overlapping sleeps only resume after both settle, and never 
     agent.sleepResume();
     assert.deepEqual(
       thinking,
-      ['chan-2'],
+      ['100'],
       'both sleeps settled — typing re-fires once',
     );
 

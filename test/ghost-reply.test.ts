@@ -12,6 +12,8 @@ import assert from 'node:assert/strict';
 import { hasReplySubstance, type Agent } from '../src/agent.js';
 import type { LLM, CompleteResult } from '../src/llm/llm.js';
 import { buildTestAgent, makeConfig, EMPTY_WAKE } from './helpers.js';
+import { openDatabase } from '../src/store/db.js';
+import { createChannelDirectory } from '../src/store/channels.js';
 
 function scriptedLLM(
   responses: CompleteResult[],
@@ -572,6 +574,79 @@ test('D1: a ghost reply in a muted channel does NOT bounce (a reply legitimately
       m.content.includes('you wrote a reply but sent nothing'),
     ),
     'a muted turn channel must not bounce a ghost reply',
+  );
+  agent.stop();
+});
+
+test('an addressed default-denied mentions turn still gets ghost-reply repair', async () => {
+  const ghost =
+    'this reply has substance but was never sent through the explicit Discord effect path';
+  const llm = scriptedLLM([
+    {
+      message: { role: 'assistant', content: ghost },
+      stripped: false,
+      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    },
+    EMPTY_WAKE,
+  ]);
+  const guilds = [
+    {
+      id: 'g1',
+      slug: 'home',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      defaultTier: 'mentions' as const,
+      allowSend: true,
+      defaultAllowSend: false,
+      channels: {},
+      channelAllowSend: {},
+    },
+  ];
+  const { agent } = buildTestAgent({
+    llm,
+    config: { discord: { ...makeConfig().discord, guilds } },
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, guilds);
+      channels.set('100', 'mentions-room', 'g1');
+      return { channels };
+    },
+  });
+  agent.setOutboundSendAuthorizationIssuer((channelId, guildId, isCurrent) =>
+    Object.freeze({
+      kind: 'mentions-turn',
+      channelId,
+      guildId,
+      isCurrent,
+    }),
+  );
+  const done = Promise.withResolvers<void>();
+  llm.onCall = (n) => {
+    if (n === 2) done.resolve();
+  };
+
+  void agent.loop();
+  agent.enqueue({
+    ...userMsg(),
+    guildId: 'g1',
+    guildSlug: 'home',
+    kind: 'discord',
+    wakeClass: 'wake',
+    policyChannelId: '100',
+  });
+  await done.promise;
+  await microtask();
+
+  const users = agent.messagesForTest.filter(
+    (message) =>
+      message.role === 'user' && message.personContext?.kind !== 'memory',
+  );
+  assert.ok(
+    users.some((message) =>
+      message.content.includes('you wrote a reply but sent nothing'),
+    ),
+    'the sendable mentions turn must receive the ordinary ghost-reply repair',
   );
   agent.stop();
 });

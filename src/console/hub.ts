@@ -65,7 +65,7 @@ export interface RoomFact {
    * unconfigured (legacy, NULL-guild) directory channel. */
   guildSlug: string | null;
   /** The channel's effective receive mode, or null when unconfigured / internal. */
-  tier: 'drop' | 'direct' | 'social' | 'quiet' | null;
+  tier: 'drop' | 'direct' | 'social' | 'quiet' | 'mentions' | null;
   /** Whether configuration permits outbound messages before runtime mute state. */
   allowSend: boolean;
   /** Which configuration layer denies send, or null when configuration allows it. */
