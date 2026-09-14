@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import {
   editDiffPreview,
   operationDisplayTarget,
@@ -17,19 +14,9 @@ import {
   wakePresentation,
 } from '../src/console/client/run.js';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..');
-
-test('typed run card prettifies display source without changing execution bytes', async () => {
-  const source = fs.readFileSync(
-    path.join(root, 'src/console/client/components/thread.tsx'),
-    'utf8',
-  );
-  assert.match(source, /<FormattedCode call=\{call\} \/>/);
-  assert.doesNotMatch(source, /runAttribution|run-attribution/);
+test('run display formatting restores heredoc bodies after formatting', async () => {
   const raw = "const x={a:1,b:[2,3]};await elpis.read('x')";
   const formatted = await formatRunSource({ code: raw });
-  assert.equal(raw, "const x={a:1,b:[2,3]};await elpis.read('x')");
   assert.match(formatted, /const x = \{ a: 1, b: \[2, 3\] \};/);
   assert.match(formatted, /await elpis\.read\('x'\)/);
   const heredoc = await formatRunSource({
@@ -62,15 +49,7 @@ test('operation card targets hide host prefixes while retaining useful paths', (
   );
 });
 
-test('operation receipts optimize for human navigation instead of data volume', () => {
-  const source = fs.readFileSync(
-    path.join(root, 'src/console/client/components/thread.tsx'),
-    'utf8',
-  );
-  const styles = fs.readFileSync(
-    path.join(root, 'src/console/client/styles.css'),
-    'utf8',
-  );
+test('operation receipts link only literal Mind IDs and retain file actions', () => {
   assert.equal(
     operationMindId({
       kind: 'mind',
@@ -99,13 +78,6 @@ test('operation receipts optimize for human navigation instead of data volume', 
     }),
     true,
   );
-  assert.doesNotMatch(source, /if \(!mindId\) return null/);
-  assert.match(source, /item\?\.title\s*\|\|\s*mindId/);
-  assert.match(source, /onOpenMind\(mindId\)/);
-  assert.match(styles, /\.operation-compact/);
-  assert.match(styles, /min-height: 38px/);
-  assert.doesNotMatch(source, /resultSummary\(result\.content, 260\)/);
-  assert.doesNotMatch(styles, /operation-mind-body|operation-desktop-body/);
 });
 
 test('runtime ledgers replace only the source actions they actually instrument', () => {

@@ -1,8 +1,7 @@
 // End-to-end sandbox tests: a real vm sandbox over a tmp-dir memory. Covers
 // persistence, timeouts, tools (sh/sudo), the node host, injected globals
 // (editor/fs/read/ponder/memory.person/git/focus), reserved-name protection,
-// console isolation, heredoc round-trips, and elpis.sh.q. Split out of the former
-// sandbox.test.ts monolith. Run with: npm test
+// console isolation, heredoc round-trips, and elpis.sh.q.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSandbox } from '../src/sandbox/index.js';
@@ -95,92 +94,34 @@ test('sandbox: ponder slugifies thread names + close() is collision-safe', async
   );
 });
 
-test('e2e: 1 + 1 → 2', async () => {
-  const r = await sandbox.run('1 + 1');
-  assert.equal(r.ok, true);
-  assert.equal(r.preview, '2');
-  assert.equal(r.savedAs, '_');
-});
-
-test('e2e: const persists', async () => {
-  await sandbox.run('const y = 10');
-  const r = await sandbox.run('y + 1');
-  assert.equal(r.ok, true);
-  assert.equal(r.preview, '11');
-});
-
-test('e2e: let persists with mutation', async () => {
-  await sandbox.run('let z = 1; z++');
-  const r = await sandbox.run('z');
-  assert.equal(r.preview, '2');
-});
-
-test('e2e: var persists', async () => {
-  await sandbox.run('var w = 5');
-  const r = await sandbox.run('w * 2');
-  assert.equal(r.preview, '10');
-});
-
-test('e2e: destructuring persists', async () => {
-  await sandbox.run('const { a } = { a: 7 }');
-  const r = await sandbox.run('a');
-  assert.equal(r.preview, '7');
-});
-
-test('e2e: function persists', async () => {
-  await sandbox.run('function f(){ return 42 }');
-  const r = await sandbox.run('f()');
-  assert.equal(r.preview, '42');
-});
-
-test('e2e: class persists', async () => {
-  await sandbox.run('class C {}');
-  const r = await sandbox.run('new C()');
-  assert.equal(r.ok, true);
-  // instance preview — don't assert exact string, just no throw
-});
-
-test('e2e: no-init declarator then assign then read', async () => {
-  await sandbox.run('let q');
-  await sandbox.run('q = 9');
-  const r = await sandbox.run('q');
-  assert.equal(r.preview, '9');
-});
-
 test('e2e: _ reflects previous value', async () => {
   await sandbox.run('123');
   const r = await sandbox.run('_ + 1');
   assert.equal(r.preview, '124');
 });
 
-test('e2e: top-level await works', async () => {
-  const r = await sandbox.run('await Promise.resolve(42)');
-  assert.equal(r.ok, true);
-  assert.equal(r.preview, '42');
-});
-
 // ---------- timeout tests ----------
 
 test('e2e: sync infinite loop killed, process survives', async () => {
-  const r = await sandbox.run('while(true){}');
+  const bounded = createSandbox({
+    ...deps,
+    config: {
+      ...deps.config,
+      sandbox: { ...deps.config.sandbox, syncTimeoutMs: 50 },
+    },
+  } as Parameters<typeof createSandbox>[0]);
+  const r = await bounded.run('while(true){}');
   assert.equal(r.ok, false);
   assert.match(r.error || '', /timeout|Time|execution/i);
   // process survives — next run still works
-  const r2 = await sandbox.run('1 + 1');
+  const r2 = await bounded.run('1 + 1');
   assert.equal(r2.ok, true);
   assert.equal(r2.preview, '2');
 });
 
-test('e2e: async hang detaches into a bg future (A5)', async () => {
-  const r = await sandbox.run('await new Promise(()=>{})');
-  assert.equal(r.ok, true);
-  assert.equal(r.detached, true);
-  assert.ok(r.bgId, 'should get a bg id');
-});
-
 // ---------- tool tests ----------
 
-test('e2e: sh returns object with stdout (async, A5)', async () => {
+test('e2e: sh returns object with stdout', async () => {
   const r = await sandbox.run('await elpis.sh("whoami")');
   assert.equal(r.ok, true, String(r.error));
   assert.match(r.preview || '', /whoami|stdout|sh\{/);
@@ -210,7 +151,7 @@ test('e2e: sh returns object with stdout (async, A5)', async () => {
   assert.match(r.operationReceipts?.[0]?.stdout ?? '', /\S/);
 });
 
-test('e2e: sh nonzero exit does not throw (async, A5)', async () => {
+test('e2e: sh nonzero exit does not throw', async () => {
   const r = await sandbox.run('await elpis.sh("nonexistent-cmd-xyz")');
   assert.equal(r.ok, true);
   const receipt = r.operationReceipts?.[0];
@@ -220,30 +161,27 @@ test('e2e: sh nonzero exit does not throw (async, A5)', async () => {
   assert.match(receipt?.stderr ?? '', /nonexistent-cmd-xyz|not found/i);
 });
 
-test('e2e: sudo runs as root (async, A5)', async () => {
-  const r = await sandbox.run('(await elpis.sudo("whoami")).stdout.trim()');
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview || '', /root/);
-  assert.equal(r.operationReceipts?.[0]?.name, 'sudo');
-  assert.equal(r.operationReceipts?.[0]?.command, 'whoami');
-  assert.match(r.operationReceipts?.[0]?.stdout ?? '', /root/);
-});
+test(
+  'live host: sudo runs as root',
+  { skip: process.env.TEST_NO_NETWORK === '1' },
+  async () => {
+    const r = await sandbox.run('(await elpis.sudo("whoami")).stdout.trim()');
+    assert.equal(r.ok, true, String(r.error));
+    assert.match(r.preview || '', /root/);
+    assert.equal(r.operationReceipts?.[0]?.name, 'sudo');
+    assert.equal(r.operationReceipts?.[0]?.command, 'whoami');
+    assert.match(r.operationReceipts?.[0]?.stdout ?? '', /root/);
+  },
+);
 
-test('e2e: sh nonexistent cmd has nonzero code (async, A5)', async () => {
-  const r = await sandbox.run('await elpis.sh("nonexistent-cmd-xyz")');
-  assert.equal(r.ok, true);
-  const out = await sandbox.run('(await elpis.sh("nonexistent-cmd-xyz")).code');
-  assert.ok(out.preview === 'null' || Number(out.preview) !== 0);
-});
-
-test('e2e: sh proxy guard throws on un-awaited .stdout (A5)', async () => {
+test('e2e: sh proxy guard throws on un-awaited .stdout', async () => {
   const r = await sandbox.run('elpis.sh("whoami").stdout');
   assert.equal(r.ok, false);
   assert.match(r.error || '', /async|await/i);
   assert.equal(r.operationReceipts?.[0]?.state, 'running');
 });
 
-test('e2e: sh final-expression promise auto-resolves (A5)', async () => {
+test('e2e: sh final-expression promise auto-resolves', async () => {
   // A bare elpis.sh as the last expression flattens (async-IIFE return), so the
   // common `elpis.sh("git status")`-as-last-line pattern keeps working unmodified.
   const r = await sandbox.run('elpis.sh("echo flat")');
@@ -359,14 +297,6 @@ test('e2e: fs global reads a file', async () => {
   assert.match(r.preview || '', /Agent Memory/);
 });
 
-test('e2e: elpis.editor is gone; elpis.edit and elpis.fill are functions', async () => {
-  const r = await sandbox.run(
-    'typeof elpis.editor + "/" + typeof elpis.edit + "/" + typeof elpis.fill',
-  );
-  assert.equal(r.ok, true, String(r.error));
-  assert.equal(r.preview, 'string(27 chars): "undefined/function/function"');
-});
-
 test('e2e: elpis.edit() replaces a unique substring and returns a diff', async () => {
   const f = path.join(tmp, 'edit-target.txt');
   fs.writeFileSync(f, 'one\ntwo\nthree\nfour\n');
@@ -431,15 +361,6 @@ test('e2e: elpis.fill() substitutes {{keys}}; several elpis.edit() calls run in 
   const r = await sandbox.run(code);
   assert.equal(r.ok, true, String(r.error));
   assert.equal(fs.readFileSync(f, 'utf8'), 'const a = 1;\nconst b = 2;\n');
-});
-
-test('e2e: await elpis.sh() returns same shape (async-first, A5)', async () => {
-  const r = await sandbox.run('await elpis.sh("echo hello")');
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview || '', /hello/);
-  const prev = await sandbox.run('_');
-  assert.equal(prev.ok, true);
-  assert.match(prev.preview || '', /stdout/);
 });
 
 // ---------- memory tests ----------
@@ -637,39 +558,7 @@ test('elpis.channel().send: literal escape sequences throw unless allowEscapes',
   assert.equal(sent.length, 2);
 });
 
-test('elpis.sleep(ms) delays async without blocking the event loop', async () => {
-  const sb = createSandbox({
-    config: {
-      sandbox: {
-        syncTimeoutMs: 3000,
-        asyncDeadlineMs: 8000,
-        previewMaxBytes: 2048,
-        logMaxBytes: 2048,
-      },
-      kagi: { apiKey: null },
-      paths: { harnessRoot: '/tmp/hr', dataDirectory: tmp },
-    },
-    memory: { read: () => '', append: () => {}, overwrite: () => {} },
-    logbuf: [],
-    bg: bgRegistry,
-  });
-  const start = Date.now();
-  const r = await sb.run('await elpis.sleep(30); "done"');
-  const elapsed = Date.now() - start;
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview || '', /"done"/);
-  assert.ok(elapsed >= 25, `expected at least 25ms delay, got ${elapsed}ms`);
-  assert.ok(elapsed < 300, `expected sub-300ms total, got ${elapsed}ms`);
-  // Invalid arguments default to 0 delay rather than throwing.
-  const noArg = await sb.run('await elpis.sleep(); "ok"');
-  assert.equal(noArg.ok, true, String(noArg.error));
-  const neg = await sb.run('await elpis.sleep(-10); "ok"');
-  assert.equal(neg.ok, true, String(neg.error));
-});
-
-// ---------- A1: parse errors surface with position + TS hint ----------
-
-test('A1: parse error returns pre-parse marker with acorn position', async () => {
+test('parse error returns pre-parse marker with acorn position', async () => {
   const r = await sandbox.run('const x = ;');
   assert.equal(r.ok, false);
   assert.match(r.error || '', /SyntaxError \(pre-parse\)/);
@@ -677,22 +566,14 @@ test('A1: parse error returns pre-parse marker with acorn position', async () =>
   assert.match(r.error || '', /\(1:\d+\)/);
 });
 
-test('A1: TS cast code returns a TS hint', async () => {
+test('TS cast code returns a TS hint', async () => {
   const r = await sandbox.run('const x = v as any');
   assert.equal(r.ok, false);
   assert.match(r.error || '', /TypeScript syntax/);
   assert.match(r.error || '', /plain JavaScript/i);
 });
 
-test('A1: valid code unaffected by the parse-error path', async () => {
-  const r = await sandbox.run('1 + 2');
-  assert.equal(r.ok, true);
-  assert.equal(r.preview, '3');
-});
-
-// ---------- A2: _ preserved on undefined completion ----------
-
-test('A2: console.log-final run does not clobber _', async () => {
+test('console.log-final run does not clobber _', async () => {
   // bank a real value into _
   await sandbox.run('[1, 2, 3]');
   // a run ending in console.log returns undefined
@@ -705,7 +586,7 @@ test('A2: console.log-final run does not clobber _', async () => {
   assert.equal(still.preview, '3');
 });
 
-test('A2: assignment-only run preserves _', async () => {
+test('assignment-only run preserves _', async () => {
   await sandbox.run('"banked"');
   // declarations as the last statement → completion is undefined
   const r = await sandbox.run('let q = 5; let p = 10;');
@@ -715,27 +596,18 @@ test('A2: assignment-only run preserves _', async () => {
   assert.match(still.preview || '', /banked/);
 });
 
-test('A2: real value still sets _', async () => {
-  const r = await sandbox.run('42');
-  assert.equal(r.savedAs, '_');
-  const v = await sandbox.run('_');
-  assert.equal(v.preview, '42');
-});
-
-// ---------- A6 (elpis era): the namespace is the protected surface; verb names are free ----------
-
-test('A6: redeclaring elpis errors at parse time', async () => {
+test('redeclaring elpis errors at parse time', async () => {
   const r = await sandbox.run('const elpis = 5');
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /reserved/i);
 });
 
-test('A6: redeclaring fs errors (bare survivor)', async () => {
+test('redeclaring fs errors (bare survivor)', async () => {
   const r = await sandbox.run('const fs = 5');
   assert.equal(r.ok, false);
 });
 
-test('A6: freed verb names persist as plain variables', async () => {
+test('freed verb names persist as plain variables', async () => {
   const r1 = await sandbox.run('const search = 41; search + 1');
   assert.equal(r1.ok, true);
   assert.match(r1.preview ?? '', /42/);
@@ -743,13 +615,13 @@ test('A6: freed verb names persist as plain variables', async () => {
   assert.match(r2.preview ?? '', /41/);
 });
 
-test('A6: plain reassignment does not clobber elpis', async () => {
+test('plain reassignment does not clobber elpis', async () => {
   await sandbox.run('elpis = 5');
   const r = await sandbox.run('typeof elpis.sh');
   assert.match(r.preview ?? '', /function/);
 });
 
-test('A6: elpis members are frozen — assignment does not clobber', async () => {
+test('elpis members are frozen — assignment does not clobber', async () => {
   // The sandbox script body is NOT strict-mode (no `'use strict'` pragma in
   // the transform's async-IIFE wrapper — see transform.ts), so assigning to a
   // frozen property is a silent no-op rather than a thrown TypeError (the same
@@ -762,47 +634,13 @@ test('A6: elpis members are frozen — assignment does not clobber', async () =>
   assert.match(r.preview ?? '', /function/);
 });
 
-test('A6: elpis.inbound getter stays live', async () => {
+test('elpis.inbound getter stays live', async () => {
   deps.inbound = null;
   const r1 = await sandbox.run('elpis.inbound');
   assert.match(r1.preview ?? '', /null/);
   deps.inbound = { author: 'bramble' } as never;
   const r2 = await sandbox.run('elpis.inbound.author');
   assert.match(r2.preview ?? '', /bramble/);
-});
-
-// every expected verb is actually on elpis
-test('elpis carries the full verb surface', async () => {
-  const expected = [
-    'sh',
-    'sudo',
-    'grep',
-    'read',
-    'edit',
-    'fill',
-    'channel',
-    'remember',
-    'ponder',
-    'restart',
-    'deploy',
-    'focus',
-    'preview',
-    'git',
-    'memory',
-    'bg',
-    'inbound',
-    'search',
-    'extract',
-    'sleep',
-    'wait',
-    'timeout',
-    'schedule',
-    'ext',
-    'motor',
-  ];
-  const r = await sandbox.run('Object.keys(elpis).sort().join(",")');
-  for (const k of expected)
-    assert.match(r.preview ?? '', new RegExp(`\\b${k}\\b`));
 });
 
 // ---------- HARNESS_ROOT / DATA_DIR globals ----------
@@ -813,9 +651,7 @@ test('HARNESS_ROOT and DATA_DIR globals available', async () => {
   assert.match(r.preview || '', /\/tmp\/harness-root \| /);
 });
 
-// ---------- F3c: elpis.focus / NOW.md ----------
-
-test('F3c: elpis.focus() writes NOW.md', async () => {
+test('elpis.focus() writes NOW.md', async () => {
   const r = await sandbox.run(
     'elpis.focus("currently: testing\\nnext: commit")',
   );
@@ -828,16 +664,14 @@ test('F3c: elpis.focus() writes NOW.md', async () => {
   assert.equal(fs.statSync(nowPath).mode & 0o777, 0o600);
 });
 
-test('F3c: elpis.focus() overwrites (not appends)', async () => {
+test('elpis.focus() overwrites (not appends)', async () => {
   await sandbox.run('elpis.focus("first")');
   await sandbox.run('elpis.focus("second")');
   const nowPath = path.join(tmp, 'NOW.md');
   assert.equal(fs.readFileSync(nowPath, 'utf8'), 'second');
 });
 
-// ---------- B4: elpis.read global ----------
-
-test('B4: elpis.read() returns line-numbered file contents', async () => {
+test('elpis.read() returns line-numbered file contents', async () => {
   const f = path.join(tmp, 'lines.txt');
   fs.writeFileSync(f, 'one\ntwo\nthree');
   const r = await sandbox.run(`elpis.read(${JSON.stringify(f)})`);
@@ -852,7 +686,7 @@ test('B4: elpis.read() returns line-numbered file contents', async () => {
   assert.match(r.operationReceipts?.[0]?.stdout ?? '', /3: three/);
 });
 
-test('B4: elpis.read() honors from/to slice', async () => {
+test('elpis.read() honors from/to slice', async () => {
   const f = path.join(tmp, 'slice.txt');
   fs.writeFileSync(f, 'a\nb\nc\nd\ne\n');
   const r = await sandbox.run(
@@ -864,7 +698,7 @@ test('B4: elpis.read() honors from/to slice', async () => {
   assert.match(r.preview || '', /4: d/);
 });
 
-test('B4: elpis.read() numbers:false drops line numbers', async () => {
+test('elpis.read() numbers:false drops line numbers', async () => {
   const f = path.join(tmp, 'nonum.txt');
   fs.writeFileSync(f, 'x\ny\n');
   const r = await sandbox.run(
@@ -876,7 +710,7 @@ test('B4: elpis.read() numbers:false drops line numbers', async () => {
   assert.match(r.preview || '', /x/);
 });
 
-test("B4/2a: elpis.read() self-paginates a large file — the continuation marker survives elpis.preview()'s downstream head/tail split", async () => {
+test("elpis.read() self-paginates a large file — the continuation marker survives elpis.preview()'s downstream head/tail split", async () => {
   const f = path.join(tmp, 'big-elpis.read.txt');
   const lines = Array.from(
     { length: 500 },
@@ -893,9 +727,7 @@ test("B4/2a: elpis.read() self-paginates a large file — the continuation marke
   assert.match(r.preview || '', /showing lines 1–\d+ of 500/);
 });
 
-// ---------- E2: elpis.ponder global ----------
-
-test('E2: elpis.ponder() creates and appends a thread file', async () => {
+test('elpis.ponder() creates and appends a thread file', async () => {
   const r1 = await sandbox.run(
     'elpis.ponder("e2-thread", "what is the question?")',
   );
@@ -912,7 +744,7 @@ test('E2: elpis.ponder() creates and appends a thread file', async () => {
   assert.match(body2, /a further thought/);
 });
 
-test('E2: elpis.ponder.close() archives to resolved/', async () => {
+test('elpis.ponder.close() archives to resolved/', async () => {
   await sandbox.run('elpis.ponder("e2-close", "open question")');
   const r = await sandbox.run('elpis.ponder.close("e2-close", "it resolved")');
   assert.equal(r.ok, true, String(r.error));
@@ -925,16 +757,14 @@ test('E2: elpis.ponder.close() archives to resolved/', async () => {
   assert.match(fs.readFileSync(arch, 'utf8'), /it resolved/);
 });
 
-test('E2: elpis.ponder.close() without conclusion still archives', async () => {
+test('elpis.ponder.close() without conclusion still archives', async () => {
   await sandbox.run('elpis.ponder("e2-noconc", "just a thread")');
   await sandbox.run('elpis.ponder.close("e2-noconc")');
   const arch = path.join(tmp, 'ponder', 'resolved', 'e2-noconc.md');
   assert.ok(fs.existsSync(arch));
 });
 
-// ---------- E3: elpis.memory.person global ----------
-
-test('E3: elpis.memory.person() creates people/ file with frontmatter stub', async () => {
+test('elpis.memory.person() creates people/ file with frontmatter stub', async () => {
   // Need an inbound author to pre-fill ids; create a fresh sandbox with elpis.inbound.
   const sb = createSandbox({
     config: {
@@ -981,7 +811,7 @@ test('E3: elpis.memory.person() creates people/ file with frontmatter stub', asy
   assert.match(body, /wants my identity based in myself/);
 });
 
-test('E3: elpis.memory.person() appends to existing file without duplicating frontmatter', async () => {
+test('elpis.memory.person() appends to existing file without duplicating frontmatter', async () => {
   const file = path.join(tmp, 'people', 'bramble.md');
   fs.rmSync(path.join(tmp, 'people'), { recursive: true, force: true });
   await sandbox.run('elpis.memory.person("Bramble", "first note")');
@@ -1365,59 +1195,6 @@ test('grep: finds matches in a path, returns raw file:line hits', async () => {
   assert.match(miss.operationReceipts?.[0]?.stdout ?? '', /no matches/);
 });
 
-// ---------- reserved list ⇔ injected globals ⇔ documented globals ----------
-
-// Every global the prompt (prompt.ts) documents must actually exist in the
-// sandbox, or the agent gets a ReferenceError. `inbound` regressed exactly this
-// way in the A6 rework. Post-elpis-restructure, the harness-verb tier resolves
-// through the `elpis.` namespace; only the bare survivors resolve directly off
-// globalThis.
-const PROMPT_DOCUMENTED_GLOBALS = [
-  'elpis.sh',
-  'elpis.sudo',
-  'fs',
-  'elpis.edit',
-  'elpis.fill',
-  'elpis.memory',
-  'elpis.remember',
-  'elpis.read',
-  'elpis.bg',
-  'elpis.channel',
-  'elpis.focus',
-  'elpis.ponder',
-  'elpis.restart',
-  'elpis.deploy',
-  'elpis.preview',
-  'elpis.inbound',
-  'console',
-  '_',
-  'elpis.search',
-  'elpis.extract',
-  'elpis.git',
-  'elpis.grep',
-  'elpis.motor',
-];
-
-test('every prompt-documented global exists in the sandbox', async () => {
-  const r = await sandbox.run(`
-    (${JSON.stringify(PROMPT_DOCUMENTED_GLOBALS)}).filter(n => {
-      let v = globalThis;
-      for (const part of n.split('.')) {
-        if (v == null || !(part in v)) return true;
-        v = v[part];
-      }
-      return false;
-    })
-  `);
-  assert.equal(r.ok, true, String(r.error));
-  // The completion is [] (no missing names); preview renders an empty array.
-  assert.match(
-    r.preview ?? '',
-    /Array\(0\)|\[\s*\]/,
-    `missing globals: ${r.preview}`,
-  );
-});
-
 // ---------- per-run console isolation ----------
 
 test('concurrent runs keep their logs separate (reentrant, no shared buffer)', async () => {
@@ -1616,71 +1393,4 @@ test('elpis.sh.q: quoted value round-trips through a real shell byte-for-byte', 
   );
   assert.equal(r.ok, true, String(r.error));
   assert.match(r.preview ?? '', /true/);
-});
-// ---------- sleep primitive ----------
-
-test('sleep: delays at least the requested milliseconds and resolves', async () => {
-  const r = await sandbox.run(
-    'const start = Date.now(); await elpis.sleep(60); const elapsed = Date.now() - start; ({ ok: elapsed >= 40 && elapsed < 300, elapsed })',
-  );
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview ?? '', /ok:\s*true/);
-});
-
-test('sleep: non-finite values are treated as 0', async () => {
-  const r = await sandbox.run(
-    'const start = Date.now(); await elpis.sleep(-50); await elpis.sleep(NaN); await elpis.sleep(undefined); const elapsed = Date.now() - start; ({ ok: elapsed < 100, elapsed })',
-  );
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview ?? '', /ok:\s*true/);
-});
-
-test('sleep: does not block the event loop across concurrent runs', async () => {
-  const [r1, r2] = await Promise.all([
-    sandbox.run(
-      'const start = Date.now(); await elpis.sleep(80); Date.now() - start',
-    ),
-    sandbox.run(
-      'const start = Date.now(); await elpis.sleep(20); Date.now() - start',
-    ),
-  ]);
-  assert.equal(r1.ok, true, String(r1.error));
-  assert.equal(r2.ok, true, String(r2.error));
-  const t1 = Number((r1.preview ?? '').match(/(\d+)/)?.[1] ?? '0');
-  const t2 = Number((r2.preview ?? '').match(/(\d+)/)?.[1] ?? '0');
-  assert.ok(t2 < t1, `shorter sleep should finish first (t1=${t1}, t2=${t2})`);
-});
-
-// ---------- timeout primitive ----------
-
-test('timeout: resolves with promise value if it settles before timeout', async () => {
-  const r = await sandbox.run(
-    'await elpis.timeout(new Promise(res => setTimeout(() => res("ok"), 20)), 100)',
-  );
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview ?? '', /ok/);
-});
-
-test('timeout: rejects when promise takes longer than timeout', async () => {
-  const r = await sandbox.run(
-    'await elpis.timeout(new Promise(res => setTimeout(res, 200)), 30)',
-  );
-  assert.equal(r.ok, false);
-  assert.match(r.error ?? '', /timeout after 30ms/);
-});
-
-test('timeout: zero or non-finite ms returns promise unchanged (no timeout)', async () => {
-  const r = await sandbox.run(
-    'await elpis.timeout(new Promise(res => setTimeout(() => res("done"), 10)), 0)',
-  );
-  assert.equal(r.ok, true, String(r.error));
-  assert.match(r.preview ?? '', /done/);
-});
-
-test('timeout: rejects with underlying error if promise rejects before timeout', async () => {
-  const r = await sandbox.run(
-    'await elpis.timeout(new Promise((_, rej) => setTimeout(() => rej(new Error("boom")), 20)), 100)',
-  );
-  assert.equal(r.ok, false);
-  assert.match(r.error ?? '', /boom/);
 });

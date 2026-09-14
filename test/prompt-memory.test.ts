@@ -10,7 +10,7 @@ const base = {
   dataDirectory: '/data',
 };
 
-test('memory prompt makes DATA_DIRECTORY private, permits grug, and forbids hand-written current dates', () => {
+test('memory prompt declares the data directory private and sharing explicit', () => {
   const prompt = build({
     ...base,
     profile: { restricted: false, source: 'normal' },
@@ -19,11 +19,5 @@ test('memory prompt makes DATA_DIRECTORY private, permits grug, and forbids hand
   assert.match(
     prompt,
     /only an artifact you explicitly choose to carry out becomes shared/,
-  );
-  assert.match(prompt, /thing hurt\. not know why yet\. keep\./);
-  assert.match(prompt, /first person, as compact internal monologue/);
-  assert.match(
-    prompt,
-    /Do \*\*not\*\* put the current date inside text passed to/,
   );
 });

@@ -97,6 +97,19 @@ npm run bench:check
 
 `npm test` includes live or environment-sensitive cases and may require configured providers. Classify such failures explicitly; do not report a blanket green result when only the deterministic suite passed.
 
+## Test judgment
+
+A test should name a plausible regression and observe its consequence. Test count is not a deliverable. For low-impact copy, style, or mechanical edits, existing checks and a build may be enough. See [Testing](docs/testing.md) for test layers and examples.
+
+- **Do not test source spelling as behavior.** Searching TypeScript, JSX, CSS, shell scripts, or docs for a substring does not prove an interaction, ordering rule, or deployment works. Invoke the production function, registered handler, HTTP endpoint, or browser control. Execute transformed code instead of asserting its temporary variable names. Narrow static dependency/authority guards are supplemental checks; label their limits honestly. Parse declarative manifests before asserting permissions.
+- **Do not freeze incidental details.** Avoid tests for ordinary prose, CSS classes, layout pixels, artwork hashes, dependency versions, export identity, or a copied inventory of functions. Exact bytes are appropriate for actual contracts such as wire formats, migration checksums, lossless output, and published algorithm vectors.
+- **Do not confuse prompt checks with model evaluation.** Test assembly, conditional capabilities, cache tiers, identity refresh, request-only state, privacy exclusions, and required machine syntax. Do not pin every guidance sentence or assert that a model will obey it because the words appear. Prompt wording changes normally need review; claims about model behavior need representative evaluations.
+- **Do not check for data you never supplied.** A privacy/exclusion test must supply the forbidden data to the relevant boundary and show that it is withheld while allowed data survives. Searching for a secret never present in the fixture proves nothing. Keep privacy, authorization, transcript, and replay-provenance regressions, or replace them with stronger behavioral coverage.
+- **Do not test the fake or reimplement the subject.** Mock external effects and nondeterminism, not the behavior being checked. Expected results must be independent of the production calculation. Asserting that an immutable local string stayed unchanged, or that test-authored formatting has a chosen length, is not a regression test.
+- **Do not multiply the same case across files and layers.** Extend the existing subsystem suite. Keep a lower-level edge-case matrix and a small integration check when they catch different failures; remove redundant happy paths and export-only checks. Do not create a new one-test file for each patch.
+- **Do not let a test title promise more than its assertions.** An `ok` flag, a count, a parseable file, or the presence of a label rarely proves the whole operation. Check the returned value, stored record, emitted effect, or rejected side effect that matters. A check for five markers is not proof that all content survives.
+- **Do not use wall-clock races as a clock test.** Prefer controlled clocks, deferred promises, and completion signals over short sleeps, arbitrary polling counts, and tight elapsed-time ceilings. Keep real timing only where the timer/process integration itself is under test. Register cleanup when acquiring resources, and keep privileged commands and live services out of the deterministic suite.
+
 ## Source conventions
 
 - TypeScript, ESM, Node.js 22+.

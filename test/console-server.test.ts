@@ -18,7 +18,6 @@ import assert from 'node:assert/strict';
 import * as net from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import {
   createConsoleServer,
@@ -90,21 +89,32 @@ test('resolveFramePath confines image routes to canonical console frame roots', 
   assert.equal(resolveFramePath('/frames/unknown/frame.png', '/tmp/unn'), null);
 });
 
-test('static console server declares PWA asset MIME types', () => {
-  const source = fs.readFileSync(
-    path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
-      '../src/console/server.ts',
-    ),
-    'utf8',
+test('static console assets serve usable MIME types without caching private state', async (t) => {
+  const server = createConsoleServer(
+    makeConfig({ console: { enabled: true, port: 0, host: '127.0.0.1' } }),
+    new ConsoleHub([]),
   );
-  assert.equal(source.includes("  '.png': 'image/png',"), true);
-  assert.equal(
-    source.includes(
-      "  '.webmanifest': 'application/manifest+json; charset=utf-8',",
-    ),
-    true,
-  );
+  t.after(() => server.stop());
+  await server.start();
+  const base = `http://127.0.0.1:${server.port}`;
+  for (const [route, type] of [
+    ['/', 'text/html; charset=utf-8'],
+    ['/apple-touch-icon.png', 'image/png'],
+    ['/manifest.webmanifest', 'application/manifest+json; charset=utf-8'],
+  ]) {
+    const response = await fetch(base + route);
+    assert.equal(response.status, 200, route);
+    assert.equal(response.headers.get('content-type'), type, route);
+    assert.match(
+      response.headers.get('cache-control') ?? '',
+      /\bno-store\b/,
+      route,
+    );
+    assert.ok((await response.arrayBuffer()).byteLength > 0, route);
+  }
+  const worker = await fetch(`${base}/service-worker.js`);
+  assert.equal(worker.status, 404);
+  await worker.arrayBuffer();
 });
 
 test('resolveAttachmentPath: non-attachment paths are not its business', () => {

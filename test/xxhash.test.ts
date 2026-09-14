@@ -28,10 +28,3 @@ test('xxh64: seeded vectors (the real cch seed)', () => {
   );
   assert.equal(hex(bytes('short seeded'), seed), '96f746d5279d4339');
 });
-
-test('xxh64: low-20-bit cch derivation is 5 hex chars', () => {
-  const h = xxh64(bytes('anything'), 0x4d659218e32a3268n);
-  const cch = (h & 0xfffffn).toString(16).padStart(5, '0');
-  assert.equal(cch.length, 5);
-  assert.match(cch, /^[0-9a-f]{5}$/);
-});

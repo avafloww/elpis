@@ -1,15 +1,16 @@
 // Unit tests for the pure extracted Discord command helpers:
-// buildCommandDefinitions, isAuthorizedOperator, SLASH_COMMAND_NAMES.
+// buildCommandDefinitions, isAuthorizedOperator, and routing helpers.
 //
-// These exercise command registration shape + the operator-auth gate WITHOUT a
-// Discord client or network — the whole point of extracting them as pure
-// top-level functions. Run with: npm run test:unit
+// Command shapes and authorization helpers run directly; ingress gates also
+// exercise registered Discord listeners without logging in or using the network.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { Collection, Events, type Message } from 'discord.js';
+import type { Agent, InboundMessage } from '../src/agent.js';
 import {
   buildCommandDefinitions,
+  createDiscord,
   isAuthorizedOperator,
   isOwnMessage,
   isIgnoredAuthor,
@@ -27,28 +28,6 @@ import { makeConfig } from './helpers.js';
 /** Minimal Config stub — authorization reads the canonical top-level operator id. */
 const stubConfig = (discordId: string | null) =>
   makeConfig({ operator: { ...makeConfig().operator, discordId } });
-
-// ---------- SLASH_COMMAND_NAMES ----------
-
-test('SLASH_COMMAND_NAMES: includes clear, new, compact, exec, restart, usage, cache', () => {
-  assert.ok(SLASH_COMMAND_NAMES.includes('clear'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('new'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('compact'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('exec'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('restart'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('usage'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('cache'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('clear-thinking'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('mind'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('join'));
-  assert.ok(SLASH_COMMAND_NAMES.includes('leave'));
-  assert.equal(SLASH_COMMAND_NAMES.length, 15, 'exactly fifteen commands');
-});
-
-test('SLASH_COMMAND_NAMES includes the killswitch four', () => {
-  for (const n of ['mute', 'unmute', 'deafen', 'undeafen'])
-    assert.ok(SLASH_COMMAND_NAMES.includes(n as never));
-});
 
 // ---------- buildCommandDefinitions ----------
 
@@ -337,48 +316,6 @@ test('isIgnoredAuthor: exact configured ids are dropped and other bots remain vi
   const ignored = new Set(['222']);
   assert.equal(isIgnoredAuthor(ignored, '222'), true);
   assert.equal(isIgnoredAuthor(ignored, '111'), false);
-});
-
-test('ignored authors are gated before every agent-visible message or reaction side effect', () => {
-  const source = fs.readFileSync(
-    new URL('../src/discord/discord.ts', import.meta.url),
-    'utf8',
-  );
-  const messageStart = source.indexOf('client.on(Events.MessageCreate');
-  const reactionStart = source.indexOf(
-    'client.on(Events.MessageReactionAdd',
-    messageStart,
-  );
-  const messageBody = source.slice(messageStart, reactionStart);
-  const ignored = messageBody.indexOf(
-    'isIgnoredAuthor(ignoredUserIds, message.author.id)',
-  );
-  assert.ok(ignored >= 0);
-  for (const marker of [
-    'isOwnMessage(',
-    'pluralKit.resolve(',
-    '`inbound message',
-    'ch.messages.fetch(',
-    'buildInboundAttachments(',
-  ]) {
-    const position = messageBody.indexOf(marker);
-    assert.ok(
-      position > ignored,
-      `${marker} must remain after the ignored-author gate`,
-    );
-  }
-  assert.match(
-    messageBody,
-    /if \(!ref \|\| isIgnoredAuthor\(ignoredUserIds, ref\.author\.id\)\) return null/,
-  );
-
-  const reactionBody = source.slice(reactionStart);
-  const reactionIgnored = reactionBody.indexOf(
-    'isIgnoredAuthor(ignoredUserIds, user.id)',
-  );
-  assert.ok(reactionIgnored >= 0);
-  assert.ok(reactionBody.indexOf('reaction.fetch()') > reactionIgnored);
-  assert.ok(reactionBody.indexOf('recordReaction(') > reactionIgnored);
 });
 
 // ---------- isOwnMessage (loop guard: self only, other bots allowed) ----------
@@ -989,5 +926,131 @@ test('resolveMentions: non-mention angle-bracket text is not mangled', () => {
   assert.equal(
     resolveMentions('a <b> c <@notanid> d', NAMES),
     'a <b> c <@notanid> d',
+  );
+});
+
+test('ignored authors cannot enter message, reply, or reaction paths', async (t) => {
+  const received: InboundMessage[] = [];
+  const feedback: unknown[] = [];
+  const config = makeConfig();
+  config.discord.ignoredUserIds = ['222'];
+  config.discord.guilds = [
+    {
+      id: 'g1',
+      slug: 'example',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      channels: { '100': 'direct' },
+    },
+  ];
+  const debug = t.mock.method(config.logger, 'debug');
+  const warn = t.mock.method(config.logger, 'warn');
+  const { client } = createDiscord(
+    config,
+    {
+      setSend: () => {},
+      enqueue: (message: InboundMessage) => received.push(message),
+    } as unknown as Agent,
+    {
+      feedback: {
+        recordReaction: (entry: unknown) => feedback.push(entry),
+      } as never,
+    },
+  );
+  t.after(() => client.destroy());
+  Object.defineProperty(client, 'user', {
+    value: { id: '999' },
+    configurable: true,
+  });
+  const onMessage = client.listeners(Events.MessageCreate)[0] as (
+    message: Message,
+  ) => Promise<void>;
+  const onReaction = client.listeners(Events.MessageReactionAdd)[0] as (
+    ...args: any[]
+  ) => Promise<void>;
+  const downstream = t.mock.fn(() => {
+    throw new Error('ignored input reached downstream work');
+  });
+  const ignored = {
+    author: { id: '222' },
+    get guildId() {
+      return downstream();
+    },
+  };
+  await onMessage(ignored as unknown as Message);
+  await onReaction(
+    {
+      get partial() {
+        return downstream();
+      },
+    },
+    { id: '222' },
+  );
+  assert.equal(downstream.mock.callCount(), 0);
+  assert.equal(debug.mock.callCount(), 0);
+  assert.equal(warn.mock.callCount(), 0);
+  assert.deepEqual(received, []);
+  assert.deepEqual(feedback, []);
+
+  let replyAuthor = '222';
+  const message = {
+    id: 'message-1',
+    guildId: 'g1',
+    channelId: '100',
+    content: 'Allowed message',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    author: { id: '111', bot: false, displayName: 'Bramble' },
+    channel: {
+      name: 'example',
+      isThread: () => false,
+      isTextBased: () => true,
+      sendTyping: async () => {},
+      messages: {
+        fetch: async () => ({
+          id: 'reply-1',
+          author: { id: replyAuthor, displayName: 'Clover' },
+          content: 'Reply content',
+        }),
+      },
+    },
+    reference: { messageId: 'reply-1' },
+    mentions: {
+      users: new Collection(),
+      roles: new Collection(),
+      channels: new Collection(),
+    },
+    attachments: new Collection(),
+  } as unknown as Message;
+  await onMessage(message);
+  assert.equal(
+    received.length,
+    1,
+    'the same listener still ingests allowed messages',
+  );
+  assert.equal(received[0].content, 'Allowed message');
+  assert.equal(received[0].replyTo, null, 'ignored reply authors are withheld');
+  replyAuthor = '333';
+  await onMessage(message);
+  assert.equal(received[1].replyTo?.content, 'Reply content');
+
+  let hydrated = 0;
+  const reaction = {
+    partial: true,
+    fetch: async () => {
+      hydrated++;
+    },
+    message: { ...message, author: { id: '999' } },
+    emoji: { name: '👍' },
+  };
+  await onReaction(reaction, { id: '222' });
+  assert.equal(hydrated, 0);
+  assert.deepEqual(feedback, []);
+  await onReaction(reaction, { id: '111', displayName: 'Bramble' });
+  assert.equal(hydrated, 1);
+  assert.equal(
+    feedback.length,
+    1,
+    'the same listener still records allowed reactions',
   );
 });

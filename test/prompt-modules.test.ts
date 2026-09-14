@@ -52,10 +52,16 @@ test('active motor docs expose only the resident-selectable motor-skill catalog'
     makeConfig({
       modules: { enabled: ['computer', 'motor'], disabled: [] },
     }),
-    [{ name: 'pixel-game', description: 'LeafGreen controls and save ritual' }],
+    [
+      {
+        name: 'pixel-game',
+        description: 'Pixel game controls',
+        ...{ body: 'SUPER SECRET MOTOR BODY' },
+      },
+    ],
   );
   assert.match(p, /Available motor skills for `opts\.skills`/);
-  assert.match(p, /`pixel-game`: LeafGreen controls and save ritual/);
+  assert.match(p, /`pixel-game`: Pixel game controls/);
   assert.match(p, /inspectSkill\(name\)/);
   assert.doesNotMatch(p, /SUPER SECRET MOTOR BODY/);
 });
@@ -73,18 +79,20 @@ test('bare LLM docs appear only for an opted-in sanitized model catalog', () => 
         model: 'wire-weak',
         providerType: 'openai-compatible',
         contextSize: 32000,
+        ...{
+          endpoint: 'https://private-endpoint.example.com',
+          apiKey: 'synthetic-key',
+          reasoningContent: 'private-reasoning',
+        },
       },
     ],
   );
   assert.match(present, /### `elpis\.llm`/);
   assert.match(present, /`weak` or `p\/weak`: `wire-weak`/);
-  assert.match(present, /one fresh user message/);
-  assert.match(
+  assert.doesNotMatch(
     present,
-    /no SOUL, MEMORY, history, Mind, social context, tools/,
+    /private-endpoint|apiKey|synthetic-key|reasoningContent|private-reasoning/,
   );
-  assert.match(present, /invalid JSON or schema output throws/);
-  assert.doesNotMatch(present, /private-endpoint|apiKey|reasoningContent/);
 });
 
 test('disabled and unavailable modules are both entirely absent from prompt text', () => {

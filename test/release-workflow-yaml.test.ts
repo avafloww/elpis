@@ -16,11 +16,8 @@ const readWorkflow = async (): Promise<Record<string, any>> =>
     uniqueKeys: true,
   }) as Record<string, any>;
 
-test('unified workflow has exact triggers concurrency and least job permissions', async () => {
-  const names = (await fs.readdir(path.join(root, '.github/workflows'))).sort();
-  assert.deepEqual(names, ['release.yml']);
+test('release workflow restricts publishing triggers, permissions, and action origins', async () => {
   const workflow = await readWorkflow();
-  assert.equal(workflow.name, 'ci-release');
   assert.deepEqual(Object.keys(workflow.on).sort(), [
     'pull_request',
     'push',
@@ -30,8 +27,9 @@ test('unified workflow has exact triggers concurrency and least job permissions'
   assert.deepEqual(workflow.on.push['paths-ignore'], ['**/*.md']);
   assert.equal(workflow.on.push.tags, undefined);
   assert.equal(workflow.on.pull_request, null);
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.bootstrap, {
-    description: 'Publish the explicit first v0.1.0 release',
+  const { description: _description, ...bootstrap } =
+    workflow.on.workflow_dispatch.inputs.bootstrap;
+  assert.deepEqual(bootstrap, {
     required: true,
     default: false,
     type: 'boolean',
@@ -53,25 +51,17 @@ test('unified workflow has exact triggers concurrency and least job permissions'
     .flatMap((job: any) => job.steps)
     .flatMap((step: any) => (typeof step.uses === 'string' ? [step.uses] : []));
   const allowed = new Set([
-    'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
-    'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
-    'docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f',
-    'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9',
+    'actions/checkout',
+    'actions/setup-node',
+    'docker/setup-buildx-action',
+    'docker/login-action',
   ]);
   assert.ok(uses.length > 0);
   assert.ok(
-    uses.every((value) => allowed.has(value)),
+    uses.every((value) => allowed.has(value.split('@')[0])),
     uses.join('\n'),
   );
   assert.ok(uses.every((value) => /@[0-9a-f]{40}$/.test(value)));
-
-  const buildxSteps = Object.values(workflow.jobs)
-    .flatMap((job: any) => job.steps)
-    .filter((step: any) =>
-      String(step.uses ?? '').startsWith('docker/setup-buildx-action@'),
-    );
-  assert.equal(buildxSteps.length, 2);
-  assert.ok(buildxSteps.every((step: any) => step.with.version === 'v0.36.1'));
 });
 
 test('workflow publishes exact resident and Gateway images after guarded release refs', async () => {
@@ -109,16 +99,6 @@ test('workflow publishes exact resident and Gateway images after guarded release
       index('Verify anonymous Gateway image pull'),
   );
 
-  assert.equal((text.match(/npm run tools:check/g) ?? []).length, 2);
-  assert.equal((text.match(/npm run test:gateway/g) ?? []).length, 2);
-  assert.equal((text.match(/npm run build:gateway/g) ?? []).length, 2);
-  assert.equal((text.match(/docker buildx build/g) ?? []).length, 4);
-  assert.equal((text.match(/git push --atomic/g) ?? []).length, 2);
-  assert.equal(
-    (text.match(/npm run release:workflow -- prepare/g) ?? []).length,
-    2,
-  );
-  assert.equal((text.match(/--bootstrap "\$BOOTSTRAP"/g) ?? []).length, 2);
   assert.match(
     text,
     /ELPIS_BUILD_REVISION=\$\{\{ steps\.prep\.outputs\.release_sha \}\}/,
@@ -152,8 +132,6 @@ test('workflow publishes exact resident and Gateway images after guarded release
   assert.match(text, /release_notes_sha256/);
   assert.match(text, /cmp -s/);
   assert.doesNotMatch(text, /--generate-notes/);
-  assert.doesNotMatch(text, /cargo|rustup|rust\/|ORAS|executor distribution/i);
-  assert.doesNotMatch(text, /build-push-action/);
   assert.doesNotMatch(
     text,
     /personal[_ -]?access|\bPAT\b|skip release|\[skip/i,

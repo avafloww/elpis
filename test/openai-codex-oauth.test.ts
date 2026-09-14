@@ -2,16 +2,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  codexTokenIdentity as transportCodexTokenIdentity,
-  decodeCodexJwt as transportDecodeCodexJwt,
-  refreshOpenAICodexToken as transportRefreshOpenAICodexToken,
-} from '@elpis/provider-transport';
+import { refreshOpenAICodexToken as transportRefreshOpenAICodexToken } from '@elpis/provider-transport';
 import {
   OPENAI_CODEX_CLIENT_ID,
   OPENAI_CODEX_DEVICE_AUTH_URL,
   codexTokenIdentity,
-  decodeCodexJwt,
   loginOpenAICodexDevice,
   refreshOpenAICodexToken,
 } from '../src/llm/oauth/openai-codex.js';
@@ -36,11 +31,6 @@ test('codexTokenIdentity extracts workspace, normalized email, and plan claims',
     planType: 'pro',
   });
   assert.equal(codexTokenIdentity('not-a-jwt').accountId, undefined);
-});
-
-test('resident exports the shared identity helpers unchanged', () => {
-  assert.equal(codexTokenIdentity, transportCodexTokenIdentity);
-  assert.equal(decodeCodexJwt, transportDecodeCodexJwt);
 });
 
 test('resident refresh wrapper preserves shared transport results and request behavior', async () => {

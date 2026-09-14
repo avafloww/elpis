@@ -21,14 +21,12 @@ const logger = () => {
   };
 };
 
-test('bundled alias pools have at least 100 unique simple words and meme teeth', () => {
+test('bundled alias pools have at least 100 unique simple words', () => {
   for (const words of Object.values(BUNDLED_ALIAS_WORDLISTS)) {
     assert.ok(words.length >= 100);
     assert.equal(new Set(words).size, words.length);
     assert.ok(words.every((word) => /^[a-z][a-z0-9]*$/.test(word)));
   }
-  assert.ok(BUNDLED_ALIAS_WORDLISTS.adjectives.includes('saucy'));
-  assert.ok(BUNDLED_ALIAS_WORDLISTS.nouns.includes('blahaj'));
 });
 
 test('missing wordlists seed atomically under elpis-data/config and hot-reload authored words', () => {

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build, segmentSystemPrompt } from '../src/llm/prompt.js';
-import { RUN_TOOL } from '../src/llm/llm.js';
 
 const inputs = {
   soul: 'SOUL_BODY_MARKER_XYZ',
@@ -11,36 +10,6 @@ const inputs = {
   dataDirectory: '/DD',
   guildCount: 1,
 };
-
-test('build: sandbox documentation distinguishes ephemeral core from persistent full scope', () => {
-  const full = build(inputs);
-  assert.ok(
-    full.includes(
-      'Omitting `sandbox` creates a fresh core-only ephemeral sandbox',
-    ),
-  );
-  assert.ok(
-    full.includes(
-      'Only calls selecting the same persistent sandbox share JavaScript variables',
-    ),
-  );
-  assert.ok(full.includes('Core ephemeral runs have no `_`'));
-  assert.ok(
-    full.includes(
-      'Reading files (including reloading AGENTS.md) needs a full sandbox',
-    ),
-  );
-  assert.ok(
-    !full.includes('executes JavaScript in a PERSISTENT sandbox that survives'),
-  );
-  assert.ok(
-    !full.includes('Sandbox variables are shared between `run` calls.'),
-  );
-  assert.match(
-    RUN_TOOL.function.parameters.properties.sandbox.description,
-    /Mind id, unique prefix, or exact title/,
-  );
-});
 
 test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   const full = build(inputs);
@@ -61,7 +30,6 @@ test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   // profiles are ordinary history messages and never enter the system string.
   assert.ok(segs[1].text.startsWith('## Current memory'));
   assert.ok(segs[1].text.includes('MEMORY_MARKER_XYZ'));
-  assert.ok(!full.includes('CLOVER_FACTS_XYZ'));
 
   // Stable tier carries the static bulk (tool docs) and no volatile content.
   assert.ok(segs[0].text.includes('## Output contract'));
@@ -86,28 +54,38 @@ test('build: catalogs skills and explains the dedicated context-load round', () 
   assert.doesNotMatch(full, /catalog\/path-must-not-render/);
 });
 
-test('segmentSystemPrompt: no content is lost (every non-marker line survives)', () => {
+test('segmentSystemPrompt preserves the entire assembled prompt', () => {
   const full = build(inputs);
-  const segs = segmentSystemPrompt(full);
-  // Concatenating tiers reproduces every marker line (order differs — SOUL moved).
-  for (const marker of [
-    'SOUL_BODY_MARKER_XYZ',
-    'MEMORY_MARKER_XYZ',
-    'NOW_MARKER_XYZ',
-    '## Output contract',
-    '## Your Environment',
-  ]) {
-    assert.ok(
-      segs.some((s) => s.text.includes(marker)),
-      `missing: ${marker}`,
-    );
-  }
+  assert.equal(
+    segmentSystemPrompt(full)
+      .map((segment) => segment.text)
+      .join('\n\n'),
+    full,
+  );
+});
+
+test('identity and memory updates leave unrelated cache tiers unchanged', () => {
+  const before = segmentSystemPrompt(build(inputs));
+  const soulChanged = segmentSystemPrompt(
+    build({ ...inputs, soul: 'RELOADED_SOUL' }),
+  );
+  assert.deepEqual(soulChanged.slice(0, 2), before.slice(0, 2));
+  assert.match(soulChanged[2].text, /RELOADED_SOUL/);
+  assert.doesNotMatch(soulChanged[2].text, /SOUL_BODY_MARKER_XYZ/);
+  const memoryChanged = segmentSystemPrompt(
+    build({ ...inputs, memory: 'RELOADED_MEMORY' }),
+  );
+  assert.deepEqual(memoryChanged[0], before[0]);
+  assert.deepEqual(memoryChanged[2], before[2]);
+  assert.match(memoryChanged[1].text, /RELOADED_MEMORY/);
+  assert.doesNotMatch(memoryChanged[1].text, /MEMORY_MARKER_XYZ/);
 });
 
 test('segmentSystemPrompt: degrades to a single stable block when markers are absent', () => {
   const segs = segmentSystemPrompt(
     'a prompt with none of the expected headings',
   );
-  assert.equal(segs.length, 1);
-  assert.equal(segs[0].tier, 'stable');
+  assert.deepEqual(segs, [
+    { tier: 'stable', text: 'a prompt with none of the expected headings' },
+  ]);
 });

@@ -14,7 +14,6 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   ConsoleHub,
   serializeMessage,
@@ -175,71 +174,6 @@ test('handleClientMessage: console chat validates, delegates, and deduplicates b
   );
 });
 
-test('shared console composer is IME-safe and Thread keeps one acknowledged ingress', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const main = fs.readFileSync(
-    path.join(here, '../src/console/client/main.tsx'),
-    'utf8',
-  );
-  const chat = fs.readFileSync(
-    path.join(here, '../src/console/client/components/chat.tsx'),
-    'utf8',
-  );
-  const secretary = fs.readFileSync(
-    path.join(here, '../src/console/client/components/secretary.tsx'),
-    'utf8',
-  );
-  const hook = fs.readFileSync(
-    path.join(here, '../src/console/client/use-console.ts'),
-    'utf8',
-  );
-  assert.match(
-    chat,
-    /event\.key === 'Enter'[\s\S]*!event\.shiftKey[\s\S]*!event\.isComposing/,
-  );
-  assert.match(main, /<ChatComposer[\s\S]*onSend=\{actions\.sendChat\}/);
-  assert.match(
-    secretary,
-    /<ChatComposer[\s\S]*placeholder='Ask the secretary…'/,
-  );
-  assert.match(hook, /send\(\{ t: 'chat', nonce, content: value \}\)/);
-  assert.match(hook, /case 'chatResult':[\s\S]*frame\.ok === false/);
-  assert.match(
-    hook,
-    /live:\s*frame\.stream\s*\?\s*\(object\(frame\.stream\)/,
-    'snapshot restores an active stream',
-  );
-});
-
-test('client console has a bounded CSS-driven mobile drawer and logs view', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const main = fs.readFileSync(
-    path.join(here, '../src/console/client/main.tsx'),
-    'utf8',
-  );
-  const css = fs.readFileSync(
-    path.join(here, '../src/console/client/styles.css'),
-    'utf8',
-  );
-  assert.match(main, /drawer-scrim/);
-  assert.match(main, /MobileTabs/);
-  assert.match(main, /view: 'logs' as ViewName/);
-  assert.match(main, /actions\.setView\(item\.view\)/);
-  const mobileCss = css.slice(css.indexOf('@media'));
-  assert.match(mobileCss, /@media\s*\(max-width:\s*760px\)/);
-  assert.match(mobileCss, /height:\s*100dvh/);
-  assert.match(mobileCss, /safe-area-inset-bottom/);
-  assert.match(mobileCss, /\.mobile-tabs\s*\{[\s\S]*?display:\s*flex/);
-  assert.match(
-    mobileCss,
-    /\.drawer-layer\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?inset:\s*0/,
-  );
-  assert.match(
-    mobileCss,
-    /\.drawer-scrim\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/,
-  );
-});
-
 test('classifyMessage covers every render kind', () => {
   assert.equal(
     classifyMessage({
@@ -386,18 +320,6 @@ test('typed client attachments parser round-trips the server envelope format', (
   assert.deepEqual(attachmentsOf('[harness: context compacted]'), []);
 });
 
-test('Preact thread renders backend event kinds and real watch frames without person heuristics', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const thread = fs.readFileSync(
-    path.join(here, '../src/console/client/components/thread.tsx'),
-    'utf8',
-  );
-  assert.match(thread, /entry\.eventKind === 'watch'/);
-  assert.match(thread, /<img[\s\S]*src=\{entry\.frameUrl\}/);
-  assert.match(thread, /<InternalEventCard entry=\{entry\} \/>/);
-  assert.doesNotMatch(thread, /entry\.author === 'harness'/);
-});
-
 test('runtime command receipts project actual invocations and explicit omissions', () => {
   const entry = {
     id: 1,
@@ -512,36 +434,6 @@ test('memory context parser separates source frontmatter and Markdown body', () 
       markdown: '# Notes\n\n**kept** body',
     },
   );
-});
-
-test('Preact stream keeps thinking transient until real content exists', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const main = fs.readFileSync(
-    path.join(here, '../src/console/client/main.tsx'),
-    'utf8',
-  );
-  const thread = fs.readFileSync(
-    path.join(here, '../src/console/client/components/thread.tsx'),
-    'utf8',
-  );
-  const chat = fs.readFileSync(
-    path.join(here, '../src/console/client/components/chat.tsx'),
-    'utf8',
-  );
-  const hook = fs.readFileSync(
-    path.join(here, '../src/console/client/use-console.ts'),
-    'utf8',
-  );
-  assert.match(thread, /live\?\.content/);
-  assert.match(thread, /streaming-copy/);
-  assert.doesNotMatch(thread, /live\.content \|\| 'thinking'/);
-  assert.match(main, /<ActivityStrip[\s\S]*is thinking/);
-  assert.match(chat, /class=\{`activity-row activity-\$\{tone\}`\}/);
-  assert.match(chat, /message-avatar agent-avatar activity-avatar/);
-  assert.match(thread, /runtime-no-output[^]*no output/);
-  assert.doesNotMatch(main, /StatusBar|mobile-thread-status/);
-  assert.match(hook, /case 'streamStart'/);
-  assert.match(hook, /case 'delta'/);
 });
 
 test('sandbox operation extraction types direct Mind, edit, shell, file, and desktop calls', () => {
@@ -1484,46 +1376,6 @@ test('handleClientMessage: committed history invalidates the context cache', asy
   );
 });
 
-test('Preact Mind detail follows the rendered-first reference without v1 edit chrome', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const source = fs.readFileSync(
-    path.join(here, '../src/console/client/components/mind.tsx'),
-    'utf8',
-  );
-  assert.match(source, /<Markdown value=\{item\.body\}/);
-  assert.match(source, /class='secretary-glyph'/);
-  assert.match(source, /class='mind-comments'/);
-  assert.match(
-    source,
-    /\.sort\([\s\S]*?\(a,\s*b\)\s*=>[\s\S]*?Number\(a\.createdAt/,
-  );
-  assert.match(source, /item\.dependencies \?\? item\.blockedBy/);
-  assert.doesNotMatch(source, /MindForm|editing|copy raw|copy\(item\.body/);
-});
-
-test('Preact context pane subscribes to live projection updates without resetting scroll', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const hook = fs.readFileSync(
-    path.join(here, '../src/console/client/use-console.ts'),
-    'utf8',
-  );
-  const view = fs.readFileSync(
-    path.join(here, '../src/console/client/components/context.tsx'),
-    'utf8',
-  );
-  assert.match(hook, /t: 'watch'[\s\S]*context: state\.view === 'context'/);
-  assert.match(hook, /state\.snapshotVersion/);
-  assert.match(
-    hook,
-    /dispatch\(\{ type: 'context-request', reqId \}\)[\s\S]*send\(\{ t: 'context', reqId \}\)/,
-  );
-  assert.doesNotMatch(
-    view,
-    /scrollTop\s*=/,
-    'Preact preserves the existing scroll container across context diffs',
-  );
-});
-
 test('handleClientMessage: context answers null when unwired or when the source throws', async () => {
   const hub = new ConsoleHub([]);
   hub.attach(stubSources()); // no context source
@@ -1590,19 +1442,6 @@ test('hub: yieldNudge appends an yieldnudge entry and broadcasts one message fra
   assert.equal(entry.channel, 'internal');
   assert.ok(typeof entry.id === 'number');
   assert.ok(entry.ts && entry.ts > 0, 'stamped with a wall-clock time');
-});
-
-test('v2 room rail is an observational lens with no duplicate moderation authority', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const main = fs.readFileSync(
-    path.join(here, '../src/console/client/main.tsx'),
-    'utf8',
-  );
-  assert.match(
-    main,
-    /actions\.setRoom\(roomAfterSelection\(state\.room, id\)\);[\s\S]*actions\.setView\('thread'\)/,
-  );
-  assert.doesNotMatch(main, /['"](?:moderate|mute|deafen|undeafen)['"]/);
 });
 
 test('sendSnapshot resends only to an attached client', async () => {

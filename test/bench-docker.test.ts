@@ -9,23 +9,6 @@ import {
   prepareEpisodeMounts,
 } from '../bench/docker.js';
 
-const repositoryRoot = path.resolve(import.meta.dirname, '..');
-
-test('bench image files are present in the allowlisted Docker context', () => {
-  const dockerfile = fs.readFileSync(
-    path.join(repositoryRoot, 'bench/docker/Dockerfile'),
-    'utf8',
-  );
-  const ignoreLines = new Set(
-    fs
-      .readFileSync(path.join(repositoryRoot, '.dockerignore'), 'utf8')
-      .split(/\r?\n/),
-  );
-  assert.match(dockerfile, /COPY bench \.\/bench/);
-  assert.equal(ignoreLines.has('!bench/'), true);
-  assert.equal(ignoreLines.has('!bench/**'), true);
-});
-
 test('Docker episodes deny network/capabilities and mount only explicit episode paths', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-docker-')),
     work = path.join(root, 'work'),

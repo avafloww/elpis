@@ -22,16 +22,11 @@ test('disabled external thinking leaves no model-facing think vocabulary', () =>
   assert.doesNotMatch(prompt, /external thinking/i);
   assert.doesNotMatch(prompt, /separator result means continue/);
   assert.match(prompt, /Unmarked assistant `content` remains internal/);
-  assert.match(prompt, /Before your first `run\(\.\.\.\)` call/);
-  assert.match(prompt, /You act through `run`/);
 });
 
-test('enabled external thinking documents and invites voluntary pause-anytime use', () => {
+test('enabled external thinking advertises think while keeping cognition internal', () => {
   const prompt = build(input(true));
-  assert.match(prompt, /second model-facing tool/);
-  assert.match(prompt, /Use `think` whenever pausing would help/);
-  assert.match(prompt, /available at any point in a turn/);
-  assert.match(prompt, /not only when the harness forces the first call/);
+  assert.match(prompt, /`think`/);
   assert.match(prompt, /not sent to chat channels/);
   assert.match(prompt, /separator result means continue/);
   assert.match(prompt, /Keep unmarked assistant `content` empty/);
@@ -40,15 +35,6 @@ test('enabled external thinking documents and invites voluntary pause-anytime us
   assert.match(
     prompt,
     /Unmarked assistant `content` is transport residue only/,
-  );
-  assert.doesNotMatch(prompt, /Before your first `run\(\.\.\.\)` call/);
-  assert.match(
-    prompt,
-    /Before the first action, use `think` if pausing would help/,
-  );
-  assert.match(
-    prompt,
-    /Prefer an explicit speech header for ordinary text and replies/,
   );
 });
 
@@ -61,8 +47,6 @@ for (const externalThinking of [false, true]) {
       /The entire body after that first line is outward speech/,
     );
     assert.match(prompt, /A header does not yield/);
-    assert.match(prompt, /same response/);
-    assert.match(prompt, /attachments and programmatic work/);
     assert.doesNotMatch(prompt, /You speak to the user ONLY through/);
     assert.doesNotMatch(prompt, /They are never speech/);
   });

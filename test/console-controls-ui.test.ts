@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { turnMessages } from '../src/console/client/components/secretary.js';
 import { workerEntries } from '../src/console/client/components/workers.js';
 import { clampLogRailHeight } from '../src/console/client/scroll.js';
@@ -15,85 +12,10 @@ import {
   workerDetailFromControl,
 } from '../src/console/client/use-console.js';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..');
-const read = (file: string): string =>
-  fs.readFileSync(path.join(root, file), 'utf8');
-
-test('console exports one five-view dashboard over a bounded transport', () => {
-  const main = read('src/console/client/main.tsx');
-  const hook = read('src/console/client/use-console.ts');
-  const transport = read('src/console/client/transport.ts');
-  const websocket = read('src/console/client/websocket-transport.ts');
-  const standalone = read('src/console/client/standalone.tsx');
-  const html = read('src/console/public/index.html');
-  assert.match(main, /Thread.*Context.*Mind.*Workers.*Secretary/s);
-  assert.match(main, /export function ConsoleDashboard/);
-  assert.match(
-    main,
-    /export function ConsoleDashboard\(\{\s*state,\s*actions,\s*mediaResolver,\s*preferences,\s*\}: ConsoleDashboardProps\)/,
-  );
-  assert.match(
-    main,
-    /<ConsoleMediaResolverContext\.Provider value=\{mediaResolver\}>/,
-  );
-
-  assert.match(standalone, /useConsole\(transport, preferences\)/);
-  assert.doesNotMatch(hook, /WebSocket|location\.host|\/ws|localStorage/);
-  assert.match(standalone, /localStorage\.getItem\(VIEW_KEY\)/);
-  assert.match(standalone, /localStorage\.setItem\(VIEW_KEY, view\)/);
-  assert.match(hook, /transport\.subscribe/);
-  assert.match(hook, /transport\.send/);
-  assert.match(transport, /interface ConsoleTransport/);
-  assert.match(websocket, /new WebSocket/);
-  assert.match(websocket, /location\.host}\/ws/);
-  assert.match(
-    standalone,
-    /<ConsoleDashboard\s+state=\{state\}\s+actions=\{actions\}\s+preferences=\{preferences\}/,
-  );
-  assert.match(hook, /t: 'control'/);
-  assert.match(hook, /t: 'mind'/);
-  assert.match(html, /id="app"/);
-  assert.match(html, /app\.css/);
-  assert.match(html, /app\.js/);
-  assert.doesNotMatch(html, /unfinished operations|worker-root|secretary-root/);
-});
-
-test('build uses exact Preact and esbuild seam while retired vanilla files stay absent', () => {
-  const pkg = JSON.parse(read('package.json'));
-  assert.equal(pkg.dependencies.preact, '10.29.8');
-  assert.equal(pkg.devDependencies.esbuild, '0.28.2');
-  assert.match(
-    pkg.scripts['build:console'],
-    /tsc -p tsconfig\.console\.json.*build-console/,
-  );
-  for (const file of [
-    'app.js',
-    'styles.css',
-    'scroll-follow.js',
-    'run-code.js',
-    'elpis-branding.js',
-  ])
-    assert.equal(
-      fs.existsSync(path.join(root, 'src/console/public', file)),
-      false,
-      file,
-    );
-});
-
-test('desktop log rail restores bounded persisted resize and fixed timestamps', () => {
+test('log rail height stays within the viewport bounds', () => {
   assert.equal(clampLogRailHeight(40, 800), 96);
   assert.equal(clampLogRailHeight(208, 800), 208);
   assert.equal(clampLogRailHeight(9999, 800), 560);
-  const main = read('src/console/client/main.tsx');
-  const standalone = read('src/console/client/standalone.tsx');
-  const styles = read('src/console/client/styles.css');
-  assert.doesNotMatch(main, /localStorage|LOG_RAIL_KEY/);
-  assert.match(standalone, /LOG_RAIL_KEY = 'ep-logdock-h'/);
-  assert.match(main, /role='separator'/);
-  assert.match(main, /setPointerCapture/);
-  assert.match(main, /ArrowUp/);
-  assert.match(styles, /\.log-line time[\s\S]*white-space: nowrap/);
 });
 
 test('control projections preserve worker identity and select a started Secretary session', () => {
@@ -204,29 +126,9 @@ test('successful control receipts upsert sessions and append Secretary turns imm
       { id: 'turn-new', sessionId: 'sec-old', status: 'queued' },
     ],
   );
-  const source = read('src/console/client/use-console.ts');
-  for (const op of ['start', 'send', 'followup', 'dismiss', 'enqueue', 'close'])
-    assert.match(source, new RegExp(`frame\\.op === '${op}'`));
 });
 
-test('image viewer and worker mandate use real bounded content', () => {
-  const thread = read('src/console/client/components/thread.tsx');
-  const workers = read('src/console/client/components/workers.tsx');
-  const styles = read('src/console/client/styles.css');
-  assert.match(thread, /class='image-viewer'/);
-  assert.match(thread, /event\.key === 'Escape'/);
-  assert.match(thread, /class='memory-context-surface'/);
-  assert.match(thread, /<Markdown value=\{memory\.markdown\}/);
-  assert.match(styles, /\.image-viewer-layer[\s\S]*position: fixed/);
-  assert.match(styles, /\.memory-context-body table/);
-  assert.match(workers, /state\.mindItems\.find[\s\S]*\.body/);
-  assert.doesNotMatch(workers, /Mandate text is not exposed/);
-  assert.match(workers, /Fresh same-Mind follow-up/);
-  assert.match(workers, /hidden model context is not resumed/);
-  assert.match(workers, /actions\.control\('worker', 'followup'/);
-});
-
-test('Secretary pending state renders honest activity labels without client polling', () => {
+test('Secretary pending state distinguishes queued, claimed, and completed turns', () => {
   const snapshot = {
     available: true,
     sessions: [
@@ -244,16 +146,6 @@ test('Secretary pending state renders honest activity labels without client poll
     }),
     false,
   );
-  const socket = read('src/console/client/use-console.ts');
-  const view = read('src/console/client/components/secretary.tsx');
-  assert.match(
-    socket,
-    /frame\.lane === 'secretary'[\s\S]*frame\.op === 'snapshot'[\s\S]*secretary: controlSnapshot\(frame\.result\)/,
-  );
-  assert.match(socket, /t: 'watch'/);
-  assert.doesNotMatch(socket, /}, 750\)/);
-  assert.match(view, /Waiting for Secretary/);
-  assert.match(view, /Secretary is thinking/);
 });
 
 test('secretary turn renderer preserves ordinary request and response wire records', () => {
@@ -267,45 +159,5 @@ test('secretary turn renderer preserves ordinary request and response wire recor
       { role: 'user', content: 'question', status: 'completed' },
       { role: 'assistant', content: 'answer', status: 'completed' },
     ],
-  );
-});
-
-test('runtime command cards use only per-invocation receipts', () => {
-  const thread = read('src/console/client/components/thread.tsx');
-  assert.match(thread, /runtimeOperationReceipts\(result\)/);
-  assert.match(thread, /hasRuntimeOperationLedger\(result\)/);
-  assert.match(
-    thread,
-    /!hasRuntimeCommands \|\|[\s\S]*!operationHasRuntimeReceipt\(operation\)/,
-  );
-  assert.match(thread, /value=\{receipt\.stdout\}/);
-  assert.match(thread, /value=\{receipt\.stderr\}/);
-  assert.match(thread, /value=\{receipt\.error\}/);
-  assert.match(thread, /runtime-operation-omitted/);
-  assert.doesNotMatch(
-    thread,
-    /RuntimeOperationCard[\s\S]{0,400}result\.content/,
-  );
-});
-
-test('operations display bounded receipts without raw credentials or local paths', () => {
-  const source = [
-    'main.tsx',
-    'use-console.ts',
-    'components/workers.tsx',
-    'components/secretary.tsx',
-  ]
-    .map((file) => read(`src/console/client/${file}`))
-    .join('\n');
-  assert.match(source, /sha256/);
-  assert.match(source, /artifact/);
-  assert.match(source, /request-correlated|reqId|requestId/);
-  assert.doesNotMatch(
-    source,
-    /rawToken|controlTokenDigest|secretKey|relativePath|localPath|podUid|podName/,
-  );
-  assert.match(
-    read('docs/console-v2-adjustments.md'),
-    /Secretary launch context is not authority scope/,
   );
 });

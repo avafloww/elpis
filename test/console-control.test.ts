@@ -89,6 +89,8 @@ const workerSession = {
   updatedAt: 2,
   lastError: null,
   token: 'raw-worker-credential',
+  rawToken: 'synthetic-raw-token',
+  secretKey: 'synthetic-secret-key',
   controlTokenDigest: 'digest',
 };
 const secretaryId = 'sec-1234567890123456789012';
@@ -257,7 +259,7 @@ test('snapshots include durable turns while stripping tokens, credentials, and a
   assert.equal(c.frames[0].secretary.sessions[0].turns.length, 1);
   assert.doesNotMatch(
     JSON.stringify(c.frames[0]),
-    /raw-worker|raw-secretary|turn-secret|controlToken|private-workspace|secretary-pod/,
+    /raw-worker|raw-secretary|turn-secret|controlToken|private-workspace|secretary-pod|rawToken|secretKey|podName|podUid/,
   );
   const status = await control(hub, c, {
     lane: 'worker',
@@ -268,7 +270,10 @@ test('snapshots include durable turns while stripping tokens, credentials, and a
   assert.equal(status.ok, true);
   assert.equal(status.result.messages[0].body, 'done');
   assert.equal(status.result.artifacts[0].key, 'workspace.patch.gz');
-  assert.doesNotMatch(JSON.stringify(status), /relativePath|localPath|private/);
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /relativePath|localPath|private|rawToken|secretKey|controlToken|podName|podUid|mail-secret/,
+  );
 });
 
 test('control snapshots retain active sessions while bounding history and body previews', async () => {

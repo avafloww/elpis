@@ -194,7 +194,7 @@ test('native Opus and DAVE dependencies are available', () => {
   const packet = encoder.encode(pcm, 960);
   assert.ok(packet.length > 0);
   assert.equal(encoder.decode(packet).length, pcm.length);
-  assert.match(generateDependencyReport(), /@snazzah\/davey: 0\.1\./);
+  assert.match(generateDependencyReport(), /@snazzah\/davey: \d+\.\d+\.\d+/);
 });
 
 test('session subscribes only to the operator and emits bounded PCM/VAD callbacks', async (t) => {

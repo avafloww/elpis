@@ -6,16 +6,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createElpisRuntime,
   isUnannouncedRestart,
   formatProcessErrorNotice,
   formatSandboxLateProcessErrorNotice,
   shutdownRuntimeMedia,
 } from '../src/index.js';
-
-test('production runtime composition is exported without booting on import', () => {
-  assert.equal(typeof createElpisRuntime, 'function');
-});
 
 test('shutdownRuntimeMedia stops the agent before destroying Discord', () => {
   const calls: string[] = [];

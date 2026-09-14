@@ -5,7 +5,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   MemoryConsolidator,
-  MEMORY_CONSOLIDATION_PROMPT,
   effectiveMemoryLimits,
 } from '../src/store/memory-consolidator.js';
 import { noopLogger } from '../src/lib/log.js';
@@ -71,19 +70,6 @@ test('memory limits clamp to half the usable model window', () => {
   });
 });
 
-test('private consolidation prompt owns the memory, permits grug, and forbids new dates/polish', () => {
-  assert.match(
-    MEMORY_CONSOLIDATION_PROMPT,
-    /your memory, not anyone else's profile/i,
-  );
-  assert.match(MEMORY_CONSOLIDATION_PROMPT, /private by default/i);
-  assert.match(
-    MEMORY_CONSOLIDATION_PROMPT,
-    /Grug\/fragment language is welcome/,
-  );
-  assert.match(MEMORY_CONSOLIDATION_PROMPT, /Do not add the current date/);
-});
-
 test('oversized memory is atomically consolidated and backed up', async () => {
   const p = fixture();
   const original = '# Memory\n' + 'old repeated fact\n'.repeat(80);
@@ -104,7 +90,7 @@ test('oversized memory is atomically consolidated and backed up', async () => {
     '# memory\nthing keep. fix known.\n',
   );
   assert.equal(fs.statSync(p.memoryPath).mode & 0o777, 0o600);
-  assert.match(seenSystem, /first-person internal monologue/);
+  assert.match(seenSystem, /private by default/i);
   assert.match(seenSystem, /Small identity anchor/);
   const backupDir = resolveDataLayout(p.dataDirectory).memoryBackups;
   const backups = fs.readdirSync(backupDir);

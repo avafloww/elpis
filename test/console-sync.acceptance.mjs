@@ -2,6 +2,7 @@
 // npm run build && node test/console-sync.acceptance.mjs
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 import { ConsoleHub } from '../dist/console/hub.js';
 import { createConsoleServer } from '../dist/console/server.js';
@@ -37,6 +38,9 @@ let turns = [];
 let projection = 'Original context';
 let rooms = [];
 let agentName = 'Aster';
+const chatInputs = [];
+const chatReceived = Promise.withResolvers();
+const moderationInputs = [];
 const workerStatus = (ref) => ({
   session: workers.find((worker) => worker.worker === ref),
   messages,
@@ -68,6 +72,12 @@ hub.attach({
     tools: [],
     messages: [{ role: 'user', content: projection }],
   }),
+  chat: (input) => {
+    chatInputs.push(input);
+    chatReceived.resolve();
+    return { ok: true, note: 'accepted' };
+  },
+  moderate: (input) => moderationInputs.push(input),
   mind,
   worker: {
     list: async () => workers,
@@ -199,6 +209,22 @@ try {
 
   await nav('Thread');
   const composer = page.getByPlaceholder('Write a message…');
+  await composer.fill('An IME composition');
+  await composer.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  assert.deepEqual(chatInputs, []);
+  assert.equal(await composer.inputValue(), 'An IME composition');
+  await composer.press('Enter');
+  await Promise.race([
+    chatReceived.promise,
+    delay(8000, null, { ref: false }).then(() =>
+      assert.fail('chat never reached the Hub'),
+    ),
+  ]);
+  await page.waitForFunction(
+    () => document.querySelector('textarea')?.value === '',
+  );
+  assert.equal(chatInputs.length, 1);
+  assert.equal(chatInputs[0].content, 'An IME composition');
   await composer.fill('Unsent thread draft');
   hub.streamStart();
   hub.streamDelta('content', 'Streaming progress');
@@ -231,6 +257,42 @@ try {
     },
   ];
   await visible('.room-section', 'Example room');
+  await page
+    .locator('.room-section button')
+    .filter({ hasText: 'Example room' })
+    .click();
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.thread-item')].some(
+      (entry) =>
+        entry.textContent.includes('Committed response') &&
+        Number(getComputedStyle(entry).opacity) < 1,
+    ),
+  );
+  await page
+    .locator('.room-section button')
+    .filter({ hasText: 'Example room' })
+    .click();
+  await visible('.thread-scroll', 'Committed response');
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.thread-item')].some(
+      (entry) =>
+        entry.textContent.includes('Committed response') &&
+        Number(getComputedStyle(entry).opacity) === 1,
+    ),
+  );
+  assert.deepEqual(
+    moderationInputs,
+    [],
+    'room selection is only a history lens',
+  );
+  assert.deepEqual(
+    await page.evaluate(async () => ({
+      workers: (await navigator.serviceWorker.getRegistrations()).length,
+      caches: await caches.keys(),
+    })),
+    { workers: 0, caches: [] },
+    'the console leaves no service worker or persistent response cache',
+  );
   assert.equal(
     navigations,
     1,

@@ -21,12 +21,6 @@ test('preview: string short', () => {
   assert.equal(preview('hi', 2048), 'string(2 chars): "hi"');
 });
 
-test('preview: string long', () => {
-  const big = 'x'.repeat(12048);
-  const p = preview(big, 2048);
-  assert.match(p, /string\(12048 chars\)/);
-});
-
 test('preview: array capped', () => {
   const arr = Array.from({ length: 100000 }, (_, i) => i);
   const p = preview(arr, 2048);
@@ -105,12 +99,6 @@ test('preview: null/undefined/boolean', () => {
   assert.equal(preview(null, 2048), 'null');
   assert.equal(preview(undefined, 2048), 'undefined');
   assert.equal(preview(true, 2048), 'true');
-});
-
-test('preview: Buffer never dumps contents', () => {
-  const p = preview(Buffer.alloc(1024), 2048);
-  assert.match(p, /Buffer\(1024 bytes\)/);
-  assert.doesNotMatch(p, /\x00/);
 });
 
 test('cap: byte-aware truncate', () => {
@@ -246,10 +234,6 @@ test('preview: string elision names the exact slice offsets that reproduce the e
     headEnd < tailStart,
     'a genuinely truncated preview must have a non-empty elided middle',
   );
-});
-
-test('B2: short string preview unchanged', () => {
-  assert.equal(preview('hi', 2048), 'string(2 chars): "hi"');
 });
 
 test('preview: a string that fits the budget is shown once, in full — no elision path', () => {
@@ -459,4 +443,33 @@ test('preview: Buffer contents render as a bounded hex head (no more "contents n
   assert.match(out, /^Buffer\(13 bytes\) hex: 75 73 65 72 20 5c 22/);
   const big = preview(Buffer.alloc(300, 0xab), 4096);
   assert.match(big, /Buffer\(300 bytes\) hex: (ab ){63}ab … \(\+236 more/);
+});
+
+test('preview: URL renders as a readable string', () => {
+  const url = new URL('https://example.com/path?query=1');
+  const out = preview(url, 1000);
+  assert.ok(
+    out.includes('https://example.com/path?query=1'),
+    'URL should render as its href string',
+  );
+});
+
+test('from past EOF clamps, never prints a reversed range', () => {
+  const content = Array.from({ length: 68 }, (_, i) => `line ${i + 1}`).join(
+    '\n',
+  );
+  const out = formatRead('f.txt', content, { from: 140, to: 999 }, 100_000);
+  assert.doesNotMatch(out, /showing 140-68/); // no reversed range
+  assert.match(out, /showing 68-68/); // clamped to the last valid line
+  assert.match(out, /line 68/);
+});
+
+test('an explicitly reversed range ({from > to}) also clamps instead of reversing', () => {
+  const content = Array.from({ length: 68 }, (_, i) => `line ${i + 1}`).join(
+    '\n',
+  );
+  const out = formatRead('f.txt', content, { from: 50, to: 10 }, 100_000);
+  assert.doesNotMatch(out, /showing 50-10/);
+  assert.match(out, /showing 10-10/);
+  assert.match(out, /line 10/);
 });

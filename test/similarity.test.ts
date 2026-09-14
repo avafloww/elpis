@@ -10,7 +10,6 @@ import {
   jaccard,
   containment,
   findRepetition,
-  BLIND_SPOTS,
 } from '../src/lib/similarity.js';
 
 test('tokenize: lowercases, strips punctuation and short words, drops urls', () => {
@@ -78,11 +77,6 @@ test('findRepetition: DOES NOT catch paraphrase (the declared blind spot)', () =
     null,
     'if this ever starts passing, update BLIND_SPOTS',
   );
-});
-
-test('BLIND_SPOTS names paraphrase and admits the reading is a floor', () => {
-  assert.match(BLIND_SPOTS, /paraphrase/);
-  assert.match(BLIND_SPOTS, /floor, not a measure/);
 });
 
 test('findRepetition: anchors on the NEWEST message, not old resolved loops', () => {
