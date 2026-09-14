@@ -53,6 +53,7 @@ function fixture(opts: { max?: number } = {}) {
     sizeBytes: number;
   } | null = null;
   let sourceError: Error | null = null;
+  let sourceHook: ((sessionId: string) => void) | null = null;
   const preparedSources: string[] = [];
   const discardedSources: string[] = [];
   let cleanupHook: ((session: WorkerSession) => void) | null = null;
@@ -91,6 +92,7 @@ function fixture(opts: { max?: number } = {}) {
     workspace: {
       async prepareSource(sessionId) {
         preparedSources.push(sessionId);
+        sourceHook?.(sessionId);
         if (sourceError) throw sourceError;
         return sourceReceipt;
       },
@@ -121,6 +123,9 @@ function fixture(opts: { max?: number } = {}) {
     },
     setSourceError(error: Error | null) {
       sourceError = error;
+    },
+    setSourceHook(hook: typeof sourceHook) {
+      sourceHook = hook;
     },
     setProvisionHook(hook: typeof provisionHook) {
       provisionHook = hook;
@@ -365,6 +370,39 @@ test('dismiss revokes token before cleanup and cleanup failure stays revoked', a
   assert.equal(dismissed.status, 'dismissed');
   assert.match(dismissed.lastError ?? '', /delete denied/);
   f.close();
+});
+
+async function assertRecoverySkipsActiveStart(
+  phase: 'source' | 'provision',
+): Promise<void> {
+  const f = fixture();
+  f.setSourceReceipt({
+    revision: '1'.repeat(40),
+    sha256: '2'.repeat(64),
+    sizeBytes: 1024,
+  });
+  let recovery: Promise<WorkerSession[]> | null = null;
+  const triggerRecovery = () => {
+    recovery = f.broker.recover();
+  };
+  if (phase === 'source') f.setSourceHook(triggerRecovery);
+  else f.setProvisionHook(triggerRecovery);
+
+  const session = await f.broker.start(f.item.id);
+  assert.ok(recovery, `${phase} hook started recovery`);
+  await recovery;
+  assert.equal(session.status, 'running');
+  assert.equal(f.broker.status(session.id).status, 'running');
+  assert.deepEqual(f.cleaned, []);
+  f.close();
+}
+
+test('recovery skips a session during source preparation', async () => {
+  await assertRecoverySkipsActiveStart('source');
+});
+
+test('recovery skips a session during Pod provisioning', async () => {
+  await assertRecoverySkipsActiveStart('provision');
 });
 
 test('recovery adopts ready Pods, finalizes terminal Pods, and fails missing claims', async () => {

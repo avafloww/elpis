@@ -20,6 +20,8 @@ Worker authority is a strict allowlist for its own workspace: local file editing
 
 Source-preparation failures identify the failed session with an `elpis.worker.status(...)` lookup. A dirty source tree gets fixed checkpoint guidance; arbitrary Git/filesystem details are not copied into the thrown error. The failed session remains revoked and no Pod is created.
 
+While one broker instance is actively preparing source or provisioning a Pod, refresh recovery skips that exact locally owned session. This prevents Kubernetes' transient not-yet-visible state from impersonating an abandoned missing Pod. The ownership marker is process-local and always released when the start attempt settles; after a process restart no marker survives, so startup recovery still fails and cleans a genuinely missing spawning claim.
+
 ## Isolation
 
 Production workers run in fixed operator-owned restricted Pods. Callers may not supply images, commands, mounts, namespaces, service accounts, security contexts, resources, arbitrary environment, or alternate Mind roots. A worker Pod receives only its workspace/scratch and a short-lived control token for token-bound completion, Mind, mailbox, and workspace-custody endpoints. Provider credentials, Discord credentials, resident DATA_DIR, and Kubernetes service-account tokens stay outside the Pod.

@@ -180,6 +180,9 @@ export class WorkerSpawnBroker {
   private readonly credential: () => WorkerControlCredential;
   private readonly id: () => string;
   private readonly slug: (taken: Set<string>) => string;
+  /** In-process start ownership closes before recovery may interpret a missing Pod.
+   * A process restart drops this set, so abandoned spawning rows stay recoverable. */
+  private readonly provisioning = new Set<string>();
 
   constructor(private readonly options: WorkerSpawnBrokerOptions) {
     this.now = options.now ?? Date.now;
@@ -311,104 +314,109 @@ export class WorkerSpawnBroker {
       throw new WorkerSpawnError('conflict', boundedError(error));
     }
 
-    let source: WorkerSourceReceipt | null = null;
-    if (this.options.workspace) {
-      try {
-        source = await this.options.workspace.prepareSource(id);
-        if (source) {
-          const bound = this.options.db
-            .prepare(
-              `UPDATE worker_sessions
+    this.provisioning.add(id);
+    try {
+      let source: WorkerSourceReceipt | null = null;
+      if (this.options.workspace) {
+        try {
+          source = await this.options.workspace.prepareSource(id);
+          if (source) {
+            const bound = this.options.db
+              .prepare(
+                `UPDATE worker_sessions
                SET source_revision = ?, source_sha256 = ?, source_bytes = ?, updated_at = ?
                WHERE id = ? AND status = 'spawning'
                  AND source_revision IS NULL AND source_sha256 IS NULL AND source_bytes IS NULL`,
-            )
-            .run(
-              source.revision,
-              source.sha256,
-              source.sizeBytes,
-              this.now(),
-              id,
-            );
-          if (Number(bound.changes) !== 1) {
-            this.options.workspace.discardSource(id);
-            throw new WorkerSpawnError(
-              'conflict',
-              'worker was revoked during source preparation',
-            );
+              )
+              .run(
+                source.revision,
+                source.sha256,
+                source.sizeBytes,
+                this.now(),
+                id,
+              );
+            if (Number(bound.changes) !== 1) {
+              this.options.workspace.discardSource(id);
+              throw new WorkerSpawnError(
+                'conflict',
+                'worker was revoked during source preparation',
+              );
+            }
           }
-        }
-      } catch (error) {
-        this.options.workspace.discardSource(id);
-        const detail = boundedError(error);
-        this.options.db
-          .prepare(
-            `UPDATE worker_sessions
+        } catch (error) {
+          this.options.workspace.discardSource(id);
+          const detail = boundedError(error);
+          this.options.db
+            .prepare(
+              `UPDATE worker_sessions
              SET status = 'failed', updated_at = ?, last_error = ?
              WHERE id = ? AND status = 'spawning'`,
+            )
+            .run(this.now(), detail, id);
+          if (error instanceof WorkerSpawnError) throw error;
+          const summary =
+            error instanceof WorkerWorkspaceError &&
+            error.reason === 'dirty_source'
+              ? 'worker source repository must be clean; checkpoint changes before starting a worker'
+              : 'worker source preparation failed';
+          throw new WorkerSpawnError(
+            'workspace_failed',
+            `${summary}; inspect elpis.worker.status("${id}") for details`,
+          );
+        }
+      }
+
+      let receipt: WorkerProvisionReceipt;
+      try {
+        receipt = await this.options.runtime.provision({
+          sessionId: id,
+          slug,
+          token: credential.token,
+        });
+      } catch (error) {
+        const failed = this.byId(id)!;
+        let cleanupError: string | null = null;
+        try {
+          await this.options.runtime.cleanup(failed);
+        } catch (cleanup) {
+          cleanupError = boundedError(cleanup);
+        }
+        const message = `${boundedError(error)}${cleanupError ? `; cleanup: ${cleanupError}` : ''}`;
+        this.options.db
+          .prepare(
+            "UPDATE worker_sessions SET status = 'failed', updated_at = ?, last_error = ? WHERE id = ? AND status = 'spawning'",
           )
-          .run(this.now(), detail, id);
-        if (error instanceof WorkerSpawnError) throw error;
-        const summary =
-          error instanceof WorkerWorkspaceError &&
-          error.reason === 'dirty_source'
-            ? 'worker source repository must be clean; checkpoint changes before starting a worker'
-            : 'worker source preparation failed';
+          .run(this.now(), message.slice(0, 1000), id);
         throw new WorkerSpawnError(
-          'workspace_failed',
-          `${summary}; inspect elpis.worker.status("${id}") for details`,
+          'provision_failed',
+          'worker provisioning failed',
         );
       }
-    }
 
-    let receipt: WorkerProvisionReceipt;
-    try {
-      receipt = await this.options.runtime.provision({
-        sessionId: id,
-        slug,
-        token: credential.token,
-      });
-    } catch (error) {
-      const failed = this.byId(id)!;
-      let cleanupError: string | null = null;
-      try {
-        await this.options.runtime.cleanup(failed);
-      } catch (cleanup) {
-        cleanupError = boundedError(cleanup);
-      }
-      const message = `${boundedError(error)}${cleanupError ? `; cleanup: ${cleanupError}` : ''}`;
-      this.options.db
+      const result = this.options.db
         .prepare(
-          "UPDATE worker_sessions SET status = 'failed', updated_at = ?, last_error = ? WHERE id = ? AND status = 'spawning'",
-        )
-        .run(this.now(), message.slice(0, 1000), id);
-      throw new WorkerSpawnError(
-        'provision_failed',
-        'worker provisioning failed',
-      );
-    }
-
-    const result = this.options.db
-      .prepare(
-        `UPDATE worker_sessions
+          `UPDATE worker_sessions
          SET status = 'running', pod_name = ?, pod_uid = ?, workspace_ref = ?, updated_at = ?, last_error = NULL
          WHERE id = ? AND status = 'spawning'`,
-      )
-      .run(
-        receipt.podName,
-        receipt.podUid,
-        receipt.workspaceRef,
-        this.now(),
-        id,
-      );
-    if (Number(result.changes) !== 1) {
-      await this.options.runtime.cleanup(this.byId(id)!);
-      throw new WorkerSpawnError(
-        'conflict',
-        'worker was revoked during provisioning',
-      );
+        )
+        .run(
+          receipt.podName,
+          receipt.podUid,
+          receipt.workspaceRef,
+          this.now(),
+          id,
+        );
+      if (Number(result.changes) !== 1) {
+        await this.options.runtime.cleanup(this.byId(id)!);
+        throw new WorkerSpawnError(
+          'conflict',
+          'worker was revoked during provisioning',
+        );
+      }
+      return this.byId(id)!;
+    } finally {
+      this.provisioning.delete(id);
     }
-    return this.byId(id)!;
   }
 
   async dismiss(ref: string): Promise<WorkerSession> {
@@ -436,8 +444,9 @@ export class WorkerSpawnBroker {
   }
 
   async recover(): Promise<WorkerSession[]> {
-    const active = this.list().filter((session) =>
-      ACTIVE.includes(session.status),
+    const active = this.list().filter(
+      (session) =>
+        ACTIVE.includes(session.status) && !this.provisioning.has(session.id),
     );
     for (const session of active) {
       let state: WorkerProvisionState;
