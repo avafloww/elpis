@@ -59,6 +59,10 @@ export interface GuildConfig {
   channels: Record<string, ChannelMode>;
   /** Explicit channel id → send permission. Scalar channel entries parse as true. */
   channelAllowSend?: Record<string, boolean>;
+  /** Add resident-authored 👍/👎 controls to sent messages by default. */
+  feedbackReactions?: boolean;
+  /** Explicit channel id → feedback control override. Omitted entries inherit the guild. */
+  channelFeedbackReactions?: Record<string, boolean>;
 }
 
 export interface LlmConfig extends LegacyLlmDefinition {
@@ -630,6 +634,13 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
         `${f}: guild \`default_allow_send\` must be true or false (got ${JSON.stringify(defaultAllowSend)})`,
       );
     }
+    const feedbackReactions =
+      g.feedback_reactions === undefined ? false : g.feedback_reactions;
+    if (typeof feedbackReactions !== 'boolean') {
+      throw new Error(
+        `${f}: guild \`feedback_reactions\` must be true or false (got ${JSON.stringify(feedbackReactions)})`,
+      );
+    }
     if (g.id === undefined || g.id === null || g.id === '') {
       throw new Error(`${f}: guild entry missing a non-empty string \`id\``);
     }
@@ -676,6 +687,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
     }
     const channels: Record<string, ChannelMode> = {};
     const channelAllowSend: Record<string, boolean> = {};
+    const channelFeedbackReactions: Record<string, boolean> = {};
     for (const [cid, rawPolicy] of channelEntries) {
       if (!/^\d+$/.test(cid))
         throw new Error(
@@ -683,6 +695,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
         );
       let tier: unknown = rawPolicy;
       let channelSend: unknown = true;
+      let channelFeedback: unknown;
       if (
         rawPolicy &&
         typeof rawPolicy === 'object' &&
@@ -690,7 +703,10 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       ) {
         const obj = rawPolicy as Record<string, unknown>;
         const unknown = Object.keys(obj).filter(
-          (key) => key !== 'tier' && key !== 'allow_send',
+          (key) =>
+            key !== 'tier' &&
+            key !== 'allow_send' &&
+            key !== 'feedback_reactions',
         );
         if (unknown.length > 0)
           throw new Error(
@@ -698,6 +714,7 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
           );
         tier = obj.tier;
         channelSend = obj.allow_send === undefined ? true : obj.allow_send;
+        channelFeedback = obj.feedback_reactions;
       }
       if (tier === 'muted')
         throw new Error(
@@ -716,6 +733,14 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
           `${f}: guild '${slug}' channel "${cid}" \`allow_send\` must be true or false (got ${JSON.stringify(channelSend)})`,
         );
       }
+      if (
+        channelFeedback !== undefined &&
+        typeof channelFeedback !== 'boolean'
+      ) {
+        throw new Error(
+          `${f}: guild '${slug}' channel "${cid}" \`feedback_reactions\` must be true or false (got ${JSON.stringify(channelFeedback)})`,
+        );
+      }
       if (seenChannels.has(cid))
         throw new Error(
           `${f}: channel id "${cid}" appears in more than one guild`,
@@ -723,6 +748,9 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       seenChannels.add(cid);
       channels[cid] = tier as ChannelMode;
       channelAllowSend[cid] = channelSend;
+      if (typeof channelFeedback === 'boolean') {
+        channelFeedbackReactions[cid] = channelFeedback;
+      }
     }
     const timezone =
       typeof g.timezone === 'string' && g.timezone !== '' ? g.timezone : null;
@@ -760,8 +788,10 @@ function parseGuilds(tree: YamlTree, f: string): GuildConfig[] {
       defaultTier: defaultTier as ChannelMode,
       allowSend,
       defaultAllowSend,
+      feedbackReactions,
       channels,
       channelAllowSend,
+      channelFeedbackReactions,
     });
   }
   return guilds;

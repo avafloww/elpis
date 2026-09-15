@@ -59,6 +59,189 @@ test('Discord send revalidates fetched channel guild before delivery', async () 
   cleanup();
 });
 
+test('Discord adds feedback controls after completed text and voice delivery', async () => {
+  const feedbackGuild = {
+    ...guild,
+    feedbackReactions: true,
+    channels: { '1002': 'direct', '1003': 'direct', '1004': 'direct' },
+    channelAllowSend: { '1002': true, '1003': true, '1004': true },
+    channelFeedbackReactions: { '1003': false, '1004': false },
+  } satisfies GuildConfig;
+  const channelOnlyGuild = {
+    ...guild,
+    id: 'g2',
+    slug: 'friends',
+    feedbackReactions: false,
+    channels: { '2002': 'direct' },
+    channelAllowSend: { '2002': true },
+    channelFeedbackReactions: { '2002': true },
+  } satisfies GuildConfig;
+  const fixture = buildTestAgent({
+    config: {
+      discord: {
+        ...makeConfig().discord,
+        guilds: [feedbackGuild, channelOnlyGuild],
+      },
+    },
+    tmpPrefix: 'harness-discord-feedback-reactions-',
+  });
+  const effects: string[] = [];
+  const voice = {
+    channelId: null,
+    join: async () => {},
+    leave: () => {},
+    speak: async (text: string) => ({
+      status: 'played' as const,
+      transcript: text,
+      playedMs: 0,
+    }),
+    captureSpeech: () => async (text: string) => {
+      effects.push('voice');
+      return {
+        status: 'played' as const,
+        transcript: text,
+        playedMs: 0,
+      };
+    },
+  } as never;
+  const { client } = createDiscord(fixture.config, fixture.agent, { voice });
+  const sends: string[] = [];
+  const reactions: Array<{ message: number; emoji: string }> = [];
+  Object.defineProperty(client.channels, 'fetch', {
+    configurable: true,
+    value: async (id: string) => ({
+      ...fetchedChannel(id === '2002' ? 'g2' : 'g1', () => {}),
+      isThread: () => id === '1004',
+      parentId: id === '1004' ? '1002' : null,
+      send: async () => {
+        const message = sends.length;
+        sends.push(id);
+        effects.push('text');
+        return {
+          react: async (emoji: string) => {
+            reactions.push({ message, emoji });
+            effects.push(`reaction:${emoji}`);
+            if (message === 0 && emoji === '👍') {
+              throw new Error('synthetic reaction failure');
+            }
+          },
+        };
+      },
+    }),
+  });
+
+  try {
+    await fixture.agent.send('1002', 'a'.repeat(4000));
+    const enabledSends = sends.length;
+    assert.ok(
+      enabledSends > 1,
+      'fixture must exercise multiple Discord chunks',
+    );
+    assert.deepEqual(
+      reactions,
+      Array.from({ length: enabledSends }, (_unused, message) => [
+        { message, emoji: '👍' },
+        { message, emoji: '👎' },
+      ]).flat(),
+      'each delivered chunk gets both controls even when one reaction rejects',
+    );
+    assert.ok(
+      effects.indexOf('voice') > effects.lastIndexOf('text') &&
+        effects.indexOf('voice') < effects.indexOf('reaction:👍'),
+      'optional controls do not delay captured speech after text delivery',
+    );
+
+    await fixture.agent.send('1003', 'channel override keeps controls off');
+    assert.equal(sends.length, enabledSends + 1);
+    assert.equal(reactions.length, enabledSends * 2);
+
+    await fixture.agent.send('1004', 'thread inherits enabled parent controls');
+    assert.equal(sends.length, enabledSends + 2);
+    assert.deepEqual(reactions.slice(-2), [
+      { message: enabledSends + 1, emoji: '👍' },
+      { message: enabledSends + 1, emoji: '👎' },
+    ]);
+
+    await fixture.agent.send('2002', 'channel override enables controls');
+    assert.equal(sends.length, enabledSends + 3);
+    assert.deepEqual(reactions.slice(-2), [
+      { message: enabledSends + 2, emoji: '👍' },
+      { message: enabledSends + 2, emoji: '👎' },
+    ]);
+  } finally {
+    fixture.agent.stop();
+    client.destroy();
+    fixture.cleanup();
+  }
+});
+
+test('Discord feedback reactions stop after mentions authority expires without failing sent text', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const config = makeConfig();
+  config.discord.guilds = [
+    {
+      ...guild,
+      defaultTier: 'mentions',
+      feedbackReactions: true,
+      channels: { '1002': 'mentions' },
+      channelAllowSend: { '1002': true },
+    },
+  ];
+  let send!: (
+    channelId: string,
+    text: string,
+    opts?: Parameters<
+      Parameters<import('../src/agent.js').Agent['setSend']>[0]
+    >[2],
+    authorization?: Parameters<
+      Parameters<import('../src/agent.js').Agent['setSend']>[0]
+    >[3],
+  ) => Promise<unknown>;
+  let issueAuthorization!: (
+    channelId: string,
+    guildId: string,
+    isCurrent: () => boolean,
+  ) => NonNullable<Parameters<typeof send>[3]>;
+  const agent = {
+    setSend: (fn: typeof send) => {
+      send = fn;
+    },
+    setOutboundSendAuthorizationIssuer: (fn: typeof issueAuthorization) => {
+      issueAuthorization = fn;
+    },
+    enqueue: () => {},
+  } as never;
+  const wiring = createDiscord(config, agent);
+  let current = true;
+  let sends = 0;
+  const reactions: string[] = [];
+  Object.defineProperty(wiring.client.channels, 'fetch', {
+    configurable: true,
+    value: async () => ({
+      ...fetchedChannel('g1', () => sends++),
+      send: async () => {
+        sends++;
+        return {
+          react: async (emoji: string) => {
+            reactions.push(emoji);
+            if (emoji === '👍') current = false;
+          },
+        };
+      },
+    }),
+  });
+
+  try {
+    const authorization = issueAuthorization('1002', 'g1', () => current);
+    await send('1002', 'a'.repeat(4000), undefined, authorization);
+    assert.ok(sends > 1, 'all readable chunks survive optional control expiry');
+    assert.deepEqual(reactions, ['👍']);
+  } finally {
+    wiring.stopTyping();
+    wiring.client.destroy();
+  }
+});
+
 test('Discord replies use first chunk only and never retry a rejected reference', async () => {
   const { agent, config, cleanup } = buildTestAgent({
     config: { discord: { ...makeConfig().discord, guilds: [guild] } },

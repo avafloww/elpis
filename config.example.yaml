@@ -188,7 +188,9 @@ discord:
   # policy objects can override it. Unlisted channels use default_allow_send,
   # which defaults false. An addressed mentions-tier turn can reply only to its
   # exact inbound room despite that default; guild/channel denials still dominate.
-  # Runtime mute/deafen may deny further, never re-enable.
+  # Runtime mute/deafen may deny further, never re-enable. feedback_reactions
+  # defaults false at guild scope; channel policy objects may override it.
+  # Human 👍/👎 feedback capture remains active even when controls are disabled.
   #
   # slug must be unique, lowercase, and not all-digits (^[a-z0-9][a-z0-9-]*$,
   # not ^\d+$) — it's the human-readable handle for the guild. quiet_hours is
@@ -209,6 +211,7 @@ discord:
       # Adds a ~2.5s ingest hold for ordinary human messages in this guild so
       # slower proxy round-trips cannot let the original enter history first.
       pluralkit: false
+      feedback_reactions: true # Add 👍/👎 controls to sent messages in this guild
       channels:
         '222222222222222222': direct
         '333333333333333333': social
@@ -226,6 +229,7 @@ discord:
         '555555555555555555':
           tier: drop
           allow_send: true
+          feedback_reactions: true # Override the guild default for this channel
         '666666666666666666': quiet
 
 compaction:

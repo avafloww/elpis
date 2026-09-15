@@ -2448,6 +2448,10 @@ export function createDiscord(
         `sending to #${channelDisplayName(channel)} is disabled because the fetched channel is not configured`,
       );
     }
+    const feedbackReactions =
+      configPolicy.guild.channelFeedbackReactions?.[policyChannelId] ??
+      configPolicy.guild.feedbackReactions ??
+      false;
     const assertEffectAllowed = (): void => {
       const active = currentSendAuthorization();
       if (sendAuthorizationGeneration !== entryAuthorizationGeneration) {
@@ -2526,6 +2530,9 @@ export function createDiscord(
       const name = f.name || path.basename(f.path);
       return new AttachmentBuilder(f.path, { name });
     });
+    const deliveredMessages: Array<{
+      react(emoji: string): Promise<unknown>;
+    }> = [];
     for (let i = 0; i < chunks.length; i++) {
       const users = discordMentionUserIds(chunks[i]).filter((id) =>
         notifiedUsers.has(id),
@@ -2539,20 +2546,38 @@ export function createDiscord(
       };
       if (i === 0 && attachments.length > 0) payload.files = attachments;
       assertEffectAllowed();
-      await channel.send(payload);
+      deliveredMessages.push(await channel.send(payload));
     }
+    let voiceReceipt;
     if (capturedSpeech) {
       try {
         assertEffectAllowed();
-        return { voice: await capturedSpeech(text) };
+        voiceReceipt = { voice: await capturedSpeech(text) };
       } catch {
         // The readable send has already succeeded. Acoustic failure must not
         // erase that receipt or invite an automatic duplicate text send.
-        return {
+        voiceReceipt = {
           voice: { status: 'failed' as const, transcript: '', playedMs: 0 },
         };
       }
     }
+    // All readable chunks and captured speech complete before optional controls.
+    // A reaction-side authority or mute change cannot abort either delivery.
+    if (feedbackReactions) {
+      for (const sent of deliveredMessages) {
+        for (const emoji of ['👍', '👎'] as const) {
+          try {
+            assertEffectAllowed();
+            await sent.react(emoji);
+          } catch (error) {
+            log.warn(
+              `feedback reaction ${emoji} failed for #${channelId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+    }
+    return voiceReceipt;
   };
 
   // Wire the process-local nominal issuer before any Discord effect callback.

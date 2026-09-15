@@ -1061,44 +1061,56 @@ test('configFile: top-level operator identity parses name, pronouns, and Discord
   });
 });
 
-test('configFile: guild receive/send defaults and channel object overrides parse', () => {
+test('configFile: guild defaults and channel policy overrides parse', () => {
   const body = GUILDS.replace(
     'slug: home',
-    'slug: home\n      default_tier: social\n      default_allow_send: false\n      allow_send: true',
-  ).replace(
-    '        "1002": social',
-    '        "1002":\n          tier: drop\n          allow_send: false',
-  );
-  const home = loadConfigFile(fixture(body)).discord.guilds[0];
+    'slug: home\n      default_tier: social\n      default_allow_send: false\n      allow_send: true\n      feedback_reactions: true',
+  )
+    .replace(
+      '        "1002": social',
+      '        "1002":\n          tier: drop\n          allow_send: false\n          feedback_reactions: false',
+    )
+    .replace(
+      '        "2001": social',
+      '        "2001":\n          tier: social\n          feedback_reactions: true',
+    );
+  const [home, friends] = loadConfigFile(fixture(body)).discord.guilds;
   assert.equal(home.defaultTier, 'social');
   assert.equal(home.allowSend, true);
   assert.equal(home.defaultAllowSend, false);
+  assert.equal(home.feedbackReactions, true);
   assert.deepEqual(home.channels, { '1001': 'direct', '1002': 'drop' });
   assert.deepEqual(home.channelAllowSend, { '1001': true, '1002': false });
+  assert.deepEqual(home.channelFeedbackReactions, { '1002': false });
+  assert.equal(friends.feedbackReactions, false);
+  assert.deepEqual(friends.channelFeedbackReactions, { '2001': true });
 });
 
-test('configFile: guild/channel send policy fields are strict booleans', () => {
-  assert.throws(
-    () =>
-      loadConfigFile(
-        fixture(
-          GUILDS.replace('slug: home', 'slug: home\n      allow_send: nope'),
-        ),
-      ),
-    /allow_send.*true or false/s,
-  );
-  assert.throws(
-    () =>
-      loadConfigFile(
-        fixture(
-          GUILDS.replace(
-            '"1002": social',
-            '"1002":\n          tier: social\n          allow_send: nope',
-          ),
-        ),
-      ),
-    /allow_send.*true or false/s,
-  );
+test('configFile: guild/channel policy flags are strict booleans', () => {
+  for (const body of [
+    GUILDS.replace('slug: home', 'slug: home\n      allow_send: nope'),
+    GUILDS.replace(
+      '"1002": social',
+      '"1002":\n          tier: social\n          allow_send: nope',
+    ),
+  ]) {
+    assert.throws(
+      () => loadConfigFile(fixture(body)),
+      /allow_send.*true or false/s,
+    );
+  }
+  for (const body of [
+    GUILDS.replace('slug: home', 'slug: home\n      feedback_reactions: nope'),
+    GUILDS.replace(
+      '"1002": social',
+      '"1002":\n          tier: social\n          feedback_reactions: nope',
+    ),
+  ]) {
+    assert.throws(
+      () => loadConfigFile(fixture(body)),
+      /feedback_reactions.*true or false/s,
+    );
+  }
 });
 
 test('configFile: tier "muted" is rejected pointing at quiet', () => {
