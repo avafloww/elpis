@@ -1,6 +1,6 @@
 // feedback.ts — out-of-band capture of 👍/👎 reactions on the agent's Discord
-// messages. Writes one IMMUTABLE row per reaction-add into elpis.db's `feedback`
-// table. This NEVER touches the conversation transcript or the agent's history —
+// messages. Reaction adds append rows; removing a reaction retracts every row for
+// that exact message + reactor + emoji key. This NEVER touches the conversation transcript or the agent's history —
 // the agent does not see feedback; it is data for offline human+LLM review (see
 // docs/feedback.md and scripts/feedback.ts).
 
@@ -24,8 +24,15 @@ export interface FeedbackEvent {
   messageContent: string;
 }
 
+export interface FeedbackReactionKey {
+  discordMessageId: string;
+  reactorId: string;
+  emoji: string;
+}
+
 export interface FeedbackStore {
   recordReaction(event: FeedbackEvent): void;
+  retractReaction(key: FeedbackReactionKey): number;
 }
 
 /** 👍 → 'good', 👎 → 'bad', anything else → null (not feedback). */
@@ -41,6 +48,9 @@ export function createFeedbackStore(db: Database): FeedbackStore {
       '(verdict, reacted_at, emoji, reactor_id, reactor_name, is_owner, discord_message_id, channel_id, channel_name, message_content) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   );
+  const retract = db.prepare(
+    'DELETE FROM feedback WHERE discord_message_id = ? AND reactor_id = ? AND emoji = ?',
+  );
   return {
     recordReaction(e) {
       ins.run(
@@ -54,6 +64,11 @@ export function createFeedbackStore(db: Database): FeedbackStore {
         e.channelId,
         e.channelName,
         e.messageContent,
+      );
+    },
+    retractReaction(key) {
+      return Number(
+        retract.run(key.discordMessageId, key.reactorId, key.emoji).changes,
       );
     },
   };

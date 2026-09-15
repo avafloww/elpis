@@ -17,8 +17,8 @@ import {
 // (`<@id>`/`<@&id>`/`<#id>`) is rewritten to readable `@name`/`#name` HERE,
 // at the one ingest point (resolveMentions) — a raw id tells the agent
 // nothing about who was pinged, least of all whether it was themselves.
-// - on MessageReactionAdd: 👍/👎 on one of the bot's OWN messages is captured
-// OUT-OF-BAND via deps.feedback (elpis.db) as a good/bad signal — see the
+// - on MessageReactionAdd/Remove: 👍/👎 on one of the bot's OWN messages is
+// captured or retracted OUT-OF-BAND via deps.feedback (elpis.db) — see the
 // reactionVerdict gate. Never touches the conversation transcript or history;
 // the agent does not see it. Fully guarded so a feedback failure can't disturb
 // the gateway. Content-matching lives only in scripts/feedback.ts, not here.
@@ -1754,65 +1754,139 @@ export function createDiscord(
     }
   });
 
-  // Feedback capture: 👍/👎 on one of the bot's OWN messages is recorded
-  // out-of-band (elpis.db feedback table) as a good/bad signal for later review.
-  // Never touches the conversation transcript or the agent's history. Fully
-  // guarded — a feedback failure must never disturb the gateway or the loop.
-  client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  // Feedback is current reaction state rather than an irrevocable click log.
+  // Discord does not await async event listeners, so serialize each exact key:
+  // a remove arriving during add hydration must execute after that add.
+  const feedbackOrder = new Map<string, Promise<void>>();
+  const enqueueFeedback = (
+    reaction: { message: { id: string }; emoji: { name: string | null } },
+    user: { id: string },
+    work: () => Promise<void>,
+  ): Promise<void> => {
+    const key = `${reaction.message.id}\0${user.id}\0${reaction.emoji.name ?? ''}`;
+    const previous = feedbackOrder.get(key) ?? Promise.resolve();
+    const next = previous.then(work, work);
+    feedbackOrder.set(key, next);
+    void next
+      .finally(() => {
+        if (feedbackOrder.get(key) === next) feedbackOrder.delete(key);
+      })
+      .catch(() => {});
+    return next;
+  };
+
+  client.on(Events.MessageReactionAdd, (reaction, user) => {
+    const feedback = deps?.feedback;
+    if (
+      !feedback ||
+      isIgnoredAuthor(ignoredUserIds, user.id) ||
+      user.id === client.user?.id
+    )
+      return;
     try {
-      if (isIgnoredAuthor(ignoredUserIds, user.id)) return;
-      if (user.id === client.user?.id) return; // ignore our own reactions early
-      // Old/uncached messages arrive partial — hydrate before inspecting.
-      if (reaction.partial) {
-        await reaction.fetch();
-      }
-      if (reaction.message.partial) {
-        await reaction.message.fetch();
-      }
-      if (user.partial) {
+      return enqueueFeedback(reaction, user, async () => {
         try {
-          await user.fetch();
-        } catch {
-          /* name falls back below */
+          // Old/uncached reactions need hydration before their message can be
+          // trusted. A partial user is optional display metadata only.
+          if (reaction.partial) await reaction.fetch();
+          if (reaction.message.partial) await reaction.message.fetch();
+          if (user.partial) {
+            try {
+              await user.fetch();
+            } catch {
+              /* name falls back below */
+            }
+          }
+          const msg = reaction.message;
+          if (
+            !msg.guildId ||
+            !config.discord.guilds.some((g) => g.id === msg.guildId)
+          )
+            return;
+          const verdict = reactionVerdict({
+            botUserId: client.user?.id,
+            reactorId: user.id,
+            messageAuthorId: msg.author?.id,
+            emojiName: reaction.emoji.name,
+          });
+          if (!verdict) return;
+          const channel = msg.channel;
+          const channelName =
+            'name' in channel && typeof channel.name === 'string'
+              ? channel.name
+              : null;
+          feedback.recordReaction({
+            verdict,
+            reactedAt: new Date().toISOString(),
+            emoji: reaction.emoji.name ?? '',
+            reactorId: user.id,
+            reactorName: user.displayName || user.username || null,
+            isOwner: isAuthorizedOperator(config, user.id),
+            discordMessageId: msg.id,
+            channelId: msg.channelId,
+            channelName,
+            messageContent: msg.content ?? '',
+          });
+          log.info(
+            `feedback ${verdict} on #${msg.channelId} msg ${msg.id} from <${user.id}>`,
+          );
+        } catch (e) {
+          log.warn(
+            `reaction add handler failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
-      }
-      const msg = reaction.message;
-      if (
-        !msg.guildId ||
-        !config.discord.guilds.some((g) => g.id === msg.guildId)
-      )
-        return;
-      const verdict = reactionVerdict({
-        botUserId: client.user?.id,
-        reactorId: user.id,
-        messageAuthorId: msg.author?.id,
-        emojiName: reaction.emoji.name,
       });
-      if (!verdict) return;
-      if (!deps?.feedback) return;
-      const channel = msg.channel;
-      const channelName =
-        'name' in channel && typeof channel.name === 'string'
-          ? channel.name
-          : null;
-      deps.feedback.recordReaction({
-        verdict,
-        reactedAt: new Date().toISOString(),
-        emoji: reaction.emoji.name ?? '',
-        reactorId: user.id,
-        reactorName: user.displayName || user.username || null,
-        isOwner: isAuthorizedOperator(config, user.id),
-        discordMessageId: msg.id,
-        channelId: msg.channelId,
-        channelName,
-        messageContent: msg.content ?? '',
-      });
-      log.info(
-        `feedback ${verdict} on #${msg.channelId} msg ${msg.id} from <${user.id}>`,
-      );
     } catch (e) {
       log.warn(
-        `reaction handler failed: ${e instanceof Error ? e.message : String(e)}`,
+        `reaction add handler failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  });
+
+  client.on(Events.MessageReactionRemove, (reaction, user) => {
+    const feedback = deps?.feedback;
+    if (
+      !feedback ||
+      isIgnoredAuthor(ignoredUserIds, user.id) ||
+      user.id === client.user?.id
+    )
+      return;
+    try {
+      return enqueueFeedback(reaction, user, async () => {
+        try {
+          // The removed reaction itself may no longer be fetchable. Its event
+          // still carries the exact key; only hydrate the message when needed.
+          if (reaction.message.partial) await reaction.message.fetch();
+          const msg = reaction.message;
+          if (
+            !msg.guildId ||
+            !config.discord.guilds.some((g) => g.id === msg.guildId)
+          )
+            return;
+          const verdict = reactionVerdict({
+            botUserId: client.user?.id,
+            reactorId: user.id,
+            messageAuthorId: msg.author?.id,
+            emojiName: reaction.emoji.name,
+          });
+          if (!verdict) return;
+          const deleted = feedback.retractReaction({
+            discordMessageId: msg.id,
+            reactorId: user.id,
+            emoji: reaction.emoji.name ?? '',
+          });
+          log.info(
+            `feedback ${verdict} retracted on #${msg.channelId} msg ${msg.id} from <${user.id}> (${deleted})`,
+          );
+        } catch (e) {
+          log.warn(
+            `reaction remove handler failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      });
+    } catch (e) {
+      log.warn(
+        `reaction remove handler failed: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   });

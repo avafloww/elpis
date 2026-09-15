@@ -1373,6 +1373,10 @@ test('ignored authors cannot enter message, reply, or reaction paths', async (t)
   const onReaction = client.listeners(Events.MessageReactionAdd)[0] as (
     ...args: any[]
   ) => Promise<void>;
+  const onReactionRemove = client.listeners(
+    Events.MessageReactionRemove,
+  )[0] as (...args: any[]) => Promise<void>;
+  assert.ok(onReactionRemove, 'feedback remove listener is registered');
   const downstream = t.mock.fn(() => {
     throw new Error('ignored input reached downstream work');
   });
@@ -1383,14 +1387,19 @@ test('ignored authors cannot enter message, reply, or reaction paths', async (t)
     },
   };
   await onMessage(ignored as unknown as Message);
-  await onReaction(
-    {
-      get partial() {
-        return downstream();
-      },
+  const ignoredReaction = {
+    get partial() {
+      return downstream();
     },
-    { id: '222' },
-  );
+    get message() {
+      return downstream();
+    },
+    get emoji() {
+      return downstream();
+    },
+  };
+  await onReaction(ignoredReaction, { id: '222' });
+  await onReactionRemove(ignoredReaction, { id: '222' });
   assert.equal(downstream.mock.callCount(), 0);
   assert.equal(debug.mock.callCount(), 0);
   assert.equal(warn.mock.callCount(), 0);
@@ -1456,5 +1465,242 @@ test('ignored authors cannot enter message, reply, or reaction paths', async (t)
     feedback.length,
     1,
     'the same listener still records allowed reactions',
+  );
+});
+
+test('feedback removal retracts the exact reaction with controls hidden and without reaction hydration', async (t) => {
+  const config = makeConfig();
+  config.discord.guilds = [
+    {
+      id: 'g1',
+      slug: 'example',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      channels: { '100': 'direct' },
+      feedbackReactions: false,
+      channelFeedbackReactions: { '100': false },
+    },
+  ];
+
+  const retractions: Array<{
+    discordMessageId: string;
+    reactorId: string;
+    emoji: string;
+  }> = [];
+  const { client } = createDiscord(
+    config,
+    { setSend: () => {}, enqueue: () => {} } as unknown as Agent,
+    {
+      feedback: {
+        recordReaction: () => {},
+        retractReaction: (key: {
+          discordMessageId: string;
+          reactorId: string;
+          emoji: string;
+        }) => {
+          retractions.push(key);
+          return 1;
+        },
+      } as never,
+    },
+  );
+  t.after(() => client.destroy());
+  Object.defineProperty(client, 'user', {
+    value: { id: '999' },
+    configurable: true,
+  });
+
+  const removeListener = client.listeners(Events.MessageReactionRemove)[0];
+  assert.ok(
+    removeListener,
+    'createDiscord must register a MessageReactionRemove listener',
+  );
+  const onRemove = removeListener as (...args: any[]) => Promise<void>;
+
+  let reactionFetches = 0;
+  let messageFetches = 0;
+  const partialMessage: any = {
+    id: 'message-1',
+    guildId: 'g1',
+    channelId: '100',
+    partial: true,
+    content: 'A bot-authored answer',
+    channel: { name: 'general' },
+    fetch: async () => {
+      messageFetches++;
+      partialMessage.partial = false;
+      partialMessage.author = { id: '999', bot: true };
+      return partialMessage;
+    },
+  };
+  const removedReaction = {
+    partial: true,
+    // Discord may no longer be able to fetch a reaction after its removal.
+    // The remove path has enough key data and must never call this edge.
+    fetch: async () => {
+      reactionFetches++;
+      throw new Error('removed reaction no longer exists');
+    },
+    message: partialMessage,
+    emoji: { name: '👍' },
+  };
+  await onRemove(removedReaction, {
+    id: '111',
+    partial: false,
+    displayName: 'Bramble',
+  });
+
+  assert.equal(reactionFetches, 0);
+  assert.equal(messageFetches, 1, 'only the partial message is hydrated');
+  assert.deepEqual(retractions, [
+    {
+      discordMessageId: 'message-1',
+      reactorId: '111',
+      emoji: '👍',
+    },
+  ]);
+
+  const fullReaction = (emoji: string, authorId: string) => ({
+    partial: false,
+    message: {
+      id: 'message-1',
+      guildId: 'g1',
+      channelId: '100',
+      partial: false,
+      author: { id: authorId, bot: authorId === '999' },
+      content: 'A message',
+      channel: { name: 'general' },
+    },
+    emoji: { name: emoji },
+  });
+  await onRemove(fullReaction('👍', '999'), { id: '999', partial: false });
+  await onRemove(fullReaction('❤️', '999'), { id: '111', partial: false });
+  await onRemove(fullReaction('👎', 'human-author'), {
+    id: '111',
+    partial: false,
+  });
+  assert.equal(
+    retractions.length,
+    1,
+    'bot self-removals, irrelevant emoji, and non-bot messages stay ignored',
+  );
+});
+
+test('feedback add and remove are serialized in arrival order for one exact key', async (t) => {
+  const config = makeConfig();
+  config.discord.guilds = [
+    {
+      id: 'g1',
+      slug: 'example',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      channels: { '100': 'direct' },
+      feedbackReactions: false,
+    },
+  ];
+
+  type Key = {
+    discordMessageId: string;
+    reactorId: string;
+    emoji: string;
+  };
+  const projection: Key[] = [];
+  const operations: string[] = [];
+  const { client } = createDiscord(
+    config,
+    { setSend: () => {}, enqueue: () => {} } as unknown as Agent,
+    {
+      feedback: {
+        recordReaction: (event: Key) => {
+          operations.push('add');
+          projection.push({
+            discordMessageId: event.discordMessageId,
+            reactorId: event.reactorId,
+            emoji: event.emoji,
+          });
+        },
+        retractReaction: (key: Key) => {
+          operations.push('remove');
+          let deleted = 0;
+          for (let i = projection.length - 1; i >= 0; i--) {
+            const row = projection[i];
+            if (
+              row.discordMessageId === key.discordMessageId &&
+              row.reactorId === key.reactorId &&
+              row.emoji === key.emoji
+            ) {
+              projection.splice(i, 1);
+              deleted++;
+            }
+          }
+          return deleted;
+        },
+      } as never,
+    },
+  );
+  t.after(() => client.destroy());
+  Object.defineProperty(client, 'user', {
+    value: { id: '999' },
+    configurable: true,
+  });
+
+  const addListener = client.listeners(Events.MessageReactionAdd)[0];
+  const removeListener = client.listeners(Events.MessageReactionRemove)[0];
+  assert.ok(addListener, 'precondition: add listener is registered');
+  assert.ok(
+    removeListener,
+    'createDiscord must register a MessageReactionRemove listener',
+  );
+  const onAdd = addListener as (...args: any[]) => Promise<void>;
+  const onRemove = removeListener as (...args: any[]) => Promise<void>;
+
+  const hydrationEntered = Promise.withResolvers<void>();
+  const releaseHydration = Promise.withResolvers<void>();
+  const message = {
+    id: 'message-race',
+    guildId: 'g1',
+    channelId: '100',
+    partial: false,
+    author: { id: '999', bot: true },
+    content: 'Race-sensitive answer',
+    channel: { name: 'general' },
+  };
+  const addReaction: any = {
+    partial: true,
+    message,
+    emoji: { name: '👍' },
+    fetch: async () => {
+      hydrationEntered.resolve();
+      await releaseHydration.promise;
+      addReaction.partial = false;
+      return addReaction;
+    },
+  };
+  const removeReaction = {
+    partial: false,
+    message,
+    emoji: { name: '👍' },
+  };
+  const user = { id: '111', partial: false, displayName: 'Bramble' };
+
+  const addDone = onAdd(addReaction, user);
+  await hydrationEntered.promise;
+  // Arrival order is add then remove. Do not await remove here: a correctly
+  // serialized remove waits behind the add's controlled hydration.
+  const removeDone = onRemove(removeReaction, user);
+  releaseHydration.resolve();
+  await Promise.all([addDone, removeDone]);
+
+  assert.deepEqual(
+    operations,
+    ['add', 'remove'],
+    'the exact key must execute in listener arrival order',
+  );
+  assert.deepEqual(
+    projection,
+    [],
+    'a fast remove must not leave a stale add after hydration completes',
   );
 });
