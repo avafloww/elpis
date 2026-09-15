@@ -1364,6 +1364,23 @@ export function createDiscord(
   const issuedSendAuthorizations = new WeakSet<
     import('../types.js').OutboundSendAuthorization
   >();
+  let activeSendAuthorization:
+    import('../types.js').OutboundSendAuthorization | null = null;
+  let sendAuthorizationGeneration = 0;
+  const currentSendAuthorization = () => {
+    const authorization = activeSendAuthorization;
+    if (!authorization || !issuedSendAuthorizations.has(authorization)) {
+      activeSendAuthorization = null;
+      return null;
+    }
+    try {
+      if (authorization.isCurrent() === true) return authorization;
+    } catch {
+      /* fail closed below */
+    }
+    activeSendAuthorization = null;
+    return null;
+  };
   const issueSendAuthorization: import('../types.js').OutboundSendAuthorizationIssuer =
     (channelId, guildId, isCurrent) => {
       const authorization = Object.freeze({
@@ -1373,6 +1390,8 @@ export function createDiscord(
         isCurrent,
       });
       issuedSendAuthorizations.add(authorization);
+      activeSendAuthorization = authorization;
+      sendAuthorizationGeneration++;
       return authorization;
     };
   const muteType = (id: string) => deps?.mutes?.get(id)?.type ?? null;
@@ -1430,10 +1449,10 @@ export function createDiscord(
       ch && 'guildId' in ch && typeof ch.guildId === 'string'
         ? ch.guildId
         : null;
+    const activeAtStart = currentSendAuthorization();
     const authorizedGuildId =
-      authorization !== undefined &&
-      issuedSendAuthorizations.has(authorization) &&
-      authorization.kind === 'mentions-turn' &&
+      activeAtStart !== null &&
+      authorization === activeAtStart &&
       authorization.channelId === channelId &&
       authorization.guildId === cachedGuildId
         ? authorization.guildId
@@ -1448,27 +1467,26 @@ export function createDiscord(
       policyChannelId,
       guildIndex,
     );
-    const mentionsAuthorizationMatches =
-      authorization !== undefined &&
-      issuedSendAuthorizations.has(authorization) &&
-      authorization.kind === 'mentions-turn' &&
-      authorization.channelId === channelId &&
-      authorization.guildId === resolvedGuildId &&
-      policy?.tier === 'mentions' &&
-      policy.sendDeniedBy === 'default';
-    const authorizationIsCurrent = (): boolean => {
-      if (!mentionsAuthorizationMatches) return false;
-      try {
-        return authorization.isCurrent() === true;
-      } catch {
-        return false;
-      }
+    const effectAllowed = (): boolean => {
+      if (policy === null) return false;
+      const active = currentSendAuthorization();
+      const authorizationTargetsChannel =
+        active !== null &&
+        authorization === active &&
+        active.channelId === channelId &&
+        active.guildId === resolvedGuildId;
+      if (active !== null && !authorizationTargetsChannel) return false;
+      if (active === null && authorization !== undefined) return false;
+      const defaultDenialOverride =
+        authorizationTargetsChannel &&
+        policy.tier === 'mentions' &&
+        policy.sendDeniedBy === 'default';
+      return (
+        (policy.allowSend || defaultDenialOverride) &&
+        muteType(channelId) === null &&
+        (policyChannelId === channelId || muteType(policyChannelId) === null)
+      );
     };
-    const effectAllowed = (): boolean =>
-      policy !== null &&
-      (policy.allowSend || authorizationIsCurrent()) &&
-      muteType(channelId) === null &&
-      (policyChannelId === channelId || muteType(policyChannelId) === null);
     if (!effectAllowed()) return;
     const fire = () => {
       if (!effectAllowed()) {
@@ -2376,6 +2394,26 @@ export function createDiscord(
   ) => {
     validateReplyTo(opts?.replyTo);
     validateMentionNotifications(opts?.mentions);
+    const entryAuthorization = currentSendAuthorization();
+    const entryAuthorizationGeneration = sendAuthorizationGeneration;
+    if (entryAuthorization !== null) {
+      if (authorization !== entryAuthorization) {
+        throw new Error(
+          'active mentions-turn authorization is required before delivery',
+        );
+      }
+      if (entryAuthorization.channelId !== channelId) {
+        throw new Error(
+          'mentions-turn authorization is restricted to its exact channel',
+        );
+      }
+    } else if (authorization !== undefined) {
+      throw new Error(
+        issuedSendAuthorizations.has(authorization)
+          ? 'mentions-turn authorization expired before delivery'
+          : 'mentions-turn authorization was not issued by this Discord runtime',
+      );
+    }
     // Bind optional acoustic delivery to the call that exists before any
     // channel fetch/text-send await. A later join or rejoin must not receive
     // speech authored for an earlier call state.
@@ -2410,34 +2448,41 @@ export function createDiscord(
         `sending to #${channelDisplayName(channel)} is disabled because the fetched channel is not configured`,
       );
     }
-    const mentionsAuthorizationMatches =
-      authorization !== undefined &&
-      issuedSendAuthorizations.has(authorization) &&
-      authorization.kind === 'mentions-turn' &&
-      authorization.channelId === channelId &&
-      authorization.guildId === guildId &&
-      configPolicy.tier === 'mentions' &&
-      configPolicy.sendDeniedBy === 'default';
-    const authorizationIsCurrent = (): boolean => {
-      if (!mentionsAuthorizationMatches) return false;
-      try {
-        return authorization.isCurrent() === true;
-      } catch {
-        return false;
-      }
-    };
     const assertEffectAllowed = (): void => {
-      if (!configPolicy.allowSend) {
-        if (!mentionsAuthorizationMatches) {
-          throw new Error(
-            `sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
-          );
-        }
-        if (!authorizationIsCurrent()) {
+      const active = currentSendAuthorization();
+      if (sendAuthorizationGeneration !== entryAuthorizationGeneration) {
+        throw new Error(
+          'mentions-turn authorization scope changed before delivery',
+        );
+      }
+      if (entryAuthorization !== null) {
+        if (active !== entryAuthorization) {
           throw new Error(
             'mentions-turn authorization expired before delivery',
           );
         }
+        if (
+          entryAuthorization.channelId !== channelId ||
+          entryAuthorization.guildId !== guildId
+        ) {
+          throw new Error(
+            'mentions-turn authorization is restricted to its exact channel',
+          );
+        }
+      } else if (active !== null) {
+        throw new Error(
+          'active mentions-turn authorization is required before delivery',
+        );
+      }
+      const defaultDenialOverride =
+        entryAuthorization !== null &&
+        active === entryAuthorization &&
+        configPolicy.tier === 'mentions' &&
+        configPolicy.sendDeniedBy === 'default';
+      if (!configPolicy.allowSend && !defaultDenialOverride) {
+        throw new Error(
+          `sending to #${channelDisplayName(channel)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
+        );
       }
       const state =
         muteType(channelId) ??

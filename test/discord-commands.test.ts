@@ -929,7 +929,7 @@ test('resolveMentions: non-mention angle-bracket text is not mangled', () => {
   );
 });
 
-test('mentions-turn Discord authorization is exact-channel and default-denial only', async (t) => {
+test('mentions-turn Discord authorization restricts even otherwise-sendable targets', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const config = makeConfig();
   config.discord.guilds = [
@@ -942,8 +942,20 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
       defaultTier: 'mentions',
       allowSend: true,
       defaultAllowSend: false,
-      channels: {},
-      channelAllowSend: {},
+      channels: { '102': 'direct', '103': 'mentions', '104': 'social' },
+      channelAllowSend: { '102': true, '103': false, '104': true },
+    },
+    {
+      id: 'g2',
+      slug: 'denied',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      defaultTier: 'drop',
+      allowSend: false,
+      defaultAllowSend: false,
+      channels: { '200': 'mentions' },
+      channelAllowSend: { '200': true },
     },
   ];
   let send!: Parameters<Agent['setSend']>[0];
@@ -982,15 +994,46 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
         : null;
     },
   } as never;
-  const wiring = createDiscord(config, agent, { mutes });
+  let captureSpeechEnabled = false;
+  let speechCaptures = 0;
+  let speechEffects = 0;
+  const voice = {
+    channelId: null,
+    join: async () => {},
+    leave: () => {},
+    speak: async (text: string) => ({
+      status: 'played' as const,
+      transcript: text,
+      playedMs: 0,
+    }),
+    captureSpeech: () => {
+      if (!captureSpeechEnabled) return null;
+      speechCaptures++;
+      return async (text: string) => {
+        speechEffects++;
+        return {
+          status: 'played' as const,
+          transcript: text,
+          playedMs: 0,
+        };
+      };
+    },
+  } as never;
+  const wiring = createDiscord(config, agent, { mutes, voice });
   t.after(() => {
     wiring.stopTyping();
     wiring.client.destroy();
   });
   let exactTyping = 0;
   let otherTyping = 0;
+  let otherwiseSendableTyping = 0;
   let exactSends = 0;
+  let expireDuringChunkedSend = false;
   let otherSends = 0;
+  let otherwiseSendableSends = 0;
+  let socialSends = 0;
+  let explicitDeniedSends = 0;
+  let guildDeniedSends = 0;
   wiring.client.channels.cache.set('100', {
     guildId: 'g1',
     isThread: () => false,
@@ -1000,6 +1043,7 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
     },
     send: async () => {
       exactSends++;
+      if (expireDuringChunkedSend) current = false;
     },
   } as never);
   wiring.client.channels.cache.set('101', {
@@ -1013,7 +1057,43 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
       otherSends++;
     },
   } as never);
+  wiring.client.channels.cache.set('102', {
+    guildId: 'g1',
+    isThread: () => false,
+    isTextBased: () => true,
+    sendTyping: async () => {
+      otherwiseSendableTyping++;
+    },
+    send: async () => {
+      otherwiseSendableSends++;
+    },
+  } as never);
+  wiring.client.channels.cache.set('103', {
+    guildId: 'g1',
+    isThread: () => false,
+    isTextBased: () => true,
+    send: async () => {
+      explicitDeniedSends++;
+    },
+  } as never);
+  wiring.client.channels.cache.set('104', {
+    guildId: 'g1',
+    isThread: () => false,
+    isTextBased: () => true,
+    send: async () => {
+      socialSends++;
+    },
+  } as never);
+  wiring.client.channels.cache.set('200', {
+    guildId: 'g2',
+    isThread: () => false,
+    isTextBased: () => true,
+    send: async () => {
+      guildDeniedSends++;
+    },
+  } as never);
 
+  let fetchCalls = 0;
   let fetchGate:
     | {
         entered: ReturnType<typeof Promise.withResolvers<void>>;
@@ -1021,6 +1101,7 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
       }
     | undefined;
   t.mock.method(wiring.client.channels, 'fetch', async (channelId) => {
+    fetchCalls++;
     const gate = fetchGate;
     if (gate) {
       gate.entered.resolve();
@@ -1037,6 +1118,9 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
   ) => void;
   typing('100');
   typing('101', authorization);
+  typing('102');
+  typing('102', { ...authorization });
+  typing('102', authorization);
   typing('100', { ...authorization, guildId: 'wrong-guild' });
   typing('100', authorization);
   await new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -1052,62 +1136,201 @@ test('mentions-turn Discord authorization is exact-channel and default-denial on
   await new Promise<void>((resolve) => queueMicrotask(resolve));
   assert.equal(exactTyping, 2, 'revocation stops the next repeating effect');
   current = true;
+  const sendAuthorization = issueAuthorization('100', 'g1', () => current);
 
   await assert.rejects(
+    send('102', 'omitted active capability'),
+    /active mentions-turn authorization.*required/i,
+  );
+  await assert.rejects(
+    send('102', 'forged active capability', undefined, {
+      ...sendAuthorization,
+    }),
+    /active mentions-turn authorization.*required/i,
+  );
+  await assert.rejects(
     send('100', 'wrong guild', undefined, {
-      ...authorization,
+      ...sendAuthorization,
       guildId: 'wrong-guild',
     }),
-    /disabled by configuration/i,
+    /active mentions-turn authorization.*required/i,
   );
   await assert.rejects(
-    send('101', 'wrong room', undefined, authorization),
-    /disabled by configuration/i,
+    send('102', 'otherwise sendable room', undefined, sendAuthorization),
+    /mentions-turn authorization.*exact channel/i,
   );
   await assert.rejects(
-    send('100', 'forged lookalike', undefined, { ...authorization }),
-    /disabled by configuration/i,
+    send('101', 'wrong room', undefined, sendAuthorization),
+    /mentions-turn authorization.*exact channel/i,
   );
   await assert.rejects(
-    send(
-      '100',
-      'throwing validator',
-      undefined,
-      issueAuthorization('100', 'g1', () => {
-        throw new Error('validator fault');
-      }),
-    ),
-    /authorization.*expired/i,
+    send('100', 'forged lookalike', undefined, { ...sendAuthorization }),
+    /active mentions-turn authorization.*required/i,
   );
-  await send('100', 'exact room', undefined, authorization);
+  await send('100', 'exact room', undefined, sendAuthorization);
 
   assert.equal(exactTyping, 2);
   assert.equal(otherTyping, 0);
+  assert.equal(otherwiseSendableTyping, 0);
   assert.equal(exactSends, 1);
   assert.equal(otherSends, 0);
+  assert.equal(otherwiseSendableSends, 0);
 
   fetchGate = {
     entered: Promise.withResolvers<void>(),
     release: Promise.withResolvers<void>(),
   };
-  const staleSend = send('100', 'stale after fetch', undefined, authorization);
+  const staleSend = send(
+    '100',
+    'stale after fetch',
+    undefined,
+    sendAuthorization,
+  );
   await fetchGate.entered.promise;
   current = false;
   fetchGate.release.resolve();
   await assert.rejects(staleSend, /authorization.*expired/i);
   assert.equal(exactSends, 1);
 
+  captureSpeechEnabled = true;
+  const fetchesBeforeLateContinuation = fetchCalls;
+  const capturesBeforeLateContinuation = speechCaptures;
+  const effectsBeforeLateContinuation = speechEffects;
+  await assert.rejects(
+    send(
+      '100',
+      'stale continuation at exact source',
+      { files: [{ path: '/tmp/must-not-be-read' }] },
+      sendAuthorization,
+    ),
+    /authorization.*expired/i,
+  );
+  typing('100', sendAuthorization);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(fetchCalls, fetchesBeforeLateContinuation);
+  assert.equal(exactSends, 1);
+  assert.equal(speechCaptures, capturesBeforeLateContinuation);
+  assert.equal(speechEffects, effectsBeforeLateContinuation);
+  assert.equal(exactTyping, 2);
+  captureSpeechEnabled = false;
+
   current = true;
+  const laterAuthorization = issueAuthorization('100', 'g1', () => current);
+  captureSpeechEnabled = true;
+  const fetchesBeforeLaterScope = fetchCalls;
+  const capturesBeforeLaterScope = speechCaptures;
+  await assert.rejects(
+    send(
+      '100',
+      'stale continuation during later scope',
+      { files: [{ path: '/tmp/must-not-be-read' }] },
+      sendAuthorization,
+    ),
+    /active mentions-turn authorization.*required/i,
+  );
+  typing('100', sendAuthorization);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(fetchCalls, fetchesBeforeLaterScope);
+  assert.equal(exactSends, 1);
+  assert.equal(speechCaptures, capturesBeforeLaterScope);
+  assert.equal(speechEffects, effectsBeforeLateContinuation);
+  assert.equal(exactTyping, 2);
+  assert.equal(laterAuthorization.isCurrent(), true);
+  captureSpeechEnabled = false;
+
+  current = true;
+  issueAuthorization('100', 'g1', () => current);
+  captureSpeechEnabled = true;
   fetchGate = {
     entered: Promise.withResolvers<void>(),
     release: Promise.withResolvers<void>(),
   };
-  const mutedSend = send('100', 'muted after fetch', undefined, authorization);
+  const fetchesBeforeOmittedRace = fetchCalls;
+  const omittedExpirySend = send('102', 'omitted expiry downgrade');
+  current = false;
+  fetchGate.release.resolve();
+  await assert.rejects(
+    omittedExpirySend,
+    /active mentions-turn authorization.*required/i,
+  );
+  assert.equal(fetchCalls, fetchesBeforeOmittedRace);
+  assert.equal(otherwiseSendableSends, 0);
+  assert.equal(speechCaptures, 0);
+  assert.equal(speechEffects, 0);
+  captureSpeechEnabled = false;
+
+  current = true;
+  const mutedAuthorization = issueAuthorization('100', 'g1', () => current);
+  fetchGate = {
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  };
+  const mutedSend = send(
+    '100',
+    'muted after fetch',
+    undefined,
+    mutedAuthorization,
+  );
   await fetchGate.entered.promise;
   activeMutes.set('100', 'mute');
   fetchGate.release.resolve();
   await assert.rejects(mutedSend, /muted/i);
   assert.equal(exactSends, 1);
+
+  activeMutes.clear();
+  current = false;
+  await send('102', 'direct after scope expiry');
+  await send('104', 'social after scope expiry');
+  assert.equal(otherwiseSendableSends, 1);
+  assert.equal(socialSends, 1);
+
+  captureSpeechEnabled = true;
+  fetchGate = {
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  };
+  const fetchesBeforeScopeChange = fetchCalls;
+  const crossScopeSend = send('102', 'scope changes during fetch');
+  let replacementCurrent = true;
+  issueAuthorization('100', 'g1', () => replacementCurrent);
+  replacementCurrent = false;
+  fetchGate.release.resolve();
+  await assert.rejects(crossScopeSend, /authorization scope changed/i);
+  assert.equal(fetchCalls, fetchesBeforeScopeChange + 1);
+  assert.equal(otherwiseSendableSends, 1);
+  assert.equal(speechCaptures, 1);
+  assert.equal(speechEffects, 0);
+  captureSpeechEnabled = false;
+
+  current = true;
+  const chunkAuthorization = issueAuthorization('100', 'g1', () => current);
+  expireDuringChunkedSend = true;
+  await assert.rejects(
+    send('100', 'x'.repeat(3_000), undefined, chunkAuthorization),
+    /authorization.*expired/i,
+  );
+  expireDuringChunkedSend = false;
+  assert.equal(exactSends, 2, 'only the first message chunk left Discord');
+
+  const explicitDenied = issueAuthorization('103', 'g1', () => true);
+  await assert.rejects(
+    send('103', 'explicit denial', undefined, explicitDenied),
+    /channel allow_send=false/i,
+  );
+  const guildDenied = issueAuthorization('200', 'g2', () => true);
+  await assert.rejects(
+    send('200', 'guild denial', undefined, guildDenied),
+    /guild allow_send=false/i,
+  );
+  const throwing = issueAuthorization('100', 'g1', () => {
+    throw new Error('validator fault');
+  });
+  await assert.rejects(
+    send('100', 'throwing validator', undefined, throwing),
+    /authorization.*expired/i,
+  );
+  assert.equal(explicitDeniedSends, 0);
+  assert.equal(guildDeniedSends, 0);
 });
 
 test('ignored authors cannot enter message, reply, or reaction paths', async (t) => {

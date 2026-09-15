@@ -576,7 +576,9 @@ export async function createElpisRuntime(
       channelId: string,
       content: string,
       opts?: import('./types.js').OutboundSendOptions,
-    ) => agent.send(channelId, content, opts),
+      scope?: import('./types.js').OutboundEffectScope,
+    ) => agent.send(channelId, content, opts, scope),
+    captureOutboundScope: () => agent.captureSandboxOutboundScope(),
     logbuf: extensionLogbuf,
     agentName: () => readAgentName(config.paths.soulPath),
     get inbound() {
@@ -587,8 +589,8 @@ export async function createElpisRuntime(
     flushTranscripts: () => agent.flushTranscripts(),
     // Typing pauses during elpis.sleep/wait: a sleep is the agent
     // choosing to wait, so the indicator should not show through it.
-    sleepPause: () => agent.sleepPause(),
-    sleepResume: () => agent.sleepResume(),
+    sleepPause: (scope) => agent.sleepPause(scope),
+    sleepResume: (scope) => agent.sleepResume(scope),
     //: channel needs an explicit target; known channels come from the
     // persistent directory (no live contexts).
     listChannels: () => agent.knownChannelIds(),
@@ -614,7 +616,7 @@ export async function createElpisRuntime(
     // `agent` isn't wired to the real Discord typing implementation until
     // agent.setTyping runs below (discord doesn't exist yet at this point in
     // boot), same ordering reason as the `send` dep just above.
-    typing: (channelId: string) => agent.typing(channelId),
+    typing: (channelId: string, scope) => agent.typing(channelId, scope),
     // Watch mode: deliver local image frames as one ephemeral multimodal
     // message (kind 'watch' → stripped after one generation, text-only in the
     // transcript). The frame-building lives on the Agent (enqueueWatch).

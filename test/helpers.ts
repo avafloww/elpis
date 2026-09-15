@@ -319,11 +319,14 @@ export function buildTestAgent(opts: BuildTestAgentOpts = {}) {
       ok: true,
       note: `restart simulated in test harness${reason ? `: ${reason}` : ''}`,
     }),
-    typing: () => {},
+    typing: (channelId, scope) => agentRef.current!.typing(channelId, scope),
     scheduler,
     mind,
-    send: async (channelId, text, options) => {
-      return agentRef.current!.send(channelId, text, options);
+    captureOutboundScope: () => agentRef.current!.captureSandboxOutboundScope(),
+    sleepPause: (scope) => agentRef.current!.sleepPause(scope),
+    sleepResume: (scope) => agentRef.current!.sleepResume(scope),
+    send: async (channelId, text, options, scope) => {
+      return agentRef.current!.send(channelId, text, options, scope);
     },
     listChannels: () => agentRef.current!.knownChannelIds(),
     listChannelsWithNames: () => agentRef.current!.knownChannels(),

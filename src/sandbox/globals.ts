@@ -89,6 +89,7 @@ export interface RunScope {
   operationReceiptsDropped: number;
   llmToolCalls: number;
   llmToolInputBytes: number;
+  outboundScope?: import('../types.js').OutboundEffectScope;
   processError?: (kind: RunProcessErrorKind, error: unknown) => boolean;
 }
 export const runScope = new AsyncLocalStorage<RunScope>();
@@ -1744,7 +1745,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
                 typeof (f as { path?: unknown }).path === 'string',
             )
           : undefined;
-        const delivery = await deps.send(channelId, text, {
+        const outboundOptions = {
           files,
           ...(sendOpts?.replyTo !== undefined
             ? { replyTo: sendOpts.replyTo }
@@ -1752,7 +1753,12 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ...(sendOpts?.mentions !== undefined
             ? { mentions: sendOpts.mentions }
             : {}),
-        });
+        };
+        const outboundScope = runScope.getStore()?.outboundScope;
+        const delivery =
+          outboundScope === undefined
+            ? await deps.send(channelId, text, outboundOptions)
+            : await deps.send(channelId, text, outboundOptions, outboundScope);
         // Record the send on the current run scope for turn accounting, console
         // rendering, transcript recovery, and detached-future delivery.
         const sendRecord: {
@@ -1788,7 +1794,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
             'elpis.channel().typing() is not wired in this harness',
           );
         }
-        deps.typing(channelId);
+        const outboundScope = runScope.getStore()?.outboundScope;
+        if (outboundScope === undefined) deps.typing(channelId);
+        else deps.typing(channelId, outboundScope);
+
         return { ok: true, channelId, note: 'typing indicator active' };
       },
       // Killswitch self-mute: "no speaking here." Deliberately the
@@ -2138,11 +2147,14 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     // A sleep is the agent *choosing to wait* — showing "typing…" through it
     // misrepresents what is happening. elpis.timeout stays unhooked:
     // it caps real running work, which is exactly what typing should indicate.
-    deps.sleepPause?.();
+    const outboundScope = runScope.getStore()?.outboundScope;
+    if (outboundScope === undefined) deps.sleepPause?.();
+    else deps.sleepPause?.(outboundScope);
     try {
       await new Promise<void>((resolve) => setTimeout(resolve, delay));
     } finally {
-      deps.sleepResume?.();
+      if (outboundScope === undefined) deps.sleepResume?.();
+      else deps.sleepResume?.(outboundScope);
     }
   };
 

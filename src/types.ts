@@ -63,9 +63,9 @@ export interface OutboundSendOptions {
   mentions?: boolean;
 }
 
-/** Harness-internal proof that the current addressed mentions-tier turn may reply
- * to this exact channel despite the conservative default send policy. Never
- * exposed through OutboundSendOptions or the sandbox API. */
+/** Harness-internal proof that every effect in the current addressed mentions-tier
+ * turn is confined to this exact channel. Never exposed through
+ * OutboundSendOptions or the sandbox API. */
 export interface OutboundSendAuthorization {
   kind: 'mentions-turn';
   channelId: string;
@@ -78,6 +78,23 @@ export type OutboundSendAuthorizationIssuer = (
   guildId: string,
   isCurrent: () => boolean,
 ) => OutboundSendAuthorization;
+
+/** Opaque origin retained by one sandbox run, including detached continuations. */
+export type OutboundEffectScope = Readonly<
+  {
+    turnToken: object | null;
+    turnChannelId: string | null;
+  } & (
+    | {
+        kind: 'sandbox-run';
+        authorization: OutboundSendAuthorization | null;
+      }
+    | {
+        kind: 'sandbox-run-denied';
+        authorization: null;
+      }
+  )
+>;
 
 /** Text delivery and acoustic playback are distinct outcomes. */
 export interface VoiceDelivery {
@@ -178,7 +195,10 @@ export interface SandboxDeps {
     channelId: string,
     content: string,
     opts?: OutboundSendOptions,
+    scope?: OutboundEffectScope,
   ) => Promise<void | OutboundDelivery>;
+  /** Captures the outbound origin once when a sandbox run begins. */
+  captureOutboundScope?: () => OutboundEffectScope;
   logbuf: string[];
   /** Hot-reloaded inhabitant name (SOUL.md frontmatter), used for self-authored records. */
   agentName?: () => string;
@@ -208,8 +228,8 @@ export interface SandboxDeps {
    * sleepPause clears typing on the 0->1 depth edge; sleepResume re-fires it
    * once depth returns to 0, only while the turn is still live. Deliberately
    * NOT used by elpis.timeout, which caps real running work. */
-  sleepPause?: () => void;
-  sleepResume?: () => void;
+  sleepPause?: (scope?: OutboundEffectScope) => void;
+  sleepResume?: (scope?: OutboundEffectScope) => void;
   /** Returns the known real channel ids. Used by channel() to list known rooms
    * in the throw when called with no/unknown argument (: sourced from the
    * channels.json directory, not live contexts). */
@@ -234,7 +254,7 @@ export interface SandboxDeps {
    * very next tool result ( mis-target guardrail, now guild-aware — ). */
   channelLabel?: (id: string) => string;
   /** Trigger Discord's typing indicator in a channel. Used by channel(id).typing(). */
-  typing?: (channelId: string) => void;
+  typing?: (channelId: string, scope?: OutboundEffectScope) => void;
   /** Enqueue a watch-mode message: image frames from local paths delivered as
    * ephemeral multimodal content for exactly one generation. Used by elpis.watch. */
   watch?: (

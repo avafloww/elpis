@@ -1197,6 +1197,94 @@ test('grep: finds matches in a path, returns raw file:line hits', async () => {
 
 // ---------- per-run console isolation ----------
 
+test('detached channel effects retain the outbound scope captured at run start', async () => {
+  const mentionAuthorization = Object.freeze({
+    kind: 'mentions-turn' as const,
+    channelId: '100',
+    guildId: 'g1',
+    isCurrent: () => false,
+  });
+  const mentionTurnToken = {};
+  const mentionScope = Object.freeze({
+    kind: 'sandbox-run' as const,
+    authorization: mentionAuthorization,
+    turnToken: mentionTurnToken,
+    turnChannelId: '100',
+  });
+  const unscopedTurnToken = {};
+  const unscoped = Object.freeze({
+    kind: 'sandbox-run' as const,
+    authorization: null,
+    turnToken: unscopedTurnToken,
+    turnChannelId: '100',
+  });
+
+  const observe = async (captured: unknown, replacement: unknown) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-scope-'));
+    const settled = Promise.withResolvers<void>();
+    const sends: unknown[] = [];
+    const typings: unknown[] = [];
+    let current = captured;
+    const scoped = createSandbox({
+      config: {
+        sandbox: {
+          syncTimeoutMs: 3000,
+          asyncDeadlineMs: 10,
+          persistentRetirementGraceMs: 1000,
+          previewMaxBytes: 2048,
+          logMaxBytes: 2048,
+        },
+        kagi: { apiKey: null },
+        paths: { harnessRoot: dir, dataDirectory: dir },
+      },
+      memory: { read: () => '', append: () => {}, overwrite: () => {} },
+      logbuf: [],
+      bg: createBgRegistry(dir),
+      captureOutboundScope: () => current,
+      send: async (
+        _channelId: string,
+        _content: string,
+        _opts: unknown,
+        scope: unknown,
+      ) => {
+        sends.push(scope);
+      },
+      typing: (_channelId: string, scope: unknown) => {
+        typings.push(scope);
+      },
+      listChannels: () => ['100'],
+      onFutureSettled: () => settled.resolve(),
+    } as Parameters<typeof createSandbox>[0]);
+    try {
+      const result = await scoped.run(
+        `await elpis.sleep(40); await elpis.channel('100').send('late'); elpis.channel('100').typing();`,
+      );
+      assert.equal(result.detached, true);
+      current = replacement;
+      await Promise.race([
+        settled.promise,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('detached scope test timed out')),
+            500,
+          ),
+        ),
+      ]);
+      return { sends, typings };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const fromMention = await observe(mentionScope, unscoped);
+  assert.strictEqual(fromMention.sends[0], mentionScope);
+  assert.strictEqual(fromMention.typings[0], mentionScope);
+
+  const fromUnscoped = await observe(unscoped, mentionScope);
+  assert.strictEqual(fromUnscoped.sends[0], unscoped);
+  assert.strictEqual(fromUnscoped.typings[0], unscoped);
+});
+
 test('concurrent runs keep their logs separate (reentrant, no shared buffer)', async () => {
   const [r1, r2] = await Promise.all([
     sandbox.run(

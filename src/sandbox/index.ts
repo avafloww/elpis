@@ -143,6 +143,9 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       operationReceiptsDropped: 0,
       llmToolCalls: 0,
       llmToolInputBytes: 0,
+      ...(deps.captureOutboundScope
+        ? { outboundScope: deps.captureOutboundScope() }
+        : {}),
     };
     return runScope.run(scope, () => runInScope(code, scope, owner));
   }

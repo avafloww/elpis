@@ -777,6 +777,20 @@ export function computeEffectiveTrigger(
   );
 }
 
+function mentionsTurnTargetMismatch(
+  channelId: string,
+  token: object | null | undefined,
+  realUserTurn: boolean | undefined,
+  sourceChannelId: string | null | undefined,
+): boolean {
+  return (
+    token != null &&
+    realUserTurn === true &&
+    typeof sourceChannelId === 'string' &&
+    sourceChannelId !== channelId
+  );
+}
+
 export class Agent {
   /** The one conversation history. */
   private messages: ChatMessage[] = [];
@@ -867,10 +881,13 @@ export class Agent {
   private turnChannel: string = INTERNAL_CHANNEL_ID;
   /** The channel of the message that woke the current turn — typing only. */
   private turnChannelId: string | null = null;
-  /** Exact room authorized by an addressed mentions-tier wake when only the
-   * conservative default send policy denies it. Cleared at every turn boundary. */
+  /** Process-local identity shared by sandbox runs from exactly one Agent turn. */
+  private outboundTurnToken: object | null = null;
+  /** Exact room and process-local transport proof for every addressed mentions-tier wake. */
   private mentionsTurnChannelId: string | null = null;
   private mentionsTurnToken: object | null = null;
+  private mentionsTurnAuthorizationToken:
+    import('./types.js').OutboundSendAuthorization | null = null;
   private outboundSendAuthorizationIssuer:
     import('./types.js').OutboundSendAuthorizationIssuer | null = null;
   /** A sendable direct-tier Discord wake gets one request-only instruction to
@@ -1014,6 +1031,40 @@ export class Agent {
     this.outboundSendAuthorizationIssuer = issuer;
   }
 
+  /** Capture one immutable outbound origin for a sandbox run and its continuations. */
+  captureSandboxOutboundScope(): import('./types.js').OutboundEffectScope {
+    const channelId = this.mentionsTurnChannelId;
+    const policy = channelId ? this.policyForChannel(channelId) : null;
+    const authorization =
+      channelId && policy
+        ? this.mentionsTurnAuthorization(channelId, policy)
+        : undefined;
+    if (channelId && !authorization) {
+      return Object.freeze({
+        kind: 'sandbox-run-denied',
+        authorization: null,
+        turnToken: this.outboundTurnToken,
+        turnChannelId: this.turnChannelId,
+      });
+    }
+    return Object.freeze({
+      kind: 'sandbox-run',
+      authorization: authorization ?? null,
+      turnToken: this.outboundTurnToken,
+      turnChannelId: this.turnChannelId,
+    });
+  }
+
+  private outboundScopeMatchesCurrentTurn(
+    scope: import('./types.js').OutboundEffectScope,
+  ): boolean {
+    return (
+      scope.turnToken !== null &&
+      scope.turnToken === this.outboundTurnToken &&
+      scope.turnChannelId === this.turnChannelId
+    );
+  }
+
   /** Replace the typing-indicator callbacks (wired by the Discord layer on
    * start — same ordering reason as setSend: the Discord client doesn't
    * exist yet when the Agent/sandbox are constructed). */
@@ -1055,28 +1106,77 @@ export class Agent {
     channelId: string,
     policy: ChannelPolicy,
   ): import('./types.js').OutboundSendAuthorization | undefined {
-    const token = this.mentionsTurnToken;
-    if (token === null || !this.mentionsTurnAllows(channelId, policy))
-      return undefined;
-    if (!this.outboundSendAuthorizationIssuer) return undefined;
-    const isCurrent = () =>
-      this.mentionsTurnToken === token &&
-      this.mentionsTurnAllows(channelId, policy);
-    return this.outboundSendAuthorizationIssuer(
-      channelId,
-      policy.guild.id,
-      isCurrent,
-    );
+    const authorization = this.mentionsTurnAuthorizationToken;
+    let authorizationValid = false;
+    try {
+      authorizationValid =
+        authorization?.kind === 'mentions-turn' &&
+        authorization.channelId === channelId &&
+        authorization.guildId === policy.guild.id &&
+        authorization.isCurrent() === true;
+    } catch {
+      authorizationValid = false;
+    }
+    if (
+      this.mentionsTurnToken !== null &&
+      this.realUserTurn &&
+      this.mentionsTurnChannelId === channelId &&
+      policy.tier === 'mentions' &&
+      authorizationValid &&
+      authorization
+    ) {
+      return authorization;
+    }
+    return undefined;
   }
 
   /** Explicitly show typing only where configuration permits a later send. */
-  typing(channelId: string): void {
+  typing(
+    channelId: string,
+    outboundScope?: import('./types.js').OutboundEffectScope,
+  ): void {
     if (this.turnSendScope === 'observe_only') return;
+    if (outboundScope?.kind === 'sandbox-run-denied') return;
+    const scopedAuthorization = outboundScope?.authorization ?? undefined;
+    if (scopedAuthorization && scopedAuthorization.channelId !== channelId)
+      return;
+    if (
+      mentionsTurnTargetMismatch(
+        channelId,
+        this.mentionsTurnToken,
+        this.realUserTurn,
+        this.mentionsTurnChannelId,
+      )
+    )
+      return;
+
     if (channelId === CONSOLE_CHANNEL_ID) return;
     const policy = this.policyForChannel(channelId);
     if (!policy) return;
-    const authorization = this.mentionsTurnAuthorization(channelId, policy);
-    if (!policy.allowSend && !authorization) return;
+    const currentAuthorization = this.mentionsTurnAuthorization(
+      channelId,
+      policy,
+    );
+    const authorization =
+      outboundScope === undefined ? currentAuthorization : scopedAuthorization;
+    const scopedMentionsTurn =
+      this.mentionsTurnToken != null &&
+      this.realUserTurn === true &&
+      this.mentionsTurnChannelId === channelId;
+    if (
+      scopedMentionsTurn &&
+      (!currentAuthorization || authorization !== currentAuthorization)
+    )
+      return;
+    if (
+      !policy.allowSend &&
+      !(
+        authorization &&
+        authorization === currentAuthorization &&
+        this.mentionsTurnAllows(channelId, policy)
+      )
+    )
+      return;
     this.deps.onThinking?.(channelId, authorization);
   }
 
@@ -1086,10 +1186,34 @@ export class Agent {
     channelId: string,
     content: string,
     opts?: import('./types.js').OutboundSendOptions,
+    outboundScope?: import('./types.js').OutboundEffectScope,
   ): Promise<void | import('./types.js').OutboundDelivery> {
     if (this.turnSendScope === 'observe_only') {
       throw new Error(
         'sending is disabled for this ambient observation turn (discord.ambient_allow_send=false)',
+      );
+    }
+    if (outboundScope?.kind === 'sandbox-run-denied') {
+      throw new Error(
+        'mentions-turn authorization is unavailable for this sandbox run',
+      );
+    }
+    const scopedAuthorization = outboundScope?.authorization ?? undefined;
+    if (scopedAuthorization && scopedAuthorization.channelId !== channelId) {
+      throw new Error(
+        'mentions-turn authorization is restricted to the exact waking channel',
+      );
+    }
+    if (
+      mentionsTurnTargetMismatch(
+        channelId,
+        this.mentionsTurnToken,
+        this.realUserTurn,
+        this.mentionsTurnChannelId,
+      )
+    ) {
+      throw new Error(
+        'mentions-turn authorization is restricted to the exact waking channel',
       );
     }
     validateReplyTo(opts?.replyTo);
@@ -1113,11 +1237,32 @@ export class Agent {
         `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled because the channel is not configured`,
       );
     }
-    const mentionsAuthorization = this.mentionsTurnAuthorization(
+    const currentAuthorization = this.mentionsTurnAuthorization(
       channelId,
       configPolicy,
     );
-    if (!configPolicy.allowSend && !mentionsAuthorization) {
+    const mentionsAuthorization =
+      outboundScope === undefined ? currentAuthorization : scopedAuthorization;
+    const scopedMentionsTurn =
+      this.mentionsTurnToken != null &&
+      this.realUserTurn === true &&
+      this.mentionsTurnChannelId === channelId;
+    if (
+      scopedMentionsTurn &&
+      (!currentAuthorization || mentionsAuthorization !== currentAuthorization)
+    ) {
+      throw new Error(
+        'mentions-turn authorization is unavailable for the exact waking channel',
+      );
+    }
+    if (
+      !configPolicy.allowSend &&
+      !(
+        mentionsAuthorization &&
+        mentionsAuthorization === currentAuthorization &&
+        this.mentionsTurnAllows(channelId, configPolicy)
+      )
+    ) {
       throw new Error(
         `sending to channel ${this.qualifiedChannelLabel(channelId)} is disabled by configuration (${configPolicy.sendDeniedBy} allow_send=false)`,
       );
@@ -1981,19 +2126,20 @@ export class Agent {
   /** elpis.sleep/wait is the agent choosing to wait — pause typing for its duration
    *. Depth-counted so overlapping sleeps only resume typing once
    * every one of them has settled. */
-  sleepPause(): void {
+  sleepPause(scope?: import('./types.js').OutboundEffectScope): void {
+    if (scope && !this.outboundScopeMatchesCurrentTurn(scope)) return;
     this.sleepDepth++;
     if (this.sleepDepth === 1) this.deps.onIdle?.();
   }
 
   /** Resume typing once every pending sleep has settled — but only if the
-   * turn that started the sleep is still live (busy + a target channel).
-   * A sleep resolving after its turn ended, or after a clear, re-fires
-   * nothing. Clamps at 0 so an unbalanced resume can't go negative. */
-  sleepResume(): void {
+   * turn that started the sleep is still current. A stale continuation cannot
+   * mutate another turn's depth or inherit its channel/authorization. */
+  sleepResume(scope?: import('./types.js').OutboundEffectScope): void {
+    if (scope && !this.outboundScopeMatchesCurrentTurn(scope)) return;
     this.sleepDepth = Math.max(0, this.sleepDepth - 1);
     if (this.sleepDepth === 0 && this.busy && this.turnChannelId)
-      this.typing(this.turnChannelId);
+      this.typing(this.turnChannelId, scope);
   }
 
   /** Clear the one conversation: drop history, queued inbound, tracker/compactor
@@ -2031,8 +2177,11 @@ export class Agent {
     this.externalThinkForcedThisTurn = false;
     this.personInputTurn = false;
     this.directActionReply = null;
+    this.outboundTurnToken = null;
     this.mentionsTurnChannelId = null;
     this.mentionsTurnToken = null;
+    this.mentionsTurnAuthorizationToken = null;
+    this.sleepDepth = 0;
     this.inbound = [];
     this.hasNewInput = false;
     // A leftover ambientUnseen entry outlives the messages it points at — the
@@ -2093,8 +2242,33 @@ export class Agent {
       this.logger.warn(`[error-notice, log-only] ${text}`);
       return;
     }
+    if (
+      mentionsTurnTargetMismatch(
+        ch,
+        this.mentionsTurnToken,
+        this.realUserTurn,
+        this.mentionsTurnChannelId,
+      )
+    ) {
+      this.logger.warn(`[error-notice, mentions-turn source-confined] ${text}`);
+      return;
+    }
+    const policy = this.policyForChannel(ch);
+    const authorization = policy
+      ? this.mentionsTurnAuthorization(ch, policy)
+      : undefined;
+    const scopedMentionsTurn =
+      this.mentionsTurnToken != null &&
+      this.realUserTurn === true &&
+      this.mentionsTurnChannelId === ch;
+    if (scopedMentionsTurn && !authorization) {
+      this.logger.warn(
+        `[error-notice, mentions-turn authorization unavailable] ${text}`,
+      );
+      return;
+    }
     try {
-      await this.deps.send(ch, text);
+      await this.deps.send(ch, text, undefined, authorization);
     } catch {
       /* ignore */
     }
@@ -2304,6 +2478,7 @@ export class Agent {
       this.turnChannelId = this.realUserTurn
         ? (this.lastInbound?.channelId ?? null)
         : null;
+      this.outboundTurnToken = {};
       const turnPolicy = this.turnChannelId
         ? this.policyForChannel(this.turnChannelId)
         : null;
@@ -2313,11 +2488,35 @@ export class Agent {
         turnKind === 'discord' &&
         this.lastInbound?.wakeClass === 'wake' &&
         this.turnChannelId !== null &&
-        turnPolicy?.tier === 'mentions' &&
-        turnPolicy.sendDeniedBy === 'default'
+        turnPolicy?.tier === 'mentions'
           ? this.turnChannelId
           : null;
       this.mentionsTurnToken = this.mentionsTurnChannelId ? {} : null;
+      this.mentionsTurnAuthorizationToken = null;
+      if (
+        this.mentionsTurnChannelId &&
+        this.mentionsTurnToken &&
+        turnPolicy &&
+        this.outboundSendAuthorizationIssuer
+      ) {
+        const channelId = this.mentionsTurnChannelId;
+        const token = this.mentionsTurnToken;
+        try {
+          this.mentionsTurnAuthorizationToken =
+            this.outboundSendAuthorizationIssuer(
+              channelId,
+              turnPolicy.guild.id,
+              () =>
+                this.mentionsTurnToken === token &&
+                this.realUserTurn &&
+                this.mentionsTurnChannelId === channelId,
+            );
+        } catch {
+          this.logger.warn(
+            '[agent] mentions-turn authorization issuer failed; outbound sandbox effects remain denied',
+          );
+        }
+      }
       this.sleepDepth = 0;
       this.deps.setCurrentInbound?.(this.lastInbound ?? null);
       this.logger.info(
@@ -2930,7 +3129,8 @@ export class Agent {
       const turnSendAllowed =
         ghostTurnPolicy !== null &&
         (ghostTurnPolicy.allowSend ||
-          (this.outboundSendAuthorizationIssuer !== null &&
+          (this.mentionsTurnAuthorization(this.turnChannel, ghostTurnPolicy) !==
+            undefined &&
             this.mentionsTurnAllows(this.turnChannel, ghostTurnPolicy)));
       if (
         this.realUserTurn &&
@@ -3130,8 +3330,11 @@ export class Agent {
     this.personInputTurn = false;
     this.turnSendScope = 'normal';
     this.directActionReply = null;
+    this.outboundTurnToken = null;
     this.mentionsTurnChannelId = null;
     this.mentionsTurnToken = null;
+    this.mentionsTurnAuthorizationToken = null;
+    this.sleepDepth = 0;
     this.mindFrontierAllowedThisTurn = true;
     this.mindFrontierDeliveredThisTurn = false;
     this.mindFrontierTailMessagesThisTurn = 0;

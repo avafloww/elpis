@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createSandbox } from '../src/sandbox/index.js';
 import { openDatabase } from '../src/store/db.js';
 import { createChannelDirectory } from '../src/store/channels.js';
+import { createBgRegistry } from '../src/sandbox/bg.js';
 import type { SandboxDeps } from '../src/types.js';
 import {
   buildTestAgent,
@@ -154,7 +155,18 @@ test('sleep typing: mentions turn resume carries a live revocable authorization'
     a.realUserTurn = true;
     a.turnChannelId = '100';
     a.mentionsTurnChannelId = '100';
-    a.mentionsTurnToken = {};
+    const turnToken = {};
+    a.outboundTurnToken = turnToken;
+    a.mentionsTurnToken = turnToken;
+    a.mentionsTurnAuthorizationToken = Object.freeze({
+      kind: 'mentions-turn',
+      channelId: '100',
+      guildId: 'g-mentions',
+      isCurrent: () =>
+        a.mentionsTurnToken === turnToken &&
+        a.realUserTurn === true &&
+        a.mentionsTurnChannelId === '100',
+    });
     agent.sleepPause();
     agent.sleepResume();
 
@@ -164,6 +176,27 @@ test('sleep typing: mentions turn resume carries a live revocable authorization'
       | undefined;
     assert.equal(authorization?.channelId, '100');
     assert.equal(authorization?.isCurrent(), true);
+    const oldScope = agent.captureSandboxOutboundScope();
+    (agent.sleepPause as unknown as (scope: unknown) => void)(oldScope);
+    const laterTurnToken = {};
+    const laterMentionToken = {};
+    a.outboundTurnToken = laterTurnToken;
+    a.mentionsTurnToken = laterMentionToken;
+    a.mentionsTurnAuthorizationToken = Object.freeze({
+      kind: 'mentions-turn',
+      channelId: '100',
+      guildId: 'g-mentions',
+      isCurrent: () => a.mentionsTurnToken === laterMentionToken,
+    });
+    a.sleepDepth = 0;
+    (agent.sleepResume as unknown as (scope: unknown) => void)(oldScope);
+    assert.equal(
+      authorizations.length,
+      1,
+      'a stale sleep cannot inherit a later same-channel mention capability',
+    );
+    assert.equal(a.sleepDepth, 0);
+
     a.mentionsTurnToken = null;
     assert.equal(authorization?.isCurrent(), false);
   } finally {
@@ -246,6 +279,118 @@ test('sleep typing: a sleep that outlives its turn re-fires nothing', () => {
   }
 });
 
+test('sleep typing: detached resume cannot inherit an immediately queued same-channel mention turn', async () => {
+  const guilds = [
+    {
+      id: 'g-mentions',
+      slug: 'mentions',
+      slashCommands: false,
+      quietHours: null,
+      timezone: null,
+      allowSend: true,
+      defaultTier: 'mentions' as const,
+      defaultAllowSend: false,
+      channels: { '100': 'mentions' as const },
+      channelAllowSend: { '100': true },
+    },
+  ];
+  const futureSettled = Promise.withResolvers<void>();
+  const secondObserved = Promise.withResolvers<void>();
+  let agent!: ReturnType<typeof buildTestAgent>['agent'];
+  let completeCalls = 0;
+  let thinkingEffects = 0;
+  let thinkingAtSecondStart = -1;
+  let thinkingAfterOldResume = -1;
+  const llm = makeStubLLM({
+    complete: async () => {
+      completeCalls++;
+      if (completeCalls === 1) {
+        const result = await agent.execSandbox('await elpis.sleep(60)');
+        assert.equal(result.detached, true);
+        return EMPTY_WAKE;
+      }
+      thinkingAtSecondStart = thinkingEffects;
+      await futureSettled.promise;
+      thinkingAfterOldResume = thinkingEffects;
+      secondObserved.resolve();
+      return EMPTY_WAKE;
+    },
+  });
+  const built = buildTestAgent({
+    llm,
+    config: {
+      discord: { ...makeConfig().discord, guilds },
+      sandbox: {
+        ...makeConfig().sandbox,
+        asyncDeadlineMs: 10,
+        persistentRetirementGraceMs: 1000,
+      },
+    },
+    sandboxDeps: ({ tmpDir }) => ({
+      bg: createBgRegistry(tmpDir),
+      onFutureSettled: () => futureSettled.resolve(),
+    }),
+    agentDeps: ({ tmpDir }) => {
+      const db = openDatabase(tmpDir);
+      const channels = createChannelDirectory(db, tmpDir, guilds);
+      channels.set('100', 'mentions-room', 'g-mentions');
+      return {
+        channels,
+        onThinking: () => {
+          thinkingEffects++;
+        },
+      };
+    },
+    tmpPrefix: 'harness-sleep-queued-mention-',
+  });
+  agent = built.agent;
+  agent.setOutboundSendAuthorizationIssuer((channelId, guildId, isCurrent) =>
+    Object.freeze({ kind: 'mentions-turn', channelId, guildId, isCurrent }),
+  );
+  const mention = (id: string) => ({
+    ...inbound(id),
+    guildId: 'g-mentions',
+    guildSlug: 'mentions',
+    kind: 'discord' as const,
+    wakeClass: 'wake' as const,
+    policyChannelId: '100',
+  });
+  const scheduler = built.scheduler;
+  const originalCreate = scheduler.create.bind(scheduler);
+  let queued = false;
+  scheduler.create = (input) => {
+    const task = originalCreate(input);
+    if (!queued) {
+      queued = true;
+      agent.enqueue(mention('queued-mention'));
+    }
+    return task;
+  };
+
+  const running = agent.loop();
+  agent.enqueue(mention('first-mention'));
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      secondObserved.promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('queued mention sleep test timed out')),
+          1000,
+        );
+      }),
+    ]);
+    assert.equal(completeCalls, 2);
+    assert.equal(thinkingAfterOldResume, thinkingAtSecondStart);
+    assert.equal((agent as any).sleepDepth, 0);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    agent.stop();
+    await running;
+    built.cleanup();
+  }
+});
+
 test('sleep typing: depth resets at turn start, so a stranded sleep cannot suppress the next turn', async () => {
   // The reset (agent.ts's `this.sleepDepth = 0;` at turn start) happens
   // synchronously before the LLM is called, so a stub `complete` that
@@ -292,6 +437,38 @@ test('sleep typing: sleep(0) still pauses and resumes typing (one macrotask, no 
   const r = await sb.run('await elpis.sleep(0)');
   assert.equal(r.ok, true, String(r.error));
   assert.deepEqual(calls, ['pause', 'resume']);
+});
+
+test('sandbox: elpis.sleep passes the exact captured outbound scope to both hooks', async () => {
+  const scope = Object.freeze({
+    kind: 'sandbox-run-denied' as const,
+    authorization: null,
+    turnToken: {},
+    turnChannelId: '100',
+  });
+  const pauses: unknown[] = [];
+  const resumes: unknown[] = [];
+  const sb = createSandbox({
+    config: {
+      sandbox: {
+        syncTimeoutMs: 3000,
+        asyncDeadlineMs: 8000,
+        previewMaxBytes: 2048,
+        logMaxBytes: 2048,
+      },
+      kagi: { apiKey: null },
+      paths: { harnessRoot: '/tmp/hr', dataDirectory: '/tmp' },
+    },
+    memory: { read: () => '', append: () => {}, overwrite: () => {} },
+    logbuf: [],
+    captureOutboundScope: () => scope,
+    sleepPause: (captured: unknown) => pauses.push(captured),
+    sleepResume: (captured: unknown) => resumes.push(captured),
+  } as unknown as SandboxDeps);
+  const r = await sb.run('await elpis.sleep(0)');
+  assert.equal(r.ok, true, String(r.error));
+  assert.deepEqual(pauses, [scope]);
+  assert.deepEqual(resumes, [scope]);
 });
 
 test('sandbox: elpis.sleep calls sleepPause/sleepResume around the timer, in order', async () => {
