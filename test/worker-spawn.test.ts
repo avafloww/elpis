@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createWorkerControlCredential } from '../src/worker/auth.js';
+import { WorkerMailboxBroker } from '../src/worker/mailbox.js';
 import { resolveWorkerSession } from '../src/worker/session.js';
 import {
   WorkerSpawnBroker,
@@ -42,6 +43,7 @@ function fixture(opts: { max?: number } = {}) {
   config.workers.enabled = true;
   config.workers.maxConcurrent = opts.max ?? 4;
   let now = 1000;
+  let monotonicNow = 0;
   const provisioned: WorkerProvisionRequest[] = [];
   const cleaned: WorkerSession[] = [];
   const states = new Map<string, WorkerProvisionState>();
@@ -101,6 +103,7 @@ function fixture(opts: { max?: number } = {}) {
       },
     },
     now: () => ++now,
+    monotonicNow: () => monotonicNow,
     credential: () => credentials[cred++],
     id: () => `wrk-test000${++id}`,
     slug: (taken) => (taken.has('quiet-otter') ? 'still-fox' : 'quiet-otter'),
@@ -112,12 +115,19 @@ function fixture(opts: { max?: number } = {}) {
     item,
     config,
     broker,
+    runtime,
     provisioned,
     cleaned,
     states,
     credentials,
     preparedSources,
     discardedSources,
+    setNow(value: number) {
+      now = value;
+    },
+    advanceMonotonic(ms: number) {
+      monotonicNow += ms;
+    },
     setSourceReceipt(receipt: typeof sourceReceipt) {
       sourceReceipt = receipt;
     },
@@ -266,6 +276,10 @@ test('source preparation failure creates no Pod and revokes the failed session',
   const failed = f.broker.list()[0];
   assert.equal(failed.status, 'failed');
   assert.match(failed.lastError ?? '', /dirty source root detail/);
+  const delivery = f.db
+    .prepare('SELECT completion_notified_at FROM worker_sessions WHERE id = ?')
+    .get(failed.id) as { completion_notified_at: number | null };
+  assert.equal(delivery.completion_notified_at, null);
   assert.equal(failed.sourceRevision, null);
   assert.equal(resolveWorkerSession(f.db, f.credentials[0].token), null);
   f.close();
@@ -344,6 +358,10 @@ test('provision failure is durable, revoked, and cleaned without leaking detail'
   const failed = f.broker.list()[0];
   assert.equal(failed.status, 'failed');
   assert.match(failed.lastError ?? '', /secret infrastructure detail/);
+  const delivery = f.db
+    .prepare('SELECT completion_notified_at FROM worker_sessions WHERE id = ?')
+    .get(failed.id) as { completion_notified_at: number | null };
+  assert.equal(delivery.completion_notified_at, null);
   assert.equal(resolveWorkerSession(f.db, f.provisioned[0].token), null);
   assert.equal(f.cleaned.length, 1);
   f.close();
@@ -368,7 +386,17 @@ test('dismiss revokes token before cleanup and cleanup failure stays revoked', a
   );
   const dismissed = f.broker.status(session.id);
   assert.equal(dismissed.status, 'dismissed');
-  assert.match(dismissed.lastError ?? '', /delete denied/);
+  assert.equal(dismissed.lastError, null);
+  const cleanup = f.db
+    .prepare(
+      'SELECT runtime_cleanup_completed_at, runtime_cleanup_error FROM worker_sessions WHERE id = ?',
+    )
+    .get(session.id) as {
+    runtime_cleanup_completed_at: number | null;
+    runtime_cleanup_error: string | null;
+  };
+  assert.equal(cleanup.runtime_cleanup_completed_at, null);
+  assert.match(cleanup.runtime_cleanup_error ?? '', /delete denied/);
   f.close();
 });
 
@@ -397,6 +425,215 @@ async function assertRecoverySkipsActiveStart(
   f.close();
 }
 
+test('repeated dismissal and recovery join one cleanup failure', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  const cleanupStarted = Promise.withResolvers<void>();
+  const releaseCleanup = Promise.withResolvers<void>();
+  let cleanupCalls = 0;
+  f.runtime.cleanup = async () => {
+    cleanupCalls++;
+    cleanupStarted.resolve();
+    await releaseCleanup.promise;
+    throw new Error('synthetic shared cleanup failure');
+  };
+
+  const first = f.broker.dismiss(session.id);
+  const firstOutcome = first.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  await cleanupStarted.promise;
+  let secondSettled = false;
+  const second = f.broker.dismiss(session.id);
+  const secondOutcome = second.then(
+    () => {
+      secondSettled = true;
+      return null;
+    },
+    (error: unknown) => {
+      secondSettled = true;
+      return error;
+    },
+  );
+  let recoverySettled = false;
+  const recovery = f.broker.cleanupPending().finally(() => {
+    recoverySettled = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false);
+  assert.equal(recoverySettled, false);
+  assert.equal(cleanupCalls, 1);
+
+  releaseCleanup.resolve();
+  const [firstError, secondError] = await Promise.all([
+    firstOutcome,
+    secondOutcome,
+  ]);
+  await recovery;
+  assert.match(String(firstError), /cleanup failed/);
+  assert.match(String(secondError), /cleanup failed/);
+  assert.equal(cleanupCalls, 1);
+  f.close();
+});
+
+test('dismiss and recovery serialize cleanup for one runtime', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let cleanups = 0;
+  let recovery: Promise<WorkerSession[]> | null = null;
+  f.runtime.cleanup = async () => {
+    cleanups++;
+    if (cleanups === 1) recovery = f.broker.recover();
+    started.resolve();
+    await release.promise;
+  };
+
+  const dismiss = f.broker.dismiss(session.id);
+  await started.promise;
+  release.resolve();
+  await dismiss;
+  assert.ok(recovery);
+  await recovery;
+
+  assert.equal(cleanups, 1);
+  assert.equal(f.broker.status(session.id).status, 'dismissed');
+  f.close();
+});
+
+test('dismiss during Pod creation waits and records one post-creation cleanup', async () => {
+  const f = fixture();
+  const provisionStarted = Promise.withResolvers<WorkerProvisionRequest>();
+  const releaseProvision = Promise.withResolvers<void>();
+  const originalProvision = f.runtime.provision.bind(f.runtime);
+  f.runtime.provision = async (request) => {
+    provisionStarted.resolve(request);
+    await releaseProvision.promise;
+    return originalProvision(request);
+  };
+
+  const starting = f.broker.start(f.item.id);
+  const startOutcome = starting.then(
+    (session) => ({ session, error: null }),
+    (error: unknown) => ({ session: null, error }),
+  );
+  const request = await provisionStarted.promise;
+  const dismissing = f.broker.dismiss(request.sessionId);
+  let dismissSettled = false;
+  void dismissing.finally(() => {
+    dismissSettled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(f.broker.status(request.sessionId).status, 'dismissed');
+  assert.equal(dismissSettled, false);
+  assert.deepEqual(f.cleaned, []);
+
+  releaseProvision.resolve();
+  const dismissed = await dismissing;
+  const outcome = await startOutcome;
+  assert.equal(dismissed.status, 'dismissed');
+  assert.equal(outcome.session, null);
+  assert.ok(outcome.error instanceof WorkerSpawnError);
+  assert.equal(outcome.error.code, 'conflict');
+  assert.deepEqual(
+    f.cleaned.map((session) => session.id),
+    [request.sessionId],
+  );
+  const cleanup = f.db
+    .prepare(
+      'SELECT runtime_cleanup_completed_at FROM worker_sessions WHERE id = ?',
+    )
+    .get(request.sessionId) as { runtime_cleanup_completed_at: number | null };
+  assert.equal(typeof cleanup.runtime_cleanup_completed_at, 'number');
+  f.close();
+});
+
+test('durable finish during Pod creation survives final provisioning commit', async () => {
+  const f = fixture();
+  const provisionStarted = Promise.withResolvers<WorkerProvisionRequest>();
+  const releaseProvision = Promise.withResolvers<void>();
+  const originalProvision = f.runtime.provision.bind(f.runtime);
+  f.runtime.provision = async (request) => {
+    provisionStarted.resolve(request);
+    await releaseProvision.promise;
+    return originalProvision(request);
+  };
+
+  const starting = f.broker.start(f.item.id);
+  const request = await provisionStarted.promise;
+  new WorkerMailboxBroker(f.db, () => 2000).postFromWorker(
+    request.token,
+    'finish-during-provision',
+    'finish',
+    'durable result',
+  );
+  assert.equal(f.broker.status(request.sessionId).status, 'finished');
+
+  releaseProvision.resolve();
+  const session = await starting;
+
+  assert.equal(session.status, 'finished');
+  assert.deepEqual(f.cleaned, []);
+  const cleanup = f.db
+    .prepare(
+      'SELECT runtime_cleanup_completed_at FROM worker_sessions WHERE id = ?',
+    )
+    .get(request.sessionId) as { runtime_cleanup_completed_at: number | null };
+  assert.equal(cleanup.runtime_cleanup_completed_at, null);
+  f.close();
+});
+
+test('source failure cleanup receipt clamps a rolled-back clock', async () => {
+  const f = fixture();
+  f.setSourceHook(() => f.setNow(-1000));
+  f.setSourceError(new Error('synthetic source failure'));
+
+  await assert.rejects(
+    () => f.broker.start(f.item.id),
+    /source preparation failed/,
+  );
+  const row = f.db
+    .prepare(
+      'SELECT status, created_at, updated_at, runtime_cleanup_completed_at FROM worker_sessions',
+    )
+    .get() as {
+    status: string;
+    created_at: number;
+    updated_at: number;
+    runtime_cleanup_completed_at: number | null;
+  };
+  assert.equal(row.status, 'failed');
+  assert.ok(row.updated_at >= row.created_at);
+  assert.ok((row.runtime_cleanup_completed_at ?? -1) >= row.created_at);
+  f.close();
+});
+
+test('runtime cleanup receipt clamps a rolled-back clock', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  f.db
+    .prepare("UPDATE worker_sessions SET status = 'failed' WHERE id = ?")
+    .run(session.id);
+  f.setNow(-1000);
+
+  await f.broker.recover();
+
+  const row = f.db
+    .prepare(
+      'SELECT created_at, runtime_cleanup_completed_at FROM worker_sessions WHERE id = ?',
+    )
+    .get(session.id) as {
+    created_at: number;
+    runtime_cleanup_completed_at: number | null;
+  };
+  assert.ok((row.runtime_cleanup_completed_at ?? -1) >= row.created_at);
+  assert.equal(f.cleaned.length, 1);
+  f.close();
+});
+
 test('recovery skips a session during source preparation', async () => {
   await assertRecoverySkipsActiveStart('source');
 });
@@ -405,7 +642,134 @@ test('recovery skips a session during Pod provisioning', async () => {
   await assertRecoverySkipsActiveStart('provision');
 });
 
-test('recovery adopts ready Pods, finalizes terminal Pods, and fails missing claims', async () => {
+test('durable mailbox finish outranks a later Pod failure during recovery', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  new WorkerMailboxBroker(f.db).postFromWorker(
+    f.provisioned[0].token,
+    'finish-accepted',
+    'finish',
+    'The bounded review is accepted.',
+  );
+  f.states.set(session.id, {
+    state: 'failed',
+    error: 'worker process exited after the durable finish receipt',
+  });
+
+  await f.broker.recover();
+
+  const recovered = f.broker.status(session.id);
+  assert.equal(recovered.status, 'finished');
+  assert.equal(recovered.lastError, null);
+  assert.deepEqual(
+    f.cleaned.map((candidate) => candidate.id),
+    [session.id],
+  );
+  f.close();
+});
+
+test('legacy durable finish starts cleanup grace at the finish timestamp', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  f.setNow(50_000);
+  f.db
+    .prepare(
+      `INSERT INTO worker_mailbox_messages
+       (session_id,direction,kind,message_key,sender,body,created_at)
+       VALUES (?,'worker_to_dispatcher','finish','finish-before-crash',?,'done',50000)`,
+    )
+    .run(session.id, session.worker);
+  f.db
+    .prepare(
+      `UPDATE worker_sessions
+       SET status = 'failed', updated_at = ?, last_error = 'late broker error'
+       WHERE id = ?`,
+    )
+    .run(session.updatedAt, session.id);
+
+  await f.broker.recover();
+
+  const recovered = f.broker.status(session.id);
+  assert.equal(recovered.status, 'finished');
+  assert.equal(recovered.updatedAt, 50_000);
+  assert.deepEqual(f.cleaned, []);
+  f.close();
+});
+
+test('forward wall-clock jump cannot shorten finish cleanup grace', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  new WorkerMailboxBroker(f.db, () => 2000).postFromWorker(
+    f.provisioned[0].token,
+    'finish-before-forward-clock-jump',
+    'finish',
+    'done',
+  );
+
+  await f.broker.cleanupPending();
+  f.setNow(1_000_000);
+  await f.broker.cleanupPending();
+  assert.deepEqual(f.cleaned, []);
+  f.advanceMonotonic(30_001);
+  await f.broker.cleanupPending();
+
+  assert.deepEqual(
+    f.cleaned.map((candidate) => candidate.id),
+    [session.id],
+  );
+  f.close();
+});
+
+test('finish cleanup grace remains bounded when wall clock rolls backward', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  new WorkerMailboxBroker(f.db, () => 2000).postFromWorker(
+    f.provisioned[0].token,
+    'finish-before-clock-rollback',
+    'finish',
+    'done',
+  );
+  f.setNow(-1000);
+
+  await f.broker.cleanupPending();
+  assert.deepEqual(f.cleaned, []);
+  f.advanceMonotonic(30_001);
+  await f.broker.cleanupPending();
+
+  assert.deepEqual(
+    f.cleaned.map((candidate) => candidate.id),
+    [session.id],
+  );
+  f.close();
+});
+
+test('finished cleanup proceeds after grace when Pod inspection keeps failing', async () => {
+  const f = fixture();
+  const session = await f.broker.start(f.item.id);
+  new WorkerMailboxBroker(f.db, () => 2000).postFromWorker(
+    f.provisioned[0].token,
+    'finish-before-broken-inspect',
+    'finish',
+    'done',
+  );
+  f.setNow(50_000);
+  f.runtime.inspect = async () => {
+    throw new Error('inspection unavailable');
+  };
+
+  await f.broker.cleanupPending();
+  assert.deepEqual(f.cleaned, []);
+  f.advanceMonotonic(30_001);
+  await f.broker.cleanupPending();
+
+  assert.deepEqual(
+    f.cleaned.map((candidate) => candidate.id),
+    [session.id],
+  );
+  f.close();
+});
+
+test('recovery adopts ready Pods and fails terminal claims without finish', async () => {
   const f = fixture();
   const a = await f.broker.start(f.item.id);
   const bItem = f.mind.create({ title: 'b' });
@@ -433,7 +797,11 @@ test('recovery adopts ready Pods, finalizes terminal Pods, and fails missing cla
     },
   });
   await f.broker.recover();
-  assert.equal(f.broker.status(a.id).status, 'finished');
+  assert.equal(f.broker.status(a.id).status, 'failed');
+  assert.match(
+    f.broker.status(a.id).lastError ?? '',
+    /exited successfully without a durable finish/,
+  );
   assert.equal(f.broker.status(b.id).status, 'running');
   assert.equal(f.broker.status(b.id).podName, 'adopted');
   assert.equal(f.broker.status('wrk-missing1').status, 'failed');

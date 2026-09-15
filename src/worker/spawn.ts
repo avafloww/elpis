@@ -36,6 +36,8 @@ export interface WorkerSession {
   createdAt: number;
   updatedAt: number;
   lastError: string | null;
+  runtimeCleanupCompletedAt: number | null;
+  runtimeCleanupError: string | null;
 }
 
 export interface WorkerProvisionRequest {
@@ -58,9 +60,15 @@ export type WorkerProvisionState =
   | { state: 'missing' };
 
 export interface WorkerPodRuntime {
-  provision(request: WorkerProvisionRequest): Promise<WorkerProvisionReceipt>;
-  inspect(session: WorkerSession): Promise<WorkerProvisionState>;
-  cleanup(session: WorkerSession): Promise<void>;
+  provision(
+    request: WorkerProvisionRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkerProvisionReceipt>;
+  inspect(
+    session: WorkerSession,
+    signal?: AbortSignal,
+  ): Promise<WorkerProvisionState>;
+  cleanup(session: WorkerSession, signal?: AbortSignal): Promise<void>;
 }
 
 export class WorkerSpawnError extends Error {
@@ -83,6 +91,11 @@ export class WorkerSpawnError extends Error {
   }
 }
 
+interface WorkerOperationScope {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+}
+
 export interface WorkerSpawnBrokerOptions {
   db: Database;
   config: Config;
@@ -90,12 +103,14 @@ export interface WorkerSpawnBrokerOptions {
   runtime: WorkerPodRuntime;
   workspace?: Pick<WorkerWorkspaceStore, 'prepareSource' | 'discardSource'>;
   now?: () => number;
+  monotonicNow?: () => number;
   credential?: () => WorkerControlCredential;
   id?: () => string;
   slug?: (taken: Set<string>) => string;
 }
 
 const ACTIVE: WorkerSessionStatus[] = ['spawning', 'running', 'idle'];
+const FINISH_CLEANUP_GRACE_MS = 30_000;
 const CLOSED_MIND = new Set(['done', 'cancelled']);
 
 function boundedError(error: unknown): string {
@@ -125,6 +140,14 @@ function rowSession(row: Record<string, unknown>): WorkerSession {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     lastError: row.last_error == null ? null : String(row.last_error),
+    runtimeCleanupCompletedAt:
+      row.runtime_cleanup_completed_at == null
+        ? null
+        : Number(row.runtime_cleanup_completed_at),
+    runtimeCleanupError:
+      row.runtime_cleanup_error == null
+        ? null
+        : String(row.runtime_cleanup_error),
   };
 }
 
@@ -177,18 +200,65 @@ function validateMind(mind: MindService, value: unknown): MindDetail {
 
 export class WorkerSpawnBroker {
   private readonly now: () => number;
+  private readonly monotonicNow: () => number;
   private readonly credential: () => WorkerControlCredential;
   private readonly id: () => string;
   private readonly slug: (taken: Set<string>) => string;
   /** In-process start ownership closes before recovery may interpret a missing Pod.
    * A process restart drops this set, so abandoned spawning rows stay recoverable. */
-  private readonly provisioning = new Set<string>();
+  private readonly provisioning = new Map<string, Promise<void>>();
+  private readonly cleaning = new Map<string, Promise<void>>();
+  private readonly provisioningSettledListeners = new Set<
+    (sessionId: string) => void
+  >();
+  private readonly finishCleanupObservedAt = new Map<string, number>();
 
   constructor(private readonly options: WorkerSpawnBrokerOptions) {
     this.now = options.now ?? Date.now;
+    this.monotonicNow =
+      options.monotonicNow ??
+      (() => Number(process.hrtime.bigint() / 1_000_000n));
     this.credential = options.credential ?? createWorkerControlCredential;
     this.id = options.id ?? newWorkerId;
     this.slug = options.slug ?? generateWorkerSlug;
+  }
+
+  onProvisioningSettled(listener: (sessionId: string) => void): () => void {
+    this.provisioningSettledListeners.add(listener);
+    return () => this.provisioningSettledListeners.delete(listener);
+  }
+
+  revokeProvisioning(): WorkerSession[] {
+    const ids = [...this.provisioning.keys()];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    this.options.db
+      .prepare(
+        `UPDATE worker_sessions
+         SET status = 'failed',
+             updated_at = MAX(created_at, updated_at, ?),
+             last_error = 'worker supervisor stopped during provisioning',
+             completion_notified_at = NULL,
+             runtime_cleanup_completed_at = NULL,
+             runtime_cleanup_error = NULL
+         WHERE id IN (${placeholders}) AND status = 'spawning'`,
+      )
+      .run(this.now(), ...ids);
+    return ids
+      .map((id) => this.byId(id))
+      .filter((session): session is WorkerSession => session != null);
+  }
+
+  private operationCurrent(scope: WorkerOperationScope): boolean {
+    return scope.isCurrent?.() ?? true;
+  }
+
+  private requireOperationCurrent(scope: WorkerOperationScope): void {
+    if (!this.operationCurrent(scope))
+      throw new WorkerSpawnError(
+        'unavailable',
+        'worker supervisor is disposed',
+      );
   }
 
   private requireEnabled(): void {
@@ -201,6 +271,70 @@ export class WorkerSpawnBroker {
       .prepare('SELECT * FROM worker_sessions WHERE id = ?')
       .get(id) as Record<string, unknown> | undefined;
     return row ? rowSession(row) : null;
+  }
+
+  private cleanupCompleted(sessionId: string): boolean {
+    const row = this.options.db
+      .prepare(
+        'SELECT runtime_cleanup_completed_at FROM worker_sessions WHERE id = ?',
+      )
+      .get(sessionId) as
+      { runtime_cleanup_completed_at: number | null } | undefined;
+    return row?.runtime_cleanup_completed_at != null;
+  }
+
+  private cleanupRuntime(
+    session: WorkerSession,
+    signal?: AbortSignal,
+    canPersist: () => boolean = () => true,
+  ): Promise<void> {
+    if (this.cleanupCompleted(session.id)) return Promise.resolve();
+    const existing = this.cleaning.get(session.id);
+    if (existing) return existing;
+
+    const ownership = Promise.withResolvers<void>();
+    this.cleaning.set(session.id, ownership.promise);
+    void (async () => {
+      const current = this.byId(session.id) ?? session;
+      if (this.cleanupCompleted(session.id)) return;
+      try {
+        await this.options.runtime.cleanup(current, signal);
+      } catch (error) {
+        if (canPersist()) {
+          this.options.db
+            .prepare(
+              `UPDATE worker_sessions
+               SET runtime_cleanup_error = ?
+               WHERE id = ? AND status IN ('finished','failed','dismissed')
+                 AND runtime_cleanup_completed_at IS NULL`,
+            )
+            .run(boundedError(error), session.id);
+        }
+        throw error;
+      }
+      if (!canPersist()) return;
+      this.options.db
+        .prepare(
+          `UPDATE worker_sessions
+           SET runtime_cleanup_completed_at = MAX(created_at, updated_at, ?),
+               runtime_cleanup_error = NULL
+           WHERE id = ? AND status IN ('finished','failed','dismissed')
+             AND runtime_cleanup_completed_at IS NULL`,
+        )
+        .run(this.now(), session.id);
+    })().then(
+      () => {
+        if (this.cleaning.get(session.id) === ownership.promise)
+          this.cleaning.delete(session.id);
+        ownership.resolve();
+      },
+      (error: unknown) => {
+        if (this.cleaning.get(session.id) === ownership.promise)
+          this.cleaning.delete(session.id);
+        ownership.reject(error);
+      },
+    );
+    return ownership.promise;
   }
 
   private resolve(ref: string): WorkerSession {
@@ -238,7 +372,12 @@ export class WorkerSpawnBroker {
     return this.resolve(ref);
   }
 
-  async start(mindId: unknown, value?: unknown): Promise<WorkerSession> {
+  async start(
+    mindId: unknown,
+    value?: unknown,
+    scope: WorkerOperationScope = {},
+  ): Promise<WorkerSession> {
+    this.requireOperationCurrent(scope);
     this.requireEnabled();
     const item = validateMind(this.options.mind, mindId);
     const input = parseStartOptions(value);
@@ -250,7 +389,6 @@ export class WorkerSpawnBroker {
       throw new WorkerSpawnError('invalid_request', boundedError(error));
     }
 
-    await this.recover();
     const credential = this.credential();
     const now = this.now();
     let id = '';
@@ -314,12 +452,22 @@ export class WorkerSpawnBroker {
       throw new WorkerSpawnError('conflict', boundedError(error));
     }
 
-    this.provisioning.add(id);
+    const cleanupSession = this.byId(id)!;
+    const provisioning = Promise.withResolvers<void>();
+    this.provisioning.set(id, provisioning.promise);
+    let provisioningSettled = false;
+    const settleProvisioning = () => {
+      if (provisioningSettled) return;
+      provisioningSettled = true;
+      provisioning.resolve();
+    };
+
     try {
       let source: WorkerSourceReceipt | null = null;
       if (this.options.workspace) {
         try {
           source = await this.options.workspace.prepareSource(id);
+          this.requireOperationCurrent(scope);
           if (source) {
             const bound = this.options.db
               .prepare(
@@ -345,14 +493,20 @@ export class WorkerSpawnBroker {
           }
         } catch (error) {
           this.options.workspace.discardSource(id);
+          this.requireOperationCurrent(scope);
           const detail = boundedError(error);
+          const failedAt = this.now();
           this.options.db
             .prepare(
               `UPDATE worker_sessions
-             SET status = 'failed', updated_at = ?, last_error = ?
+             SET status = 'failed',
+                 updated_at = MAX(created_at, updated_at, ?),
+                 last_error = ?, completion_notified_at = NULL,
+                 runtime_cleanup_completed_at = MAX(created_at, updated_at, ?),
+                 runtime_cleanup_error = NULL
              WHERE id = ? AND status = 'spawning'`,
             )
-            .run(this.now(), detail, id);
+            .run(failedAt, detail, failedAt, id);
           if (error instanceof WorkerSpawnError) throw error;
           const summary =
             error instanceof WorkerWorkspaceError &&
@@ -368,31 +522,54 @@ export class WorkerSpawnBroker {
 
       let receipt: WorkerProvisionReceipt;
       try {
-        receipt = await this.options.runtime.provision({
-          sessionId: id,
-          slug,
-          token: credential.token,
-        });
+        receipt = await this.options.runtime.provision(
+          {
+            sessionId: id,
+            slug,
+            token: credential.token,
+          },
+          scope.signal,
+        );
       } catch (error) {
-        const failed = this.byId(id)!;
-        let cleanupError: string | null = null;
-        try {
-          await this.options.runtime.cleanup(failed);
-        } catch (cleanup) {
-          cleanupError = boundedError(cleanup);
+        settleProvisioning();
+        if (!this.operationCurrent(scope)) {
+          try {
+            await this.options.runtime.cleanup(cleanupSession);
+          } catch {}
+          this.requireOperationCurrent(scope);
         }
-        const message = `${boundedError(error)}${cleanupError ? `; cleanup: ${cleanupError}` : ''}`;
-        this.options.db
+        const failedAt = this.now();
+        const changed = this.options.db
           .prepare(
-            "UPDATE worker_sessions SET status = 'failed', updated_at = ?, last_error = ? WHERE id = ? AND status = 'spawning'",
+            `UPDATE worker_sessions
+             SET status = 'failed', updated_at = ?, last_error = ?, completion_notified_at = NULL
+             WHERE id = ? AND status = 'spawning'`,
           )
-          .run(this.now(), message.slice(0, 1000), id);
+          .run(failedAt, boundedError(error), id);
+        const current = this.byId(id)!;
+        if (current.status === 'finished') return current;
+        try {
+          await this.cleanupRuntime(current);
+        } catch {}
+        if (Number(changed.changes) !== 1) {
+          throw new WorkerSpawnError(
+            'conflict',
+            'worker was revoked during provisioning',
+          );
+        }
         throw new WorkerSpawnError(
           'provision_failed',
           'worker provisioning failed',
         );
       }
 
+      settleProvisioning();
+      if (!this.operationCurrent(scope)) {
+        try {
+          await this.options.runtime.cleanup(cleanupSession);
+        } catch {}
+        this.requireOperationCurrent(scope);
+      }
       const result = this.options.db
         .prepare(
           `UPDATE worker_sessions
@@ -407,7 +584,11 @@ export class WorkerSpawnBroker {
           id,
         );
       if (Number(result.changes) !== 1) {
-        await this.options.runtime.cleanup(this.byId(id)!);
+        const current = this.byId(id)!;
+        if (current.status === 'finished') return current;
+        try {
+          await this.cleanupRuntime(current);
+        } catch {}
         throw new WorkerSpawnError(
           'conflict',
           'worker was revoked during provisioning',
@@ -415,11 +596,23 @@ export class WorkerSpawnBroker {
       }
       return this.byId(id)!;
     } finally {
-      this.provisioning.delete(id);
+      settleProvisioning();
+      if (this.provisioning.get(id) === provisioning.promise) {
+        this.provisioning.delete(id);
+        for (const listener of this.provisioningSettledListeners) {
+          try {
+            listener(id);
+          } catch {}
+        }
+      }
     }
   }
 
-  async dismiss(ref: string): Promise<WorkerSession> {
+  async dismiss(
+    ref: string,
+    scope: WorkerOperationScope = {},
+  ): Promise<WorkerSession> {
+    this.requireOperationCurrent(scope);
     const session = this.resolve(ref);
     const changed = this.options.db
       .prepare(
@@ -429,30 +622,142 @@ export class WorkerSpawnBroker {
       )
       .run(this.now(), session.id);
     const revoked = this.byId(session.id)!;
-    if (Number(changed.changes) === 0) return revoked;
+    if (
+      Number(changed.changes) === 0 &&
+      (revoked.status !== 'dismissed' ||
+        revoked.runtimeCleanupCompletedAt != null)
+    )
+      return revoked;
+
+    const provisioning = this.provisioning.get(session.id);
+    if (provisioning) await provisioning;
+    this.requireOperationCurrent(scope);
     try {
-      await this.options.runtime.cleanup(revoked);
-    } catch (error) {
-      this.options.db
-        .prepare(
-          'UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?',
-        )
-        .run(boundedError(error), this.now(), session.id);
+      await this.cleanupRuntime(this.byId(session.id)!, scope.signal, () =>
+        this.operationCurrent(scope),
+      );
+    } catch {
+      this.requireOperationCurrent(scope);
       throw new WorkerSpawnError('cleanup_failed', 'worker cleanup failed');
     }
+    this.requireOperationCurrent(scope);
     return this.byId(session.id)!;
   }
 
-  async recover(): Promise<WorkerSession[]> {
+  private hasDurableFinish(sessionId: string): boolean {
+    return Boolean(
+      this.options.db
+        .prepare(
+          `SELECT 1 FROM worker_mailbox_messages
+           WHERE session_id = ? AND direction = 'worker_to_dispatcher' AND kind = 'finish'`,
+        )
+        .get(sessionId),
+    );
+  }
+
+  async recoverState(
+    isCurrent: () => boolean = () => true,
+    signal?: AbortSignal,
+  ): Promise<WorkerSession[]> {
+    if (!isCurrent()) return [];
+    this.options.db
+      .prepare(
+        `UPDATE worker_sessions
+         SET status = 'finished',
+             updated_at = MAX(
+               updated_at,
+               (SELECT MAX(message.created_at)
+                FROM worker_mailbox_messages message
+                WHERE message.session_id = worker_sessions.id
+                  AND message.direction = 'worker_to_dispatcher'
+                  AND message.kind = 'finish')
+             ),
+             last_error = NULL
+         WHERE status = 'failed'
+           AND EXISTS (
+             SELECT 1 FROM worker_mailbox_messages message
+             WHERE message.session_id = worker_sessions.id
+               AND message.direction = 'worker_to_dispatcher'
+               AND message.kind = 'finish'
+           )`,
+      )
+      .run();
     const active = this.list().filter(
       (session) =>
         ACTIVE.includes(session.status) && !this.provisioning.has(session.id),
     );
     for (const session of active) {
+      if (!isCurrent()) return [];
+      if (this.hasDurableFinish(session.id)) {
+        this.options.db
+          .prepare(
+            `UPDATE worker_sessions
+             SET status = 'finished',
+                 updated_at = MAX(
+                   updated_at,
+                   COALESCE(
+                     (SELECT MAX(message.created_at)
+                      FROM worker_mailbox_messages message
+                      WHERE message.session_id = worker_sessions.id
+                        AND message.direction = 'worker_to_dispatcher'
+                        AND message.kind = 'finish'),
+                     updated_at
+                   )
+                 ),
+                 last_error = NULL
+             WHERE id = ? AND status IN ('spawning','running','idle')`,
+          )
+          .run(session.id);
+        continue;
+      }
       let state: WorkerProvisionState;
       try {
-        state = await this.options.runtime.inspect(session);
+        state = await this.options.runtime.inspect(session, signal);
       } catch {
+        if (!isCurrent()) return [];
+        if (!this.hasDurableFinish(session.id)) continue;
+        this.options.db
+          .prepare(
+            `UPDATE worker_sessions
+             SET status = 'finished',
+                 updated_at = MAX(
+                   updated_at,
+                   COALESCE(
+                     (SELECT MAX(message.created_at)
+                      FROM worker_mailbox_messages message
+                      WHERE message.session_id = worker_sessions.id
+                        AND message.direction = 'worker_to_dispatcher'
+                        AND message.kind = 'finish'),
+                     updated_at
+                   )
+                 ),
+                 last_error = NULL
+             WHERE id = ? AND status IN ('spawning','running','idle')`,
+          )
+          .run(session.id);
+        continue;
+      }
+      if (!isCurrent()) return [];
+      if (this.hasDurableFinish(session.id)) {
+        this.options.db
+          .prepare(
+            `UPDATE worker_sessions
+             SET status = 'finished',
+                 updated_at = MAX(
+                   updated_at,
+                   COALESCE(
+                     (SELECT MAX(message.created_at)
+                      FROM worker_mailbox_messages message
+                      WHERE message.session_id = worker_sessions.id
+                        AND message.direction = 'worker_to_dispatcher'
+                        AND message.kind = 'finish'),
+                     updated_at
+                   )
+                 ),
+                 last_error = NULL
+             WHERE id = ? AND status IN ('spawning','running','idle')`,
+          )
+          .run(session.id);
         continue;
       }
       if (state.state === 'pending') continue;
@@ -460,7 +765,8 @@ export class WorkerSpawnBroker {
         this.options.db
           .prepare(
             `UPDATE worker_sessions
-             SET status = 'running', pod_name = ?, pod_uid = ?, workspace_ref = ?, updated_at = ?, last_error = NULL
+             SET status = 'running', pod_name = ?, pod_uid = ?, workspace_ref = ?,
+                 updated_at = ?, last_error = NULL
              WHERE id = ? AND status IN ('spawning','running','idle')`,
           )
           .run(
@@ -472,35 +778,85 @@ export class WorkerSpawnBroker {
           );
         continue;
       }
-      const status = state.state === 'succeeded' ? 'finished' : 'failed';
       const error =
-        state.state === 'failed'
-          ? boundedError(state.error)
-          : state.state === 'missing'
-            ? 'worker Pod is missing'
-            : null;
+        state.state === 'succeeded'
+          ? 'worker Pod exited successfully without a durable finish'
+          : state.state === 'failed'
+            ? boundedError(state.error)
+            : 'worker Pod is missing';
       this.options.db
         .prepare(
-          "UPDATE worker_sessions SET status = ?, updated_at = ?, last_error = ? WHERE id = ? AND status IN ('spawning','running','idle')",
+          `UPDATE worker_sessions
+           SET status = 'failed', updated_at = ?, last_error = ?,
+               completion_notified_at = NULL
+           WHERE id = ? AND status IN ('spawning','running','idle')`,
         )
-        .run(status, this.now(), error, session.id);
-      try {
-        await this.options.runtime.cleanup(this.byId(session.id)!);
-      } catch (cleanup) {
-        this.options.db
-          .prepare(
-            'UPDATE worker_sessions SET last_error = ?, updated_at = ? WHERE id = ?',
-          )
-          .run(
-            `${error ? `${error}; ` : ''}cleanup: ${boundedError(cleanup)}`.slice(
-              0,
-              1000,
-            ),
-            this.now(),
-            session.id,
-          );
-      }
+        .run(this.now(), error, session.id);
     }
+
+    if (!isCurrent()) return [];
+    return this.list();
+  }
+
+  async cleanupPending(
+    isCurrent: () => boolean = () => true,
+    signal?: AbortSignal,
+  ): Promise<WorkerSession[]> {
+    if (!isCurrent()) return [];
+    const cleanup = this.options.db
+      .prepare(
+        `SELECT * FROM worker_sessions
+         WHERE status IN ('finished','failed','dismissed')
+           AND runtime_cleanup_completed_at IS NULL
+         ORDER BY updated_at, id`,
+      )
+      .all() as Record<string, unknown>[];
+    for (const row of cleanup) {
+      if (!isCurrent()) return [];
+      const session = rowSession(row);
+      if (this.provisioning.has(session.id)) continue;
+      if (session.status === 'finished') {
+        const monotonicNow = this.monotonicNow();
+        const firstObserved =
+          this.finishCleanupObservedAt.get(session.id) ?? monotonicNow;
+        this.finishCleanupObservedAt.set(session.id, firstObserved);
+        const monotonicAge = Math.max(0, monotonicNow - firstObserved);
+        const graceExpired = monotonicAge >= FINISH_CLEANUP_GRACE_MS;
+        let state: WorkerProvisionState;
+        try {
+          state = await this.options.runtime.inspect(session, signal);
+        } catch {
+          if (!isCurrent()) return [];
+          if (!graceExpired) continue;
+          state = { state: 'missing' };
+        }
+        if (!isCurrent()) return [];
+        if (
+          (state.state === 'pending' || state.state === 'ready') &&
+          !graceExpired
+        ) {
+          continue;
+        }
+      }
+      try {
+        await this.cleanupRuntime(session, signal, isCurrent);
+      } catch {}
+      if (!isCurrent()) return [];
+      if (this.cleanupCompleted(session.id))
+        this.finishCleanupObservedAt.delete(session.id);
+    }
+    if (!isCurrent()) return [];
+    return this.list();
+  }
+
+  async recover(
+    isCurrent: () => boolean = () => true,
+    signal?: AbortSignal,
+  ): Promise<WorkerSession[]> {
+    await this.recoverState(isCurrent, signal);
+    if (!isCurrent()) return [];
+    await this.cleanupPending(isCurrent, signal);
+    if (!isCurrent()) return [];
     return this.list();
   }
 }

@@ -783,6 +783,11 @@ export async function createElpisRuntime(
     // once `discord` exists — same ordering reason `send` is a stub here.
     console: hub,
   });
+  // Completion notices are activated only after Agent construction so recovered
+  // worker terminal rows enter the same ordered internal queue as every other wake.
+  await workerRuntime?.activate((notice) =>
+    agent.notifyWorkerCompletion(notice),
+  );
   // Job notices are deliberately activated only now: recovered completion and
   // heartbeat callbacks close over `agent`, which did not exist during registry load.
   bgRegistry.activate();
@@ -1007,6 +1012,11 @@ export async function createElpisRuntime(
     stopGatewayControlPlane(gatewayRotation, gatewayEnrollment, gatewayLink);
     try {
       consoleServer?.stop();
+    } catch {
+      /* non-fatal */
+    }
+    try {
+      workerRuntime?.dispose();
     } catch {
       /* non-fatal */
     }

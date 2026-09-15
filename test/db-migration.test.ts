@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    27,
+    28,
   );
   assert.deepEqual(
     (
@@ -194,9 +194,156 @@ test('current migration prefix preserves fleet history and creates resident stat
         name: '0026-gateway-rotation-proposal-checkpoint',
       },
       { component: 'core', name: '0027-discord-person-settings' },
+      { component: 'core', name: '0028-worker-completion-delivery' },
     ],
   );
   db.close();
+});
+
+test('migration v27→v28 grandfathers delivery but leaves every legacy cleanup pending', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.exec(`
+    DROP INDEX worker_sessions_completion_pending_idx;
+    DROP INDEX worker_sessions_cleanup_pending_idx;
+    ALTER TABLE worker_sessions DROP COLUMN completion_notified_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_completed_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_error;
+    DROP TRIGGER elpis_migrations_no_delete;
+    DELETE FROM elpis_migrations
+      WHERE component = 'core' AND name = '0028-worker-completion-delivery';
+    PRAGMA user_version = 27;
+    PRAGMA foreign_keys = OFF;
+  `);
+  const insert = db.prepare(
+    `INSERT INTO worker_sessions
+     (id,slug,status,model_ref,mind_id,runtime,control_token_digest,created_at,updated_at)
+     VALUES (?,?,?,?,?,'kubernetes',?,?,?)`,
+  );
+  insert.run(
+    'wrk-finished1',
+    'finished-worker',
+    'finished',
+    'provider/model',
+    'elm-finished1',
+    '1'.repeat(64),
+    100,
+    200,
+  );
+  insert.run(
+    'wrk-dismissed',
+    'dismissed-worker',
+    'dismissed',
+    'provider/model',
+    'elm-dismissed',
+    '5'.repeat(64),
+    100,
+    205,
+  );
+  insert.run(
+    'wrk-failed001',
+    'failed-worker',
+    'failed',
+    'provider/model',
+    'elm-failed001',
+    '2'.repeat(64),
+    100,
+    210,
+  );
+  insert.run(
+    'wrk-failedfin',
+    'failed-finish-worker',
+    'failed',
+    'provider/model',
+    'elm-failedfin',
+    '4'.repeat(64),
+    100,
+    215,
+  );
+  db.prepare(
+    `INSERT INTO worker_mailbox_messages
+     (session_id,direction,kind,message_key,sender,body,created_at)
+     VALUES (?,'worker_to_dispatcher','finish','finish-1',?,'durable report',205)`,
+  ).run('wrk-failedfin', 'worker:failed-finish-worker');
+  insert.run(
+    'wrk-running01',
+    'running-worker',
+    'running',
+    'provider/model',
+    'elm-running01',
+    '3'.repeat(64),
+    100,
+    220,
+  );
+
+  runMigrations(db);
+
+  const rows = (
+    db
+      .prepare(
+        `SELECT id, status, completion_notified_at, runtime_cleanup_completed_at,
+                runtime_cleanup_error
+         FROM worker_sessions ORDER BY id`,
+      )
+      .all() as {
+      id: string;
+      status: string;
+      completion_notified_at: number | null;
+      runtime_cleanup_completed_at: number | null;
+      runtime_cleanup_error: string | null;
+    }[]
+  ).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [
+    {
+      id: 'wrk-dismissed',
+      status: 'dismissed',
+      completion_notified_at: null,
+      runtime_cleanup_completed_at: null,
+      runtime_cleanup_error: null,
+    },
+    {
+      id: 'wrk-failed001',
+      status: 'failed',
+      completion_notified_at: 210,
+      runtime_cleanup_completed_at: null,
+      runtime_cleanup_error: null,
+    },
+    {
+      id: 'wrk-failedfin',
+      status: 'failed',
+      completion_notified_at: null,
+      runtime_cleanup_completed_at: null,
+      runtime_cleanup_error: null,
+    },
+    {
+      id: 'wrk-finished1',
+      status: 'finished',
+      completion_notified_at: 200,
+      runtime_cleanup_completed_at: null,
+      runtime_cleanup_error: null,
+    },
+    {
+      id: 'wrk-running01',
+      status: 'running',
+      completion_notified_at: null,
+      runtime_cleanup_completed_at: null,
+      runtime_cleanup_error: null,
+    },
+  ]);
+  runMigrations(db);
+  assert.equal(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM pragma_table_info('worker_sessions')
+           WHERE name IN ('completion_notified_at','runtime_cleanup_completed_at','runtime_cleanup_error')`,
+        )
+        .get() as { n: number }
+    ).n,
+    3,
+  );
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('migration v12→v15 adds cold notices and backfills retirement deadlines', () => {
@@ -254,7 +401,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    27,
+    28,
   );
   assert.deepEqual(
     (
@@ -279,6 +426,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0025-gateway-resident-state',
       '0026-gateway-rotation-proposal-checkpoint',
       '0027-discord-person-settings',
+      '0028-worker-completion-delivery',
     ],
   );
   runMigrations(db);
@@ -310,7 +458,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    14,
+    15,
   );
   db.close();
 });
@@ -350,7 +498,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 27);
+  assert.equal(version, 28);
   assert.equal(
     (
       reopened

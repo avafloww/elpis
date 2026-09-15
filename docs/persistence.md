@@ -75,7 +75,7 @@ The consolidation prompt treats the data directory as the inhabitant's private r
 - feedback and message localization;
 - scheduled tasks;
 - OAuth credentials;
-- native worker sessions and mailbox messages (with published `fleet_*` rows retained as inert migration history);
+- native worker sessions, mailbox messages, terminal-notice acknowledgements, and runtime-cleanup receipts (with published `fleet_*` rows retained as inert migration history);
 - token-density estimates;
 - Mind items, dependencies, tags, comments, events, and reminders;
 - immutable local sandbox executor identity, permanent Mind↔sandbox registrations, alias tombstones, and lifecycle/run counters.

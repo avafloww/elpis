@@ -19,6 +19,11 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers)
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   db.exec(`
+    DROP INDEX worker_sessions_completion_pending_idx;
+    DROP INDEX worker_sessions_cleanup_pending_idx;
+    ALTER TABLE worker_sessions DROP COLUMN completion_notified_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_completed_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_error;
     DROP TRIGGER gateway_resident_state_identity_no_update;
     DROP TRIGGER gateway_resident_state_no_delete;
     DROP TRIGGER gateway_resident_state_binding_no_update;
@@ -88,7 +93,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -148,7 +153,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    27,
+    28,
   );
   assert.equal(
     (

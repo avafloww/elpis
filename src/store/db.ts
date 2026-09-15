@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 27;
+const SCHEMA_VERSION = 28;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -998,6 +998,47 @@ export function runMigrations(db: DatabaseSync): void {
           updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 40),
           PRIMARY KEY (guild_id, user_id)
         ) WITHOUT ROWID;
+      `,
+    },
+    {
+      name: '0028-worker-completion-delivery',
+      sql: `
+        ALTER TABLE worker_sessions ADD COLUMN completion_notified_at INTEGER
+          CHECK (
+            completion_notified_at IS NULL
+            OR (
+              typeof(completion_notified_at) = 'integer'
+              AND completion_notified_at >= created_at
+            )
+          );
+        ALTER TABLE worker_sessions ADD COLUMN runtime_cleanup_completed_at INTEGER
+          CHECK (
+            runtime_cleanup_completed_at IS NULL
+            OR (
+              typeof(runtime_cleanup_completed_at) = 'integer'
+              AND runtime_cleanup_completed_at >= created_at
+            )
+          );
+        ALTER TABLE worker_sessions ADD COLUMN runtime_cleanup_error TEXT;
+        UPDATE worker_sessions
+        SET completion_notified_at = MAX(created_at, updated_at)
+        WHERE status = 'finished'
+           OR (
+             status = 'failed'
+             AND NOT EXISTS (
+               SELECT 1 FROM worker_mailbox_messages message
+               WHERE message.session_id = worker_sessions.id
+                 AND message.direction = 'worker_to_dispatcher'
+                 AND message.kind = 'finish'
+             )
+           );
+        CREATE INDEX worker_sessions_completion_pending_idx
+          ON worker_sessions(status, updated_at, id)
+          WHERE status IN ('finished', 'failed') AND completion_notified_at IS NULL;
+        CREATE INDEX worker_sessions_cleanup_pending_idx
+          ON worker_sessions(status, updated_at, id)
+          WHERE status IN ('finished', 'failed', 'dismissed')
+            AND runtime_cleanup_completed_at IS NULL;
       `,
     },
   ]);

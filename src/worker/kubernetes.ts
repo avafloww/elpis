@@ -16,6 +16,7 @@ export interface KubectlResult {
 export type KubectlExecutor = (
   args: string[],
   stdin?: string,
+  signal?: AbortSignal,
 ) => Promise<KubectlResult>;
 
 export interface KubernetesWorkerRuntimeOptions {
@@ -116,16 +117,21 @@ async function defaultExec(
   binary: string,
   args: string[],
   stdin?: string,
+  signal?: AbortSignal,
 ): Promise<KubectlResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
+      signal,
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk) => stdout.push(Buffer.from(chunk)));
     child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)));
+    child.stdin.on('error', (error) => {
+      if (!signal?.aborted) reject(error);
+    });
     child.once('error', reject);
     child.once('close', (code) =>
       resolve({
@@ -264,7 +270,8 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
     if (!this.kubectlPath) throw new Error('kubectl path must be non-empty');
     this.exec =
       options.exec ??
-      ((args, stdin) => defaultExec(this.kubectlPath, args, stdin));
+      ((args, stdin, signal) =>
+        defaultExec(this.kubectlPath, args, stdin, signal));
   }
 
   private names(sessionId: string): { pod: string; secret: string } {
@@ -281,8 +288,12 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
     return [...context, '--namespace', this.options.namespace, ...args];
   }
 
-  private async run(args: string[], stdin?: string): Promise<KubectlResult> {
-    const result = await this.exec(this.args(...args), stdin);
+  private async run(
+    args: string[],
+    stdin?: string,
+    signal?: AbortSignal,
+  ): Promise<KubectlResult> {
+    const result = await this.exec(this.args(...args), stdin, signal);
     if (result.code !== 0)
       throw new Error(
         `kubectl failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no diagnostic'}`,
@@ -304,15 +315,14 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
 
   async provision(
     request: WorkerProvisionRequest,
+    signal?: AbortSignal,
   ): Promise<WorkerProvisionReceipt> {
     const names = this.names(request.sessionId);
-    const templateResult = await this.run([
-      'get',
-      'podtemplate',
-      this.options.template,
-      '-o',
-      'json',
-    ]);
+    const templateResult = await this.run(
+      ['get', 'podtemplate', this.options.template, '-o', 'json'],
+      undefined,
+      signal,
+    );
     let template: unknown;
     try {
       template = JSON.parse(templateResult.stdout);
@@ -336,7 +346,7 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
       type: 'Opaque',
       stringData: { token: request.token },
     };
-    await this.run(['create', '-f', '-'], JSON.stringify(secret));
+    await this.run(['create', '-f', '-'], JSON.stringify(secret), signal);
     try {
       const spec = clone(validated.spec);
       const container = spec.containers[0] as Record<string, any>;
@@ -365,26 +375,29 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
       const created = await this.run(
         ['create', '-f', '-', '-o', 'json'],
         JSON.stringify(pod),
+        signal,
       );
       return this.receipt(request.sessionId, JSON.parse(created.stdout));
     } catch (error) {
       await this.exec(
         this.args('delete', 'secret', names.secret, '--ignore-not-found=true'),
+        undefined,
+        signal,
       );
       throw error;
     }
   }
 
-  async inspect(session: WorkerSession): Promise<WorkerProvisionState> {
+  async inspect(
+    session: WorkerSession,
+    signal?: AbortSignal,
+  ): Promise<WorkerProvisionState> {
     const names = this.names(session.id);
-    const result = await this.run([
-      'get',
-      'pod',
-      names.pod,
-      '-o',
-      'json',
-      '--ignore-not-found=true',
-    ]);
+    const result = await this.run(
+      ['get', 'pod', names.pod, '-o', 'json', '--ignore-not-found=true'],
+      undefined,
+      signal,
+    );
     if (!result.stdout.trim()) return { state: 'missing' };
     const pod = object(JSON.parse(result.stdout), 'worker Pod');
     const receipt = this.receipt(session.id, pod);
@@ -418,6 +431,8 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
             '--tail=20',
             `--limit-bytes=${MAX_FATAL_LOG_BYTES}`,
           ),
+          undefined,
+          signal,
         );
         const diagnostic =
           logs.code === 0 ? workerFatalDiagnostic(logs.stdout) : null;
@@ -436,14 +451,18 @@ export class KubectlWorkerRuntime implements WorkerPodRuntime {
     }
   }
 
-  async cleanup(session: WorkerSession): Promise<void> {
+  async cleanup(session: WorkerSession, signal?: AbortSignal): Promise<void> {
     const names = this.names(session.id);
-    await this.run([
-      'delete',
-      `pod/${names.pod}`,
-      `secret/${names.secret}`,
-      '--ignore-not-found=true',
-      '--wait=false',
-    ]);
+    await this.run(
+      [
+        'delete',
+        `pod/${names.pod}`,
+        `secret/${names.secret}`,
+        '--ignore-not-found=true',
+        '--wait=false',
+      ],
+      undefined,
+      signal,
+    );
   }
 }

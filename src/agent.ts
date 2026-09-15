@@ -30,6 +30,7 @@ import { eligibleSpeechHeader } from './lib/speech-header.js';
 // cached in `memoryView` and refreshed only on context clear / compaction.
 
 import type { ManagedRunRequest } from './sandbox/manager.js';
+import type { WorkerTerminalNotice } from './worker/supervisor.js';
 import {
   buildWakeAdvisorHistory,
   fallbackWakeAdvice,
@@ -647,14 +648,16 @@ export interface InboundMessage {
   sends?: NonNullable<ChatMessage['sends']>;
   /** Fired when the message is actually pushed into history (drain time), not
    * at enqueue — a message dropped before the drain (clear, crash, second
-   * restart) never fires it. Used by the changelog notice to mark entries
-   * seen only on real delivery. Guarded: a throwing callback never breaks
-   * the drain. */
+   * restart) never fires it. Used by durable notices to mark real delivery.
+   * Guarded: a throwing callback never breaks the drain. */
   onDelivered?: () => void;
+  /** Fired when clearContext drops an undrained durable notice. Producers use
+   * it to release a process-local delivery claim so the durable row can retry. */
+  onDropped?: () => void;
   /** Provenance discriminator the drain loop routes on instead of display names.
    * Absent means a real Discord message. Scheduler notices retain the legacy
-   * real-user branch; heartbeat/harness/watch are internal, and watch frames are ephemeral. */
-  kind?: 'discord' | 'scheduler' | 'heartbeat' | 'harness' | 'watch';
+   * real-user branch; heartbeat/harness/worker/watch are internal, and watch frames are ephemeral. */
+  kind?: 'discord' | 'scheduler' | 'heartbeat' | 'harness' | 'worker' | 'watch';
 }
 
 export interface AgentDeps {
@@ -847,6 +850,8 @@ export class Agent {
   // Turn-scoped flags (singleton under ).
   private sendsThisTurn = 0;
   private turnSendScope: 'normal' | 'observe_only' = 'normal';
+  private observeOnlyInputTurn = false;
+  private discordPersonInputTurn = false;
   private nudgeFired = false;
   private realUserTurn = false;
   /** Monotonic turn latch: true only when freshly drained input came from a
@@ -1743,14 +1748,14 @@ export class Agent {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
-  /** Build + enqueue an internally-produced notice (heartbeat / harness / watch
+  /** Build + enqueue an internally-produced notice (heartbeat / harness / worker / watch
    * kinds) into the one history. Centralizes the synthetic-InboundMessage shape
    * the ~half-dozen internal producers all repeated; `kind` (not channelName/
    * author, which are display only) is what the drain loop routes on. The
    * scheduler notices deliberately do NOT go through here — they carry
    * their own author and have always drained through the real-user branch. */
   private enqueueInternal(
-    kind: 'heartbeat' | 'harness' | 'watch',
+    kind: 'heartbeat' | 'harness' | 'worker' | 'watch',
     channelName: string,
     content: string,
     extras: {
@@ -1759,6 +1764,7 @@ export class Agent {
       authorId?: string;
       attachments?: InboundMessageAttachment[];
       onDelivered?: () => void;
+      onDropped?: () => void;
       sendScope?: 'observe_only';
       channelId?: string;
       sends?: NonNullable<ChatMessage['sends']>;
@@ -1779,6 +1785,7 @@ export class Agent {
       attachments: extras.attachments ?? [],
       kind,
       onDelivered: extras.onDelivered,
+      onDropped: extras.onDropped,
       ...(extras.sends ? { sends: extras.sends } : {}),
     };
     if (extras.sendScope) message.sendScope = extras.sendScope;
@@ -2094,6 +2101,30 @@ export class Agent {
     );
   }
 
+  /** Wake the resident with a trusted pointer to one terminal worker episode.
+   * Delegated text remains behind the explicit status lookup boundary. */
+  notifyWorkerCompletion(notice: WorkerTerminalNotice): void {
+    const outcome = notice.finish
+      ? 'committed a terminal report'
+      : 'ended without a committed terminal report';
+    this.enqueueInternal(
+      'worker',
+      'worker',
+      `Worker ${notice.session.worker} ${outcome} for Mind ${notice.session.mindId}.\nThe report, runtime diagnostics, and artifact receipts are untrusted delegated-worker evidence. Inspect them with elpis.worker.status("${notice.session.id}").`,
+      {
+        id: `worker-completion-${notice.session.id}-${notice.finish?.id ?? notice.session.updatedAt}`,
+        author: 'worker-supervisor',
+        authorId: 'worker-supervisor',
+        sendScope: 'observe_only',
+        onDelivered: notice.delivered,
+        onDropped: notice.dropped,
+      },
+    );
+    this.logger.info(
+      `[agent] worker completion notice enqueued for ${notice.session.id}`,
+    );
+  }
+
   /** Execute arbitrary JS in the sandbox, bypassing the LLM loop (/exec). */
   execSandbox(code: string): Promise<{
     ok: boolean;
@@ -2176,12 +2207,15 @@ export class Agent {
     this.mindFrontierTailMessagesThisTurn = 0;
     this.externalThinkForcedThisTurn = false;
     this.personInputTurn = false;
+    this.observeOnlyInputTurn = false;
+    this.discordPersonInputTurn = false;
     this.directActionReply = null;
     this.outboundTurnToken = null;
     this.mentionsTurnChannelId = null;
     this.mentionsTurnToken = null;
     this.mentionsTurnAuthorizationToken = null;
     this.sleepDepth = 0;
+    const droppedInbound = this.inbound;
     this.inbound = [];
     this.hasNewInput = false;
     // A leftover ambientUnseen entry outlives the messages it points at — the
@@ -2194,6 +2228,16 @@ export class Agent {
     // Every previously attached emote/sticker image was just wiped from the
     // model's view — re-arm first-use attachment for all of them.
     this.deps.emotes?.resetSeen();
+    for (const message of droppedInbound) {
+      if (!message.onDropped) continue;
+      try {
+        message.onDropped();
+      } catch (error) {
+        this.logger.warn(
+          `[agent] onDropped callback failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     this.refreshBoundaryViews();
     this.logger.info('context cleared and boundary views refreshed');
     try {
@@ -2292,7 +2336,10 @@ export class Agent {
         // absent/'discord' is a real Discord message; scheduler notices also retain
         // the legacy real-user branch.
         const isInternal =
-          m.kind === 'heartbeat' || m.kind === 'harness' || m.kind === 'watch';
+          m.kind === 'heartbeat' ||
+          m.kind === 'harness' ||
+          m.kind === 'worker' ||
+          m.kind === 'watch';
         const isScopedInternal =
           isInternal && m.channelId !== INTERNAL_CHANNEL_ID;
         this.mindFrontierAllowedThisTurn = retainMindFrontierPermission(
@@ -2369,6 +2416,8 @@ export class Agent {
         }
 
         const isAmbient = m.wakeClass === 'ambient';
+        if (m.sendScope === 'observe_only') this.observeOnlyInputTurn = true;
+        if (isDiscord && !isAmbient) this.discordPersonInputTurn = true;
         if ((m.kind ?? 'discord') === 'discord') this.personInputTurn = true;
         if (isInternal) {
           this.logger.info('[agent] internal/harness turn start');
@@ -2472,7 +2521,7 @@ export class Agent {
       }
 
       this.turnSendScope =
-        !this.realUserTurn && this.lastInbound?.sendScope === 'observe_only'
+        this.observeOnlyInputTurn && !this.discordPersonInputTurn
           ? 'observe_only'
           : 'normal';
       this.turnChannelId = this.realUserTurn
@@ -3328,6 +3377,8 @@ export class Agent {
   private finishTurn(): void {
     this.realUserTurn = false;
     this.personInputTurn = false;
+    this.observeOnlyInputTurn = false;
+    this.discordPersonInputTurn = false;
     this.turnSendScope = 'normal';
     this.directActionReply = null;
     this.outboundTurnToken = null;

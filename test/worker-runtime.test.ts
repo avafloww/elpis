@@ -215,6 +215,42 @@ test('scoped worker server owns completion, Mind, mailbox, and clean stop', asyn
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as any).source, null);
 
+  const finishRequest = {
+    protocol: 1,
+    operation: 'post',
+    messageKey: 'finish-http-1',
+    kind: 'finish',
+    body: 'HTTP receipt precedes worker journal completion.',
+  };
+  response = await fetch(`${base}/v1/mailbox`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(finishRequest),
+  });
+  assert.equal(response.status, 200);
+  const finishReceipt = ((await response.json()) as any).message;
+  assert.equal(
+    (
+      f.db
+        .prepare("SELECT status FROM worker_sessions WHERE id = 'wrk-runtime'")
+        .get() as { status: string }
+    ).status,
+    'finished',
+  );
+  response = await fetch(`${base}/v1/mailbox`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(finishRequest),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as any).message.id, finishReceipt.id);
+  response = await fetch(`${base}/v1/mailbox`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ protocol: 1, operation: 'pull' }),
+  });
+  assert.equal(response.status, 401);
+
   const closed = once(runtime.server, 'close');
   runtime.stop();
   runtime.stop();

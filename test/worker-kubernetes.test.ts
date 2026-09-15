@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import test from 'node:test';
 import {
   KubectlWorkerRuntime,
@@ -64,6 +67,8 @@ function session(patch: Partial<WorkerSession> = {}): WorkerSession {
     createdAt: 1,
     updatedAt: 1,
     lastError: null,
+    runtimeCleanupCompletedAt: null,
+    runtimeCleanupError: null,
     ...patch,
   };
 }
@@ -379,4 +384,158 @@ test('inspect is phase and UID aware, while cleanup uses exact names without sel
     '--wait=false',
   ]);
   assert.equal(args.includes('--selector'), false);
+});
+
+test('aborting default kubectl execution terminates the child cleanly', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-kubectl-abort-'));
+  const executable = path.join(dir, 'kubectl');
+  fs.writeFileSync(
+    executable,
+    '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n',
+  );
+  fs.chmodSync(executable, 0o700);
+  const runtime = new KubectlWorkerRuntime({
+    namespace: 'workers',
+    template: 'elpis-worker',
+    container: 'worker',
+    brokerUrl: 'https://broker.example.com',
+    kubectlPath: executable,
+  });
+  const abort = new AbortController();
+  try {
+    const inspection = runtime.inspect(session(), abort.signal);
+    abort.abort(new Error('supervisor disposed'));
+    await assert.rejects(inspection, { name: 'AbortError' });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('exact cleanup removes ambiguous Secret and Pod admissions after abort', async (t) => {
+  for (const admittedKind of ['Secret', 'Pod'] as const) {
+    await t.test(admittedKind, async () => {
+      const resources = new Set<string>();
+      const mutatingCallStarted = Promise.withResolvers<void>();
+      let exactCleanupCalls = 0;
+      const catchCleanupSignals: (AbortSignal | undefined)[] = [];
+      const runtime = new KubectlWorkerRuntime({
+        namespace: 'workers',
+        template: 'elpis-worker',
+        container: 'worker',
+        brokerUrl: 'https://broker.example.com',
+        exec: async (args, stdin, signal) => {
+          if (args.includes('podtemplate')) {
+            return {
+              code: 0,
+              stdout: JSON.stringify(safeTemplate()),
+              stderr: '',
+            };
+          }
+          if (args.includes('create') && stdin) {
+            const value = JSON.parse(stdin) as {
+              kind: string;
+              metadata: object;
+            };
+            resources.add(value.kind);
+            if (value.kind === admittedKind) {
+              mutatingCallStarted.resolve();
+              await new Promise<never>((_resolve, reject) => {
+                if (signal?.aborted) return reject(signal.reason);
+                signal?.addEventListener('abort', () => reject(signal.reason), {
+                  once: true,
+                });
+              });
+            }
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                ...value,
+                metadata: { ...value.metadata, uid: 'uid-1' },
+              }),
+              stderr: '',
+            };
+          }
+          if (args.includes('delete')) {
+            if (args.some((arg) => arg.startsWith('pod/'))) {
+              exactCleanupCalls++;
+              resources.delete('Pod');
+              resources.delete('Secret');
+            } else if (args.includes('secret')) {
+              catchCleanupSignals.push(signal);
+              resources.delete('Secret');
+            }
+            return { code: 0, stdout: '', stderr: '' };
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      });
+      const abort = new AbortController();
+      const provisioning = runtime.provision(
+        {
+          sessionId: 'wrk-a1b2c3d4',
+          slug: 'quiet-otter',
+          token: 'synthetic-worker-token',
+        },
+        abort.signal,
+      );
+      await mutatingCallStarted.promise;
+      abort.abort(new Error(`local abort after ${admittedKind} admission`));
+      await assert.rejects(provisioning, /local abort after/);
+      assert.deepEqual(
+        catchCleanupSignals,
+        admittedKind === 'Pod' ? [abort.signal] : [],
+      );
+
+      await runtime.cleanup(session());
+
+      assert.deepEqual([...resources], []);
+      assert.equal(exactCleanupCalls, 1);
+    });
+  }
+});
+
+test('provision, inspect, and cleanup forward abort authority to kubectl execution', async () => {
+  const seen: (AbortSignal | undefined)[] = [];
+  const runtime = new KubectlWorkerRuntime({
+    namespace: 'workers',
+    template: 'elpis-worker',
+    container: 'worker',
+    brokerUrl: 'https://broker.example.com',
+    exec: async (_args, _stdin, signal?: AbortSignal) => {
+      seen.push(signal);
+      signal?.throwIfAborted();
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  });
+  const provisionAbort = new AbortController();
+  provisionAbort.abort(new Error('provision stopped'));
+  await assert.rejects(
+    () =>
+      runtime.provision(
+        {
+          sessionId: 'wrk-a1b2c3d4',
+          slug: 'quiet-otter',
+          token: 'synthetic-worker-token',
+        },
+        provisionAbort.signal,
+      ),
+    /provision stopped/,
+  );
+  const inspectAbort = new AbortController();
+  inspectAbort.abort(new Error('inspect stopped'));
+  await assert.rejects(
+    () => runtime.inspect(session(), inspectAbort.signal),
+    /inspect stopped/,
+  );
+  const cleanupAbort = new AbortController();
+  cleanupAbort.abort(new Error('cleanup stopped'));
+  await assert.rejects(
+    () => runtime.cleanup(session(), cleanupAbort.signal),
+    /cleanup stopped/,
+  );
+  assert.deepEqual(seen, [
+    provisionAbort.signal,
+    inspectAbort.signal,
+    cleanupAbort.signal,
+  ]);
 });

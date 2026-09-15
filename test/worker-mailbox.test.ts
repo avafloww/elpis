@@ -112,6 +112,44 @@ test('mailbox delivers retry-safe dispatcher messages and receiver-owned acknowl
   close(f);
 });
 
+test('finish observers run after commit and cannot invalidate the mailbox receipt', () => {
+  const f = fixture();
+  const observed: number[] = [];
+  const unsubscribe = f.broker.onFinish((event) => {
+    const stored = f.db
+      .prepare(
+        `SELECT id FROM worker_mailbox_messages
+         WHERE session_id = ? AND kind = 'finish'`,
+      )
+      .get(event.sessionId) as { id: number };
+    assert.equal(stored.id, event.messageId);
+    observed.push(stored.id);
+    throw new Error('observer failure');
+  });
+
+  const finish = f.broker.postFromWorker(
+    f.credential.token,
+    'finish-observed',
+    'finish',
+    'durable before observer',
+  );
+
+  assert.deepEqual(observed, [finish.id]);
+  assert.equal(f.broker.finishFromWorker('wrk-worker1')?.id, finish.id);
+  unsubscribe();
+  assert.equal(
+    f.broker.postFromWorker(
+      f.credential.token,
+      'finish-observed',
+      'finish',
+      'durable before observer',
+    ).id,
+    finish.id,
+  );
+  assert.deepEqual(observed, [finish.id]);
+  close(f);
+});
+
 test('mailbox keeps directions isolated and acknowledgments atomic', () => {
   const f = fixture();
   const incoming = f.broker.sendToWorker('wrk-worker1', 'dispatch-1', 'hello');
@@ -155,10 +193,35 @@ test('mailbox records one idempotent terminal finish and rejects a second', () =
     'finish',
     'done',
   );
+  const terminal = f.db
+    .prepare(
+      `SELECT status, last_error, completion_notified_at, runtime_cleanup_completed_at
+       FROM worker_sessions WHERE id = 'wrk-worker1'`,
+    )
+    .get() as {
+    status: string;
+    last_error: string | null;
+    completion_notified_at: number | null;
+    runtime_cleanup_completed_at: number | null;
+  };
+  assert.deepEqual(
+    { ...terminal },
+    {
+      status: 'finished',
+      last_error: null,
+      completion_notified_at: null,
+      runtime_cleanup_completed_at: null,
+    },
+  );
   assert.equal(
     f.broker.postFromWorker(f.credential.token, 'finish-1', 'finish', 'done')
       .id,
     finish.id,
+  );
+  assert.throws(
+    () => f.broker.pullForWorker(f.credential.token),
+    (error: unknown) =>
+      error instanceof WorkerMailboxError && error.code === 'unauthorized',
   );
   assert.throws(
     () =>
@@ -169,7 +232,7 @@ test('mailbox records one idempotent terminal finish and rejects a second', () =
         'done again',
       ),
     (error: unknown) =>
-      error instanceof WorkerMailboxError && error.code === 'conflict',
+      error instanceof WorkerMailboxError && error.code === 'unauthorized',
   );
   assert.throws(
     () =>
@@ -180,13 +243,13 @@ test('mailbox records one idempotent terminal finish and rejects a second', () =
         'too late',
       ),
     (error: unknown) =>
-      error instanceof WorkerMailboxError && error.code === 'conflict',
+      error instanceof WorkerMailboxError && error.code === 'unauthorized',
   );
   assert.throws(
     () =>
       f.broker.sendToWorker('wrk-worker1', 'dispatch-after-finish', 'too late'),
     (error: unknown) =>
-      error instanceof WorkerMailboxError && error.code === 'conflict',
+      error instanceof WorkerMailboxError && error.code === 'not_found',
   );
   assert.deepEqual(
     f.broker.pullFromWorker('wrk-worker1').map((message) => message.kind),

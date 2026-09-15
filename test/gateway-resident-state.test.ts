@@ -214,13 +214,19 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
   // Reopening must interpret every legacy rotation as not yet proposed.
   db.exec(`
+    DROP INDEX worker_sessions_completion_pending_idx;
+    DROP INDEX worker_sessions_cleanup_pending_idx;
+    ALTER TABLE worker_sessions DROP COLUMN completion_notified_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_completed_at;
+    ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_error;
     DROP TRIGGER gateway_resident_state_rotation_proposal_guard;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component='core'
         AND name IN (
           '0026-gateway-rotation-proposal-checkpoint',
-          '0027-discord-person-settings'
+          '0027-discord-person-settings',
+          '0028-worker-completion-delivery'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

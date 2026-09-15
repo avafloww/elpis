@@ -1,4 +1,5 @@
 import type { Database } from '../store/db.js';
+import { verifyWorkerControlToken, workerControlTokenDigest } from './auth.js';
 import { resolveWorkerSession, type WorkerSessionBinding } from './session.js';
 
 export type WorkerMailboxKind = 'message' | 'finish';
@@ -91,11 +92,25 @@ function rowMessage(row: Record<string, unknown>): WorkerMailboxMessage {
   };
 }
 
+export interface WorkerFinishCommitted {
+  sessionId: string;
+  messageId: number;
+}
+
 export class WorkerMailboxBroker {
+  private readonly finishListeners = new Set<
+    (event: WorkerFinishCommitted) => void
+  >();
+
   constructor(
     private readonly db: Database,
     private readonly now: () => number = Date.now,
   ) {}
+
+  onFinish(listener: (event: WorkerFinishCommitted) => void): () => void {
+    this.finishListeners.add(listener);
+    return () => this.finishListeners.delete(listener);
+  }
 
   private worker(token: string): WorkerSessionBinding {
     const binding = resolveWorkerSession(this.db, token);
@@ -230,6 +245,168 @@ export class WorkerMailboxBroker {
     }
   }
 
+  private insertFinish(
+    binding: WorkerSessionBinding,
+    key: string,
+    body: string,
+  ): WorkerMailboxMessage {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior = this.existing(
+        binding.sessionId,
+        'worker_to_dispatcher',
+        key,
+      );
+      if (prior) {
+        if (
+          prior.kind !== 'finish' ||
+          prior.sender !== binding.worker ||
+          prior.body !== body
+        ) {
+          throw new WorkerMailboxError(
+            'conflict',
+            'messageKey was already used with different content',
+          );
+        }
+        this.db
+          .prepare(
+            `UPDATE worker_sessions
+             SET status = 'finished', updated_at = MAX(updated_at, ?), last_error = NULL
+             WHERE id = ? AND status IN ('spawning','running','idle','failed','finished')`,
+          )
+          .run(prior.createdAt, binding.sessionId);
+        this.db.exec('COMMIT');
+        return prior;
+      }
+      if (
+        this.db
+          .prepare(
+            `SELECT 1 FROM worker_mailbox_messages
+             WHERE session_id = ? AND direction = 'worker_to_dispatcher' AND kind = 'finish'`,
+          )
+          .get(binding.sessionId)
+      ) {
+        throw new WorkerMailboxError(
+          'conflict',
+          'worker session already has a finish message',
+        );
+      }
+      const session = this.db
+        .prepare(
+          'SELECT status, source_sha256 FROM worker_sessions WHERE id = ?',
+        )
+        .get(binding.sessionId) as
+        { status: string; source_sha256: string | null } | undefined;
+      if (
+        !session ||
+        !['spawning', 'running', 'idle'].includes(session.status)
+      ) {
+        throw new WorkerMailboxError(
+          'unauthorized',
+          'worker session is unavailable',
+        );
+      }
+      if (session.source_sha256) {
+        const artifact = this.db
+          .prepare(
+            `SELECT 1 FROM worker_workspace_artifacts
+             WHERE session_id = ? AND source_sha256 = ? LIMIT 1`,
+          )
+          .get(binding.sessionId, session.source_sha256);
+        if (!artifact) {
+          throw new WorkerMailboxError(
+            'conflict',
+            'worker source artifact must be in custody before finish',
+          );
+        }
+      }
+      const createdAt = this.now();
+      const result = this.db
+        .prepare(
+          `INSERT INTO worker_mailbox_messages
+           (session_id, direction, kind, message_key, sender, body, created_at)
+           VALUES (?, 'worker_to_dispatcher', 'finish', ?, ?, ?, ?)`,
+        )
+        .run(binding.sessionId, key, binding.worker, body, createdAt);
+      const changed = this.db
+        .prepare(
+          `UPDATE worker_sessions
+           SET status = 'finished', updated_at = MAX(updated_at, ?), last_error = NULL,
+               completion_notified_at = NULL, runtime_cleanup_completed_at = NULL,
+               runtime_cleanup_error = NULL
+           WHERE id = ? AND status IN ('spawning','running','idle')`,
+        )
+        .run(createdAt, binding.sessionId);
+      if (Number(changed.changes) !== 1) {
+        throw new WorkerMailboxError(
+          'conflict',
+          'worker session changed while committing finish',
+        );
+      }
+      const row = this.db
+        .prepare('SELECT * FROM worker_mailbox_messages WHERE id = ?')
+        .get(Number(result.lastInsertRowid)) as Record<string, unknown>;
+      this.db.exec('COMMIT');
+      return rowMessage(row);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private terminalFinishRetry(
+    token: string,
+    key: string,
+    body: string,
+  ): { binding: WorkerSessionBinding; message: WorkerMailboxMessage } | null {
+    let digest: string;
+    try {
+      digest = workerControlTokenDigest(token);
+    } catch {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT id, slug, status, model_ref, mind_id, runtime, control_token_digest
+         FROM worker_sessions WHERE control_token_digest = ?`,
+      )
+      .get(digest) as Record<string, unknown> | undefined;
+    if (
+      !row ||
+      (row.status !== 'finished' && row.status !== 'failed') ||
+      !verifyWorkerControlToken(
+        token,
+        String(row.control_token_digest ?? ''),
+      ) ||
+      (row.runtime !== 'trusted' && row.runtime !== 'kubernetes') ||
+      typeof row.model_ref !== 'string' ||
+      typeof row.mind_id !== 'string'
+    ) {
+      return null;
+    }
+    const binding: WorkerSessionBinding = {
+      sessionId: String(row.id),
+      worker: `worker:${String(row.slug)}`,
+      modelRef: row.model_ref,
+      mindId: row.mind_id,
+      runtime: row.runtime,
+    };
+    const message = this.existing(
+      binding.sessionId,
+      'worker_to_dispatcher',
+      key,
+    );
+    if (
+      !message ||
+      message.kind !== 'finish' ||
+      message.sender !== binding.worker ||
+      message.body !== body
+    ) {
+      return null;
+    }
+    return { binding, message: this.insertFinish(binding, key, body) };
+  }
+
   private pending(
     sessionId: string,
     direction: WorkerMailboxDirection,
@@ -322,20 +499,58 @@ export class WorkerMailboxBroker {
     kind: WorkerMailboxKind,
     bodyValue: string,
   ): WorkerMailboxMessage {
-    const binding = this.worker(token);
+    const active = resolveWorkerSession(this.db, token);
     if (kind !== 'message' && kind !== 'finish')
       throw new WorkerMailboxError(
         'invalid_request',
         'kind must be message or finish',
       );
-    return this.insert(
-      binding.sessionId,
-      'worker_to_dispatcher',
-      kind,
-      messageKey(keyValue),
-      binding.worker,
-      boundedText(bodyValue, 'body', 100_000),
-    );
+    const key = messageKey(keyValue);
+    const body = boundedText(bodyValue, 'body', 100_000);
+    const retry =
+      !active && kind === 'finish'
+        ? this.terminalFinishRetry(token, key, body)
+        : null;
+    const binding = active ?? retry?.binding;
+    if (!binding)
+      throw new WorkerMailboxError(
+        'unauthorized',
+        'worker session is unavailable',
+      );
+    const message =
+      retry?.message ??
+      (kind === 'finish'
+        ? this.insertFinish(binding, key, body)
+        : this.insert(
+            binding.sessionId,
+            'worker_to_dispatcher',
+            kind,
+            key,
+            binding.worker,
+            body,
+          ));
+    if (kind === 'finish') {
+      const event = { sessionId: message.sessionId, messageId: message.id };
+      for (const listener of [...this.finishListeners]) {
+        try {
+          listener(event);
+        } catch {
+          /* observation cannot invalidate a committed finish receipt */
+        }
+      }
+    }
+    return message;
+  }
+
+  finishFromWorker(sessionId: string): WorkerMailboxMessage | null {
+    const binding = this.dispatcherSession(sessionId, false);
+    const row = this.db
+      .prepare(
+        `SELECT * FROM worker_mailbox_messages
+         WHERE session_id = ? AND direction = 'worker_to_dispatcher' AND kind = 'finish'`,
+      )
+      .get(binding.sessionId) as Record<string, unknown> | undefined;
+    return row ? rowMessage(row) : null;
   }
 
   pullFromWorker(sessionId: string, limit = 32): WorkerMailboxMessage[] {
