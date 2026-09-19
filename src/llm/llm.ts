@@ -267,7 +267,7 @@ export function extractCacheTokens(usage: unknown): number | undefined {
     : undefined;
 }
 
-/** Wraps an LLM failure that may succeed on retry (network, 429, 5xx). */
+/** Wraps an LLM failure that may succeed on retry (network, transient 429, 5xx). */
 export class RetriableError extends Error {
   constructor(public readonly cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
@@ -283,6 +283,49 @@ export class NonRetriableError extends Error {
   }
 }
 
+/** A provider plan or quota boundary that cannot recover within this turn. */
+export class UsageLimitError extends NonRetriableError {
+  constructor(cause: unknown) {
+    super(cause);
+    this.name = 'UsageLimitError';
+  }
+}
+
+const TERMINAL_LIMIT_CODES = new Set([
+  'billing_hard_limit_reached',
+  'insufficient_quota',
+  'plan_limit_reached',
+  'usage_limit_exceeded',
+  'usage_limit_reached',
+]);
+
+export function isUsageLimitCode(code: string | undefined): boolean {
+  return code !== undefined && TERMINAL_LIMIT_CODES.has(code.toLowerCase());
+}
+
+const TERMINAL_LIMIT_MESSAGE_PATTERNS = [
+  /\b(?:plan|quota|usage)(?:[- ](?:limit|window))? (?:has been |is )?(?:reached|hit|exhausted|exceeded)\b/i,
+  /\byou(?: have|'ve)? (?:reached|hit|exhausted|exceeded) (?:your|the) (?:plan|quota|usage)(?:[- ](?:limit|window))?\b/i,
+  /\b(?:plan|quota|usage)(?:[- ](?:limit|window))? (?:will )?resets? (?:at|on|in)\b/i,
+  /\bexceeded (?:your|the) current quota\b/i,
+];
+
+function isTerminalUsageLimit(
+  error: object,
+  status: number | undefined,
+  code: string | undefined,
+): boolean {
+  if (status !== 429) return false;
+  if (isUsageLimitCode(code)) return true;
+  const message =
+    'message' in error && typeof error.message === 'string'
+      ? error.message
+      : '';
+  return TERMINAL_LIMIT_MESSAGE_PATTERNS.some((pattern) =>
+    pattern.test(message),
+  );
+}
+
 /** Classify a provider error into Retriable/NonRetriable. Exported for the
  * Responses path (responses.ts), which shares the retry contract. */
 export function classifyError(e: unknown): RetriableError | NonRetriableError {
@@ -292,6 +335,9 @@ export function classifyError(e: unknown): RetriableError | NonRetriableError {
       'status' in e && typeof e.status === 'number' ? e.status : undefined;
     const code = 'code' in e && typeof e.code === 'string' ? e.code : undefined;
     const name = 'name' in e && typeof e.name === 'string' ? e.name : '';
+    if (isTerminalUsageLimit(e, status, code)) {
+      return new UsageLimitError(e);
+    }
     if (
       status === 400 ||
       status === 401 ||

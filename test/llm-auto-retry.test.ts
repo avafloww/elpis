@@ -238,6 +238,42 @@ test('auto-retry: retries exhausted — error surfaced once, user message kept i
   agent.stop();
 });
 
+test('auto-retry: usage-limit exhaustion stops after one call and preserves input', async () => {
+  const llm = flakyLLM(0, [emptyEnd]);
+  let calls = 0;
+  llm.complete = async () => {
+    calls++;
+    throw classifyError(
+      Object.assign(new Error('429 The usage limit has been reached'), {
+        status: 429,
+      }),
+    );
+  };
+  const { agent, sent } = buildAgentWith(llm);
+  agent.llmRetryDelays = [1, 1];
+  const running = agent.loop();
+  try {
+    agent.enqueue(userMsg());
+    for (let i = 0; i < 100 && sent.length === 0; i++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+    assert.equal(calls, 1, 'a plan limit is not retried in-loop');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text, /provider usage limit reached/);
+    assert.doesNotMatch(sent[0].text, /transient|corrupted|\/clear/);
+    assert.equal(
+      agent.messagesForTest.filter(
+        (m) => m.role === 'user' && m.personContext?.kind === 'inbound',
+      ).length,
+      1,
+      'the blocked input remains available for a later explicit retry',
+    );
+  } finally {
+    agent.stop();
+    await running;
+  }
+});
+
 test('policy denials stop retries and preserve inputs across repeated turns', async () => {
   const llm = flakyLLM(0, [emptyEnd]);
   let calls = 0;

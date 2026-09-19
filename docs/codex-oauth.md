@@ -38,6 +38,9 @@ The adapter:
 - enforces configured stream-idle and total-call timeouts in standalone lanes,
   including memory consolidation, so a stalled provider cannot hold boot indefinitely;
 - refreshes once after an authentication failure;
+- stops the current turn without automatic retries when a 429 explicitly reports
+  an exhausted plan, quota, or usage window, while preserving the blocked input
+  for a later explicit retry; ordinary transient rate-limit 429s remain retriable;
 - records policy denials only when both denial text and an error-shaped SSE envelope are present.
 
 GPT-5.6 and GPT-6 Astra use Responses Lite request shaping, including tool

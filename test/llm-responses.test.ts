@@ -23,11 +23,13 @@ import {
 } from '../src/llm/responses.js';
 import {
   createLLM,
+  classifyError,
   prepareForApi,
   sentChars,
   computeCharsSent,
   reasoningItemChars,
   NonRetriableError,
+  UsageLimitError,
   SKILL_TOOL,
   type ChatMessage,
 } from '../src/llm/llm.js';
@@ -404,6 +406,16 @@ test('failureToError: transient codes stay retriable', () => {
     429,
   );
   assert.equal((failureToError(undefined) as any).status, 400);
+});
+
+test('failureToError: usage-limit codes reach specialized terminal handling', () => {
+  const error = failureToError({
+    code: 'usage_limit_reached',
+    message: 'The usage limit has been reached',
+  }) as Error & { code: string; status: number };
+  assert.equal(error.status, 429);
+  assert.equal(error.code, 'usage_limit_reached');
+  assert.ok(classifyError(error) instanceof UsageLimitError);
 });
 
 // ─── unsupported detection ───────────────────────────────────────────────────

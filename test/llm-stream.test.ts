@@ -14,6 +14,7 @@ import {
   streamComplete,
   RetriableError,
   NonRetriableError,
+  UsageLimitError,
 } from '../src/llm/llm.js';
 import type { Config } from '../src/config.js';
 
@@ -142,6 +143,22 @@ test('streamComplete: a 429 throw is classified RetriableError', async () => {
         { role: 'user', content: 'hi' },
       ]),
     (e: unknown) => e instanceof RetriableError,
+  );
+});
+
+test('streamComplete: an exhausted subscription 429 is non-retriable', async () => {
+  const client = mockClient({
+    throwValue: {
+      status: 429,
+      message: '429 The usage limit has been reached',
+    },
+  });
+  await assert.rejects(
+    () =>
+      streamComplete(client, stubConfig(os.tmpdir()), [
+        { role: 'user', content: 'hi' },
+      ]),
+    (e: unknown) => e instanceof UsageLimitError,
   );
 });
 

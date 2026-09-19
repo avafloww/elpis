@@ -52,6 +52,7 @@ import {
   RetriableError,
   classifyError,
   computeCharsSent,
+  isUsageLimitCode,
   prepareForApi,
   sanitizeAssistantMessage,
   type ChatMessage,
@@ -372,10 +373,10 @@ export function isResponsesUnsupported(e: unknown): boolean {
  * has no `status`, so unhandled it would (a) render operator-facing as
  * `[object Object]` and (b) default to retriable — turning a terminal verdict
  * like `context_length_exceeded` into an endless retry-with-backoff loop that
- * never reaches the documented non-retriable surfacing. Only genuinely
- * transient codes stay retriable (a synthetic 5xx/429 status); everything
- * else gets a synthetic 400 → NonRetriableError, matching the chat path where
- * the SDK error carries a real status. Exported for unit tests. */
+ * never reaches the documented non-retriable surfacing. Transient codes use a
+ * synthetic 5xx/429 status, known plan/quota codes use the terminal 429 path,
+ * and everything else gets a synthetic 400 → NonRetriableError, matching the
+ * chat path where the SDK error carries a real status. Exported for unit tests. */
 export function failureToError(error: unknown): Error {
   const e = (
     typeof error === 'object' && error !== null ? error : {}
@@ -386,7 +387,11 @@ export function failureToError(error: unknown): Error {
       ? e.message
       : 'responses stream reported failure';
   const status =
-    code === 'rate_limit_exceeded' ? 429 : code === 'server_error' ? 503 : 400;
+    code === 'rate_limit_exceeded' || isUsageLimitCode(code)
+      ? 429
+      : code === 'server_error'
+        ? 503
+        : 400;
   return Object.assign(
     new Error(`responses stream failed (${code}): ${message}`),
     {

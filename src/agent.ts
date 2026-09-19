@@ -43,6 +43,7 @@ import type { LLM, ChatMessage, LLMUsage } from './llm/llm.js';
 import type OpenAI from 'openai';
 import {
   RetriableError,
+  UsageLimitError,
   prepareForApi,
   toApiMessage,
   activeModelTools,
@@ -2678,6 +2679,15 @@ export class Agent {
             this.consecutive400 = 0;
             await this.sendError(
               `(provider policy denial; automatic retries stopped and history preserved: ${e instanceof Error ? e.message : String(e)})`,
+            );
+            this.hasNewInput = false;
+            this.finishTurn();
+            continue turn;
+          }
+          if (e instanceof UsageLimitError) {
+            this.consecutive400 = 0;
+            await this.sendError(
+              `(provider usage limit reached; automatic retries stopped and history preserved: ${e.message})`,
             );
             this.hasNewInput = false;
             this.finishTurn();
