@@ -2465,6 +2465,7 @@ export function createDiscord(
     text: string,
     opts?: import('../types.js').OutboundSendOptions,
     authorization?: import('../types.js').OutboundSendAuthorization,
+    purpose?: import('../types.js').OutboundSendPurpose,
   ) => {
     validateReplyTo(opts?.replyTo);
     validateMentionNotifications(opts?.mentions);
@@ -2637,7 +2638,7 @@ export function createDiscord(
     }
     // All readable chunks and captured speech complete before optional controls.
     // A reaction-side authority or mute change cannot abort either delivery.
-    if (feedbackReactions) {
+    if (feedbackReactions && purpose?.kind !== 'error-notice') {
       for (const sent of deliveredMessages) {
         for (const emoji of ['👍', '👎'] as const) {
           try {

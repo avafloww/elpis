@@ -63,6 +63,12 @@ export interface OutboundSendOptions {
   mentions?: boolean;
 }
 
+/** Harness-only delivery purpose. Never exposed through OutboundSendOptions or
+ * the sandbox API, so resident-authored speech cannot impersonate an error notice. */
+export interface OutboundSendPurpose {
+  kind: 'error-notice';
+}
+
 /** Harness-internal proof that every effect in the current addressed mentions-tier
  * turn is confined to this exact channel. Never exposed through
  * OutboundSendOptions or the sandbox API. */

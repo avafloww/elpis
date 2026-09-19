@@ -714,6 +714,7 @@ export interface AgentDeps {
     text: string,
     opts?: import('./types.js').OutboundSendOptions,
     authorization?: import('./types.js').OutboundSendAuthorization,
+    purpose?: import('./types.js').OutboundSendPurpose,
   ) => Promise<void | import('./types.js').OutboundDelivery>;
   /** Called when the agent is about to make an LLM call (typing indicator). */
   onThinking?: (
@@ -2313,7 +2314,9 @@ export class Agent {
       return;
     }
     try {
-      await this.deps.send(ch, text, undefined, authorization);
+      await this.deps.send(ch, text, undefined, authorization, {
+        kind: 'error-notice',
+      });
     } catch {
       /* ignore */
     }

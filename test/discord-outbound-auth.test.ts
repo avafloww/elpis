@@ -175,6 +175,64 @@ test('Discord adds feedback controls after completed text and voice delivery', a
   }
 });
 
+test('Discord error notices never receive feedback controls', async () => {
+  const feedbackGuild = {
+    ...guild,
+    feedbackReactions: true,
+  } satisfies GuildConfig;
+  const fixture = buildTestAgent({
+    config: {
+      discord: {
+        ...makeConfig().discord,
+        guilds: [feedbackGuild],
+        errorChannelId: '1002',
+      },
+    },
+    tmpPrefix: 'harness-discord-error-feedback-',
+  });
+  const { client } = createDiscord(fixture.config, fixture.agent);
+  const texts: string[] = [];
+  const reactions: Array<{ message: number; emoji: string }> = [];
+  Object.defineProperty(client.channels, 'fetch', {
+    configurable: true,
+    value: async () => ({
+      ...fetchedChannel('g1', () => {}),
+      send: async (payload: { content: string }) => {
+        const message = texts.length;
+        texts.push(payload.content);
+        return {
+          react: async (emoji: string) => {
+            reactions.push({ message, emoji });
+          },
+        };
+      },
+    }),
+  });
+
+  try {
+    await fixture.agent.send(
+      '1002',
+      '(internal error: resident-authored text)',
+    );
+    await (
+      fixture.agent as unknown as { sendError(text: string): Promise<void> }
+    ).sendError('(internal error: harness notice)');
+
+    assert.deepEqual(texts, [
+      '(internal error: resident-authored text)',
+      '(internal error: harness notice)',
+    ]);
+    assert.deepEqual(reactions, [
+      { message: 0, emoji: '👍' },
+      { message: 0, emoji: '👎' },
+    ]);
+  } finally {
+    fixture.agent.stop();
+    client.destroy();
+    fixture.cleanup();
+  }
+});
+
 test('Discord feedback reactions stop after mentions authority expires without failing sent text', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const config = makeConfig();
