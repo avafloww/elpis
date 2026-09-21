@@ -66,6 +66,15 @@ test('active motor docs expose only the resident-selectable motor-skill catalog'
   assert.doesNotMatch(p, /SUPER SECRET MOTOR BODY/);
 });
 
+test('active computer docs expose exact-window lifecycle cleanup', () => {
+  const p = prompt(
+    makeConfig({
+      modules: { enabled: ['computer'], disabled: [] },
+    }),
+  );
+  assert.match(p, /closeWindow\(id\).*exact-window lifecycle cleanup/);
+});
+
 test('bare LLM docs appear only for an opted-in sanitized model catalog', () => {
   const absent = prompt(makeConfig());
   assert.doesNotMatch(absent, /### `elpis\.llm`/);
