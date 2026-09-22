@@ -140,6 +140,7 @@ test('Codex model discovery uses authenticated primary route and reported window
   const config = codexConfig();
   assert.equal(await fetchCodexContextWindow(config, store, fetchFn), 300000);
   assert.match(requested, /\/backend-api\/codex\/models\?client_version=/);
+  assert.equal(new URL(requested).searchParams.get('client_version'), '0.156.0');
   assert.equal(headers.get('authorization'), 'Bearer access-1');
   assert.equal(headers.get('chatgpt-account-id'), 'acct-1');
 });

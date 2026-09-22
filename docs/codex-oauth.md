@@ -45,7 +45,7 @@ The adapter:
 
 GPT-5.6 and GPT-6 Astra use Responses Lite request shaping, including tool
 attachments and the matching transport header. The adapter advertises Codex
-client compatibility version `0.153.3`; older versions can receive HTTP 400
+client compatibility version `0.156.0`; older versions can receive HTTP 400
 with a “requires a newer version of Codex” error even when the subscription
 has model access.
 
