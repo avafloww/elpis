@@ -280,6 +280,31 @@ test('computer look captures a screenshot and queues multimodal delivery', async
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('computer step rejects bad settle delays before dispatching keys', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-computer-test-'));
+  const calls: string[] = [];
+  const computer: any = createComputerTools({
+    computerDir: dir,
+    run: async (command) => {
+      calls.push(command);
+      return { stdout: '', stderr: '', code: 0, signal: null };
+    },
+  });
+  try {
+    await assert.rejects(
+      computer.step('Up', 10, 'bad settle', { settleMs: -1 }),
+      /settleMs must be >= 0/,
+    );
+    await assert.rejects(
+      computer.step('Up', 10, 'bad settle', { settleMs: 5001 }),
+      /settleMs must be <= 5000/,
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('computer commands fail loudly with bounded process errors', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elpis-computer-test-'));
   const computer: any = createComputerTools({

@@ -113,6 +113,8 @@ Every resident sandbox run captures one opaque outbound origin before executing:
 
 Browser profiles, screenshots, Xauthority, motor traces, and desktop runtime state live under the private data directory. They must never be committed with source.
 
+Direct `elpis.computer.step` validates `settleMs` before issuing its key hold. Invalid delays therefore reject without a desktop command; failures after a hold is issued still require observation rather than automatic replay.
+
 ### Discord person notification settings
 
 `elpis.personSettings.discord.get(guildId, userId)` reads the typed, persistent

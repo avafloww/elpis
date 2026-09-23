@@ -627,10 +627,10 @@ export function createComputerTools(
         settleMs?: number;
       } = {},
     ) => {
-      const action = await hold(keysValue, durationValue, opts);
       const settleMs = finiteInt(opts.settleMs ?? 100, 'settleMs', 0);
       if (settleMs > 5000)
         throw new Error('elpis.computer.step: settleMs must be <= 5000');
+      const action = await hold(keysValue, durationValue, opts);
       if (settleMs > 0)
         await new Promise<void>((resolve) => setTimeout(resolve, settleMs));
       const observation = await look(note, opts);
