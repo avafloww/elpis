@@ -75,9 +75,14 @@ import { replayIdentityForConfig } from './llm/provenance.js';
 import {
   Agent,
   computeEffectiveTrigger,
+  type AgentDeps,
   type InboundMessage,
 } from './agent.js';
 import { createDiscord } from './discord/discord.js';
+import {
+  createSignalTransport,
+  type SignalTransport,
+} from './signal/signal.js';
 import { createEmoteRegistry } from './discord/emotes.js';
 import {
   CONSOLE_CHANNEL_ID,
@@ -149,6 +154,7 @@ export interface ElpisRuntimeAdapters {
   fetchContextWindow?: typeof fetchContextWindow;
   createLLM?: typeof createLLM;
   createDiscord?: typeof createDiscord;
+  createSignalTransport?: typeof createSignalTransport;
   createSandbox?: typeof createSandbox;
   loadExtensions?: typeof loadExtensions;
   resolveBuildIdentity?: typeof resolveBuildIdentity;
@@ -158,10 +164,28 @@ export interface ElpisRuntimeAdapters {
   createGatewayLinkController?: GatewayLinkControllerFactory;
 }
 
+export function createOutboundTransportRouter(
+  discordSend: ReturnType<typeof createDiscord>['send'],
+  signal: SignalTransport | null,
+): AgentDeps['send'] {
+  return (channelId, content, opts, authorization, purpose) => {
+    if (signal?.owns(channelId)) {
+      if (authorization !== undefined) {
+        throw new Error(
+          'Discord mentions-turn authorization cannot be used for Signal delivery',
+        );
+      }
+      return signal.send(channelId, content, opts);
+    }
+    return discordSend(channelId, content, opts, authorization, purpose);
+  };
+}
+
 export interface ElpisRuntime {
   config: MaterializedConfig;
   agent: Agent;
   discord: ReturnType<typeof createDiscord>;
+  signal: SignalTransport | null;
   scheduler: Scheduler;
   mind: MindService;
   extensions: Awaited<ReturnType<typeof loadExtensions>>;
@@ -814,7 +838,22 @@ export async function createElpisRuntime(
   // ingest path, without also calling this, must not pick up a live repeating
   // setInterval it never tears down.
   agent.setTyping(discord.typing, discord.stopTyping);
-  await discord.start();
+  const signal = (adapters.createSignalTransport ?? createSignalTransport)(
+    config.signal,
+    {
+      enqueue: (message) => agent.enqueue(message),
+      isMuted: (channelId) => mutes.get(channelId) !== null,
+      diagnostic: (event) => config.logger.warn(`Signal transport: ${event}`),
+    },
+  );
+  agent.setSend(createOutboundTransportRouter(discord.send, signal));
+  try {
+    await signal?.start();
+    await discord.start();
+  } catch (error) {
+    await signal?.stop().catch(() => {});
+    throw error;
+  }
   const botTag = discord.client.user?.tag ?? 'unknown';
   log(
     `bot online: ${botTag} | guilds: ${config.discord.guilds.map((g) => `${g.slug}(${Object.keys(g.channels).length}ch)`).join(', ')} | ctx: ${maxContextTokens}`,
@@ -1007,7 +1046,10 @@ export async function createElpisRuntime(
   // exit. The loop blocks on a wake promise so there's no in-flight sync work to
   // interrupt; async LLM calls in flight are abandoned (the transcript already
   // captured every pushed message).
-  const shutdown = (sig: string) => {
+  let shuttingDown = false;
+  const shutdown = async (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log(`received ${sig} — flushing transcripts and shutting down`);
     stopGatewayControlPlane(gatewayRotation, gatewayEnrollment, gatewayLink);
     try {
@@ -1044,6 +1086,11 @@ export async function createElpisRuntime(
       log('shutdown Discord cleanup failed'),
     );
     try {
+      await signal?.stop();
+    } catch {
+      log('shutdown Signal cleanup failed');
+    }
+    try {
       agent.flushTranscripts();
     } catch (e) {
       config.logger.warn(
@@ -1052,8 +1099,8 @@ export async function createElpisRuntime(
     }
     process.exit(0);
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
   // Process-level crash guards (a): an unhandled rejection or
   // uncaught exception used to bring the whole process down with no notice
@@ -1081,6 +1128,7 @@ export async function createElpisRuntime(
     config,
     agent,
     discord,
+    signal,
     scheduler,
     mind,
     extensions,

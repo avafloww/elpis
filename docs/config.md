@@ -93,6 +93,16 @@ Managed generation uses the catalog-selected provider grammar while keeping resi
 
 The inhabitant's name does **not** come from this section. It comes from `SOUL.md` frontmatter.
 
+## `signal`
+
+Signal is an optional additive transport backed by one directly supervised `signal-cli` `jsonRpc` child. It is disabled by default; disabled mode starts no process and requires no executable, account, data directory, or contacts.
+
+Enabled mode requires absolute `executable` and `data_dir` paths, the lowercase ACI UUID of one already-linked local account, an exact tested `expected_version`, and at least one exact contact. Contact aliases become the only resident-facing targets (`signal:<alias>`). Each contact has an exact ACI, optional `display_name`, and independent `receive` and `allow_send` booleans; both permissions default to `false`. There is no wildcard sender, profile-name match, username lookup, group route, registration field, recovery-key field, or linking API in this configuration.
+
+The first transport increment is direct-message text only. Unknown senders and unsupported Signal event kinds are rejected before their text enters Agent history. The account database belongs in a private mode-`0700` directory and must never be committed.
+
+Signal end-to-end encryption terminates at the Elpis host. Accepted Signal text then enters the same ordered resident history and configured model request path as other conversation. Selecting Signal as a transport does **not** create a local-only model lane or prevent disclosure to the configured LLM provider.
+
 ## `discord`
 
 `discord.bot_token` is required. `discord.guilds` is exhaustive for guilds: an unlisted guild is never ingested. Each listed guild has a receive default and optional channel overrides.

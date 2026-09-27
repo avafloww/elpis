@@ -308,6 +308,13 @@ export function chunkText(text: string, max = CHUNK_MAX): string[] {
 export interface DiscordWiring {
   client: Client;
   start(): Promise<void>;
+  send(
+    channelId: string,
+    text: string,
+    opts?: import('../types.js').OutboundSendOptions,
+    authorization?: import('../types.js').OutboundSendAuthorization,
+    purpose?: import('../types.js').OutboundSendPurpose,
+  ): Promise<void | import('../types.js').OutboundDelivery>;
   /** Start (or restart) the repeating "<agent> is typing…" indicator for a
    * channel — the Agent's onThinking hook (via agent.setTyping) and the
    * sandbox's channel(id).typing both drive this. See the TEMPORARY BODGE
@@ -2661,6 +2668,7 @@ export function createDiscord(
 
   return {
     client,
+    send,
     async start(): Promise<void> {
       await client.login(config.discord.botToken);
       await registerSlashCommands(config);

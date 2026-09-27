@@ -12,8 +12,11 @@ export function parseSpeechHeader(
   if (typeof content !== 'string') return null;
   const match =
     /^\[send to=([^\s\[\]]+)(?: replyTo=([0-9]{1,20}))?\]\r?\n/u.exec(content);
-  if (!match || !/^[a-z0-9][a-z0-9-]*\/[^/\s\[\]]+$/u.test(match[1]))
-    return null;
+  if (!match) return null;
+  const target = match[1];
+  const discordTarget = /^[a-z0-9][a-z0-9-]*\/[^/\s\[\]]+$/u.test(target);
+  const signalTarget = /^signal:[a-z0-9][a-z0-9-]*$/u.test(target);
+  if (!discordTarget && !signalTarget) return null;
   const text = content.slice(match[0].length);
   if (!text.trim()) return null;
   return {

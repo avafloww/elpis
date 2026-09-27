@@ -101,6 +101,15 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
       ),
     },
     operator: { name: 'operator', pronouns: null, discordId: null },
+    signal: {
+      enabled: false,
+      executable: null,
+      dataDir: null,
+      account: null,
+      expectedVersion: null,
+      requestTimeoutMs: 15000,
+      contacts: {},
+    },
     discord: {
       botToken: 'stub',
       applicationId: 'stub',

@@ -87,7 +87,7 @@ import {
   type ContextResourceDescriptor,
 } from '../context-resources.js';
 import { isPolicyDenial } from './policy-flight-recorder.js';
-import type { VoiceDelivery } from '../types.js';
+import type { SignalDelivery, VoiceDelivery } from '../types.js';
 
 export type { GenerationProvenance } from './provenance.js';
 
@@ -187,6 +187,7 @@ export interface ChatMessage {
     replyTo?: string;
     mentions?: boolean;
     voice?: VoiceDelivery;
+    signal?: SignalDelivery;
   }[];
   /** Out-of-band generation attribution. Persisted for forensic/data use, but
    * deliberately ignored by every provider request translator. */

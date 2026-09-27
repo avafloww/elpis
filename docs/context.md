@@ -23,7 +23,7 @@ These layers deliberately have different refresh and cache behavior. Dynamic car
 
 ## Inbound envelopes
 
-Discord messages are serialized into `<incoming-message>` envelopes. Envelopes carry channel and author metadata without asking the model to infer it from prose. Attachments are either represented by metadata, inlined when small and textual, or passed as multimodal parts when supported.
+External person messages are serialized into `<incoming-message>` envelopes. Envelopes carry channel, author, and transport provenance without asking the model to infer it from prose. Discord attachments are represented by metadata, inlined when small and textual, or passed as multimodal parts when supported. Signal v1 admits configured direct-contact text only and adds `transport="signal"`; unsupported event kinds are rejected before Agent history.
 
 Console messages carry console provenance. Scheduler, heartbeat, watch, and harness notices are marked synthetic. Worker progress crosses the durable mailbox rather than resident conversation ingress.
 
@@ -38,7 +38,7 @@ Ordinary text may use an exact leading header, followed by a newline and the mes
 Hello.
 ```
 
-`replyTo` is optional. The target is always guild-qualified; the whole body is outward speech, not a mixture of speech and private commentary. Programmatic channel sends remain available for attachments and other scripted work.
+Discord targets are guild-qualified and may use optional `replyTo`. Configured Signal contacts use `signal:<alias>`, never a raw ACI, and are text-only without reply metadata. The whole body is outward speech, not a mixture of speech and private commentary. Programmatic channel sends remain available for transport-supported scripted work.
 
 Only fresh, complete, unstripped resident assistant output is eligible. The resident commits the assistant message before routing through the existing channel resolver and send checks. It appends the delivery outcome after all tool results; a failed send does not strand the tool batch. A header does not yield: the final successful wake-bearing `run` still controls that transition.
 
@@ -46,9 +46,9 @@ Restored history, inbound text, and tool results are never replayed as sends. A 
 
 ## Direct-channel action acknowledgements
 
-When the Discord message that owns a turn's wake comes from a sendable `direct`-tier channel, Elpis appends a request-only `<direct-channel-action-acknowledgement>` card immediately before the current inbound batch. If the resident decides to act because the person asked, the card requires the first assistant response to be a brief speech-header acknowledgement before the first tool call. It does not force action or speech for an ordinary answer, refusal, silence, or a request the resident declines to perform.
+When the message that owns a turn's wake comes from a sendable Discord `direct`-tier channel or a configured send-enabled Signal contact, Elpis appends a request-only `<direct-channel-action-acknowledgement>` card immediately before the current inbound batch. If the resident decides to act because the person asked, the card requires the first assistant response to be a brief speech-header acknowledgement before the first tool call. It does not force action or speech for an ordinary answer, refusal, silence, or a request the resident declines to perform.
 
-The card derives the tier from the resolved channel policy, including a thread's configured parent, while its header example targets the actual channel or thread and includes the Discord reply ID when valid. Send-denied channels receive no impossible instruction. The frozen first request retains the card across transport retries; post-tool continuations and later outer turns omit it. Social and quiet rooms, ambient context, console input, and autonomous or harness wakes never receive it.
+For Discord, the card derives the tier from resolved channel policy, including a thread's configured parent, and includes the Discord reply ID when valid. For Signal, it derives permission from the boot-frozen contact policy, targets only `signal:<alias>`, and never includes reply metadata. Send-denied channels receive no impossible instruction. The frozen first request retains the card across transport retries; post-tool continuations and later outer turns omit it. Social and quiet rooms, ambient context, console input, and autonomous or harness wakes never receive it.
 
 ## Request projection
 

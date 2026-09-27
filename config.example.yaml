@@ -138,6 +138,28 @@ operator:
   pronouns: null # Optional free-text identity metadata
   discord_id: null # Discord user id authorized for slash commands
 
+# Optional direct Signal transport through one harness-supervised signal-cli
+# `jsonRpc` child. Disabled mode spawns nothing and requires no account fields.
+# When enabled, Signal encryption ends at this host; message text then follows
+# the configured Elpis model path and is not automatically local-only.
+signal:
+  enabled: false
+  executable: null # absolute signal-cli path; required when enabled
+  data_dir: null # absolute private signal-cli account directory
+  account: null # lowercase ACI UUID for an already-linked local account
+  expected_version: null # exact tested signal-cli semver; required when enabled
+  request_timeout_ms: 15000
+  # Exact aliases are the only model-addressable recipients: signal:<alias>.
+  # Unknown senders are dropped before their text enters Agent history.
+  contacts: {}
+  # Example enabled contact (both directions default deny when omitted):
+  # contacts:
+  #   bramble:
+  #     aci: "00000000-0000-4000-8000-000000000002"
+  #     display_name: Bramble
+  #     receive: true
+  #     allow_send: false
+
 discord:
   bot_token: ... # REQUIRED
   # Bot application id for slash-command registration. Omit to derive it from

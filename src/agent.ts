@@ -658,7 +658,16 @@ export interface InboundMessage {
   /** Provenance discriminator the drain loop routes on instead of display names.
    * Absent means a real Discord message. Scheduler notices retain the legacy
    * real-user branch; heartbeat/harness/worker/watch are internal, and watch frames are ephemeral. */
-  kind?: 'discord' | 'scheduler' | 'heartbeat' | 'harness' | 'worker' | 'watch';
+  kind?:
+    | 'discord'
+    | 'signal'
+    | 'scheduler'
+    | 'heartbeat'
+    | 'harness'
+    | 'worker'
+    | 'watch';
+  /** External transport provenance when the message is not Discord. */
+  transport?: 'signal';
 }
 
 export interface AgentDeps {
@@ -1238,6 +1247,35 @@ export class Agent {
     if (!this.deps.send) {
       throw new Error('no send handler wired');
     }
+    const signalContact = this.signalContactForRoom(channelId);
+    if (signalContact) {
+      if (!signalContact.allowSend) {
+        throw new Error(
+          `sending to signal:${signalContact.alias} is disabled by configuration (allow_send=false)`,
+        );
+      }
+      if (
+        opts?.replyTo !== undefined ||
+        opts?.mentions !== undefined ||
+        (opts?.files?.length ?? 0) > 0
+      ) {
+        throw new Error(
+          'Signal transport is text-only; reply, mention, and file options are unsupported',
+        );
+      }
+      const muteRow = this.deps.mutes?.get(channelId);
+      if (muteRow) {
+        const state = muteRow.type === 'deafen' ? 'deafened' : 'muted';
+        throw new Error(
+          `channel signal:${signalContact.alias} is ${state} — release is operator-only`,
+        );
+      }
+      this.sendsThisTurn++;
+      const delivery = await this.deps.send(channelId, content, opts);
+      this.recentSends.push(content);
+      if (this.recentSends.length > 20) this.recentSends.shift();
+      return delivery;
+    }
     const configPolicy = this.policyForChannel(channelId);
     if (!configPolicy) {
       throw new Error(
@@ -1715,7 +1753,7 @@ export class Agent {
     // difference IS the thread→parent link — recorded here so send's
     // killswitch check can inherit the parent's mute row (a thread never has
     // one of its own).
-    if (msg.channelId !== INTERNAL_CHANNEL_ID) {
+    if (msg.kind !== 'signal' && msg.channelId !== INTERNAL_CHANNEL_ID) {
       const parentId =
         msg.policyChannelId && msg.policyChannelId !== msg.channelId
           ? msg.policyChannelId
@@ -2371,20 +2409,29 @@ export class Agent {
               this.guildIndex,
             );
         const isDiscord = m.kind === undefined || m.kind === 'discord';
+        const isSignal = m.kind === 'signal';
+        const signalContact = isSignal
+          ? this.signalContactForRoom(m.channelId)
+          : null;
         const mentionsTurnAllowed =
           isDiscord &&
           m.wakeClass !== 'ambient' &&
           sendPolicy?.tier === 'mentions' &&
           sendPolicy.sendDeniedBy === 'default';
-        const replyNotice =
-          !isDiscord || drainMute
-            ? null
-            : sendPolicy && !sendPolicy.allowSend && !mentionsTurnAllowed
-              ? ('config-denied' as const)
-              : m.wakeClass === 'ambient' &&
-                  !this.config.discord.ambientAllowSend
-                ? ('ambient-denied' as const)
-                : ('send' as const);
+        const replyNotice = drainMute
+          ? null
+          : isSignal
+            ? signalContact?.allowSend
+              ? ('send' as const)
+              : ('config-denied' as const)
+            : !isDiscord
+              ? null
+              : sendPolicy && !sendPolicy.allowSend && !mentionsTurnAllowed
+                ? ('config-denied' as const)
+                : m.wakeClass === 'ambient' &&
+                    !this.config.discord.ambientAllowSend
+                  ? ('ambient-denied' as const)
+                  : ('send' as const);
         const content = formatInboundEnvelope(m, marker, replyNotice);
         const contentText = muteAnnotation(
           content,
@@ -2422,7 +2469,7 @@ export class Agent {
         const isAmbient = m.wakeClass === 'ambient';
         if (m.sendScope === 'observe_only') this.observeOnlyInputTurn = true;
         if (isDiscord && !isAmbient) this.discordPersonInputTurn = true;
-        if ((m.kind ?? 'discord') === 'discord') this.personInputTurn = true;
+        if (isDiscord || isSignal) this.personInputTurn = true;
         if (isInternal) {
           this.logger.info('[agent] internal/harness turn start');
           if (!this.realUserTurn) this.sendsThisTurn = 0;
@@ -2461,7 +2508,8 @@ export class Agent {
             this.turnChannel = m.channelId;
             this.lastInbound = m;
             this.directActionReply =
-              replyNotice === 'send' && sendPolicy?.tier === 'direct'
+              replyNotice === 'send' &&
+              (isSignal || sendPolicy?.tier === 'direct')
                 ? {
                     channelId: m.channelId,
                     messageId: /^\d{1,20}$/.test(m.id) ? m.id : null,
@@ -3099,14 +3147,19 @@ export class Agent {
               const delivery = await this.send(target, header.text, {
                 ...(header.replyTo ? { replyTo: header.replyTo } : {}),
               });
+              const label = this.qualifiedChannelLabel(target);
+              const deliveryText = delivery?.signal
+                ? `[harness: header message accepted by signal-cli for ${label}; delivery and read are not confirmed. This is an acceptance receipt, not a request to send again.]`
+                : `[harness: header message delivered to ${label}. This is a delivery receipt, not a request to send again.]`;
               headerOutcome.receipt = {
                 role: 'user',
-                content: `[harness: header message delivered to ${this.qualifiedChannelLabel(target)}. This is a delivery receipt, not a request to send again.]${delivery ? `\nVoice playback receipt: ${JSON.stringify(delivery.voice)}` : ''}`,
+                content: `${deliveryText}${delivery?.voice ? `\nVoice playback receipt: ${JSON.stringify(delivery.voice)}` : ''}`,
                 sends: [
                   {
                     channel: target,
                     text: header.text,
-                    ...(delivery ? { voice: delivery.voice } : {}),
+                    ...(delivery?.voice ? { voice: delivery.voice } : {}),
+                    ...(delivery?.signal ? { signal: delivery.signal } : {}),
                     ...(header.replyTo ? { replyTo: header.replyTo } : {}),
                   },
                 ],
@@ -3590,22 +3643,25 @@ export class Agent {
   knownChannelIds(): string[] {
     return [
       CONSOLE_CHANNEL_ID,
+      ...this.signalContacts().map((contact) => this.signalRoomId(contact.aci)),
       ...(this.deps.channels?.all() ?? []).map((e) => e.id),
     ];
   }
 
-  /** `name` is the guild-qualified label ('friends-a/lounge'), not the raw
-   * channel name — this is what the model should type back into channel. */
+  /** `name` is the transport-qualified label the model should type back into channel. */
   knownChannels(): { id: string; name: string }[] {
     return [
       { id: CONSOLE_CHANNEL_ID, name: 'console' },
+      ...this.signalContacts().map((contact) => ({
+        id: this.signalRoomId(contact.aci),
+        name: `signal:${contact.alias}`,
+      })),
       ...(this.deps.channels?.all() ?? []).map((e) => ({
         id: e.id,
         name: this.qualifiedRef(e),
       })),
     ];
   }
-
   /** Record one main-loop completion's cache usage and surface a bust to the
    * console. Called from the turn loop; exposed for tests. The compactor's
    * summarizer calls deliberately never reach here — a one-shot uncached
@@ -3930,6 +3986,13 @@ Then put only the acknowledgement in that speech body; keep private reasoning ou
   resolveChannelRef(ref: string): string | null {
     const clean = ref.replace(/^#/, '');
     if (clean === CONSOLE_CHANNEL_ID) return CONSOLE_CHANNEL_ID;
+    if (clean.startsWith('signal:')) {
+      const alias = clean.slice('signal:'.length);
+      const contact = this.signalContacts().find(
+        (entry) => entry.alias === alias,
+      );
+      return contact ? this.signalRoomId(contact.aci) : null;
+    }
     // Raw-id fast path: a single-row lookup, before the full-table read the
     // name-resolution arms below need.
     if (/^\d+$/.test(clean)) {
@@ -4058,10 +4121,30 @@ Then put only the acknowledgement in that speech body; keep private reasoning ou
    * form keeps its '#' precisely because a bare name is NOT a usable ref. */
   qualifiedChannelLabel(channelId: string): string {
     if (channelId === CONSOLE_CHANNEL_ID) return 'console';
+    const signalContact = this.signalContactForRoom(channelId);
+    if (signalContact) return `signal:${signalContact.alias}`;
     const e = this.deps.channels?.entry(channelId);
     if (!e) return channelId;
     const slug = this.slugForGuildId(this.guildIdFor(e));
     return slug ? `${slug}/${e.name}` : `#${e.name}`;
+  }
+
+  private signalRoomId(aci: string): string {
+    return `signal:dm:${aci}`;
+  }
+
+  private signalContacts(): import('./config.js').SignalContactConfig[] {
+    return this.config.signal.enabled
+      ? Object.values(this.config.signal.contacts)
+      : [];
+  }
+
+  private signalContactForRoom(
+    channelId: string,
+  ): import('./config.js').SignalContactConfig | null {
+    if (!channelId.startsWith('signal:dm:')) return null;
+    const aci = channelId.slice('signal:dm:'.length);
+    return this.signalContacts().find((contact) => contact.aci === aci) ?? null;
   }
 
   private get config() {

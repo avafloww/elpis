@@ -129,6 +129,24 @@ export interface DiscordVoiceConfig {
   maxSessionMinutes: number;
 }
 
+export interface SignalContactConfig {
+  alias: string;
+  aci: string;
+  displayName: string;
+  receive: boolean;
+  allowSend: boolean;
+}
+
+export interface SignalConfig {
+  enabled: boolean;
+  executable: string | null;
+  dataDir: string | null;
+  account: string | null;
+  expectedVersion: string | null;
+  requestTimeoutMs: number;
+  contacts: Record<string, SignalContactConfig>;
+}
+
 export interface Config {
   llm: LlmConfig;
   operator: {
@@ -136,6 +154,7 @@ export interface Config {
     pronouns: string | null;
     discordId: string | null;
   };
+  signal: SignalConfig;
   discord: {
     botToken: string;
     /** Bot application id for guild slash-command registration. Falls back to
@@ -379,6 +398,157 @@ function exactMapping(
         `${file}: key \`${dotted}\` contains unknown key \`${key}\``,
       );
   return mapping;
+}
+
+const SIGNAL_ACI_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function parseSignalConfig(tree: YamlTree, file: string): SignalConfig {
+  const disabled: SignalConfig = {
+    enabled: false,
+    executable: null,
+    dataDir: null,
+    account: null,
+    expectedVersion: null,
+    requestTimeoutMs: 15000,
+    contacts: {},
+  };
+  const value = at(tree, 'signal');
+  if (value === undefined || value === null) return disabled;
+  if (typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`${file}: key \`signal\` must be a mapping or null`);
+
+  const mapping = value as YamlTree;
+  const allowed = new Set([
+    'enabled',
+    'executable',
+    'data_dir',
+    'account',
+    'expected_version',
+    'request_timeout_ms',
+    'contacts',
+  ]);
+  const unknown = Object.keys(mapping).filter((key) => !allowed.has(key));
+  if (unknown.length > 0)
+    throw new Error(`${file}: unknown Signal key(s): ${unknown.join(', ')}`);
+
+  const enabled = boolOr(tree, 'signal.enabled', false, file);
+  const executable = optStr(tree, 'signal.executable', file);
+  const dataDir = optStr(tree, 'signal.data_dir', file);
+  const account = optStr(tree, 'signal.account', file);
+  const expectedVersion = optStr(tree, 'signal.expected_version', file);
+  const requestTimeoutMs = numOr(
+    tree,
+    'signal.request_timeout_ms',
+    15000,
+    file,
+  );
+  if (executable !== null && !path.isAbsolute(executable))
+    throw new Error(`${file}: signal.executable must be an absolute path`);
+  if (dataDir !== null && !path.isAbsolute(dataDir))
+    throw new Error(`${file}: signal.data_dir must be an absolute path`);
+  if (account !== null && !SIGNAL_ACI_RE.test(account))
+    throw new Error(`${file}: signal.account must be a lowercase ACI UUID`);
+  if (expectedVersion !== null && !/^\d+\.\d+\.\d+$/.test(expectedVersion))
+    throw new Error(`${file}: signal.expected_version must be an exact semver`);
+  if (
+    !Number.isInteger(requestTimeoutMs) ||
+    requestTimeoutMs < 1000 ||
+    requestTimeoutMs > 120000
+  )
+    throw new Error(
+      `${file}: signal.request_timeout_ms must be an integer from 1000 to 120000`,
+    );
+
+  const contactsValue = mapping.contacts;
+  if (
+    contactsValue !== undefined &&
+    (contactsValue === null ||
+      typeof contactsValue !== 'object' ||
+      Array.isArray(contactsValue))
+  )
+    throw new Error(`${file}: signal.contacts must be a mapping`);
+  const contacts: Record<string, SignalContactConfig> = {};
+  const seenAcis = new Set<string>();
+  for (const [alias, rawContact] of Object.entries(
+    (contactsValue ?? {}) as YamlTree,
+  )) {
+    if (!SLUG_RE.test(alias) || /^\d+$/.test(alias))
+      throw new Error(
+        `${file}: Signal contact alias "${alias}" must match ${SLUG_RE} and not be all-digits`,
+      );
+    if (
+      rawContact === null ||
+      typeof rawContact !== 'object' ||
+      Array.isArray(rawContact)
+    )
+      throw new Error(`${file}: Signal contact '${alias}' must be a mapping`);
+    const raw = rawContact as YamlTree;
+    const contactAllowed = new Set([
+      'aci',
+      'display_name',
+      'receive',
+      'allow_send',
+    ]);
+    const contactUnknown = Object.keys(raw).filter(
+      (key) => !contactAllowed.has(key),
+    );
+    if (contactUnknown.length > 0)
+      throw new Error(
+        `${file}: Signal contact '${alias}' has unknown key(s): ${contactUnknown.join(', ')}`,
+      );
+    const aci = raw.aci;
+    if (typeof aci !== 'string' || !SIGNAL_ACI_RE.test(aci))
+      throw new Error(
+        `${file}: Signal contact '${alias}' aci must be a lowercase UUID`,
+      );
+    if (seenAcis.has(aci))
+      throw new Error(`${file}: duplicate Signal contact ACI for '${alias}'`);
+    if (account !== null && aci === account)
+      throw new Error(`${file}: Signal contact '${alias}' cannot be the local account`);
+    const displayName = raw.display_name ?? alias;
+    if (typeof displayName !== 'string' || displayName.trim().length === 0)
+      throw new Error(
+        `${file}: Signal contact '${alias}' display_name must be a non-empty string`,
+      );
+    for (const key of ['receive', 'allow_send'] as const) {
+      const current = raw[key];
+      if (current !== undefined && typeof current !== 'boolean')
+        throw new Error(
+          `${file}: Signal contact '${alias}' ${key} must be true or false`,
+        );
+    }
+    seenAcis.add(aci);
+    contacts[alias] = {
+      alias,
+      aci,
+      displayName,
+      receive: raw.receive === true,
+      allowSend: raw.allow_send === true,
+    };
+  }
+
+  if (enabled) {
+    if (executable === null)
+      throw new Error(`${file}: signal.executable is required when Signal is enabled`);
+    if (dataDir === null)
+      throw new Error(`${file}: signal.data_dir is required when Signal is enabled`);
+    if (account === null)
+      throw new Error(`${file}: signal.account is required when Signal is enabled`);
+    if (expectedVersion === null)
+      throw new Error(`${file}: signal.expected_version is required when Signal is enabled`);
+    if (Object.keys(contacts).length === 0)
+      throw new Error(`${file}: signal.contacts must not be empty when Signal is enabled`);
+  }
+  return {
+    enabled,
+    executable,
+    dataDir,
+    account,
+    expectedVersion,
+    requestTimeoutMs,
+    contacts,
+  };
 }
 
 function canonicalDashboardOrigin(
@@ -1591,6 +1761,7 @@ export function loadConfigFile(
   const dashboardConfig = parseDashboardConfig(tree, f);
   return {
     llm,
+    signal: parseSignalConfig(tree, f),
     operator: (() => {
       const name = optStr(tree, 'operator.name', f) ?? 'operator';
       if (!name.trim())

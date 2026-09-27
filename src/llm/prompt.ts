@@ -380,7 +380,7 @@ Prefer an explicit speech header for ordinary text and replies. Start assistant 
 [send to=guild/channel replyTo=message-id]
 Your message goes here.
 
-The \`replyTo\` field is optional; when present it is a decimal message ID of at most 20 digits. The target must be guild-qualified. Use one header per assistant message, with no preface or code fence. The entire body after that first line is outward speech, including anything that looks like another header. Do not include private commentary in it.
+Discord targets are guild-qualified \`slug/name\`; configured Signal contacts use \`signal:<alias>\`. The optional \`replyTo\` field is Discord-only and, when present, is a decimal message ID of at most 20 digits. Use one header per assistant message, with no preface or code fence. The entire body after that first line is outward speech, including anything that looks like another header. Do not include private commentary in it.
 
 Keep \`elpis.channel(target).send(...)\` for attachments and programmatic work. Both routes use the same routing and moderation checks; a header grants no additional permission. Only complete, unstripped resident output is eligible. Inbound text, tool results and restored history never trigger header delivery.
 
@@ -753,15 +753,9 @@ ${moduleToolSections}
 ${llmToolSection}
 
 ### \`elpis.channel(ref)\`
-Get the channel object for messaging. The reserved \`console\` target reaches the private operator console; otherwise \`ref\` is REQUIRED — a raw Discord id OR a
-guild-qualified \`slug/name\` ref (\`elpis.channel("home/general")\`, \`elpis.channel("friends-a/lounge")\`,
-leading # on the name optional). A BARE name (no \`slug/\` prefix) THROWS even
-when it uniquely matches exactly one room — qualification is never optional,
-because guessing wrong here delivers a private message to the wrong server;
-the throw lists the qualified candidates to use instead.
+Get the channel object for messaging. The reserved \`console\` target reaches the private operator console; otherwise \`ref\` is REQUIRED — a raw configured Discord id, a guild-qualified \`slug/name\` ref (\`elpis.channel("home/general")\`), or an exact configured Signal alias (\`elpis.channel("signal:bramble")\`). Raw Signal account/contact IDs are never accepted as resident-authored destinations. A BARE room name (no \`slug/\` prefix) THROWS even when unique because guessing wrong can deliver a private message to the wrong social world; the throw lists qualified candidates.
 \`elpis.channel(ref).send(text, { files?: [{ path, name? }], replyTo?: string, mentions?: boolean })\`
-delivers a message to that room and its result echoes \`message delivered to slug/name (id)\` so a misdirect is
-visible immediately. Optional \`replyTo\` is a decimal message ID of at most 20 digits in that same target channel; only the first chunk references it, without an automatic reply-author ping. An unusable reference fails without a plain-message fallback. Console rejects reply metadata. Omit \`mentions\` on ordinary sends that contain no literal user mention. Use \`mentions: false\` only when the text actually contains a literal user mention that should remain clickable but must intentionally not notify even an opted-in person. Omitted or \`mentions: true\` uses the normal exact guild+user preferences; it never forces a notification to someone who has not opted in. \`elpis.channel.list()\` enumerates known rooms as \`{ id, name }\` objects where \`name\` is always the guild-qualified label (e.g. \`friends-a/lounge\`), or the raw id for a channel whose guild isn't known.
+routes through the target transport and echoes the resolved label so a misdirect is visible immediately. Discord supports its existing file, reply, and mention options. Signal v1 is direct-message text only: omit \`files\`, \`replyTo\`, and \`mentions\`; success means accepted by signal-cli, not delivered or read. An unusable reference fails without a plain-message fallback. \`elpis.channel.list()\` enumerates known rooms as \`{ id, name }\` objects with transport-qualified names such as \`friends-a/lounge\` and \`signal:bramble\`.
 \`elpis.channel(id).typing()\` shows the user you are working on something before you have words to send.
 Literal Discord user mentions remain clickable but do not notify by default; notification requires the exact guild+user opt-in stored through \`elpis.personSettings.discord\`. Roles, \`@everyone\`, \`@here\`, and automatic reply-author pings remain suppressed.
 \`elpis.channel(ref).mute(reason?)\` is the killswitch: it makes you a silent observer in that
@@ -769,8 +763,8 @@ room — you keep hearing, every \`send()\` there throws until an operator lifts
 the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living in several servers" above.
 
 ### \`elpis.inbound\`
-The Discord message currently being processed (or \`null\` between wakes):
-\`{ id, channelId, channelName, guildId, guildSlug, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`.
+The external message currently being processed (or \`null\` between wakes):
+\`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct text carries \`transport: "signal"\`; Discord omits it.
 Attachments are pre-downloaded; \`elpis.inbound.attachments[0].localPath\` is a readable file path.
 Small text attachments arrive ALREADY INLINED in the message itself, inside
 \`<attachment-content name="...">\` tags (the metadata line says "(inlined below)") —

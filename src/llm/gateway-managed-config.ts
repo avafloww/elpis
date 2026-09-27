@@ -90,6 +90,7 @@ type PendingSnapshot = Readonly<{
 const configKeys = [
   'llm',
   'operator',
+  'signal',
   'discord',
   'compaction',
   'memory',
@@ -335,6 +336,7 @@ function snapshotBase(
     throw new Error('Gateway config console alias must equal dashboard.local');
   return {
     operator: ownData(config, 'operator', 'config.operator'),
+    signal: ownData(config, 'signal', 'config.signal'),
     discord: ownData(config, 'discord', 'config.discord'),
     compaction: ownData(config, 'compaction', 'config.compaction'),
     memory: ownData(config, 'memory', 'config.memory'),
@@ -818,6 +820,7 @@ function resolvedConfig(
   return {
     llm,
     operator: base.operator,
+    signal: base.signal,
     discord: base.discord,
     compaction: base.compaction,
     memory: base.memory,

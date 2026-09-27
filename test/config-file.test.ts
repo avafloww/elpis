@@ -1289,3 +1289,109 @@ test('configFile: pluralkit is per-guild, defaults false, and validates boolean 
     /guild 'home' `pluralkit` must be true or false/,
   );
 });
+
+const SIGNAL_ENABLED = `
+signal:
+  enabled: true
+  executable: /opt/signal-cli/bin/signal-cli
+  data_dir: /tmp/harness-config-test/signal-cli
+  account: "00000000-0000-4000-8000-000000000001"
+  expected_version: "0.14.9"
+  request_timeout_ms: 12000
+  contacts:
+    bramble:
+      aci: "00000000-0000-4000-8000-000000000002"
+      display_name: Bramble
+      receive: true
+      allow_send: false
+`;
+
+test('configFile: Signal is disabled by default with no account or process requirements', () => {
+  const c = loadConfigFile(fixture(MINIMAL_OK));
+  assert.deepEqual(c.signal, {
+    enabled: false,
+    executable: null,
+    dataDir: null,
+    account: null,
+    expectedVersion: null,
+    requestTimeoutMs: 15000,
+    contacts: {},
+  });
+});
+
+test('configFile: enabled Signal config parses an exact direct-contact allowlist with outbound denied by default', () => {
+  const c = loadConfigFile(fixture(MINIMAL_OK + SIGNAL_ENABLED));
+  assert.equal(c.signal.enabled, true);
+  assert.equal(c.signal.executable, '/opt/signal-cli/bin/signal-cli');
+  assert.equal(c.signal.dataDir, '/tmp/harness-config-test/signal-cli');
+  assert.equal(c.signal.account, '00000000-0000-4000-8000-000000000001');
+  assert.equal(c.signal.expectedVersion, '0.14.9');
+  assert.equal(c.signal.requestTimeoutMs, 12000);
+  assert.deepEqual(c.signal.contacts.bramble, {
+    alias: 'bramble',
+    aci: '00000000-0000-4000-8000-000000000002',
+    displayName: 'Bramble',
+    receive: true,
+    allowSend: false,
+  });
+});
+
+test('configFile: Signal contacts default to receive=false and allow_send=false', () => {
+  const body = (MINIMAL_OK + SIGNAL_ENABLED)
+    .replace('      receive: true\n', '')
+    .replace('      allow_send: false\n', '');
+  const c = loadConfigFile(fixture(body));
+  assert.equal(c.signal.contacts.bramble.receive, false);
+  assert.equal(c.signal.contacts.bramble.allowSend, false);
+});
+
+test('configFile: enabled Signal config rejects missing, relative, duplicate, and account-lifecycle inputs', () => {
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture((MINIMAL_OK + SIGNAL_ENABLED).replace('/opt/signal-cli/bin/signal-cli', 'signal-cli')),
+      ),
+    /signal\.executable.*absolute path/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture((MINIMAL_OK + SIGNAL_ENABLED).replace('  account: "00000000-0000-4000-8000-000000000001"\n', '')),
+      ),
+    /signal\.account.*required/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture((MINIMAL_OK + SIGNAL_ENABLED).replace('  expected_version: "0.14.9"\n', '')),
+      ),
+    /signal\.expected_version.*required/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(
+          MINIMAL_OK +
+            SIGNAL_ENABLED.replace(
+              '      allow_send: false\n',
+              '      allow_send: false\n    aster:\n      aci: "00000000-0000-4000-8000-000000000002"\n',
+            ),
+        ),
+      ),
+    /duplicate Signal contact ACI/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture((MINIMAL_OK + SIGNAL_ENABLED).replace('    bramble:', '    Bad Alias:')),
+      ),
+    /Signal contact alias/,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture((MINIMAL_OK + SIGNAL_ENABLED).replace('  contacts:', '  recovery_key: forbidden\n  contacts:')),
+      ),
+    /unknown Signal key.*recovery_key/,
+  );
+});

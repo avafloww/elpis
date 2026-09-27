@@ -1635,11 +1635,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   };
   e.ext = Object.freeze(extensionRoot);
 
-  // channel(idOrRef) -> { send(text), id, name } for outbound Discord messages.
-  //: an explicit target is ALWAYS required — there is no "current channel"
+  // channel(idOrRef) -> { send(text), id, name } for transport-routed messages.
+  // An explicit target is ALWAYS required — there is no "current channel"
   // to default to (one history interleaves every room, so a mid-turn inbound
   // from another room makes any default ambiguous). Accepts a Discord id (all
-  // digits) or a guild-qualified 'slug/name' ref — a BARE name
+  // digits), a guild-qualified 'slug/name' ref, or a configured `signal:<alias>` — a BARE name
   // throws even when it uniquely matches, because guessing wrong here delivers
   // a private message to the wrong friend group; resolveChannel (agent-side)
   // renders that throw listing qualified candidates, so it's allowed to
@@ -1651,7 +1651,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         ? deps.listChannelsWithNames().map((c) => c.name)
         : [];
       throw new Error(
-        `elpis.channel(): a channel ref is required — a raw id or a guild-qualified 'slug/name' (e.g. elpis.channel('home/general').send(…)). ` +
+        `elpis.channel(): a channel ref is required — a configured raw Discord id, guild-qualified 'slug/name', or configured Signal alias (e.g. elpis.channel('signal:bramble').send(…)). ` +
           `Known: ${known.length ? known.join(', ') : '(none yet — wait for a real message)'}`,
       );
     }
@@ -1676,7 +1676,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           ? deps.listChannelsWithNames().map((c) => c.name)
           : [];
         throw new Error(
-          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified name ('friends-a/lounge') or a configured raw id. Known: ${known.length ? known.join(', ') : '(none yet)'}`,
+          `elpis.channel(): unknown channel "${channelId}" — pass a guild-qualified Discord name, configured raw Discord id, or configured Signal alias. Known: ${known.length ? known.join(', ') : '(none yet)'}`,
         );
       }
     }
@@ -1768,8 +1768,10 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           replyTo?: string;
           mentions?: boolean;
           voice?: import('../types.js').VoiceDelivery;
+          signal?: import('../types.js').SignalDelivery;
         } = { channel: channelId, text };
-        if (delivery) sendRecord.voice = delivery.voice;
+        if (delivery?.voice) sendRecord.voice = delivery.voice;
+        if (delivery?.signal) sendRecord.signal = delivery.signal;
         if (sendOpts?.replyTo !== undefined)
           sendRecord.replyTo = sendOpts.replyTo;
         if (sendOpts?.mentions !== undefined)
@@ -1784,8 +1786,11 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         return {
           ok: true,
           channelId,
-          ...(delivery ? { voice: delivery.voice } : {}),
-          note: `message delivered to ${label}. anything you return in this turn's content block will be ignored`,
+          ...(delivery?.voice ? { voice: delivery.voice } : {}),
+          ...(delivery?.signal ? { signal: delivery.signal } : {}),
+          note: delivery?.signal
+            ? `message accepted by signal-cli for ${label}; delivery and read are not confirmed. anything you return in this turn's content block will be ignored`
+            : `message delivered to ${label}. anything you return in this turn's content block will be ignored`,
         };
       },
       typing: () => {

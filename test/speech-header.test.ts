@@ -22,6 +22,10 @@ test('speech header parses an explicit qualified target and optional reply', () 
     parseSpeechHeader('[send to=example/🌱]\nhello')?.target,
     'example/🌱',
   );
+  assert.deepEqual(parseSpeechHeader('[send to=signal:bramble]\nhello'), {
+    target: 'signal:bramble',
+    text: 'hello',
+  });
 });
 
 test('speech header never infers a destination or promotes quoted headers', () => {
@@ -35,6 +39,9 @@ test('speech header never infers a destination or promotes quoted headers', () =
     '```\n[send to=example/lounge]\nhello\n```',
     '[send to=lounge]\nhello',
     '[send to=123]\nhello',
+    '[send to=signal:dm:00000000-0000-4000-8000-000000000002]\nhello',
+    '[send to=signal:Bad Alias]\nhello',
+    '[send to=other:bramble]\nhello',
     '[send to=example/lounge extra=yes]\nhello',
     '[send replyTo=123 to=example/lounge]\nhello',
     '[send to=example/lounge replyTo=abc]\nhello',

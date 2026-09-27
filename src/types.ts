@@ -109,8 +109,14 @@ export interface VoiceDelivery {
   playedMs: number;
 }
 
+export interface SignalDelivery {
+  /** Accepted by signal-cli for sending; transport delivery/read is not confirmed. */
+  status: 'accepted';
+}
+
 export interface OutboundDelivery {
-  voice: VoiceDelivery;
+  voice?: VoiceDelivery;
+  signal?: SignalDelivery;
 }
 
 export interface RunResult {
@@ -136,6 +142,7 @@ export interface RunResult {
     replyTo?: string;
     mentions?: boolean;
     voice?: VoiceDelivery;
+    signal?: SignalDelivery;
   }[];
   /** Harness-only actual sh/sudo/git invocations, omitted from model-facing text. */
   operationReceipts?: RunOperationReceipt[];

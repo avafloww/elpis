@@ -10,7 +10,7 @@ Elpis is one long-lived Node.js process hosting one agent, one ordered conversat
 2. creates the data directory, migrates known legacy state into `elpis-data/`, and opens `elpis-data/elpis.db`;
 3. ensures `SOUL.md` and `MEMORY.md` exist;
 4. restores the newest transcript with opaque-replay provenance checks;
-5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, and Discord adapter;
+5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, Discord adapter, and any enabled external transport;
 6. starts the agent loop;
 7. delivers restart or optional harness-update notices through the same inbound queue.
 
@@ -19,7 +19,7 @@ A failure in a required persistence or configuration component is a boot failure
 ## Runtime flow
 
 ```text
-Discord / console / scheduler / heartbeat / background completion
+Signal / Discord / console / scheduler / background completion
                             │
                             ▼
                     one inbound FIFO
@@ -69,6 +69,7 @@ A resident speech header is committed with the assistant message, delivered thro
 | `src/sandbox/index.ts` | VM lifecycle, source transform, timeout/detach behavior |
 | `src/sandbox/globals.ts` | `elpis.*` capability namespace and core globals |
 | `src/discord/discord.ts` | Discord gateway, ingestion, commands, attachments, reactions |
+| `src/signal/` | supervised signal-cli JSON-RPC client and strict direct-text transport policy |
 | `src/console/` | HTTP/WebSocket console and archived-history reader |
 | `src/store/` | SQLite and file-backed durable state |
 | `src/kernel/`, `src/worker/` | shared agent kernel and bounded Mind-rooted workers |
@@ -84,7 +85,7 @@ The harness does not hardcode an inhabitant.
 
 ## Conversation provenance
 
-Every committed message can carry its source channel. Inbound Discord content is wrapped in a structured envelope containing author, channel, time, reply, forwarding, mention, and attachment metadata. The console, scheduler, heartbeat, and internal notices use reserved provenance labels.
+Every committed message can carry its source channel. External person content is wrapped in a structured envelope with transport provenance. Discord envelopes can include reply, forwarding, mention, and attachment metadata; Signal v1 admits configured direct-contact text only and marks it with `transport="signal"`. The console, scheduler, heartbeat, and internal notices use reserved provenance labels.
 
 Discord hydrates direct attachments first, followed by attachments from the first embedded forwarded snapshot, sharing one inline-text budget and local attachment index sequence. Snapshot attachments are marked as forwarded in inbound metadata and envelopes; snapshot authors and channels remain unknown. Forward references do not fetch original messages, and no further snapshots are traversed. Existing ingress gates apply before hydration.
 
@@ -137,7 +138,7 @@ Synthetic wakes do not masquerade as person-authored input. The turn records whe
 - Provider failures, compaction failures, and sustained no-yield alerts retain their configured error-channel routing; process and late sandbox exceptions use the internal routing described below.
 - Background subprocesses have explicit lifecycle tracking.
 - Console failure does not stop the agent.
-- Invalid configuration fails loudly before the bot begins operating.
+- Invalid configuration fails loudly before the bot begins operating. An enabled Signal transport also fails boot if its supervised child cannot start or reports a version other than `signal.expected_version`.
 
 Unowned process errors and late sandbox errors retain process logging and enter
 the resident's internal harness queue, not an automatic Discord send. Owned-run

@@ -151,6 +151,47 @@ test('roomsSnapshot: reserved console room is not duplicated by its directory ro
   built.cleanup();
 });
 
+const SIGNAL_ACI = '00000000-0000-4000-8000-000000000002';
+const SIGNAL_ROOM_ID = `signal:dm:${SIGNAL_ACI}`;
+
+function buildAgentWithSignal() {
+  return buildTestAgent({
+    config: {
+      signal: {
+        enabled: true,
+        executable: '/opt/signal-cli/bin/signal-cli',
+        dataDir: '/tmp/signal-cli-test',
+        account: '00000000-0000-4000-8000-000000000001',
+        expectedVersion: '0.14.9',
+        requestTimeoutMs: 15000,
+        contacts: {
+          bramble: {
+            alias: 'bramble',
+            aci: SIGNAL_ACI,
+            displayName: 'Bramble',
+            receive: true,
+            allowSend: false,
+          },
+        },
+      },
+    },
+    tmpPrefix: 'harness-resolve-signal-',
+  });
+}
+
+test('resolveChannelRef: configured Signal alias resolves without exposing raw ACI routing', () => {
+  const { agent, cleanup } = buildAgentWithSignal();
+  assert.equal(agent.resolveChannelRef('signal:bramble'), SIGNAL_ROOM_ID);
+  assert.equal(agent.resolveChannelRef('signal:nope'), null);
+  assert.equal(agent.resolveChannelRef(SIGNAL_ROOM_ID), null);
+  assert.equal(agent.qualifiedChannelLabel(SIGNAL_ROOM_ID), 'signal:bramble');
+  assert.deepEqual(
+    agent.knownChannels().find((channel) => channel.id === SIGNAL_ROOM_ID),
+    { id: SIGNAL_ROOM_ID, name: 'signal:bramble' },
+  );
+  cleanup();
+});
+
 test('knownChannels: labels are guild-qualified', () => {
   const { agent, cleanup } = buildAgentWithChannels();
   const names = agent
@@ -232,6 +273,39 @@ test('elpis.channel().send(): delivered-echo renders the guild-qualified label e
   cleanup();
 });
 
+test('elpis.channel().send(): Signal receipt says accepted without claiming delivery', async () => {
+  const { agent, cleanup } = buildAgentWithSignal();
+  const g = buildGlobals({
+    config: {
+      paths: { dataDirectory: '/tmp', harnessRoot: '/tmp' },
+      sandbox: {
+        syncTimeoutMs: 5000,
+        asyncDeadlineMs: 10000,
+        previewMaxBytes: 2048,
+        logMaxBytes: 2048,
+      },
+      kagi: { apiKey: null },
+    },
+    resolveChannel: (ref: string) => agent.resolveChannelRef(ref),
+    channelLabel: (id: string) => agent.qualifiedChannelLabel(id),
+    send: async () => ({ signal: { status: 'accepted' as const } }),
+  } as Parameters<typeof buildGlobals>[0]);
+  const elpis = g.elpis as {
+    channel: (ref: string) => {
+      send: (text: string) => Promise<{
+        note: string;
+        signal: { status: 'accepted' };
+      }>;
+    };
+  };
+  const result = await elpis.channel('signal:bramble').send('hello');
+  assert.deepEqual(result.signal, { status: 'accepted' });
+  assert.match(result.note, /accepted by signal-cli for signal:bramble/);
+  assert.match(result.note, /delivery and read are not confirmed/);
+  assert.doesNotMatch(result.note, /message delivered/);
+  cleanup();
+});
+
 test('elpis.channel().send(): unknown raw id is refused before delivery', async () => {
   const { agent, cleanup } = buildAgentWithChannels();
   let sends = 0;
@@ -259,7 +333,7 @@ test('elpis.channel().send(): unknown raw id is refused before delivery', async 
   };
   assert.throws(
     () => elpis.channel('999999'),
-    /unknown channel.*configured raw id/s,
+    /unknown channel.*configured raw Discord id/s,
   );
   assert.equal(sends, 0);
   cleanup();
