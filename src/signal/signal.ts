@@ -4,6 +4,10 @@ import type { InboundMessage, InboundMessageAttachment } from '../agent.js';
 import type { SignalConfig, SignalContactConfig } from '../config.js';
 import type { OutboundDelivery, OutboundSendOptions } from '../types.js';
 import {
+  formatSignalMarkdown,
+  type SignalTextStyle,
+} from './format.js';
+import {
   createSignalCliClient,
   type SignalCliOptions,
   type SignalCliReceiveNotification,
@@ -25,7 +29,11 @@ export interface SignalCliLike {
   ): () => void;
   onStateChange(handler: (state: SignalCliState) => void): () => void;
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
-  sendText(recipient: string, message: string): Promise<{ status: 'accepted' }>;
+  sendText(
+    recipient: string,
+    message: string,
+    styles?: readonly SignalTextStyle[],
+  ): Promise<{ status: 'accepted' }>;
   stop(): Promise<void>;
 }
 
@@ -249,7 +257,8 @@ class ConfiguredSignalTransport implements SignalTransport {
       throw new Error('Signal transport is unavailable');
     if (this.deps.isMuted(channelId))
       throw new Error(`Signal channel signal:${contact.alias} is muted`);
-    await this.client.sendText(contact.aci, content);
+    const formatted = formatSignalMarkdown(content);
+    await this.client.sendText(contact.aci, formatted.text, formatted.styles);
     return { signal: { status: 'accepted' } };
   }
 

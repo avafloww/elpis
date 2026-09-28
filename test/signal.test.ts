@@ -20,6 +20,10 @@ import {
   type SignalCliLike,
 } from '../src/signal/signal.js';
 import type { SignalCliOptions, SignalCliReceiveNotification } from '../src/signal/signal-cli.js';
+import {
+  formatSignalMarkdown,
+  type SignalTextStyle,
+} from '../src/signal/format.js';
 
 const LOCAL_ACI = '00000000-0000-4000-8000-000000000001';
 const BRAMBLE_ACI = '00000000-0000-4000-8000-000000000002';
@@ -56,7 +60,11 @@ function config(overrides: Partial<SignalConfig> = {}): SignalConfig {
 
 class FakeClient implements SignalCliLike {
   state = 'running' as const;
-  readonly sends: Array<{ recipient: string; message: string }> = [];
+  readonly sends: Array<{
+    recipient: string;
+    message: string;
+    styles: readonly SignalTextStyle[];
+  }> = [];
   readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   stopped = false;
   version = '0.14.9';
@@ -74,8 +82,12 @@ class FakeClient implements SignalCliLike {
     this.requests.push({ method, params });
     return { version: this.version };
   }
-  async sendText(recipient: string, message: string) {
-    this.sends.push({ recipient, message });
+  async sendText(
+    recipient: string,
+    message: string,
+    styles: readonly SignalTextStyle[] = [],
+  ) {
+    this.sends.push({ recipient, message, styles });
     return { status: 'accepted' as const };
   }
   async stop(): Promise<void> {
@@ -140,6 +152,59 @@ function directEnvelope(
     dataMessage: { message, timestamp: 1790550000123, ...extra },
   };
 }
+
+test('Signal Markdown becomes UTF-16 native style ranges', () => {
+  assert.deepEqual(
+    formatSignalMarkdown('**bold 🩷** *soft* ~~gone~~ `mono` ||secret||'),
+    {
+      text: 'bold 🩷 soft gone mono secret',
+      styles: [
+        { style: 'BOLD', start: 0, length: 7 },
+        { style: 'ITALIC', start: 8, length: 4 },
+        { style: 'STRIKETHROUGH', start: 13, length: 4 },
+        { style: 'MONOSPACE', start: 18, length: 4 },
+        { style: 'SPOILER', start: 23, length: 6 },
+      ],
+    },
+  );
+  assert.deepEqual(formatSignalMarkdown('**outer *inner***'), {
+    text: 'outer inner',
+    styles: [
+      { style: 'BOLD', start: 0, length: 11 },
+      { style: 'ITALIC', start: 6, length: 5 },
+    ],
+  });
+  assert.deepEqual(formatSignalMarkdown('||**hidden**||'), {
+    text: 'hidden',
+    styles: [
+      { style: 'BOLD', start: 0, length: 6 },
+      { style: 'SPOILER', start: 0, length: 6 },
+    ],
+  });
+});
+
+test('Signal Markdown preserves all markers beyond the native range cap', () => {
+  const atLimit = Array.from({ length: 128 }, () => '**x**').join(' ');
+  const formatted = formatSignalMarkdown(atLimit);
+  assert.equal(formatted.text, Array.from({ length: 128 }, () => 'x').join(' '));
+  assert.equal(formatted.styles.length, 128);
+
+  const overLimit = Array.from({ length: 129 }, () => '**x**').join(' ');
+  assert.deepEqual(formatSignalMarkdown(overLimit), {
+    text: overLimit,
+    styles: [],
+  });
+});
+
+test('Signal Markdown preserves unsupported links and escaped delimiters', () => {
+  assert.deepEqual(
+    formatSignalMarkdown('\\*literal\\* a_b [link](https://example.com)'),
+    {
+      text: '*literal* a_b [link](https://example.com)',
+      styles: [],
+    },
+  );
+});
 
 test('disabled Signal creates no client or transport', () => {
   let created = 0;
@@ -317,10 +382,16 @@ test('receive rejects escaping, symlinked, oversized, and excessive Signal attac
 test('send enforces exact room, contact permission, text-only options, and final mute', async () => {
   const h = harness();
   await h.transport.start();
-  assert.deepEqual(await h.transport.send(BRAMBLE_ROOM, 'hello'), {
+  assert.deepEqual(await h.transport.send(BRAMBLE_ROOM, '**hello**'), {
     signal: { status: 'accepted' },
   });
-  assert.deepEqual(h.client.sends, [{ recipient: BRAMBLE_ACI, message: 'hello' }]);
+  assert.deepEqual(h.client.sends, [
+    {
+      recipient: BRAMBLE_ACI,
+      message: 'hello',
+      styles: [{ style: 'BOLD', start: 0, length: 5 }],
+    },
+  ]);
 
   await assert.rejects(h.transport.send(`signal:dm:${CEDAR_ACI}`, 'no'), /allow_send=false/);
   await assert.rejects(h.transport.send('signal:dm:00000000-0000-4000-8000-000000000099', 'no'), /not configured/);
@@ -348,7 +419,7 @@ test('composition router isolates transports and preserves Discord send purpose'
     signal: { status: 'accepted' },
   });
   assert.deepEqual(h.client.sends, [
-    { recipient: BRAMBLE_ACI, message: 'through Signal' },
+    { recipient: BRAMBLE_ACI, message: 'through Signal', styles: [] },
   ]);
   assert.equal(discordCalls.length, 0);
 

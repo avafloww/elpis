@@ -1,5 +1,6 @@
 import { isUtf8 } from 'node:buffer';
 import { spawn as nodeSpawn } from 'node:child_process';
+import type { SignalTextStyle } from './format.js';
 
 export type SignalCliState = 'running' | 'stopping' | 'stopped' | 'unavailable';
 export type SignalCliDiagnostic =
@@ -121,6 +122,37 @@ function positiveInteger(value: number, name: string): number {
   return value;
 }
 
+function styleRanges(
+  message: string,
+  styles: readonly SignalTextStyle[],
+): string[] {
+  if (!Array.isArray(styles) || styles.length > 128)
+    throw new SignalCliError('invalid_request', false);
+  const ranges: string[] = [];
+  for (let index = 0; index < styles.length; index++) {
+    const entry: unknown = styles[index];
+    if (entry === null || typeof entry !== 'object') {
+      throw new SignalCliError('invalid_request', false);
+    }
+    const { style, start, length } = entry as Partial<SignalTextStyle>;
+    const end = (start ?? Number.NaN) + (length ?? Number.NaN);
+    if (
+      !style ||
+      !['BOLD', 'ITALIC', 'SPOILER', 'STRIKETHROUGH', 'MONOSPACE'].includes(style) ||
+      !Number.isSafeInteger(start) ||
+      (start ?? -1) < 0 ||
+      !Number.isSafeInteger(length) ||
+      (length ?? 0) <= 0 ||
+      !Number.isSafeInteger(end) ||
+      end > message.length
+    ) {
+      throw new SignalCliError('invalid_request', false);
+    }
+    ranges.push(`${start}:${length}:${style}`);
+  }
+  return ranges;
+}
+
 /** Directly supervised stdio client. It never restarts or replays requests. */
 export class SignalCliClient {
   private readonly child: SignalCliProcess;
@@ -202,8 +234,14 @@ export class SignalCliClient {
   async sendText(
     recipient: string,
     message: string,
+    styles: readonly SignalTextStyle[] = [],
   ): Promise<SignalCliAccepted> {
-    await this.request('send', { recipient: [recipient], message });
+    const textStyle = styleRanges(message, styles);
+    await this.request('send', {
+      recipient: [recipient],
+      message,
+      ...(textStyle.length > 0 ? { textStyle } : {}),
+    });
     return { status: 'accepted' };
   }
 

@@ -69,7 +69,7 @@ A resident speech header is committed with the assistant message, delivered thro
 | `src/sandbox/index.ts` | VM lifecycle, source transform, timeout/detach behavior |
 | `src/sandbox/globals.ts` | `elpis.*` capability namespace and core globals |
 | `src/discord/discord.ts` | Discord gateway, ingestion, commands, attachments, reactions |
-| `src/signal/` | supervised signal-cli JSON-RPC client, exact direct-contact policy, and bounded inbound attachment mapping |
+| `src/signal/` | supervised signal-cli JSON-RPC client, native outbound text styles, exact direct-contact policy, and bounded inbound attachments |
 | `src/console/` | HTTP/WebSocket console and archived-history reader |
 | `src/store/` | SQLite and file-backed durable state |
 | `src/kernel/`, `src/worker/` | shared agent kernel and bounded Mind-rooted workers |

@@ -135,6 +135,7 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
   const second = client.sendText(
     '00000000-0000-4000-8000-000000000002',
     'hello',
+    [{ style: 'BOLD', start: 0, length: 5 }],
   );
   assert.deepEqual(parsedWrites(child), [
     { jsonrpc: '2.0', method: 'version', params: {}, id: 1 },
@@ -144,6 +145,7 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
       params: {
         recipient: ['00000000-0000-4000-8000-000000000002'],
         message: 'hello',
+        textStyle: ['0:5:BOLD'],
       },
       id: 2,
     },
@@ -155,6 +157,34 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
   assert.equal(await first, 'signal-cli 1.0');
   assert.ok(timers.cleared.has(1));
   assert.ok(timers.cleared.has(2));
+});
+
+test('rejects invalid text style ranges before dispatch', async () => {
+  const { client, child, timers } = harness();
+  const error = await capturedError(
+    client.sendText('synthetic-recipient', 'hi', [
+      { style: 'BOLD', start: 1, length: 2 },
+    ]),
+  );
+  assert.equal(error.code, 'invalid_request');
+  assert.equal(error.issuanceUncertain, false);
+  assert.equal(child.writes.length, 0);
+  assert.equal(timers.scheduled.length, 0);
+
+  const sparse = new Array(1) as Parameters<typeof client.sendText>[2];
+  const sparseError = await capturedError(
+    client.sendText('synthetic-recipient', 'hi', sparse),
+  );
+  assert.equal(sparseError.code, 'invalid_request');
+  assert.equal(sparseError.issuanceUncertain, false);
+
+  const nullError = await capturedError(
+    client.sendText('synthetic-recipient', 'hi', [null] as never),
+  );
+  assert.equal(nullError.code, 'invalid_request');
+  assert.equal(nullError.issuanceUncertain, false);
+  assert.equal(child.writes.length, 0);
+  assert.equal(timers.scheduled.length, 0);
 });
 
 test('parses fragmented receive notifications and recovers after bounded frames', () => {
