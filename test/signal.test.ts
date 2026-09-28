@@ -1,4 +1,14 @@
 import assert from 'node:assert/strict';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import type { InboundMessage } from '../src/agent.js';
 import type { SignalConfig } from '../src/config.js';
@@ -197,6 +207,111 @@ test('receive admits only configured direct text before Agent enqueue', async ()
     wakeClass: 'wake',
   });
   assert.equal(JSON.stringify(inbound).includes('secret'), false);
+});
+
+test('receive maps a downloaded Signal image and its caption into the shared attachment envelope', async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'harness-signal-attachments-'));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const attachmentsDir = join(dataDir, 'attachments');
+  mkdirSync(attachmentsDir);
+  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const localPath = join(attachmentsDir, 'remote.png');
+  writeFileSync(localPath, image);
+
+  const { transport, client, inbound } = harness(config({ dataDir }));
+  await transport.start();
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, '', {
+      attachments: [
+        {
+          id: 'remote.png',
+          filename: 'signal-photo.png',
+          contentType: 'image/png',
+          size: image.length,
+          caption: 'caption through Signal',
+        },
+      ],
+    }),
+  );
+
+  assert.equal(inbound.length, 1);
+  assert.equal(inbound[0]?.content, 'caption through Signal');
+  assert.deepEqual(inbound[0]?.attachments, [
+    {
+      url: 'signal:attachment:remote.png',
+      name: 'signal-photo.png',
+      contentType: 'image/png',
+      localPath,
+      size: image.length,
+      inlineText: null,
+    },
+  ]);
+
+  const built = buildTestAgent({ tmpPrefix: 'harness-signal-image-' });
+  let loop: Promise<void> | null = null;
+  t.after(async () => {
+    built.agent.stop();
+    try {
+      await loop;
+    } finally {
+      built.cleanup();
+    }
+  });
+  let idleResolve: (() => void) | null = null;
+  built.agent['deps'].onIdle = () => idleResolve?.();
+  loop = built.agent.loop();
+  const idle = new Promise<void>((resolve) => {
+    idleResolve = resolve;
+  });
+  built.agent.enqueue(inbound[0]!);
+  await idle;
+  const userMessage = built.agent.messagesForTest.find(
+    (message) => message.role === 'user' && message.content.includes('caption through Signal'),
+  );
+  const imagePart = userMessage?.contentParts?.find(
+    (part) => part.type === 'image_url',
+  );
+  assert.ok(imagePart && imagePart.type === 'image_url');
+  assert.equal(
+    imagePart.image_url.url,
+    `data:image/png;base64,${image.toString('base64')}`,
+  );
+});
+
+test('receive rejects escaping, symlinked, oversized, and excessive Signal attachments', async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'harness-signal-attachment-guards-'));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const attachmentsDir = join(dataDir, 'attachments');
+  mkdirSync(attachmentsDir);
+  const outside = join(dataDir, 'outside.png');
+  writeFileSync(outside, 'outside');
+  symlinkSync(outside, join(attachmentsDir, 'linked.png'));
+  const oversized = join(attachmentsDir, 'oversized.png');
+  writeFileSync(oversized, '');
+  truncateSync(oversized, 25 * 1024 * 1024 + 1);
+
+  const { transport, client, inbound } = harness(config({ dataDir }));
+  await transport.start();
+  const attachment = (id: string) => ({
+    id,
+    filename: 'photo.png',
+    contentType: 'image/png',
+    size: 1,
+    caption: 'must-not-enter',
+  });
+  client.emit(directEnvelope(BRAMBLE_ACI, '', { attachments: [attachment('../outside.png')] }));
+  client.emit(directEnvelope(BRAMBLE_ACI, '', { attachments: [attachment('linked.png')] }));
+  client.emit(directEnvelope(BRAMBLE_ACI, '', { attachments: [attachment('oversized.png')] }));
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, '', {
+      attachments: Array.from({ length: 11 }, () => attachment('missing.png')),
+    }),
+  );
+  client.emit(directEnvelope(BRAMBLE_ACI, 'plain text still enters'));
+
+  assert.equal(inbound.length, 1);
+  assert.equal(inbound[0]?.content, 'plain text still enters');
+  assert.equal(JSON.stringify(inbound).includes('must-not-enter'), false);
 });
 
 test('send enforces exact room, contact permission, text-only options, and final mute', async () => {

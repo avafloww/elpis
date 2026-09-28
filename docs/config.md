@@ -99,9 +99,9 @@ Signal is an optional additive transport backed by one directly supervised `sign
 
 Enabled mode requires absolute `executable` and `data_dir` paths, the lowercase ACI UUID of one already-linked local account, an exact tested SemVer `expected_version` (release or prerelease), and at least one exact contact. Contact aliases become the only resident-facing targets (`signal:<alias>`). Each contact has an exact ACI, optional `display_name`, and independent `receive` and `allow_send` booleans; both permissions default to `false`. There is no wildcard sender, profile-name match, username lookup, group route, registration field, recovery-key field, or linking API in this configuration.
 
-The first transport increment is direct-message text only. Unknown senders and unsupported Signal event kinds are rejected before their text enters Agent history. The account database belongs in a private mode-`0700` directory and must never be committed.
+Outbound Signal sends remain direct-message text only. Inbound direct messages may carry up to ten `signal-cli`-downloaded attachments of at most 25 MiB each. Each child-provided attachment ID must resolve to a regular non-symlink file directly beneath `data_dir/attachments`; accepted files then use the same attachment envelope and image-content path as Discord. An attachment caption becomes message content only when the ordinary message body is empty. Unknown senders and unsupported Signal event kinds are rejected before their content enters Agent history. The account database belongs in a private mode-`0700` directory and must never be committed.
 
-Signal end-to-end encryption terminates at the Elpis host. Accepted Signal text then enters the same ordered resident history and configured model request path as other conversation. Selecting Signal as a transport does **not** create a local-only model lane or prevent disclosure to the configured LLM provider.
+Signal end-to-end encryption terminates at the Elpis host. Accepted Signal text and attachments then enter the same ordered resident history and configured model request path as other conversation. Selecting Signal as a transport does **not** create a local-only model lane or prevent disclosure to the configured LLM provider.
 
 ## `discord`
 

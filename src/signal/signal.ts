@@ -1,4 +1,6 @@
-import type { InboundMessage } from '../agent.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { InboundMessage, InboundMessageAttachment } from '../agent.js';
 import type { SignalConfig, SignalContactConfig } from '../config.js';
 import type { OutboundDelivery, OutboundSendOptions } from '../types.js';
 import {
@@ -12,6 +14,9 @@ const SIGNAL_ROOM_PREFIX = 'signal:dm:';
 const MAX_PENDING_INBOUND = 128;
 const MAX_SEEN_INBOUND = 4096;
 const MAX_TEXT_BYTES = 64 * 1024;
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
 export interface SignalCliLike {
   readonly state: SignalCliState;
@@ -63,6 +68,73 @@ function emitDiagnostic(
   } catch {
     // Diagnostics never supervise transport behavior.
   }
+}
+
+function signalAttachmentName(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) return fallback;
+  const name = path.posix.basename(value.trim().replaceAll('\\', '/'));
+  return Buffer.byteLength(name) <= 255 ? name : fallback;
+}
+
+/** signal-cli downloads before notification and exposes only a local basename.
+ * Keep that child-owned file inside its private attachment root before passing
+ * the ordinary attachment envelope onward. */
+function signalAttachments(
+  value: unknown,
+  dataDir: string,
+): { attachments: InboundMessageAttachment[]; captions: string[] } | null {
+  if (value === undefined) return { attachments: [], captions: [] };
+  if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) return null;
+
+  const attachmentsDir = path.resolve(dataDir, 'attachments');
+  const attachments: InboundMessageAttachment[] = [];
+  const captions: string[] = [];
+  for (const raw of value) {
+    if (!isObject(raw)) return null;
+    const id = raw.id;
+    if (
+      typeof id !== 'string' ||
+      !ATTACHMENT_ID_RE.test(id) ||
+      id === '.' ||
+      id === '..'
+    ) {
+      return null;
+    }
+    const localPath = path.resolve(attachmentsDir, id);
+    if (path.dirname(localPath) !== attachmentsDir) return null;
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(localPath);
+    } catch {
+      return null;
+    }
+    if (
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      stats.size > MAX_ATTACHMENT_BYTES
+    ) {
+      return null;
+    }
+    const contentType =
+      typeof raw.contentType === 'string' &&
+      raw.contentType.length > 0 &&
+      raw.contentType.length <= 255
+        ? raw.contentType
+        : null;
+    const caption = raw.caption;
+    if (typeof caption === 'string' && caption.trim().length > 0) {
+      captions.push(caption);
+    }
+    attachments.push({
+      url: `signal:attachment:${encodeURIComponent(id)}`,
+      name: signalAttachmentName(raw.filename, id),
+      contentType,
+      localPath,
+      size: stats.size,
+      inlineText: null,
+    });
+  }
+  return { attachments, captions };
 }
 
 class ConfiguredSignalTransport implements SignalTransport {
@@ -217,7 +289,6 @@ class ConfiguredSignalTransport implements SignalTransport {
     if (!isObject(dataMessage)) return null;
     for (const field of [
       'groupInfo',
-      'attachments',
       'quote',
       'mentions',
       'sticker',
@@ -231,10 +302,25 @@ class ConfiguredSignalTransport implements SignalTransport {
     ]) {
       if (hasOwn(dataMessage, field)) return null;
     }
-    const content = dataMessage.message;
+    const parsedAttachments = signalAttachments(
+      dataMessage.attachments,
+      this.config.dataDir!,
+    );
+    if (!parsedAttachments) return null;
+    const rawContent = dataMessage.message;
     if (
-      typeof content !== 'string' ||
-      content.trim().length === 0 ||
+      rawContent !== undefined &&
+      rawContent !== null &&
+      typeof rawContent !== 'string'
+    ) {
+      return null;
+    }
+    let content = typeof rawContent === 'string' ? rawContent : '';
+    if (content.trim().length === 0 && parsedAttachments.captions.length > 0) {
+      content = parsedAttachments.captions.join('\n');
+    }
+    if (
+      (content.trim().length === 0 && parsedAttachments.attachments.length === 0) ||
       Buffer.byteLength(content) > MAX_TEXT_BYTES
     ) {
       return null;
@@ -263,7 +349,7 @@ class ConfiguredSignalTransport implements SignalTransport {
       replyTo: null,
       forwarded: null,
       mentions: [],
-      attachments: [],
+      attachments: parsedAttachments.attachments,
       wakeClass: 'wake',
     };
   }

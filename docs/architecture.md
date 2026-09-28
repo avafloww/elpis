@@ -69,7 +69,7 @@ A resident speech header is committed with the assistant message, delivered thro
 | `src/sandbox/index.ts` | VM lifecycle, source transform, timeout/detach behavior |
 | `src/sandbox/globals.ts` | `elpis.*` capability namespace and core globals |
 | `src/discord/discord.ts` | Discord gateway, ingestion, commands, attachments, reactions |
-| `src/signal/` | supervised signal-cli JSON-RPC client and strict direct-text transport policy |
+| `src/signal/` | supervised signal-cli JSON-RPC client, exact direct-contact policy, and bounded inbound attachment mapping |
 | `src/console/` | HTTP/WebSocket console and archived-history reader |
 | `src/store/` | SQLite and file-backed durable state |
 | `src/kernel/`, `src/worker/` | shared agent kernel and bounded Mind-rooted workers |
@@ -85,9 +85,9 @@ The harness does not hardcode an inhabitant.
 
 ## Conversation provenance
 
-Every committed message can carry its source channel. External person content is wrapped in a structured envelope with transport provenance. Discord envelopes can include reply, forwarding, mention, and attachment metadata; Signal v1 admits configured direct-contact text only and marks it with `transport="signal"`. The console, scheduler, heartbeat, and internal notices use reserved provenance labels.
+Every committed message can carry its source channel. External person content is wrapped in a structured envelope with transport provenance. Discord envelopes can include reply, forwarding, mention, and attachment metadata; Signal admits configured direct-contact messages with bounded inbound attachments and marks them with `transport="signal"`. The console, scheduler, heartbeat, and internal notices use reserved provenance labels.
 
-Discord hydrates direct attachments first, followed by attachments from the first embedded forwarded snapshot, sharing one inline-text budget and local attachment index sequence. Snapshot attachments are marked as forwarded in inbound metadata and envelopes; snapshot authors and channels remain unknown. Forward references do not fetch original messages, and no further snapshots are traversed. Existing ingress gates apply before hydration.
+Discord hydrates direct attachments first, followed by attachments from the first embedded forwarded snapshot, sharing one inline-text budget and local attachment index sequence. Snapshot attachments are marked as forwarded in inbound metadata and envelopes; snapshot authors and channels remain unknown. Forward references do not fetch original messages, and no further snapshots are traversed. Existing ingress gates apply before hydration. Signal uses `signal-cli`'s already-downloaded files only after basename, containment, regular-file, count, and size checks, then enters the same envelope and image-content pipeline.
 
 Room provenance controls rendering, moderation, reply targeting, and privacy. It does not create a second agent or a second conversation history.
 

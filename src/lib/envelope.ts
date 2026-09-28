@@ -9,7 +9,7 @@
 // formatInboundEnvelope/formatAttachmentParts, read with parseEnvelope, and
 // recover the inline utterance with extractUtterance (the inverse of the build).
 
-/** Image/attachment metadata carried on an inbound Discord message. Defined here
+/** Image/attachment metadata carried on an inbound message. Defined here
  * (the envelope owns the attachment rendering) and re-exported from agent.ts so
  * existing importers keep resolving it there. */
 export interface InboundMessageAttachment {
