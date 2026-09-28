@@ -1336,6 +1336,17 @@ test('configFile: enabled Signal config parses an exact direct-contact allowlist
   });
 });
 
+test('configFile: Signal expected_version accepts exact SemVer prereleases and rejects noncanonical versions', () => {
+  for (const version of ['0.14.9-SNAPSHOT', '1.2.3-rc.1+build.7']) {
+    const body = (MINIMAL_OK + SIGNAL_ENABLED).replace('0.14.9', version);
+    assert.equal(loadConfigFile(fixture(body)).signal.expectedVersion, version);
+  }
+  for (const version of ['v0.14.9', '0.14.9-', '0.14.9-01', '01.2.3']) {
+    const body = (MINIMAL_OK + SIGNAL_ENABLED).replace('0.14.9', version);
+    assert.throws(() => loadConfigFile(fixture(body)), /expected_version.*exact semver/);
+  }
+});
+
 test('configFile: Signal contacts default to receive=false and allow_send=false', () => {
   const body = (MINIMAL_OK + SIGNAL_ENABLED)
     .replace('      receive: true\n', '')

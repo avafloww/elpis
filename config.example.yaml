@@ -147,7 +147,7 @@ signal:
   executable: null # absolute signal-cli path; required when enabled
   data_dir: null # absolute private signal-cli account directory
   account: null # lowercase ACI UUID for an already-linked local account
-  expected_version: null # exact tested signal-cli semver; required when enabled
+  expected_version: null # exact tested signal-cli SemVer, including prereleases; required when enabled
   request_timeout_ms: 15000
   # Exact aliases are the only model-addressable recipients: signal:<alias>.
   # Unknown senders are dropped before their text enters Agent history.

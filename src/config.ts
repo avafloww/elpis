@@ -402,6 +402,14 @@ function exactMapping(
 
 const SIGNAL_ACI_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SEMVER_CORE = '(?:0|[1-9]\\d*)';
+const SEMVER_PRERELEASE =
+  '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+const SIGNAL_VERSION_RE = new RegExp(
+  `^${SEMVER_CORE}\\.${SEMVER_CORE}\\.${SEMVER_CORE}` +
+    `(?:-${SEMVER_PRERELEASE}(?:\\.${SEMVER_PRERELEASE})*)?` +
+    '(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$',
+);
 
 function parseSignalConfig(tree: YamlTree, file: string): SignalConfig {
   const disabled: SignalConfig = {
@@ -449,7 +457,7 @@ function parseSignalConfig(tree: YamlTree, file: string): SignalConfig {
     throw new Error(`${file}: signal.data_dir must be an absolute path`);
   if (account !== null && !SIGNAL_ACI_RE.test(account))
     throw new Error(`${file}: signal.account must be a lowercase ACI UUID`);
-  if (expectedVersion !== null && !/^\d+\.\d+\.\d+$/.test(expectedVersion))
+  if (expectedVersion !== null && !SIGNAL_VERSION_RE.test(expectedVersion))
     throw new Error(`${file}: signal.expected_version must be an exact semver`);
   if (
     !Number.isInteger(requestTimeoutMs) ||
