@@ -38,7 +38,7 @@ Ordinary text may use an exact leading header, followed by a newline and the mes
 Hello.
 ```
 
-Discord targets are guild-qualified and may use optional `replyTo`. Configured Signal contacts use `signal:<alias>`, never a raw ACI, and are text-only without reply metadata. The whole body is outward speech, not a mixture of speech and private commentary. Programmatic channel sends remain available for transport-supported scripted work.
+Discord targets are guild-qualified and may use optional `replyTo`. Configured Signal contacts use `signal:<alias>`, never a raw ACI; speech headers remain text-only and have no reply metadata. The whole body is outward speech, not a mixture of speech and private commentary. Programmatic Signal channel sends may add bounded local file attachments.
 
 Only fresh, complete, unstripped resident assistant output is eligible. The resident commits the assistant message before routing through the existing channel resolver and send checks. It appends the delivery outcome after all tool results; a failed send does not strand the tool batch. A header does not yield: the final successful wake-bearing `run` still controls that transition.
 

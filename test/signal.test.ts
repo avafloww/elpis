@@ -65,6 +65,7 @@ class FakeClient implements SignalCliLike {
     recipient: string;
     message: string;
     styles: readonly SignalTextStyle[];
+    attachments: readonly string[];
   }> = [];
   readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   stopped = false;
@@ -87,8 +88,9 @@ class FakeClient implements SignalCliLike {
     recipient: string,
     message: string,
     styles: readonly SignalTextStyle[] = [],
+    attachments: readonly string[] = [],
   ) {
-    this.sends.push({ recipient, message, styles });
+    this.sends.push({ recipient, message, styles, attachments });
     return { status: 'accepted' as const };
   }
   async stop(): Promise<void> {
@@ -570,7 +572,7 @@ test('receive rejects escaping, symlinked, oversized, and excessive Signal attac
   assert.equal(JSON.stringify(inbound).includes('must-not-enter'), false);
 });
 
-test('send enforces exact room, contact permission, text-only options, and final mute', async () => {
+test('send enforces exact room, contact permission, unsupported options, and final mute', async () => {
   const h = harness();
   await h.transport.start();
   assert.deepEqual(await h.transport.send(BRAMBLE_ROOM, '**hello**'), {
@@ -581,18 +583,75 @@ test('send enforces exact room, contact permission, text-only options, and final
       recipient: BRAMBLE_ACI,
       message: 'hello',
       styles: [{ style: 'BOLD', start: 0, length: 5 }],
+      attachments: [],
     },
   ]);
 
   await assert.rejects(h.transport.send(`signal:dm:${CEDAR_ACI}`, 'no'), /allow_send=false/);
   await assert.rejects(h.transport.send('signal:dm:00000000-0000-4000-8000-000000000099', 'no'), /not configured/);
-  await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no', { replyTo: '1' }), /text-only/);
-  await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no', { files: [{ path: '/tmp/x' }] }), /text-only/);
-  await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no', { mentions: false }), /text-only/);
+  await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no', { replyTo: '1' }), /unsupported/);
+  await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no', { mentions: false }), /unsupported/);
 
   h.setMuted(true);
   await assert.rejects(h.transport.send(BRAMBLE_ROOM, 'no'), /muted/);
   assert.equal(h.client.sends.length, 1);
+});
+
+test('send validates every attachment before one Signal dispatch', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'elpis-signal-outbound-'));
+  try {
+    const pdf = join(root, 'resume.pdf');
+    const link = join(root, 'link.pdf');
+    const directory = join(root, 'directory.pdf');
+    const oversized = join(root, 'oversized.pdf');
+    writeFileSync(pdf, '%PDF-synthetic');
+    symlinkSync(pdf, link);
+    mkdirSync(directory);
+    writeFileSync(oversized, '');
+    truncateSync(oversized, 25 * 1024 * 1024 + 1);
+
+    const h = harness();
+    await h.transport.start();
+    assert.deepEqual(
+      await h.transport.send(BRAMBLE_ROOM, '**draft**', {
+        files: [{ path: pdf, name: 'resume.pdf' }],
+      }),
+      { signal: { status: 'accepted' } },
+    );
+    assert.deepEqual(h.client.sends, [
+      {
+        recipient: BRAMBLE_ACI,
+        message: 'draft',
+        styles: [{ style: 'BOLD', start: 0, length: 5 }],
+        attachments: [pdf],
+      },
+    ]);
+
+    const rejects: Array<{
+      files: Array<{ path: string; name?: string }>;
+      pattern: RegExp;
+    }> = [
+      { files: [{ path: 'relative.pdf' }], pattern: /absolute/ },
+      { files: [{ path: join(root, 'missing.pdf') }], pattern: /regular file/ },
+      { files: [{ path: directory }], pattern: /regular file/ },
+      { files: [{ path: link }], pattern: /regular non-symlink/ },
+      { files: [{ path: oversized }], pattern: /25 MiB/ },
+      { files: [{ path: pdf, name: 'renamed.pdf' }], pattern: /display filename/ },
+      {
+        files: Array.from({ length: 11 }, () => ({ path: pdf })),
+        pattern: /at most 10/,
+      },
+    ];
+    for (const rejection of rejects) {
+      await assert.rejects(
+        h.transport.send(BRAMBLE_ROOM, 'must not send', { files: rejection.files }),
+        rejection.pattern,
+      );
+      assert.equal(h.client.sends.length, 1);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('composition router isolates transports and preserves Discord send purpose', async () => {
@@ -610,7 +669,7 @@ test('composition router isolates transports and preserves Discord send purpose'
     signal: { status: 'accepted' },
   });
   assert.deepEqual(h.client.sends, [
-    { recipient: BRAMBLE_ACI, message: 'through Signal', styles: [] },
+    { recipient: BRAMBLE_ACI, message: 'through Signal', styles: [], attachments: [] },
   ]);
   assert.equal(discordCalls.length, 0);
 

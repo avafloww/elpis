@@ -138,6 +138,7 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
     '00000000-0000-4000-8000-000000000002',
     'hello',
     [{ style: 'BOLD', start: 0, length: 5 }],
+    ['/tmp/synthetic.pdf'],
   );
   assert.deepEqual(parsedWrites(child), [
     { jsonrpc: '2.0', method: 'version', params: {}, id: 1 },
@@ -148,6 +149,7 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
         recipient: ['00000000-0000-4000-8000-000000000002'],
         message: 'hello',
         textStyle: ['0:5:BOLD'],
+        attachments: ['/tmp/synthetic.pdf'],
       },
       id: 2,
     },
@@ -161,7 +163,7 @@ test('spawns documented stdio mode and correlates monotonic requests', async () 
   assert.ok(timers.cleared.has(2));
 });
 
-test('rejects invalid text style ranges before dispatch', async () => {
+test('rejects invalid text style and attachment arguments before dispatch', async () => {
   const { client, child, timers } = harness();
   const error = await capturedError(
     client.sendText('synthetic-recipient', 'hi', [
@@ -185,6 +187,19 @@ test('rejects invalid text style ranges before dispatch', async () => {
   );
   assert.equal(nullError.code, 'invalid_request');
   assert.equal(nullError.issuanceUncertain, false);
+
+  const emptyAttachment = await capturedError(
+    client.sendText('synthetic-recipient', 'hi', [], ['']),
+  );
+  assert.equal(emptyAttachment.code, 'invalid_request');
+  assert.equal(emptyAttachment.issuanceUncertain, false);
+
+  const sparseAttachments = new Array(1) as string[];
+  const sparseAttachment = await capturedError(
+    client.sendText('synthetic-recipient', 'hi', [], sparseAttachments),
+  );
+  assert.equal(sparseAttachment.code, 'invalid_request');
+  assert.equal(sparseAttachment.issuanceUncertain, false);
   assert.equal(child.writes.length, 0);
   assert.equal(timers.scheduled.length, 0);
 });

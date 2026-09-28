@@ -127,6 +127,21 @@ function positiveInteger(value: number, name: string): number {
   return value;
 }
 
+function attachmentPaths(attachments: readonly string[]): string[] {
+  if (!Array.isArray(attachments) || attachments.length > 10) {
+    throw new SignalCliError('invalid_request', false);
+  }
+  const paths: string[] = [];
+  for (let index = 0; index < attachments.length; index++) {
+    const value: unknown = attachments[index];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new SignalCliError('invalid_request', false);
+    }
+    paths.push(value);
+  }
+  return paths;
+}
+
 function styleRanges(
   message: string,
   styles: readonly SignalTextStyle[],
@@ -240,12 +255,17 @@ export class SignalCliClient {
     recipient: string,
     message: string,
     styles: readonly SignalTextStyle[] = [],
+    attachments: readonly string[] = [],
   ): Promise<SignalCliAccepted> {
     const textStyle = styleRanges(message, styles);
+    const outboundAttachments = attachmentPaths(attachments);
     await this.request('send', {
       recipient: [recipient],
       message,
       ...(textStyle.length > 0 ? { textStyle } : {}),
+      ...(outboundAttachments.length > 0
+        ? { attachments: outboundAttachments }
+        : {}),
     });
     return { status: 'accepted' };
   }

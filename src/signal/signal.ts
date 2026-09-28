@@ -2,7 +2,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { InboundMessage, InboundMessageAttachment } from '../agent.js';
 import type { SignalConfig, SignalContactConfig } from '../config.js';
-import type { OutboundDelivery, OutboundSendOptions } from '../types.js';
+import type {
+  OutboundAttachment,
+  OutboundDelivery,
+  OutboundSendOptions,
+} from '../types.js';
 import {
   formatSignalMarkdown,
   type SignalTextStyle,
@@ -88,6 +92,7 @@ export interface SignalCliLike {
     recipient: string,
     message: string,
     styles?: readonly SignalTextStyle[],
+    attachments?: readonly string[],
   ): Promise<{ status: 'accepted' }>;
   stop(): Promise<void>;
 }
@@ -301,6 +306,48 @@ function signalAttachments(
   return { attachments, captions };
 }
 
+function signalOutboundAttachmentPaths(
+  files: readonly OutboundAttachment[] | undefined,
+): string[] {
+  if (files === undefined) return [];
+  if (!Array.isArray(files) || files.length > MAX_ATTACHMENTS) {
+    throw new Error('Signal sends support at most 10 attachments');
+  }
+  const attachments: string[] = [];
+  for (let index = 0; index < files.length; index++) {
+    const file: unknown = files[index];
+    if (!isObject(file) || typeof file.path !== 'string' || !path.isAbsolute(file.path)) {
+      throw new Error('Signal attachment paths must be absolute');
+    }
+    const localPath = path.resolve(file.path);
+    if (
+      file.name !== undefined &&
+      (typeof file.name !== 'string' || file.name !== path.basename(localPath))
+    ) {
+      throw new Error(
+        'Signal custom display filenames are unsupported; name must match the file basename',
+      );
+    }
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(localPath);
+    } catch {
+      throw new Error('Signal attachment must be a regular file');
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error('Signal attachment must be a regular non-symlink file');
+    }
+    if (!stats.isFile()) {
+      throw new Error('Signal attachment must be a regular file');
+    }
+    if (stats.size > MAX_ATTACHMENT_BYTES) {
+      throw new Error('Signal attachments must not exceed 25 MiB each');
+    }
+    attachments.push(localPath);
+  }
+  return attachments;
+}
+
 class ConfiguredSignalTransport implements SignalTransport {
   private readonly byAci = new Map<string, SignalContactConfig>();
   private readonly pendingInbound: InboundMessage[] = [];
@@ -403,19 +450,21 @@ class ConfiguredSignalTransport implements SignalTransport {
       throw new Error('Signal destination is not configured');
     if (!contact.allowSend)
       throw new Error(`sending to signal:${contact.alias} is disabled (allow_send=false)`);
-    if (
-      opts?.replyTo !== undefined ||
-      opts?.mentions !== undefined ||
-      (opts?.files?.length ?? 0) > 0
-    ) {
-      throw new Error('Signal transport is text-only; reply, mention, and file options are unsupported');
+    if (opts?.replyTo !== undefined || opts?.mentions !== undefined) {
+      throw new Error('Signal reply and mention options are unsupported');
     }
     if (!this.ready || !this.client || this.client.state !== 'running')
       throw new Error('Signal transport is unavailable');
     if (this.deps.isMuted(channelId))
       throw new Error(`Signal channel signal:${contact.alias} is muted`);
+    const attachments = signalOutboundAttachmentPaths(opts?.files);
     const formatted = formatSignalMarkdown(content);
-    await this.client.sendText(contact.aci, formatted.text, formatted.styles);
+    await this.client.sendText(
+      contact.aci,
+      formatted.text,
+      formatted.styles,
+      attachments,
+    );
     return { signal: { status: 'accepted' } };
   }
 
