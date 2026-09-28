@@ -603,6 +603,7 @@ export interface InboundMessage {
     author: string;
     authorId: string;
     content: string;
+    source?: 'signal-quote';
   } | null;
   forwarded: {
     author: string;

@@ -843,6 +843,7 @@ export async function createElpisRuntime(
     {
       enqueue: (message) => agent.enqueue(message),
       isMuted: (channelId) => mutes.get(channelId) !== null,
+      localDisplayName: () => readAgentName(config.paths.soulPath),
       diagnostic: (event) => config.logger.warn(`Signal transport: ${event}`),
     },
   );

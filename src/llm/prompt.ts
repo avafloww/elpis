@@ -764,7 +764,7 @@ the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living i
 
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):
-\`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it.
+\`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it. A Signal \`<reply-to source="signal-quote">\` is bounded sender-embedded context, not independently fetched proof of the original message.
 Attachments are pre-downloaded; \`elpis.inbound.attachments[0].localPath\` is a readable file path.
 Small text attachments arrive ALREADY INLINED in the message itself, inside
 \`<attachment-content name="...">\` tags (the metadata line says "(inlined below)") —

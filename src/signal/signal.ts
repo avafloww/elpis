@@ -19,6 +19,7 @@ const SIGNAL_ROOM_PREFIX = 'signal:dm:';
 const MAX_PENDING_INBOUND = 128;
 const MAX_SEEN_INBOUND = 4096;
 const MAX_TEXT_BYTES = 64 * 1024;
+const MAX_QUOTED_TEXT_BYTES = 16 * 1024;
 const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const ATTACHMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
@@ -94,6 +95,7 @@ export interface SignalCliLike {
 export interface SignalTransportDeps {
   enqueue(message: InboundMessage): void;
   isMuted(channelId: string): boolean;
+  localDisplayName(): string;
   clientFactory?(options: SignalCliOptions): SignalCliLike;
   diagnostic?(event: SignalTransportDiagnostic): void;
 }
@@ -164,6 +166,72 @@ function admissibleDataMessage(value: Record<string, unknown>): boolean {
     return false;
   }
   return true;
+}
+
+function boundedQuotedText(value: string): string {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= MAX_QUOTED_TEXT_BYTES) return value;
+  const marker = '\n[…Signal quote truncated]';
+  const prefix = bytes
+    .subarray(0, MAX_QUOTED_TEXT_BYTES - Buffer.byteLength(marker))
+    .toString('utf8')
+    .replace(/\uFFFD$/, '');
+  return `${prefix}${marker}`;
+}
+
+function signalReply(
+  value: unknown,
+  localAci: string,
+  sourceAci: string,
+  contact: SignalContactConfig,
+  localDisplayName: () => string,
+): InboundMessage['replyTo'] {
+  if (!isObject(value)) return null;
+  if (!Number.isSafeInteger(value.id) || (value.id as number) <= 0) return null;
+  if (typeof value.authorUuid !== 'string') return null;
+
+  const authorUuid = value.authorUuid.toLowerCase();
+  let author: string;
+  let authorId: string;
+  if (authorUuid === localAci.toLowerCase()) {
+    try {
+      const current = localDisplayName().trim();
+      author = current.length > 0 ? current : 'me';
+    } catch {
+      author = 'me';
+    }
+    authorId = 'signal:self';
+  } else if (authorUuid === sourceAci.toLowerCase()) {
+    author = contact.displayName;
+    authorId = `signal:${contact.alias}`;
+  } else {
+    return null;
+  }
+
+  if (
+    value.text !== undefined &&
+    value.text !== null &&
+    typeof value.text !== 'string'
+  ) {
+    return null;
+  }
+  if (value.attachments !== undefined && !Array.isArray(value.attachments)) {
+    return null;
+  }
+  const rawText = typeof value.text === 'string' ? value.text : '';
+  const content =
+    rawText.length > 0
+      ? boundedQuotedText(rawText)
+      : Array.isArray(value.attachments) && value.attachments.length > 0
+        ? '(attachment)'
+        : '(no text content)';
+  return {
+    id: String(value.id),
+    author,
+    authorId,
+    content,
+    source: 'signal-quote',
+  };
 }
 
 function signalAttachmentName(value: unknown, fallback: string): string {
@@ -405,6 +473,13 @@ class ConfiguredSignalTransport implements SignalTransport {
     ) {
       return null;
     }
+    const replyTo = signalReply(
+      dataMessage.quote,
+      this.config.account!,
+      sourceUuid,
+      contact,
+      this.deps.localDisplayName,
+    );
     const timestamp = dataMessage.timestamp ?? envelope.timestamp;
     if (!Number.isSafeInteger(timestamp) || (timestamp as number) <= 0)
       return null;
@@ -426,7 +501,7 @@ class ConfiguredSignalTransport implements SignalTransport {
       authorId: `signal:${contact.alias}`,
       content,
       createdAt: new Date(timestamp as number).toISOString(),
-      replyTo: null,
+      replyTo,
       forwarded: null,
       mentions: [],
       attachments: parsedAttachments.attachments,

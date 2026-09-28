@@ -55,7 +55,12 @@ export interface EnvelopeMessage {
   author: string;
   createdAt: string;
   content: string;
-  replyTo: { id: string; author: string; content: string } | null;
+  replyTo: {
+    id: string;
+    author: string;
+    content: string;
+    source?: 'signal-quote';
+  } | null;
   forwarded: {
     author: string;
     channelName: string | null;
@@ -110,7 +115,11 @@ export function formatInboundEnvelope(
     const id = escapeXmlAttr(m.replyTo.id);
     const author = escapeXmlAttr(m.replyTo.author);
     const body = neutralizeEnvelopeTags(m.replyTo.content || '(no content)');
-    parts.push(`  <reply-to id="${id}" author="${author}">${body}</reply-to>`);
+    const source =
+      m.replyTo.source === 'signal-quote' ? ' source="signal-quote"' : '';
+    parts.push(
+      `  <reply-to id="${id}" author="${author}"${source}>${body}</reply-to>`,
+    );
   }
   if (m.forwarded) {
     const ch = escapeXmlAttr(m.forwarded.channelName ?? 'unknown');

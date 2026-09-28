@@ -129,8 +129,14 @@ test('extractUtterance: multi-line utterance survives, envelope does not', () =>
 
 test('extractUtterance: skips a leading reply-to child, keeps the reply text', () => {
   const stored = env('yes, shipping now', {
-    replyTo: { id: '9', author: 'Rowan', content: 'did it land?' },
+    replyTo: {
+      id: '9',
+      author: 'Rowan',
+      content: 'did it land?',
+      source: 'signal-quote',
+    },
   });
+  assert.match(stored, /<reply-to id="9" author="Rowan" source="signal-quote">/);
   assert.equal(extractUtterance(stored), 'yes, shipping now');
 });
 

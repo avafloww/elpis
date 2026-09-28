@@ -108,6 +108,7 @@ function harness(signalConfig = config()) {
   const transport = createSignalTransport(signalConfig, {
     enqueue: (message) => inbound.push(message),
     isMuted: () => muted,
+    localDisplayName: () => 'Aster',
     diagnostic: (event) => diagnostics.push(event),
     clientFactory: (options) => {
       created.push(options);
@@ -310,7 +311,7 @@ test('receive admits only configured direct text before Agent enqueue', async ()
   assert.equal(JSON.stringify(inbound).includes('secret'), false);
 });
 
-test('receive admits display context but rejects effects and ephemeral semantics', async () => {
+test('receive preserves bounded reply context and rejects effects and ephemeral semantics', async () => {
   const { transport, client, inbound } = harness();
   await transport.start();
   client.emit(
@@ -330,10 +331,38 @@ test('receive admits display context but rejects effects and ephemeral semantics
           image: { id: 'preview-private-image' },
         },
       ],
-      quote: { id: 1, text: 'quoted-private-text' },
+      quote: {
+        id: 1790549999000,
+        authorUuid: LOCAL_ACI,
+        text: 'yes. i think that is the honest goal.',
+        attachments: [],
+      },
       mentions: [{ uuid: 'mention-private-uuid', start: 0, length: 4 }],
       textStyles: [{ style: 'BOLD', start: 0, length: 4 }],
       storyContext: { authorUuid: 'story-private-author', sentTimestamp: 1 },
+    }),
+  );
+
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, 'reply with unknown quoted author', {
+      timestamp: 1790550000210,
+      quote: {
+        id: 1790549999010,
+        authorUuid: '00000000-0000-4000-8000-000000000099',
+        text: 'forged quoted text',
+        attachments: [],
+      },
+    }),
+  );
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, 'reply with a bounded quote', {
+      timestamp: 1790550000220,
+      quote: {
+        id: 1790549999020,
+        authorUuid: BRAMBLE_ACI,
+        text: '🩷'.repeat(9000),
+        attachments: [],
+      },
     }),
   );
 
@@ -404,13 +433,30 @@ test('receive admits display context but rejects effects and ephemeral semantics
 
   assert.deepEqual(
     inbound.map((message) => message.content),
-    ['https://example.com what do you think?', 'plain recovery message'],
+    [
+      'https://example.com what do you think?',
+      'reply with unknown quoted author',
+      'reply with a bounded quote',
+      'plain recovery message',
+    ],
   );
   assert.equal(inbound.every((message) => message.attachments.length === 0), true);
+  assert.deepEqual(inbound[0]?.replyTo, {
+    id: '1790549999000',
+    author: 'Aster',
+    authorId: 'signal:self',
+    content: 'yes. i think that is the honest goal.',
+    source: 'signal-quote',
+  });
+  assert.equal(inbound[1]?.replyTo, null);
+  assert.equal(inbound[2]?.replyTo?.author, 'Bramble');
+  assert.match(inbound[2]?.replyTo?.content ?? '', /\[…Signal quote truncated\]$/);
+  assert.equal(inbound[2]?.replyTo?.content.includes('\uFFFD'), false);
+  assert.ok(Buffer.byteLength(inbound[2]?.replyTo?.content ?? '') <= 16 * 1024);
   const admitted = JSON.stringify(inbound);
   for (const forbidden of [
     'preview-private',
-    'quoted-private',
+    'forged quoted text',
     'mention-private',
     'story-private',
     'must-not-enter',
@@ -610,7 +656,13 @@ test('Agent keeps Signal in one FIFO without Discord directory or people-memory 
     authorId: 'signal:bramble',
     content: 'agent-signal-message',
     createdAt: new Date(1790550000123).toISOString(),
-    replyTo: null,
+    replyTo: {
+      id: '1790549999000',
+      author: 'Aster',
+      authorId: 'signal:self',
+      content: 'earlier Signal response',
+      source: 'signal-quote',
+    },
     forwarded: null,
     mentions: [],
     attachments: [],
@@ -623,6 +675,10 @@ test('Agent keeps Signal in one FIFO without Discord directory or people-memory 
   const joined = capture.messages.map((message) => message.content ?? '').join('\n');
   assert.match(joined, /transport="signal"/);
   assert.match(joined, /channel="signal:bramble"/);
+  assert.match(
+    joined,
+    /<reply-to id="1790549999000" author="Aster" source="signal-quote">earlier Signal response<\/reply-to>/,
+  );
   assert.match(joined, /<direct-channel-action-acknowledgement>/);
   assert.match(joined, /\[send to=signal:bramble\]/);
   assert.doesNotMatch(joined, /<person-memory/);
