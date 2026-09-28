@@ -183,6 +183,34 @@ test('Signal Markdown becomes UTF-16 native style ranges', () => {
   });
 });
 
+test('Signal Markdown preserves fenced code lines as one monospace range', () => {
+  assert.deepEqual(
+    formatSignalMarkdown(
+      "before\n```ts\nconst heart = '🩷';\nconsole.log(heart);\n```\nafter",
+    ),
+    {
+      text: "before\nconst heart = '🩷';\nconsole.log(heart);\nafter",
+      styles: [{ style: 'MONOSPACE', start: 7, length: 40 }],
+    },
+  );
+  assert.deepEqual(formatSignalMarkdown('```\nline 1\nline 2\n```'), {
+    text: 'line 1\nline 2\n',
+    styles: [{ style: 'MONOSPACE', start: 0, length: 14 }],
+  });
+  assert.deepEqual(formatSignalMarkdown('~~~python\nprint("hi")\n~~~'), {
+    text: 'print("hi")\n',
+    styles: [{ style: 'MONOSPACE', start: 0, length: 12 }],
+  });
+  assert.deepEqual(formatSignalMarkdown('```js\r\nx\r\n```\r\nafter'), {
+    text: 'x\r\nafter',
+    styles: [{ style: 'MONOSPACE', start: 0, length: 3 }],
+  });
+  assert.deepEqual(formatSignalMarkdown('before\n```ts\n**literal**\n'), {
+    text: 'before\n```ts\n**literal**\n',
+    styles: [],
+  });
+});
+
 test('Signal Markdown preserves all markers beyond the native range cap', () => {
   const atLimit = Array.from({ length: 128 }, () => '**x**').join(' ');
   const formatted = formatSignalMarkdown(atLimit);
