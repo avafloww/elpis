@@ -2,6 +2,9 @@ import { isUtf8 } from 'node:buffer';
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { SignalTextStyle } from './format.js';
 
+const SIGNAL_RECEIVE_ACCOUNT_RE =
+  /^(?:\+[1-9]\d{1,14}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+
 export type SignalCliState = 'running' | 'stopping' | 'stopped' | 'unavailable';
 export type SignalCliDiagnostic =
   | 'invalid_frame'
@@ -10,9 +13,11 @@ export type SignalCliDiagnostic =
   | 'unknown_response'
   | 'unexpected_exit'
   | 'process_error'
+  | 'receive_error'
   | 'receive_handler_error';
 
 export interface SignalCliReceiveNotification {
+  account: string;
   envelope: Record<string, unknown>;
 }
 export interface SignalCliAccepted {
@@ -424,12 +429,26 @@ export class SignalCliClient {
       hasOwn(value, 'result') ||
       hasOwn(value, 'error') ||
       !isObject(value.params) ||
-      !isObject(value.params.envelope)
+      typeof value.params.account !== 'string' ||
+      !SIGNAL_RECEIVE_ACCOUNT_RE.test(value.params.account)
     ) {
       this.emitDiagnostic('invalid_frame');
       return;
     }
-    const notification = { envelope: value.params.envelope };
+    if (hasOwn(value.params, 'exception')) {
+      this.emitDiagnostic(
+        isObject(value.params.exception) ? 'receive_error' : 'invalid_frame',
+      );
+      return;
+    }
+    if (!isObject(value.params.envelope)) {
+      this.emitDiagnostic('invalid_frame');
+      return;
+    }
+    const notification = {
+      account: value.params.account,
+      envelope: value.params.envelope,
+    };
     for (const handler of this.receiveHandlers) {
       try {
         handler(notification);

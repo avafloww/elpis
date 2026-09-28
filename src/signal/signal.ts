@@ -9,6 +9,7 @@ import {
 } from './format.js';
 import {
   createSignalCliClient,
+  type SignalCliDiagnostic,
   type SignalCliOptions,
   type SignalCliReceiveNotification,
   type SignalCliState,
@@ -21,6 +22,59 @@ const MAX_TEXT_BYTES = 64 * 1024;
 const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const ATTACHMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
+// Keep schema drift fail-closed: every admitted field is classified below.
+const DATA_MESSAGE_FIELDS = new Set([
+  'timestamp',
+  'message',
+  'expiresInSeconds',
+  'isExpirationUpdate',
+  'viewOnce',
+  'groupCallUpdate',
+  'isEndSession',
+  'isProfileKeyUpdate',
+  'hasProfileKey',
+  'reaction',
+  'quote',
+  'payment',
+  'mentions',
+  'previews',
+  'attachments',
+  'sticker',
+  'remoteDelete',
+  'contacts',
+  'pollCreate',
+  'pollVote',
+  'pollTerminate',
+  'textStyles',
+  'groupInfo',
+  'storyContext',
+  'pinMessage',
+  'unpinMessage',
+  'adminDelete',
+]);
+const SIGNAL_OTHER_ENVELOPE_FIELDS = [
+  'editMessage',
+  'storyMessage',
+  'syncMessage',
+  'callMessage',
+  'receiptMessage',
+  'typingMessage',
+] as const;
+const SIGNAL_EFFECT_FIELDS = [
+  'groupCallUpdate',
+  'reaction',
+  'payment',
+  'sticker',
+  'remoteDelete',
+  'contacts',
+  'pollCreate',
+  'pollVote',
+  'pollTerminate',
+  'groupInfo',
+  'pinMessage',
+  'unpinMessage',
+  'adminDelete',
+] as const;
 
 export interface SignalCliLike {
   readonly state: SignalCliState;
@@ -45,6 +99,7 @@ export interface SignalTransportDeps {
 }
 
 export type SignalTransportDiagnostic =
+  | SignalCliDiagnostic
   | 'pending_inbound_overflow'
   | 'client_unavailable';
 
@@ -76,6 +131,39 @@ function emitDiagnostic(
   } catch {
     // Diagnostics never supervise transport behavior.
   }
+}
+
+function admissibleDataMessage(value: Record<string, unknown>): boolean {
+  if (Object.keys(value).some((field) => !DATA_MESSAGE_FIELDS.has(field))) {
+    return false;
+  }
+  for (const field of SIGNAL_EFFECT_FIELDS) {
+    if (hasOwn(value, field)) return false;
+  }
+  for (const field of ['previews', 'mentions', 'textStyles'] as const) {
+    if (hasOwn(value, field) && !Array.isArray(value[field])) return false;
+  }
+  for (const field of ['quote', 'storyContext'] as const) {
+    if (hasOwn(value, field) && !isObject(value[field])) return false;
+  }
+  if (
+    hasOwn(value, 'expiresInSeconds') &&
+    (!Number.isSafeInteger(value.expiresInSeconds) || value.expiresInSeconds !== 0)
+  ) {
+    return false;
+  }
+  for (const field of [
+    'isExpirationUpdate',
+    'viewOnce',
+    'isEndSession',
+    'isProfileKeyUpdate',
+  ] as const) {
+    if (hasOwn(value, field) && value[field] !== false) return false;
+  }
+  if (hasOwn(value, 'hasProfileKey') && typeof value.hasProfileKey !== 'boolean') {
+    return false;
+  }
+  return true;
 }
 
 function signalAttachmentName(value: unknown, fallback: string): string {
@@ -186,6 +274,7 @@ class ConfiguredSignalTransport implements SignalTransport {
       dataDir: this.config.dataDir!,
       account: this.config.account!,
       requestTimeoutMs: this.config.requestTimeoutMs,
+      diagnostic: (event) => emitDiagnostic(this.deps.diagnostic, event),
     });
     this.client = client;
     this.unsubscribeReceive = client.onReceive((value) =>
@@ -283,10 +372,7 @@ class ConfiguredSignalTransport implements SignalTransport {
   }
 
   private toInbound(envelope: Record<string, unknown>): InboundMessage | null {
-    if (
-      hasOwn(envelope, 'account') &&
-      envelope.account !== this.config.account
-    ) {
+    if (SIGNAL_OTHER_ENVELOPE_FIELDS.some((field) => hasOwn(envelope, field))) {
       return null;
     }
     const sourceUuid = envelope.sourceUuid;
@@ -295,22 +381,7 @@ class ConfiguredSignalTransport implements SignalTransport {
     const contact = this.byAci.get(sourceUuid);
     if (!contact?.receive) return null;
     const dataMessage = envelope.dataMessage;
-    if (!isObject(dataMessage)) return null;
-    for (const field of [
-      'groupInfo',
-      'quote',
-      'mentions',
-      'sticker',
-      'reaction',
-      'delete',
-      'remoteDelete',
-      'contacts',
-      'previews',
-      'payment',
-      'storyContext',
-    ]) {
-      if (hasOwn(dataMessage, field)) return null;
-    }
+    if (!isObject(dataMessage) || !admissibleDataMessage(dataMessage)) return null;
     const parsedAttachments = signalAttachments(
       dataMessage.attachments,
       this.config.dataDir!,

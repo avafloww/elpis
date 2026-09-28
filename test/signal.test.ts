@@ -18,6 +18,7 @@ import { createOutboundTransportRouter } from '../src/index.js';
 import {
   createSignalTransport,
   type SignalCliLike,
+  type SignalTransportDiagnostic,
 } from '../src/signal/signal.js';
 import type { SignalCliOptions, SignalCliReceiveNotification } from '../src/signal/signal-cli.js';
 import {
@@ -94,7 +95,7 @@ class FakeClient implements SignalCliLike {
     this.stopped = true;
   }
   emit(envelope: Record<string, unknown>): void {
-    this.receive?.({ envelope });
+    this.receive?.({ account: LOCAL_ACI, envelope });
   }
 }
 
@@ -102,10 +103,12 @@ function harness(signalConfig = config()) {
   const client = new FakeClient();
   const created: SignalCliOptions[] = [];
   const inbound: InboundMessage[] = [];
+  const diagnostics: SignalTransportDiagnostic[] = [];
   let muted = false;
   const transport = createSignalTransport(signalConfig, {
     enqueue: (message) => inbound.push(message),
     isMuted: () => muted,
+    diagnostic: (event) => diagnostics.push(event),
     clientFactory: (options) => {
       created.push(options);
       return client;
@@ -115,6 +118,7 @@ function harness(signalConfig = config()) {
   return {
     client,
     created,
+    diagnostics,
     inbound,
     transport,
     setMuted: (value: boolean) => {
@@ -254,14 +258,16 @@ test('disabled Signal creates no client or transport', () => {
 test('start uses exact process config and fails closed on version mismatch', async () => {
   const ok = harness();
   await ok.transport.start();
-  assert.deepEqual(ok.created, [
-    {
-      command: '/opt/signal-cli/bin/signal-cli',
-      dataDir: '/tmp/synthetic-signal-data',
-      account: LOCAL_ACI,
-      requestTimeoutMs: 12000,
-    },
-  ]);
+  assert.equal(ok.created.length, 1);
+  const { diagnostic, ...created } = ok.created[0]!;
+  assert.deepEqual(created, {
+    command: '/opt/signal-cli/bin/signal-cli',
+    dataDir: '/tmp/synthetic-signal-data',
+    account: LOCAL_ACI,
+    requestTimeoutMs: 12000,
+  });
+  diagnostic?.('receive_error');
+  assert.deepEqual(ok.diagnostics, ['receive_error']);
   assert.deepEqual(ok.client.requests, [{ method: 'version', params: {} }]);
 
   const mismatch = harness();
@@ -279,7 +285,9 @@ test('receive admits only configured direct text before Agent enqueue', async ()
   client.emit({ sourceUuid: BRAMBLE_ACI, timestamp: 1, syncMessage: { sentMessage: { message: 'sync-secret' } } });
   client.emit(directEnvelope(BRAMBLE_ACI, 'group-secret', { groupInfo: {} }));
   client.emit(directEnvelope(BRAMBLE_ACI, 'attachment-secret', { attachments: [{ id: 'x' }] }));
-  client.emit(directEnvelope(BRAMBLE_ACI, 'quote-secret', { quote: { id: 1 } }));
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, 'reaction-secret', { reaction: { emoji: 'x' } }),
+  );
   client.emit(directEnvelope(BRAMBLE_ACI, 'hello from Signal'));
 
   assert.equal(inbound.length, 1);
@@ -300,6 +308,115 @@ test('receive admits only configured direct text before Agent enqueue', async ()
     wakeClass: 'wake',
   });
   assert.equal(JSON.stringify(inbound).includes('secret'), false);
+});
+
+test('receive admits display context but rejects effects and ephemeral semantics', async () => {
+  const { transport, client, inbound } = harness();
+  await transport.start();
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, 'https://example.com what do you think?', {
+      timestamp: 1790550000200,
+      expiresInSeconds: 0,
+      isExpirationUpdate: false,
+      viewOnce: false,
+      isEndSession: false,
+      isProfileKeyUpdate: false,
+      hasProfileKey: true,
+      previews: [
+        {
+          url: 'https://example.com',
+          title: 'preview-private-title',
+          description: 'preview-private-description',
+          image: { id: 'preview-private-image' },
+        },
+      ],
+      quote: { id: 1, text: 'quoted-private-text' },
+      mentions: [{ uuid: 'mention-private-uuid', start: 0, length: 4 }],
+      textStyles: [{ style: 'BOLD', start: 0, length: 4 }],
+      storyContext: { authorUuid: 'story-private-author', sentTimestamp: 1 },
+    }),
+  );
+
+  const effectFields = [
+    'groupInfo',
+    'groupCallUpdate',
+    'reaction',
+    'payment',
+    'sticker',
+    'remoteDelete',
+    'contacts',
+    'pollCreate',
+    'pollVote',
+    'pollTerminate',
+    'pinMessage',
+    'unpinMessage',
+    'adminDelete',
+  ];
+  effectFields.forEach((field, index) => {
+    client.emit(
+      directEnvelope(BRAMBLE_ACI, `must-not-enter-effect-${field}`, {
+        timestamp: 1790550000300 + index,
+        [field]: { private: field },
+      }),
+    );
+  });
+  [
+    'editMessage',
+    'storyMessage',
+    'syncMessage',
+    'callMessage',
+    'receiptMessage',
+    'typingMessage',
+  ].forEach((field, index) => {
+    client.emit({
+      ...directEnvelope(BRAMBLE_ACI, `must-not-enter-envelope-${field}`, {
+        timestamp: 1790550000350 + index,
+      }),
+      [field]: { private: field },
+    });
+  });
+  const rejectedMetadata = [
+    { expiresInSeconds: 30 },
+    { isExpirationUpdate: true },
+    { viewOnce: true },
+    { isEndSession: true },
+    { isProfileKeyUpdate: true },
+    { previews: {} },
+    { quote: [] },
+    { mentions: {} },
+    { textStyles: {} },
+    { storyContext: [] },
+    { unknownFutureEffect: {} },
+  ];
+  rejectedMetadata.forEach((extra, index) => {
+    client.emit(
+      directEnvelope(BRAMBLE_ACI, `must-not-enter-metadata-${index}`, {
+        timestamp: 1790550000400 + index,
+        ...extra,
+      }),
+    );
+  });
+  client.emit(
+    directEnvelope(BRAMBLE_ACI, 'plain recovery message', {
+      timestamp: 1790550000999,
+    }),
+  );
+
+  assert.deepEqual(
+    inbound.map((message) => message.content),
+    ['https://example.com what do you think?', 'plain recovery message'],
+  );
+  assert.equal(inbound.every((message) => message.attachments.length === 0), true);
+  const admitted = JSON.stringify(inbound);
+  for (const forbidden of [
+    'preview-private',
+    'quoted-private',
+    'mention-private',
+    'story-private',
+    'must-not-enter',
+  ]) {
+    assert.equal(admitted.includes(forbidden), false);
+  }
 });
 
 test('receive maps a downloaded Signal image and its caption into the shared attachment envelope', async (t) => {

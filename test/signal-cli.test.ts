@@ -10,6 +10,8 @@ import {
   type SignalCliTimers,
 } from '../src/signal/signal-cli.js';
 
+const LOCAL_ACI = '00000000-0000-4000-8000-000000000001';
+
 class FakeReadable extends EventEmitter {
   data(value: Buffer | string): void {
     this.emit('data', value);
@@ -88,7 +90,7 @@ function harness(
   const diagnostics: SignalCliDiagnostic[] = [];
   const client = new SignalCliClient({
     dataDir: '/tmp/synthetic-signal-data',
-    account: '00000000-0000-4000-8000-000000000001',
+    account: LOCAL_ACI,
     spawn,
     timers,
     diagnostic: (event) => diagnostics.push(event),
@@ -195,6 +197,7 @@ test('parses fragmented receive notifications and recovers after bounded frames'
     jsonrpc: '2.0',
     method: 'receive',
     params: {
+      account: LOCAL_ACI,
       envelope: {
         sourceUuid: 'synthetic-sender',
         dataMessage: { message: 'hi' },
@@ -205,6 +208,7 @@ test('parses fragmented receive notifications and recovers after bounded frames'
   child.stdout.data(frame.slice(17) + '\n');
   assert.deepEqual(received, [
     {
+      account: LOCAL_ACI,
       envelope: {
         sourceUuid: 'synthetic-sender',
         dataMessage: { message: 'hi' },
@@ -216,7 +220,11 @@ test('parses fragmented receive notifications and recovers after bounded frames'
   child.stdout.data('{not json}\n');
   child.output({ jsonrpc: '2.0', method: 'other', params: {} });
   child.output({ jsonrpc: '1.0', method: 'receive', params: { envelope: {} } });
-  child.output({ jsonrpc: '2.0', method: 'receive', params: { envelope: {} } });
+  child.output({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: { account: LOCAL_ACI, envelope: {} },
+  });
   assert.equal(
     received.length,
     2,
@@ -228,6 +236,44 @@ test('parses fragmented receive notifications and recovers after bounded frames'
     'invalid_frame',
     'invalid_frame',
   ]);
+});
+
+test('receive notifications preserve the child-reported account and classify daemon errors', () => {
+  const { client, child, diagnostics } = harness();
+  const received: unknown[] = [];
+  client.onReceive((notification) => received.push(notification));
+
+  child.output({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: {
+      account: '+15551234567',
+      envelope: { sourceUuid: 'allowed-numbered-account' },
+    },
+  });
+  child.output({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: {
+      account: LOCAL_ACI,
+      exception: { type: 'private-daemon-error' },
+      envelope: { sourceUuid: 'must-not-enter' },
+    },
+  });
+  child.output({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: { account: 'not-a-signal-account', envelope: {} },
+  });
+
+  assert.deepEqual(received, [
+    {
+      account: '+15551234567',
+      envelope: { sourceUuid: 'allowed-numbered-account' },
+    },
+  ]);
+  assert.deepEqual(diagnostics, ['receive_error', 'invalid_frame']);
+  assert.equal(JSON.stringify({ received, diagnostics }).includes('private'), false);
 });
 
 test('strict responses reject malformed and daemon errors without private text', async () => {
