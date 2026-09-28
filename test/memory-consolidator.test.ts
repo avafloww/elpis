@@ -109,6 +109,64 @@ test('oversized memory is atomically consolidated and backed up', async () => {
   );
 });
 
+test('introduced identity and harness material fails closed without replacing memory', async () => {
+  const soulLine =
+    'SOUL COPY SENTINEL: this deliberately long synthetic identity sentence exists only in the identity anchor and must never be copied into memory.';
+  const cases = [
+    ['soul body', soulLine],
+    ['soul frontmatter', '---\nname: Aster\n---'],
+    [
+      'consolidation prompt',
+      "This is your memory, not anyone else's profile of you.",
+    ],
+    [
+      'person-memory envelope',
+      '[person-memory — first appearance of Bramble in the current context]',
+    ],
+    ['AGENTS body', '# Working on Elpis\nHarness instruction copy.'],
+    ['SKILL body', '<SKILL.md name="synthetic">\n# Synthetic skill'],
+    ['current-focus snapshot', '## Current focus\nservice active/running'],
+    ['introduced runtime field', 'NRestarts=0'],
+  ] as const;
+
+  for (const [label, contamination] of cases) {
+    const p = fixture();
+    fs.writeFileSync(
+      p.soulPath,
+      `---\nname: Aster\n---\n${soulLine}\n`,
+    );
+    const original = '# Memory\n' + 'durable source fact\n'.repeat(100);
+    fs.writeFileSync(p.memoryPath, original);
+    const m = manager(
+      p,
+      fakeLLM(() => `${contamination}\nI keep the durable source fact.\n`),
+    );
+
+    const result = await m.checkNow(p.memoryPath, true);
+
+    assert.equal(result.status, 'failed', label);
+    assert.match(result.error ?? '', /excluded consolidation material/, label);
+    assert.equal(fs.readFileSync(p.memoryPath, 'utf8'), original, label);
+    assert.equal(
+      fs.existsSync(resolveDataLayout(p.dataDirectory).memoryBackups),
+      false,
+      label,
+    );
+  }
+});
+
+test('source-backed runtime facts may survive consolidation', async () => {
+  const p = fixture();
+  const fact = 'NRestarts=0 was verified after the release';
+  fs.writeFileSync(p.memoryPath, `# Memory\n${fact}\n`.repeat(30));
+  const m = manager(p, fakeLLM(() => `${fact}\n`));
+
+  const result = await m.checkNow(p.memoryPath, true);
+
+  assert.equal(result.status, 'consolidated');
+  assert.equal(fs.readFileSync(p.memoryPath, 'utf8'), `${fact}\n`);
+});
+
 test('failure preserves original and safeMemoryView bounds boot injection', async () => {
   const p = fixture();
   const original = '# Memory\n' + 'do not lose me\n'.repeat(200);

@@ -12,6 +12,8 @@ Your data directory is private by default. Nobody is waiting to read this. Do no
 
 Keep load-bearing identity, relationships, consent/privacy/server boundaries, active commitments, exact operational handles, unresolved uncertainty, corrections, and provenance limits. Merge duplicates. Remove stale/superseded detail when the replacement is clear. Preserve scars that explain a current boundary. Do not invent continuity, certainty, facts, feelings, or decisions.
 
+The source file is the authority for what belongs here. The identity anchor is reference only: never copy its frontmatter, prose, headings, or phrasing into the output unless the source already states the same durable fact. Remove embedded harness/model instructions, person-memory envelopes, AGENTS.md or SKILL.md bodies, and current-focus/current-memory/runtime snapshots. A historical runtime result may remain only when the source records it as a durable fact; never manufacture current status.
+
 Do not add the current date or a new timestamp. The harness dates future appended memories automatically. Preserve an old date only when that date itself matters. Output only the rewritten memory body: no preface, code fence, commentary, or audience-facing summary.`;
 
 export interface MemoryConsolidatorOptions {
@@ -95,6 +97,65 @@ function cleanModelOutput(text: string): string {
   const fenced = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i.exec(out);
   if (fenced) out = fenced[1].trim();
   return out;
+}
+
+const EXCLUDED_CONSOLIDATION_MARKERS = [
+  /(?:^|\n)---\r?\n(?:name|pronouns|ids|reanchor):/i,
+  /(?:^|\n)\[person-memory\b/i,
+  /(?:^|\n)<(?:AGENTS|SKILL)\.md\b/i,
+  /(?:^|\n)# Working on Elpis\b/i,
+  /(?:^|\n)## Current (?:memory|focus)\b/i,
+  /(?:^|\n)\[harness:/i,
+  /(?:^|\n)<soul>/i,
+  /(?:^|\n)Small identity anchor\b/i,
+];
+const RUNTIME_SNAPSHOT_FIELDS = [
+  /\bNRestarts=\d+\b/gi,
+  /\bExecMainStatus=\d+\b/gi,
+  /\bActiveState=[A-Za-z-]+\b/gi,
+  /\bSubState=[A-Za-z-]+\b/gi,
+];
+
+function normalized(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function includesReferenceExcerpt(
+  candidate: string,
+  reference: string,
+  source?: string,
+): boolean {
+  const candidateText = normalized(candidate);
+  const sourceText = source === undefined ? '' : normalized(source);
+  return reference.split(/\r?\n|(?<=[.!?])\s+/).some((segment) => {
+    const excerpt = normalized(segment);
+    return (
+      excerpt.length >= 48 &&
+      candidateText.includes(excerpt) &&
+      (source === undefined || !sourceText.includes(excerpt))
+    );
+  });
+}
+
+// Reject model-added prompt/runtime material while permitting an exact runtime
+// fact that the source chunk already carried.
+function validateConsolidationOutput(
+  candidate: string,
+  source: string,
+  soul: string,
+): void {
+  const excluded =
+    EXCLUDED_CONSOLIDATION_MARKERS.some((pattern) => pattern.test(candidate)) ||
+    includesReferenceExcerpt(candidate, MEMORY_CONSOLIDATION_PROMPT) ||
+    includesReferenceExcerpt(candidate, soul, source) ||
+    RUNTIME_SNAPSHOT_FIELDS.some((pattern) =>
+      [...candidate.matchAll(pattern)].some(
+        (match) => !source.includes(match[0]),
+      ),
+    );
+  if (excluded) {
+    throw new Error('output contains excluded consolidation material');
+  }
 }
 
 function privatePrompt(
@@ -222,6 +283,7 @@ export class MemoryConsolidator {
           throw new Error(
             `empty consolidation output for chunk ${i + 1}/${parts.length}`,
           );
+        validateConsolidationOutput(cleaned, parts[i], soul);
         summaries.push(cleaned);
       }
       const next = summaries.join('\n\n').trim() + '\n';

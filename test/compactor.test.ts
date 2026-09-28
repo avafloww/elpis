@@ -103,11 +103,11 @@ test('compaction prompt requires a first-person note to the future self at both 
   assert.match(SUMMARIZE_TAIL_REMINDER, /"I…", never "you…"/);
 });
 
-test('compaction excludes transient resource bodies from both summary input and kept tail', async () => {
+test('compaction excludes injected memory and resource bodies while preserving allowed history and the tail', async () => {
   const llm = fakeLLM();
   const tracker = createContextTracker(100000, 0);
   const compactor = createCompactor(llm, tracker, {
-    keepTokens: 1,
+    keepTokens: 150,
     ratio: () => 4,
   });
   const descriptor = {
@@ -117,36 +117,45 @@ test('compaction excludes transient resource bodies from both summary input and 
     version: 'a'.repeat(64),
   };
   const messages = [
-    mk('user', `SECRET FOLD INSTRUCTIONS ${'x'.repeat(400)}`, {
+    mk('user', `PERSON MEMORY FOLD MARKER ${'p'.repeat(400)}`, {
+      personContext: { kind: 'memory', authorId: '1', author: 'Bramble' },
+    }),
+    mk('user', `RESOURCE FOLD MARKER ${'x'.repeat(400)}`, {
       contextResources: [descriptor],
     }),
-    mk('user', `SECRET KEPT INSTRUCTIONS ${'y'.repeat(400)}`, {
+    mk('user', `ALLOWED HISTORY MARKER ${'a'.repeat(400)}`),
+    mk('user', `RESOURCE TAIL MARKER ${'y'.repeat(400)}`, {
       contextResources: [descriptor],
+    }),
+    mk('user', `PERSON MEMORY TAIL MARKER ${'q'.repeat(400)}`, {
+      personContext: { kind: 'memory', authorId: '2', author: 'Aster' },
     }),
   ];
 
   compactor.start(messages);
   await Promise.resolve();
   assert.equal(llm.inputs.length, 1);
-  assert.doesNotMatch(llm.inputs[0], /SECRET FOLD INSTRUCTIONS/);
-  assert.match(llm.inputs[0], /context resource body removed/);
+  assert.match(llm.inputs[0], /ALLOWED HISTORY MARKER/);
+  assert.doesNotMatch(llm.inputs[0], /PERSON MEMORY FOLD MARKER/);
+  assert.doesNotMatch(llm.inputs[0], /RESOURCE FOLD MARKER/);
+  assert.doesNotMatch(llm.inputs[0], /context resource body removed/);
   llm.resolveAll();
   await compactor.done();
   const applied = compactor.applyCompaction(messages);
-  assert.doesNotMatch(
-    applied.map((message) => message.content).join('\n'),
-    /SECRET (?:FOLD|KEPT) INSTRUCTIONS/,
-  );
-  const resourceMessages = applied.filter((message) =>
-    /context resource body removed/.test(message.content),
-  );
-  assert.ok(resourceMessages.length > 0);
+  const appliedText = applied.map((message) => message.content).join('\n');
+  assert.doesNotMatch(appliedText, /RESOURCE (?:FOLD|TAIL) MARKER/);
+  assert.match(appliedText, /PERSON MEMORY TAIL MARKER/);
   assert.ok(
-    resourceMessages.every(
+    applied.some(
       (message) =>
         message.contextResources === undefined &&
         /context resource body removed/.test(message.content),
     ),
+  );
+  assert.match(
+    messages.map((message) => message.content).join('\n'),
+    /PERSON MEMORY FOLD MARKER[\s\S]*RESOURCE TAIL MARKER/,
+    'source history is not mutated while projecting or applying the fold',
   );
 });
 

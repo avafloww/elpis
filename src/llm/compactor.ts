@@ -184,6 +184,16 @@ function evictContextResourceBodies(messages: ChatMessage[]): ChatMessage[] {
   );
 }
 
+// Harness-injected context can guide the live turn but must not become durable
+// autobiographical memory through compaction. Use provenance, never prose markers.
+function summaryFoldMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter(
+    (message) =>
+      message.personContext?.kind !== 'memory' &&
+      !(message.contextResources && message.contextResources.length > 0),
+  );
+}
+
 /** In-the-moment compaction notice appended at the TAIL of the rebuilt history. */
 function compactionNotice(replaced: number): ChatMessage {
   return {
@@ -317,11 +327,11 @@ export function createCompactor(
         priorSummary = head.content;
         foldStart = 1;
       }
-      const foldSlice = evictContextResourceBodies(
+      const foldSlice = summaryFoldMessages(
         messages.slice(foldStart, boundaryIndex),
       );
       // Skip-guard: nothing worth summarizing (e.g. one giant message forms the
-      // whole tail, or only the prior summary would be folded).
+      // whole tail, or only injected context would be folded).
       if (foldSlice.length === 0) {
         boundaryIndex = 0;
         return { status: 'skipped' };
