@@ -751,19 +751,23 @@ test('Agent keeps Signal in one FIFO without Discord directory or people-memory 
 
 test('Agent enforces Signal contact send policy before shared dispatch', async () => {
   let dispatches = 0;
+  let dispatchedOptions: unknown;
   const allowed = buildTestAgent({
     config: { signal: config() },
     agentDeps: {
-      send: async () => {
+      send: async (_channelId, _content, opts) => {
         dispatches++;
+        dispatchedOptions = opts;
         return { signal: { status: 'accepted' as const } };
       },
     },
     tmpPrefix: 'harness-signal-send-',
   });
-  assert.deepEqual(await allowed.agent.send(BRAMBLE_ROOM, 'hello'), {
+  const files = [{ path: '/tmp/synthetic.pdf' }];
+  assert.deepEqual(await allowed.agent.send(BRAMBLE_ROOM, 'hello', { files }), {
     signal: { status: 'accepted' },
   });
+  assert.deepEqual(dispatchedOptions, { files });
   assert.equal(dispatches, 1);
   allowed.cleanup();
 

@@ -1255,14 +1255,8 @@ export class Agent {
           `sending to signal:${signalContact.alias} is disabled by configuration (allow_send=false)`,
         );
       }
-      if (
-        opts?.replyTo !== undefined ||
-        opts?.mentions !== undefined ||
-        (opts?.files?.length ?? 0) > 0
-      ) {
-        throw new Error(
-          'Signal transport is text-only; reply, mention, and file options are unsupported',
-        );
+      if (opts?.replyTo !== undefined || opts?.mentions !== undefined) {
+        throw new Error('Signal reply and mention options are unsupported');
       }
       const muteRow = this.deps.mutes?.get(channelId);
       if (muteRow) {
