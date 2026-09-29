@@ -189,6 +189,10 @@ export interface Config {
      * Config values; file parsing always populates the disabled/default shape. */
     voice?: DiscordVoiceConfig;
   };
+  contextGraph: {
+    /** Build and validate graph records without changing live request behavior. */
+    shadowEnabled: boolean;
+  };
   compaction: {
     /** Absolute token count of REAL context at which a compaction cycle is
      * triggered. Clamped at boot to the real usable window (see index.ts). */
@@ -1824,6 +1828,9 @@ export function loadConfigFile(
         voice: parseDiscordVoiceConfig(tree, f, guilds),
       };
     })(),
+    contextGraph: {
+      shadowEnabled: boolOr(tree, 'context_graph.shadow_enabled', false, f),
+    },
     compaction: {
       triggerTokens: compactTriggerTokens,
       keepTokens: compactKeepTokens,

@@ -68,7 +68,7 @@ test('mind migrations are idempotent and create the complete schema', () => {
       (db.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version,
     ),
-    28,
+    29,
   );
   db.close();
 });

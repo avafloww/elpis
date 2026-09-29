@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    28,
+    29,
   );
   assert.deepEqual(
     (
@@ -195,15 +195,30 @@ test('current migration prefix preserves fleet history and creates resident stat
       },
       { component: 'core', name: '0027-discord-person-settings' },
       { component: 'core', name: '0028-worker-completion-delivery' },
+      { component: 'core', name: '0029-context-graph-dark-store' },
     ],
   );
   db.close();
 });
 
-test('migration v27→v28 grandfathers delivery but leaves every legacy cleanup pending', () => {
+test('migration v27→current grandfathers delivery but leaves every legacy cleanup pending', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
+  db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TABLE context_manifest_shares;
+    DROP TABLE context_manifest_events;
+    DROP TABLE context_capsule_edges;
+    DROP TABLE context_legacy_import_receipts;
+    DROP TABLE context_effects;
+    DROP TABLE context_continuation_advances;
+    DROP TABLE context_continuation_head;
+    DROP TABLE context_graph_activation;
+    DROP TABLE context_share_grants;
+    DROP TABLE context_capsules;
+    DROP TABLE context_manifests;
+    DROP TABLE context_branches;
+    DROP TABLE context_world_events;
     DROP INDEX worker_sessions_completion_pending_idx;
     DROP INDEX worker_sessions_cleanup_pending_idx;
     ALTER TABLE worker_sessions DROP COLUMN completion_notified_at;
@@ -211,9 +226,9 @@ test('migration v27→v28 grandfathers delivery but leaves every legacy cleanup 
     ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_error;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name = '0028-worker-completion-delivery';
+      WHERE component = 'core'
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store');
     PRAGMA user_version = 27;
-    PRAGMA foreign_keys = OFF;
   `);
   const insert = db.prepare(
     `INSERT INTO worker_sessions
@@ -401,7 +416,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    28,
+    29,
   );
   assert.deepEqual(
     (
@@ -427,6 +442,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0026-gateway-rotation-proposal-checkpoint',
       '0027-discord-person-settings',
       '0028-worker-completion-delivery',
+      '0029-context-graph-dark-store',
     ],
   );
   runMigrations(db);
@@ -458,7 +474,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    15,
+    16,
   );
   db.close();
 });
@@ -498,7 +514,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 28);
+  assert.equal(version, 29);
   assert.equal(
     (
       reopened

@@ -107,6 +107,12 @@ import { createChannelDirectory } from './store/channels.js';
 import { createMuteStore } from './store/mutes.js';
 import { createDiscordPersonSettingsStore } from './store/discord-person-settings.js';
 import { openDatabase } from './store/db.js';
+import { ContextGraphStore } from './store/context-graph.js';
+import {
+  ContextGraphShadowRecorder,
+  originWorldForChannel,
+} from './context/shadow.js';
+import { importLegacyTranscriptIntoGraph } from './context/legacy-import.js';
 import { createGatewayResidentStore } from './store/gateway-resident.js';
 import type { GatewayLlmFetch } from './llm/gateway-client.js';
 import { materializeGatewayConfig } from './llm/gateway-managed-config.js';
@@ -316,7 +322,15 @@ export async function createElpisRuntime(
   let secretRegistry!: ReturnType<typeof createSecretRegistry>;
   let gatewayResidentStore!: ReturnType<typeof createGatewayResidentStore>;
   let maxContextTokens!: number;
+  const contextGraphStore = new ContextGraphStore(db);
+  let contextGraphShadow: ContextGraphShadowRecorder | undefined;
   try {
+    const graphActivation = contextGraphStore.getActivationState();
+    if (graphActivation.mode === 'active') {
+      throw new Error(
+        'context graph is active but this runtime supports shadow mode only',
+      );
+    }
     gatewayResidentStore = (
       adapters.createGatewayResidentStore ?? createGatewayResidentStore
     )(db);
@@ -326,6 +340,9 @@ export async function createElpisRuntime(
       store: gatewayResidentStore,
       fetch: adapters.gatewayLlmFetch ?? ((input, init) => fetch(input, init)),
     });
+    contextGraphShadow = (config.contextGraph?.shadowEnabled ?? false)
+      ? new ContextGraphShadowRecorder(contextGraphStore)
+      : undefined;
     modules = resolveBuiltinModules(config, profile);
     if (modules.isActive('motor') && !llmRoleConfigured(config, 'motor')) {
       throw new Error(
@@ -431,6 +448,17 @@ export async function createElpisRuntime(
     'tokens',
   );
   const initialMessages = initialTranscript?.messages ?? [];
+  if (initialTranscript && contextGraphShadow) {
+    const imported = importLegacyTranscriptIntoGraph({
+      sourcePath: initialTranscript.path,
+      contextRoot: path.join(dataLayout.root, 'context-graph'),
+      store: contextGraphStore,
+      importedAt: Date.now(),
+    });
+    log(
+      `context graph shadow sealed legacy transcript ${imported.artifact.sha256.slice(0, 12)}`,
+    );
+  }
   if (initialMessages.length > 0) {
     log(`loaded prior transcript: ${initialMessages.length} messages`);
   } else {
@@ -510,6 +538,10 @@ export async function createElpisRuntime(
         mentions: [],
         attachments: [],
         kind: 'scheduler',
+        originWorldId: originWorldForChannel(
+          task.channelId,
+          task.channelId ? channels.guildOf(task.channelId) : null,
+        ),
       });
     },
   });
@@ -795,6 +827,7 @@ export async function createElpisRuntime(
     compactor,
     density,
     transcript,
+    contextGraphShadow,
     scheduler,
     initialMessages,
     channels,

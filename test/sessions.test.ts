@@ -173,6 +173,55 @@ test('sessions: round-trips Anthropic thinking_blocks (signed + redacted)', () =
   ]);
 });
 
+test('sessions: round-trips validated context-graph lineage', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  const hash = 'a'.repeat(64);
+  const message: ChatMessage = {
+    role: 'user',
+    content: 'scoped',
+    worldId: 'world:discord:guild:example',
+    branchId: 'branch:one',
+    eventId: 'event:one',
+    sequence: 7,
+    sharedFromWorldId: 'world:discord:guild:source',
+    viewManifestHash: hash,
+  };
+  store.append('ch1', message);
+  const parsed = loadMostRecentForChannel(root, 'ch1')!.messages[0];
+  assert.equal(parsed.worldId, message.worldId);
+  assert.equal(parsed.branchId, message.branchId);
+  assert.equal(parsed.eventId, message.eventId);
+  assert.equal(parsed.sequence, 7);
+  assert.equal(parsed.sharedFromWorldId, message.sharedFromWorldId);
+  assert.equal(parsed.viewManifestHash, hash);
+});
+
+test('sessions: rejects malformed context-graph lineage', () => {
+  const root = tmpRoot();
+  const file = path.join(root, 'bad-context.jsonl');
+  fs.writeFileSync(
+    file,
+    `${JSON.stringify({
+      role: 'user',
+      content: 'legacy remains unscoped',
+      worldId: 'not-a-world',
+      branchId: 'branch:',
+      eventId: `event:${String.fromCharCode(0)}bad`,
+      sequence: -4,
+      sharedFromWorldId: 42,
+      viewManifestHash: 'short',
+    })}\n`,
+  );
+  const parsed = parseTranscriptFile(file)[0];
+  assert.equal(parsed.worldId, undefined);
+  assert.equal(parsed.branchId, undefined);
+  assert.equal(parsed.eventId, undefined);
+  assert.equal(parsed.sequence, undefined);
+  assert.equal(parsed.sharedFromWorldId, undefined);
+  assert.equal(parsed.viewManifestHash, undefined);
+});
+
 test('sessions: parseTranscriptFile skips malformed lines', () => {
   const root = tmpRoot();
   const dir = path.join(root, 'discord', 'ch1');

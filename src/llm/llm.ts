@@ -162,6 +162,15 @@ export interface ChatMessage {
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+  /** Harness-created context-graph lineage. These fields are persisted and used
+   * to materialize a scoped provider view; provider translators never expose
+   * them as message metadata. Legacy transcripts intentionally lack them. */
+  worldId?: import('../context-graph.js').WorldId;
+  branchId?: import('../context-graph.js').BranchId;
+  eventId?: import('../context-graph.js').EventId;
+  sequence?: number;
+  sharedFromWorldId?: import('../context-graph.js').WorldId;
+  viewManifestHash?: string;
   /** Provenance stamp: the Discord channel id this message
    * belongs to, or 'internal'/'harness' for beat/harness traffic. Persisted to
    * the transcript for offline forensics + a future dashboard; NEVER sent to the

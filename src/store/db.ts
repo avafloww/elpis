@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 29;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1039,6 +1039,414 @@ export function runMigrations(db: DatabaseSync): void {
           ON worker_sessions(status, updated_at, id)
           WHERE status IN ('finished', 'failed', 'dismissed')
             AND runtime_cleanup_completed_at IS NULL;
+      `,
+    },
+    {
+      name: '0029-context-graph-dark-store',
+      sql: `
+        CREATE TABLE context_world_events (
+          sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_id       TEXT NOT NULL UNIQUE CHECK (length(event_id) BETWEEN 1 AND 128),
+          world_id       TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          event_kind     TEXT NOT NULL CHECK (length(event_kind) BETWEEN 1 AND 64),
+          payload_json   TEXT NOT NULL CHECK (length(payload_json) >= 1 AND json_valid(payload_json)),
+          payload_hash   TEXT NOT NULL CHECK (length(payload_hash) = 64 AND payload_hash NOT GLOB '*[^0-9a-f]*'),
+          occurred_at    INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
+          recorded_at    INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer' AND recorded_at >= 0),
+          UNIQUE (event_id, world_id)
+        );
+        CREATE INDEX context_world_events_world_idx
+          ON context_world_events(world_id, sequence);
+        CREATE TRIGGER context_world_events_no_update
+          BEFORE UPDATE ON context_world_events BEGIN
+            SELECT RAISE(ABORT, 'context world events are immutable');
+          END;
+        CREATE TRIGGER context_world_events_no_delete
+          BEFORE DELETE ON context_world_events BEGIN
+            SELECT RAISE(ABORT, 'context world events are immutable');
+          END;
+
+        CREATE TABLE context_branches (
+          branch_id        TEXT PRIMARY KEY CHECK (length(branch_id) BETWEEN 1 AND 128),
+          world_id         TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          parent_branch_id TEXT,
+          status           TEXT NOT NULL CHECK (status IN ('running','yielded','crashed')),
+          authority_epoch  INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 0),
+          started_at       INTEGER NOT NULL CHECK (typeof(started_at) = 'integer' AND started_at >= 0),
+          ended_at         INTEGER CHECK (ended_at IS NULL OR (typeof(ended_at) = 'integer' AND ended_at >= started_at)),
+          CHECK ((status = 'running' AND ended_at IS NULL) OR (status != 'running' AND ended_at IS NOT NULL)),
+          UNIQUE (branch_id, world_id),
+          UNIQUE (branch_id, world_id, authority_epoch),
+          FOREIGN KEY (parent_branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX context_branches_world_idx
+          ON context_branches(world_id, started_at, branch_id);
+        CREATE TRIGGER context_branches_identity_no_update
+          BEFORE UPDATE OF branch_id, world_id, parent_branch_id, authority_epoch, started_at
+          ON context_branches BEGIN
+            SELECT RAISE(ABORT, 'context branch identity is immutable');
+          END;
+        CREATE TRIGGER context_branches_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN NOT (OLD.status = 'running' AND NEW.status IN ('yielded','crashed') AND NEW.ended_at IS NOT NULL)
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context branch transition');
+          END;
+        CREATE TRIGGER context_branches_no_delete
+          BEFORE DELETE ON context_branches BEGIN
+            SELECT RAISE(ABORT, 'context branches are permanent');
+          END;
+
+        CREATE TABLE context_manifests (
+          manifest_id           TEXT PRIMARY KEY CHECK (length(manifest_id) BETWEEN 1 AND 128),
+          branch_id             TEXT NOT NULL UNIQUE,
+          world_id              TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          manifest_hash         TEXT NOT NULL CHECK (length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+          manifest_json         TEXT NOT NULL CHECK (length(manifest_json) >= 1 AND json_valid(manifest_json)),
+          projection_generation INTEGER NOT NULL CHECK (typeof(projection_generation) = 'integer' AND projection_generation >= 0),
+          policy_generation     INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 0),
+          cache_namespace       TEXT NOT NULL CHECK (length(cache_namespace) BETWEEN 16 AND 256),
+          created_at            INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          UNIQUE (manifest_id, world_id),
+          UNIQUE (branch_id, manifest_hash),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_manifests_running_branch_guard
+          BEFORE INSERT ON context_manifests
+          WHEN (SELECT status FROM context_branches WHERE branch_id = NEW.branch_id) != 'running'
+          BEGIN
+            SELECT RAISE(ABORT, 'context manifest branch is not running');
+          END;
+        CREATE TRIGGER context_manifests_no_update
+          BEFORE UPDATE ON context_manifests BEGIN
+            SELECT RAISE(ABORT, 'context manifests are immutable');
+          END;
+        CREATE TRIGGER context_manifests_no_delete
+          BEFORE DELETE ON context_manifests BEGIN
+            SELECT RAISE(ABORT, 'context manifests are immutable');
+          END;
+
+        CREATE TABLE context_manifest_events (
+          manifest_id TEXT NOT NULL,
+          event_id    TEXT NOT NULL,
+          world_id    TEXT NOT NULL,
+          ordinal     INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+          PRIMARY KEY (manifest_id, event_id),
+          UNIQUE (manifest_id, ordinal),
+          FOREIGN KEY (manifest_id, world_id)
+            REFERENCES context_manifests(manifest_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (event_id, world_id)
+            REFERENCES context_world_events(event_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_manifest_events_no_update
+          BEFORE UPDATE ON context_manifest_events BEGIN
+            SELECT RAISE(ABORT, 'context manifest event edges are immutable');
+          END;
+        CREATE TRIGGER context_manifest_events_no_delete
+          BEFORE DELETE ON context_manifest_events BEGIN
+            SELECT RAISE(ABORT, 'context manifest event edges are immutable');
+          END;
+
+        CREATE TABLE context_capsules (
+          sequence              INTEGER PRIMARY KEY AUTOINCREMENT,
+          capsule_id            TEXT NOT NULL UNIQUE CHECK (length(capsule_id) BETWEEN 1 AND 128),
+          branch_id             TEXT NOT NULL,
+          world_id              TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          capsule_kind          TEXT NOT NULL CHECK (capsule_kind IN ('private','root_receipt','self_delta','legacy_opaque')),
+          view_manifest_hash    TEXT CHECK (view_manifest_hash IS NULL OR (length(view_manifest_hash) = 64 AND view_manifest_hash NOT GLOB '*[^0-9a-f]*')),
+          source_root_hash      TEXT NOT NULL CHECK (length(source_root_hash) = 64 AND source_root_hash NOT GLOB '*[^0-9a-f]*'),
+          policy_generation     INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 0),
+          summarizer_model      TEXT,
+          summarizer_prompt_hash TEXT CHECK (summarizer_prompt_hash IS NULL OR (length(summarizer_prompt_hash) = 64 AND summarizer_prompt_hash NOT GLOB '*[^0-9a-f]*')),
+          content_json          TEXT NOT NULL CHECK (length(content_json) >= 1 AND json_valid(content_json)),
+          content_hash          TEXT NOT NULL CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+          created_at            INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          CHECK (capsule_kind = 'legacy_opaque' OR view_manifest_hash IS NOT NULL),
+          UNIQUE (capsule_id, world_id),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, view_manifest_hash)
+            REFERENCES context_manifests(branch_id, manifest_hash) ON DELETE RESTRICT
+        );
+        CREATE INDEX context_capsules_branch_idx
+          ON context_capsules(branch_id, created_at, capsule_id);
+        CREATE TRIGGER context_capsules_running_branch_guard
+          BEFORE INSERT ON context_capsules
+          WHEN (SELECT status FROM context_branches WHERE branch_id = NEW.branch_id) != 'running'
+          BEGIN
+            SELECT RAISE(ABORT, 'context capsule branch is not running');
+          END;
+        CREATE TRIGGER context_capsules_policy_guard
+          BEFORE INSERT ON context_capsules
+          WHEN NEW.capsule_kind != 'legacy_opaque'
+            AND NEW.policy_generation != (
+              SELECT policy_generation FROM context_manifests
+              WHERE branch_id = NEW.branch_id
+                AND manifest_hash = NEW.view_manifest_hash
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'context capsule policy does not match its manifest');
+          END;
+        CREATE TRIGGER context_capsules_no_update
+          BEFORE UPDATE ON context_capsules BEGIN
+            SELECT RAISE(ABORT, 'context capsules are immutable');
+          END;
+        CREATE TRIGGER context_capsules_no_delete
+          BEFORE DELETE ON context_capsules BEGIN
+            SELECT RAISE(ABORT, 'context capsules are immutable');
+          END;
+
+        CREATE TABLE context_capsule_edges (
+          child_capsule_id  TEXT NOT NULL,
+          parent_capsule_id TEXT NOT NULL,
+          world_id          TEXT NOT NULL,
+          ordinal           INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+          PRIMARY KEY (child_capsule_id, parent_capsule_id),
+          UNIQUE (child_capsule_id, ordinal),
+          CHECK (child_capsule_id != parent_capsule_id),
+          FOREIGN KEY (child_capsule_id, world_id)
+            REFERENCES context_capsules(capsule_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (parent_capsule_id, world_id)
+            REFERENCES context_capsules(capsule_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_capsule_edges_order_guard
+          BEFORE INSERT ON context_capsule_edges
+          WHEN (SELECT sequence FROM context_capsules WHERE capsule_id = NEW.parent_capsule_id)
+            >= (SELECT sequence FROM context_capsules WHERE capsule_id = NEW.child_capsule_id)
+          BEGIN
+            SELECT RAISE(ABORT, 'context capsule parent must predate child');
+          END;
+        CREATE TRIGGER context_capsule_edges_no_update
+          BEFORE UPDATE ON context_capsule_edges BEGIN
+            SELECT RAISE(ABORT, 'context capsule edges are immutable');
+          END;
+        CREATE TRIGGER context_capsule_edges_no_delete
+          BEFORE DELETE ON context_capsule_edges BEGIN
+            SELECT RAISE(ABORT, 'context capsule edges are immutable');
+          END;
+
+        CREATE TABLE context_share_grants (
+          grant_id             TEXT PRIMARY KEY CHECK (length(grant_id) BETWEEN 1 AND 128),
+          shared_event_id      TEXT NOT NULL UNIQUE CHECK (length(shared_event_id) BETWEEN 1 AND 128),
+          source_capsule_id    TEXT NOT NULL,
+          source_world_id      TEXT NOT NULL CHECK (length(source_world_id) BETWEEN 1 AND 256),
+          destination_world_id TEXT NOT NULL CHECK (length(destination_world_id) BETWEEN 1 AND 256),
+          canonical_text       TEXT NOT NULL,
+          content_hash         TEXT NOT NULL CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+          status               TEXT NOT NULL CHECK (status IN ('active','revoked')),
+          authority_epoch      INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 0),
+          created_at           INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          revoked_at           INTEGER CHECK (revoked_at IS NULL OR (typeof(revoked_at) = 'integer' AND revoked_at >= created_at)),
+          CHECK (source_world_id != destination_world_id),
+          CHECK ((status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)),
+          UNIQUE (grant_id, destination_world_id, shared_event_id),
+          FOREIGN KEY (source_capsule_id, source_world_id)
+            REFERENCES context_capsules(capsule_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_share_grants_identity_no_update
+          BEFORE UPDATE OF grant_id, shared_event_id, source_capsule_id, source_world_id, destination_world_id,
+            canonical_text, content_hash, authority_epoch, created_at
+          ON context_share_grants BEGIN
+            SELECT RAISE(ABORT, 'context share grant identity is immutable');
+          END;
+        CREATE TRIGGER context_share_grants_transition_guard
+          BEFORE UPDATE OF status, revoked_at ON context_share_grants
+          WHEN NOT (OLD.status = 'active' AND NEW.status = 'revoked' AND NEW.revoked_at IS NOT NULL)
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context share grant transition');
+          END;
+        CREATE TRIGGER context_share_grants_no_delete
+          BEFORE DELETE ON context_share_grants BEGIN
+            SELECT RAISE(ABORT, 'context share grants are permanent');
+          END;
+
+        CREATE TABLE context_manifest_shares (
+          manifest_id          TEXT NOT NULL,
+          grant_id             TEXT NOT NULL,
+          shared_event_id      TEXT NOT NULL,
+          destination_world_id TEXT NOT NULL,
+          ordinal             INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+          PRIMARY KEY (manifest_id, grant_id),
+          UNIQUE (manifest_id, ordinal),
+          FOREIGN KEY (manifest_id, destination_world_id)
+            REFERENCES context_manifests(manifest_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (grant_id, destination_world_id, shared_event_id)
+            REFERENCES context_share_grants(grant_id, destination_world_id, shared_event_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_manifest_shares_active_guard
+          BEFORE INSERT ON context_manifest_shares
+          WHEN (SELECT status FROM context_share_grants WHERE grant_id = NEW.grant_id) != 'active'
+          BEGIN
+            SELECT RAISE(ABORT, 'revoked context share cannot enter a manifest');
+          END;
+        CREATE TRIGGER context_manifest_shares_no_update
+          BEFORE UPDATE ON context_manifest_shares BEGIN
+            SELECT RAISE(ABORT, 'context manifest share edges are immutable');
+          END;
+        CREATE TRIGGER context_manifest_shares_no_delete
+          BEFORE DELETE ON context_manifest_shares BEGIN
+            SELECT RAISE(ABORT, 'context manifest share edges are immutable');
+          END;
+
+        CREATE TABLE context_legacy_import_receipts (
+          receipt_id       TEXT PRIMARY KEY CHECK (length(receipt_id) BETWEEN 1 AND 128),
+          source_ref       TEXT NOT NULL UNIQUE CHECK (length(source_ref) BETWEEN 1 AND 512),
+          source_hash      TEXT NOT NULL CHECK (length(source_hash) = 64 AND source_hash NOT GLOB '*[^0-9a-f]*'),
+          source_size      INTEGER NOT NULL CHECK (typeof(source_size) = 'integer' AND source_size >= 0),
+          artifact_ref     TEXT NOT NULL CHECK (length(artifact_ref) BETWEEN 1 AND 512),
+          import_generation INTEGER NOT NULL CHECK (typeof(import_generation) = 'integer' AND import_generation >= 1),
+          capsule_id       TEXT NOT NULL UNIQUE REFERENCES context_capsules(capsule_id) ON DELETE RESTRICT,
+          imported_at      INTEGER NOT NULL CHECK (typeof(imported_at) = 'integer' AND imported_at >= 0)
+        );
+        CREATE TRIGGER context_legacy_import_kind_guard
+          BEFORE INSERT ON context_legacy_import_receipts
+          WHEN (SELECT capsule_kind FROM context_capsules WHERE capsule_id = NEW.capsule_id) != 'legacy_opaque'
+          BEGIN
+            SELECT RAISE(ABORT, 'legacy import must reference a legacy opaque capsule');
+          END;
+        CREATE TRIGGER context_legacy_import_receipts_no_update
+          BEFORE UPDATE ON context_legacy_import_receipts BEGIN
+            SELECT RAISE(ABORT, 'context legacy import receipts are immutable');
+          END;
+        CREATE TRIGGER context_legacy_import_receipts_no_delete
+          BEFORE DELETE ON context_legacy_import_receipts BEGIN
+            SELECT RAISE(ABORT, 'context legacy import receipts are immutable');
+          END;
+
+        CREATE TABLE context_effects (
+          effect_id            TEXT PRIMARY KEY CHECK (length(effect_id) BETWEEN 1 AND 128),
+          branch_id            TEXT NOT NULL,
+          world_id             TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          destination_world_id TEXT NOT NULL CHECK (length(destination_world_id) BETWEEN 1 AND 256),
+          effect_kind          TEXT NOT NULL CHECK (length(effect_kind) BETWEEN 1 AND 64),
+          authority_epoch      INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 0),
+          payload_json         TEXT NOT NULL CHECK (length(payload_json) >= 1 AND json_valid(payload_json)),
+          payload_hash         TEXT NOT NULL CHECK (length(payload_hash) = 64 AND payload_hash NOT GLOB '*[^0-9a-f]*'),
+          idempotency_key      TEXT,
+          status               TEXT NOT NULL CHECK (status IN ('prepared','observed','failed','uncertain')),
+          prepared_at          INTEGER NOT NULL CHECK (typeof(prepared_at) = 'integer' AND prepared_at >= 0),
+          resolved_at          INTEGER CHECK (resolved_at IS NULL OR (typeof(resolved_at) = 'integer' AND resolved_at >= prepared_at)),
+          observation_json     TEXT CHECK (observation_json IS NULL OR json_valid(observation_json)),
+          CHECK (world_id = destination_world_id),
+          CHECK ((status = 'prepared' AND resolved_at IS NULL AND observation_json IS NULL)
+            OR (status != 'prepared' AND resolved_at IS NOT NULL)),
+          UNIQUE (branch_id, idempotency_key),
+          FOREIGN KEY (branch_id, world_id, authority_epoch)
+            REFERENCES context_branches(branch_id, world_id, authority_epoch) ON DELETE RESTRICT
+        );
+        CREATE INDEX context_effects_recovery_idx
+          ON context_effects(status, prepared_at, effect_id);
+        CREATE TRIGGER context_effects_running_branch_guard
+          BEFORE INSERT ON context_effects
+          WHEN (SELECT status FROM context_branches WHERE branch_id = NEW.branch_id) != 'running'
+          BEGIN
+            SELECT RAISE(ABORT, 'context effect branch is not running');
+          END;
+        CREATE TRIGGER context_effects_identity_no_update
+          BEFORE UPDATE OF effect_id, branch_id, world_id, destination_world_id, effect_kind,
+            authority_epoch, payload_json, payload_hash, idempotency_key, prepared_at
+          ON context_effects BEGIN
+            SELECT RAISE(ABORT, 'context effect issuance is immutable');
+          END;
+        CREATE TRIGGER context_effects_transition_guard
+          BEFORE UPDATE OF status, resolved_at, observation_json ON context_effects
+          WHEN NOT (OLD.status = 'prepared' AND NEW.status IN ('observed','failed','uncertain') AND NEW.resolved_at IS NOT NULL)
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context effect transition');
+          END;
+        CREATE TRIGGER context_effects_no_delete
+          BEFORE DELETE ON context_effects BEGIN
+            SELECT RAISE(ABORT, 'context effects are permanent');
+          END;
+        CREATE TRIGGER context_branches_unresolved_effect_guard
+          BEFORE UPDATE OF status ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_effects
+            WHERE branch_id = OLD.branch_id AND status = 'prepared'
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context branch has a prepared effect');
+          END;
+
+        CREATE TABLE context_continuation_head (
+          singleton     INTEGER PRIMARY KEY CHECK (singleton = 1),
+          branch_id     TEXT,
+          world_id      TEXT,
+          revision      INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision >= 0),
+          updated_at    INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at >= 0),
+          CHECK ((branch_id IS NULL) = (world_id IS NULL)),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        INSERT INTO context_continuation_head(singleton, branch_id, world_id, revision, updated_at)
+          VALUES (1, NULL, NULL, 0, 0);
+
+        CREATE TABLE context_continuation_advances (
+          revision              INTEGER PRIMARY KEY CHECK (revision >= 1),
+          predecessor_branch_id TEXT,
+          predecessor_world_id  TEXT,
+          branch_id             TEXT NOT NULL UNIQUE,
+          world_id              TEXT NOT NULL,
+          advanced_at           INTEGER NOT NULL CHECK (typeof(advanced_at) = 'integer' AND advanced_at >= 0),
+          CHECK ((predecessor_branch_id IS NULL) = (predecessor_world_id IS NULL)),
+          CHECK (predecessor_branch_id IS NULL OR predecessor_branch_id != branch_id),
+          FOREIGN KEY (predecessor_branch_id, predecessor_world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_continuation_advances_guard
+          BEFORE INSERT ON context_continuation_advances
+          WHEN NEW.revision != (SELECT revision + 1 FROM context_continuation_head WHERE singleton = 1)
+            OR NEW.predecessor_branch_id IS NOT (SELECT branch_id FROM context_continuation_head WHERE singleton = 1)
+            OR NEW.predecessor_world_id IS NOT (SELECT world_id FROM context_continuation_head WHERE singleton = 1)
+            OR (SELECT status FROM context_branches WHERE branch_id = NEW.branch_id) != 'yielded'
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context continuation advance');
+          END;
+        CREATE TRIGGER context_continuation_advances_no_update
+          BEFORE UPDATE ON context_continuation_advances BEGIN
+            SELECT RAISE(ABORT, 'context continuation advances are immutable');
+          END;
+        CREATE TRIGGER context_continuation_advances_no_delete
+          BEFORE DELETE ON context_continuation_advances BEGIN
+            SELECT RAISE(ABORT, 'context continuation advances are immutable');
+          END;
+
+        CREATE TRIGGER context_continuation_head_guard
+          BEFORE UPDATE ON context_continuation_head
+          WHEN NEW.singleton != 1 OR NEW.revision != OLD.revision + 1 OR NEW.updated_at < OLD.updated_at
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context continuation head advance');
+          END;
+        CREATE TRIGGER context_continuation_head_no_delete
+          BEFORE DELETE ON context_continuation_head BEGIN
+            SELECT RAISE(ABORT, 'context continuation head is permanent');
+          END;
+
+        CREATE TABLE context_graph_activation (
+          singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+          mode       TEXT NOT NULL CHECK (mode IN ('dark','active')),
+          epoch      INTEGER NOT NULL CHECK (typeof(epoch) = 'integer' AND epoch >= 0),
+          created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at >= created_at)
+        );
+        INSERT INTO context_graph_activation(singleton, mode, epoch, created_at, updated_at)
+          VALUES (1, 'dark', 0, 0, 0);
+        CREATE TRIGGER context_graph_activation_guard
+          BEFORE UPDATE ON context_graph_activation
+          WHEN NOT (OLD.mode = 'dark' AND NEW.mode = 'active'
+            AND NEW.epoch = OLD.epoch + 1 AND NEW.created_at = OLD.created_at
+            AND NEW.updated_at >= OLD.updated_at)
+          BEGIN
+            SELECT RAISE(ABORT, 'context graph activation is one-way');
+          END;
+        CREATE TRIGGER context_graph_activation_no_delete
+          BEFORE DELETE ON context_graph_activation BEGIN
+            SELECT RAISE(ABORT, 'context graph activation state is permanent');
+          END;
       `,
     },
   ]);

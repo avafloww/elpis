@@ -33,6 +33,7 @@ import {
   type ReplayIdentity,
 } from '../llm/provenance.js';
 import { parseRunMessageMetadata } from '../sandbox/metadata.js';
+import { isBranchId, isEventId, isWorldId } from '../context-graph.js';
 import type { ContextResourceDescriptor } from '../context-resources.js';
 import { normalizeVoiceDelivery } from '../voice/receipt.js';
 
@@ -469,8 +470,27 @@ function parseChatMessage(
       };
     }
   }
-  //: whitelist the provenance stamp and recorded sends, or they are dropped
-  // silently on reload (review N6). parseChatMessage drops unlisted fields.
+  if (isWorldId(obj.worldId)) msg.worldId = obj.worldId;
+  if (isBranchId(obj.branchId)) msg.branchId = obj.branchId;
+  if (isEventId(obj.eventId)) msg.eventId = obj.eventId;
+  if (
+    typeof obj.sequence === 'number' &&
+    Number.isSafeInteger(obj.sequence) &&
+    obj.sequence > 0
+  ) {
+    msg.sequence = obj.sequence;
+  }
+  if (isWorldId(obj.sharedFromWorldId)) {
+    msg.sharedFromWorldId = obj.sharedFromWorldId;
+  }
+  if (
+    typeof obj.viewManifestHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(obj.viewManifestHash)
+  ) {
+    msg.viewManifestHash = obj.viewManifestHash;
+  }
+  // Whitelist harness provenance and recorded sends; parseChatMessage drops
+  // every field that is not explicitly admitted here.
   if (typeof obj.channel === 'string') msg.channel = obj.channel;
   if (role === 'tool') {
     const run = parseRunMessageMetadata(obj.run);

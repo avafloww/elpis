@@ -8,6 +8,12 @@ The inhabitant should not become a set of disconnected room-local copies. A sing
 
 The harness enforces provenance and routing mechanics. Social privacy remains partly an agent-level practice expressed in the system prompt.
 
+## Scoped-context migration
+
+The replacement context architecture is introduced behind `context_graph.shadow_enabled`, which defaults to `false`. Shadow mode records stable world/event lineage beside the existing ordered loop and seals the newest pre-graph transcript as a byte-exact, content-addressed `legacy-mixed-unscoped` artifact. The sealed artifact is testimony, not automatically visible branch context or current authority.
+
+Shadow mode does not change provider requests, compaction, send authority, cache behavior, or the one live monocontext history. It is validation infrastructure, not a privacy or world-isolation claim. A database marked `active` fails boot in a runtime that supports only shadow mode, so an older binary cannot silently resume graph-era state through the legacy loop.
+
 ## Message layers
 
 A request can contain:

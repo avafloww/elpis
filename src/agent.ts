@@ -142,6 +142,11 @@ import { spawnText } from './lib/proc.js';
 import { sniffImageMediaType } from './lib/image.js';
 import { applyKernelTurn } from './kernel/turn.js';
 import { custodyWatchFrames } from './console/watch-custody.js';
+import {
+  worldIdForInbound,
+  type EventId,
+  type WorldId,
+} from './context-graph.js';
 
 // The inbound-envelope format lives in lib/envelope.ts (build + parse in one
 // place); re-exported here so existing importers (tests, discord.ts's attachment
@@ -669,6 +674,14 @@ export interface InboundMessage {
     | 'watch';
   /** External transport provenance when the message is not Discord. */
   transport?: 'signal';
+  /** Trusted world lineage for a synthetic result returning to its origin. */
+  originWorldId?: WorldId;
+  /** Shadow graph identity assigned before this input enters the FIFO. */
+  contextGraphLineage?: {
+    worldId: WorldId;
+    eventId: EventId;
+    sequence: number;
+  };
 }
 
 export interface AgentDeps {
@@ -710,6 +723,14 @@ export interface AgentDeps {
   density?: DensityModel;
   /** Persistent transcript store (single 'main' stream). */
   transcript: TranscriptStore;
+  /** Dark-mode append-only graph recorder. It never changes request assembly. */
+  contextGraphShadow?: {
+    recordInbound(message: InboundMessage): {
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+    };
+  };
   /** Durable timer store for one-shot run wakes. */
   scheduler?: Pick<
     Scheduler,
@@ -1730,9 +1751,17 @@ export class Agent {
       .toISOString()
       .slice(0, 16);
     const stamp = `${local}${offsetSign}${offsetHours}:${offsetRemainder}`;
+    const originWorldId = task.channelId
+      ? worldIdForInbound({
+          channelId: task.channelId,
+          guildId: this.deps.channels?.guildOf(task.channelId),
+          kind: task.channelId.startsWith('signal:') ? 'signal' : 'discord',
+        })
+      : undefined;
     this.enqueueInternal('harness', 'run-wake', `[wake @ ${stamp}]`, {
       id: `run-wake-${task.id}-${firedAt}`,
       author: 'harness',
+      originWorldId,
     });
     return true;
   }
@@ -1743,6 +1772,20 @@ export class Agent {
    * turn a parked loop on. The periodic tick (`fireAmbientTick`) is the only
    * thing that turns accumulated ambient chat into a turn. */
   enqueue(msg: InboundMessage): void {
+    try {
+      const lineage = this.deps.contextGraphShadow?.recordInbound(msg);
+      if (lineage) {
+        msg.contextGraphLineage = {
+          worldId: lineage.worldId,
+          eventId: lineage.eventId,
+          sequence: lineage.sequence,
+        };
+      }
+    } catch (error) {
+      this.logger.error(
+        `[context-graph] shadow ingress record failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     // Persist the real channel name. set ignores synthetic names.
     // `policyChannelId` differs from `channelId` only for a thread, so that
     // difference IS the thread→parent link — recorded here so send's
@@ -1803,6 +1846,7 @@ export class Agent {
       sendScope?: 'observe_only';
       channelId?: string;
       sends?: NonNullable<ChatMessage['sends']>;
+      originWorldId?: WorldId;
     },
   ): void {
     const author = extras.author ?? 'harness';
@@ -1819,6 +1863,7 @@ export class Agent {
       mentions: [],
       attachments: extras.attachments ?? [],
       kind,
+      originWorldId: extras.originWorldId,
       onDelivered: extras.onDelivered,
       onDropped: extras.onDropped,
       ...(extras.sends ? { sends: extras.sends } : {}),
@@ -2005,12 +2050,20 @@ export class Agent {
     const origin = originChannelId
       ? ` · origin ${this.qualifiedChannelLabel(originChannelId)}`
       : '';
+    const originWorldId = originChannelId
+      ? worldIdForInbound({
+          channelId: originChannelId,
+          guildId: this.deps.channels?.guildOf(originChannelId),
+          kind: originChannelId.startsWith('signal:') ? 'signal' : 'discord',
+        })
+      : undefined;
     this.enqueueInternal(
       'harness',
       'harness',
       `[bg job ${id} ${event}${origin}]\n${details}`,
       {
         id: `bg-job-${id}-${event.replace(/\s+/g, '-')}-${Date.now()}`,
+        originWorldId,
       },
     );
     this.logger.info(
@@ -2448,6 +2501,11 @@ export class Agent {
                 ],
               }
             : { role: 'user', content: contentText };
+        if (m.contextGraphLineage) {
+          userMsg.worldId = m.contextGraphLineage.worldId;
+          userMsg.eventId = m.contextGraphLineage.eventId;
+          userMsg.sequence = m.contextGraphLineage.sequence;
+        }
         if (m.sends) userMsg.sends = m.sends;
         if (isDiscord && m.authorId) {
           const person = { authorId: m.authorId, author: m.author };

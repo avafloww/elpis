@@ -19,6 +19,19 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers)
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   db.exec(`
+    DROP TABLE context_manifest_shares;
+    DROP TABLE context_manifest_events;
+    DROP TABLE context_capsule_edges;
+    DROP TABLE context_legacy_import_receipts;
+    DROP TABLE context_effects;
+    DROP TABLE context_continuation_advances;
+    DROP TABLE context_continuation_head;
+    DROP TABLE context_graph_activation;
+    DROP TABLE context_share_grants;
+    DROP TABLE context_capsules;
+    DROP TABLE context_manifests;
+    DROP TABLE context_branches;
+    DROP TABLE context_world_events;
     DROP INDEX worker_sessions_completion_pending_idx;
     DROP INDEX worker_sessions_cleanup_pending_idx;
     ALTER TABLE worker_sessions DROP COLUMN completion_notified_at;
@@ -93,7 +106,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -153,7 +166,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    28,
+    29,
   );
   assert.equal(
     (

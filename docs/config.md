@@ -148,6 +148,12 @@ positive integer no greater than 60. The voice API key participates in the same
 process-wide secret redaction as other configured credentials.
 See [Discord voice](voice.md) for `/join`, permissions, playback receipts, and live verification.
 
+## `context_graph`
+
+- `shadow_enabled`: build and validate durable world-scoped graph records without changing live request assembly, tool authority, or compaction. Defaults to `false`.
+
+Shadow mode is not graph activation and makes no isolation claim. Activation is a separate one-way migration after exact request, crash-recovery, legacy-import, and effect-ledger acceptance.
+
 ## `compaction`
 
 - `trigger_tokens`: requested fold threshold;

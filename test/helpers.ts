@@ -131,6 +131,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
         },
       ],
     },
+    contextGraph: { shadowEnabled: false },
     compaction: { triggerTokens: 180000, keepTokens: 50000 },
     heartbeat: {
       intervalMs: 0,

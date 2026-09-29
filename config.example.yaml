@@ -254,6 +254,11 @@ discord:
           feedback_reactions: true # Override the guild default for this channel
         '666666666666666666': quiet
 
+context_graph:
+  # Build and validate world-scoped graph records without changing live request behavior.
+  # Activation is a separate one-way migration after shadow acceptance.
+  shadow_enabled: false
+
 compaction:
   # Tokens of real context at which a compaction cycle triggers. Clamped at
   # boot to the real usable window.

@@ -8,11 +8,12 @@ Elpis is one long-lived Node.js process hosting one agent, one ordered conversat
 
 1. loads and validates `config.yaml`;
 2. creates the data directory, migrates known legacy state into `elpis-data/`, and opens `elpis-data/elpis.db`;
-3. ensures `SOUL.md` and `MEMORY.md` exist;
-4. restores the newest transcript with opaque-replay provenance checks;
-5. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, Discord adapter, and any enabled external transport;
-6. starts the agent loop;
-7. delivers restart or optional harness-update notices through the same inbound queue.
+3. initializes the inactive scoped-context graph store and refuses to run a monocontext binary against an already-active graph;
+4. ensures `SOUL.md` and `MEMORY.md` exist;
+5. restores the newest transcript with opaque-replay provenance checks;
+6. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, Discord adapter, and any enabled external transport;
+7. starts the agent loop;
+8. delivers restart or optional harness-update notices through the same inbound queue.
 
 A failure in a required persistence or configuration component is a boot failure. Optional surfaces such as the console and worker broker degrade independently where their contracts permit it.
 
@@ -97,7 +98,7 @@ Elpis uses distinct stores for distinct kinds of continuity:
 
 - **Markdown and files:** identity, memory, people, open questions, self-authored notes.
 - **JSONL transcripts:** complete ordered message history and provider working-state envelopes.
-- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, guild-scoped Discord person notification preferences, density estimates, native worker sessions/mailbox, historical fleet rows, and Mind.
+- **SQLite:** channels, feedback, scheduler, OAuth credentials, mutes, guild-scoped Discord person notification preferences, density estimates, native worker sessions/mailbox, historical fleet rows, Mind, and the inactive scoped-context graph substrate.
 - **process memory:** the active message list and persistent JavaScript bindings.
 
 See [`persistence.md`](persistence.md).

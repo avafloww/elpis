@@ -653,6 +653,26 @@ test('configFile: compaction threshold validation (0 < keep < trigger)', () => {
   assert.equal(c.compaction.triggerTokens, 50000);
 });
 
+test('configFile: context graph shadow mode is explicit and disabled by default', () => {
+  assert.equal(
+    loadConfigFile(fixture(MINIMAL_OK)).contextGraph.shadowEnabled,
+    false,
+  );
+  assert.equal(
+    loadConfigFile(
+      fixture(`${MINIMAL_OK}\ncontext_graph:\n  shadow_enabled: true\n`),
+    ).contextGraph.shadowEnabled,
+    true,
+  );
+  assert.throws(
+    () =>
+      loadConfigFile(
+        fixture(`${MINIMAL_OK}\ncontext_graph:\n  shadow_enabled: yes\n`),
+      ),
+    /context_graph\.shadow_enabled.*must be true or false/,
+  );
+});
+
 test('configFile: sandbox retirement grace is configurable with a bounded legacy alias', () => {
   const current = loadConfigFile(
     fixture(

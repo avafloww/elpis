@@ -28,6 +28,8 @@ DATA_DIRECTORY/
     ├── ssh-sockets/
     ├── memory-backups/
     ├── policy-denials/
+    ├── context-graph/
+    │   └── legacy/            # sealed content-addressed pre-graph transcripts
     └── layout-migration.json
 ```
 
@@ -78,9 +80,10 @@ The consolidation prompt treats the data directory as the inhabitant's private r
 - native worker sessions, mailbox messages, terminal-notice acknowledgements, and runtime-cleanup receipts (with published `fleet_*` rows retained as inert migration history);
 - token-density estimates;
 - Mind items, dependencies, tags, comments, events, and reminders;
-- immutable local sandbox executor identity, permanent Mind↔sandbox registrations, alias tombstones, and lifecycle/run counters.
+- immutable local sandbox executor identity, permanent Mind↔sandbox registrations, alias tombstones, and lifecycle/run counters;
+- scoped-context world events, branches, canonical view manifests, capsules, explicit share grants, effect receipts, continuation advances, sealed legacy-import receipts, and one-way activation state.
 
-Schema migrations run at boot after the filesystem-layout migration. Core schema through v13 remains an explicit idempotent compatibility baseline; schema v14 adds `elpis_migrations`, an append-only ledger keyed by `(component, name)` with checksum and application timestamp. New core and extension migrations are strictly sorted named histories. SQL migration checksums are derived from exact SQL bytes; code migrations require an authored SHA-256 checksum. Each unapplied migration and its receipt commit in one `BEGIN IMMEDIATE` transaction, while checksum drift, removed history, or non-prefix insertion fails closed.
+Schema migrations run at boot after the filesystem-layout migration. Schema v29 adds the inactive scoped-context graph substrate; its activation row defaults to `dark`, and the current runtime refuses an `active` row rather than reopening it through monocontext recovery. Core schema through v13 remains an explicit idempotent compatibility baseline; schema v14 adds `elpis_migrations`, an append-only ledger keyed by `(component, name)` with checksum and application timestamp. New core and extension migrations are strictly sorted named histories. SQL migration checksums are derived from exact SQL bytes; code migrations require an authored SHA-256 checksum. Each unapplied migration and its receipt commit in one `BEGIN IMMEDIATE` transaction, while checksum drift, removed history, or non-prefix insertion fails closed.
 
 Trusted extensions declare migrations alongside their prompt and activation. Their component is `extension:<namespace>`; core uses `core`. Extension migrations finish before `activate(context)`, and `context.database` exposes the shared Node 24 `node:sqlite` `DatabaseSync`. A failed migration rolls back and quarantines that extension without exposing its prompt or API; later extensions still load. Foreign-key enforcement is enabled.
 
