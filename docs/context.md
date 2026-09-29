@@ -14,6 +14,8 @@ The replacement context architecture is introduced behind `context_graph.shadow_
 
 Shadow mode does not change provider requests, compaction, send authority, cache behavior, or the one live monocontext history. It is validation infrastructure, not a privacy or world-isolation claim. A database marked `active` fails boot in a runtime that supports only shadow mode, so an older binary cannot silently resume graph-era state through the legacy loop.
 
+Schema v30 adds the still-inactive root coordinator used by later branch execution. It binds one running branch to an exact continuation-head revision, keeps global predecessor order separate from same-world parent lineage, requires private and typed root-return capsules before yield, and records crash recovery without replay. Stored manifests can be reread as exact local-event and explicit-share projections; a provider-bound read can require every included share to remain active. On dark-mode boot, an interrupted coordinated branch becomes `crashed` and its prepared effects become `uncertain`; the continuation head does not advance. This does not activate graph requests or replace the legacy loop yet.
+
 ## Message layers
 
 A request can contain:

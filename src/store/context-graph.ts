@@ -112,6 +112,25 @@ export interface ManifestRecord {
   readonly createdAt: number;
 }
 
+export interface ManifestShareRecord {
+  readonly grantId: ShareGrantId;
+  readonly eventId: EventId;
+  readonly sourceCapsuleId: CapsuleId;
+  readonly sourceWorldId: WorldId;
+  readonly destinationWorldId: WorldId;
+  readonly canonicalText: string;
+  readonly contentHash: string;
+  readonly status: 'active' | 'revoked';
+  readonly authorityEpoch: number;
+}
+
+export interface ManifestProjection {
+  readonly record: ManifestRecord;
+  readonly manifest: ViewManifest;
+  readonly localEvents: readonly WorldEventRecord[];
+  readonly shares: readonly ManifestShareRecord[];
+}
+
 export interface CapsuleRecord {
   readonly capsuleId: CapsuleId;
   readonly branchId: BranchId;
@@ -148,6 +167,63 @@ export interface ContinuationHead {
   readonly worldId: WorldId | null;
   readonly revision: number;
   readonly updatedAt: number;
+}
+
+export interface BranchStartRecord {
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly baseRevision: number;
+  readonly predecessorBranchId: BranchId | null;
+  readonly predecessorWorldId: WorldId | null;
+  readonly startedAt: number;
+}
+
+export interface RootCoordinatorState {
+  readonly activeBranchId: BranchId | null;
+  readonly activeWorldId: WorldId | null;
+  readonly baseRevision: number;
+  readonly predecessorBranchId: BranchId | null;
+  readonly predecessorWorldId: WorldId | null;
+  readonly updatedAt: number;
+}
+
+export interface BranchRecoveryRecord extends BranchStartRecord {
+  readonly uncertainEffects: number;
+  readonly recoveredAt: number;
+}
+
+export type BranchReturnOutcome = 'completed' | 'interrupted' | 'failed';
+
+export interface RootReturnEffectReceipt {
+  readonly effectId: EffectId;
+  readonly destinationWorldId: WorldId;
+  readonly kind: string;
+  readonly authorityEpoch: number;
+  readonly payloadHash: string;
+  readonly status: Exclude<EffectStatus, 'prepared'>;
+  readonly preparedAt: number;
+  readonly resolvedAt: number;
+}
+
+export interface RootReturnReceiptV1 {
+  readonly schemaVersion: 1;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly viewManifestHash: string;
+  readonly outcome: BranchReturnOutcome;
+  readonly authorityEpoch: number;
+  readonly privateCapsuleId: CapsuleId;
+  readonly effects: readonly RootReturnEffectReceipt[];
+  readonly commitments: readonly string[];
+  readonly blockers: readonly string[];
+  readonly artifactRefs: readonly string[];
+}
+
+export interface CoordinatedBranchReturn {
+  readonly branch: BranchRecord;
+  readonly privateCapsule: CapsuleRecord;
+  readonly rootReceipt: CapsuleRecord;
+  readonly head: ContinuationHead;
 }
 
 export interface LegacyImportReceipt {
@@ -197,6 +273,22 @@ function timestamp(label: string, value: number): number {
 
 function generation(label: string, value: number): number {
   return timestamp(label, value);
+}
+
+function boundedStrings(label: string, values: readonly string[]): string[] {
+  if (!Array.isArray(values) || values.length > 128) {
+    throw new Error(`${label} must contain at most 128 strings`);
+  }
+  return values.map((value) => {
+    if (
+      typeof value !== 'string' ||
+      value.length > 4096 ||
+      value.includes('\u0000')
+    ) {
+      throw new Error(`${label} contains an invalid string`);
+    }
+    return value;
+  });
 }
 
 function serialize(value: unknown): string {
@@ -366,6 +458,165 @@ export class ContextGraphStore {
     return row ? mapWorldEvent(row) : null;
   }
 
+  getRootCoordinatorState(): RootCoordinatorState {
+    const row = this.database
+      .prepare(
+        `SELECT active_branch_id, active_world_id, base_revision,
+           predecessor_branch_id, predecessor_world_id, updated_at
+         FROM context_root_coordinator WHERE singleton = 1`,
+      )
+      .get() as {
+      active_branch_id: string | null;
+      active_world_id: string | null;
+      base_revision: number;
+      predecessor_branch_id: string | null;
+      predecessor_world_id: string | null;
+      updated_at: number;
+    };
+    return {
+      activeBranchId:
+        row.active_branch_id === null ? null : branchId(row.active_branch_id),
+      activeWorldId:
+        row.active_world_id === null ? null : worldId(row.active_world_id),
+      baseRevision: row.base_revision,
+      predecessorBranchId:
+        row.predecessor_branch_id === null
+          ? null
+          : branchId(row.predecessor_branch_id),
+      predecessorWorldId:
+        row.predecessor_world_id === null
+          ? null
+          : worldId(row.predecessor_world_id),
+      updatedAt: row.updated_at,
+    };
+  }
+
+  getBranchStart(id: BranchId): BranchStartRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT branch_id, world_id, base_revision, predecessor_branch_id,
+           predecessor_world_id, started_at
+         FROM context_branch_starts WHERE branch_id = ?`,
+      )
+      .get(id) as
+      | {
+          branch_id: string;
+          world_id: string;
+          base_revision: number;
+          predecessor_branch_id: string | null;
+          predecessor_world_id: string | null;
+          started_at: number;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      branchId: branchId(row.branch_id),
+      worldId: worldId(row.world_id),
+      baseRevision: row.base_revision,
+      predecessorBranchId:
+        row.predecessor_branch_id === null
+          ? null
+          : branchId(row.predecessor_branch_id),
+      predecessorWorldId:
+        row.predecessor_world_id === null
+          ? null
+          : worldId(row.predecessor_world_id),
+      startedAt: row.started_at,
+    };
+  }
+
+  beginCoordinatedBranch(input: {
+    branchId: BranchId;
+    worldId: WorldId;
+    expectedRevision: number;
+    authorityEpoch: number;
+    startedAt: number;
+  }): {
+    branch: BranchRecord;
+    start: BranchStartRecord;
+    state: RootCoordinatorState;
+  } {
+    const expectedRevision = generation(
+      'expectedRevision',
+      input.expectedRevision,
+    );
+    const authorityEpoch = generation(
+      'authorityEpoch',
+      input.authorityEpoch,
+    );
+    if (authorityEpoch < 1) throw new Error('authorityEpoch must be positive');
+    const startedAt = timestamp('startedAt', input.startedAt);
+    return transaction(this.database, () => {
+      const head = this.getContinuationHead();
+      if (head.revision !== expectedRevision) {
+        throw new StaleContinuationHeadError(expectedRevision);
+      }
+      const state = this.getRootCoordinatorState();
+      if (state.activeBranchId !== null) {
+        throw new Error(`context branch already active: ${state.activeBranchId}`);
+      }
+      if (
+        state.baseRevision !== head.revision ||
+        state.predecessorBranchId !== head.branchId ||
+        state.predecessorWorldId !== head.worldId
+      ) {
+        throw new Error('context root coordinator does not match continuation head');
+      }
+      const localParent = this.database
+        .prepare(
+          `SELECT branch_id FROM context_continuation_advances
+           WHERE world_id = ? ORDER BY revision DESC LIMIT 1`,
+        )
+        .get(input.worldId) as { branch_id: string } | undefined;
+      const branch = this.createBranch({
+        branchId: input.branchId,
+        worldId: input.worldId,
+        parentBranchId:
+          localParent === undefined ? undefined : branchId(localParent.branch_id),
+        authorityEpoch,
+        startedAt,
+      });
+      this.database
+        .prepare(
+          `INSERT INTO context_branch_starts(
+             branch_id, world_id, base_revision, predecessor_branch_id,
+             predecessor_world_id, started_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          branch.branchId,
+          branch.worldId,
+          head.revision,
+          head.branchId,
+          head.worldId,
+          startedAt,
+        );
+      const update = this.database
+        .prepare(
+          `UPDATE context_root_coordinator
+           SET active_branch_id = ?, active_world_id = ?, updated_at = ?
+           WHERE singleton = 1 AND active_branch_id IS NULL
+             AND base_revision = ?
+             AND predecessor_branch_id IS ?
+             AND predecessor_world_id IS ?`,
+        )
+        .run(
+          branch.branchId,
+          branch.worldId,
+          startedAt,
+          head.revision,
+          head.branchId,
+          head.worldId,
+        );
+      if (update.changes !== 1) {
+        throw new Error('context root coordinator changed during branch start');
+      }
+      const start = this.getBranchStart(branch.branchId);
+      if (!start) throw new Error('context branch start was not persisted');
+      return { branch, start, state: this.getRootCoordinatorState() };
+    });
+  }
+
   createBranch(input: {
     branchId: BranchId;
     worldId: WorldId;
@@ -407,6 +658,95 @@ export class ContextGraphStore {
       .run(status, timestamp('endedAt', endedAt), id);
     if (result.changes !== 1) throw new Error(`branch is not running: ${id}`);
     return this.requireBranch(id);
+  }
+
+  recoverCoordinatedBranch(recoveredAt: number): BranchRecoveryRecord | null {
+    const at = timestamp('recoveredAt', recoveredAt);
+    return transaction(this.database, () => {
+      const state = this.getRootCoordinatorState();
+      if (state.activeBranchId === null || state.activeWorldId === null) {
+        return null;
+      }
+      const head = this.getContinuationHead();
+      if (
+        state.baseRevision !== head.revision ||
+        state.predecessorBranchId !== head.branchId ||
+        state.predecessorWorldId !== head.worldId
+      ) {
+        throw new Error('active context branch is detached from continuation head');
+      }
+      const start = this.getBranchStart(state.activeBranchId);
+      if (
+        !start ||
+        start.worldId !== state.activeWorldId ||
+        start.baseRevision !== state.baseRevision ||
+        start.predecessorBranchId !== state.predecessorBranchId ||
+        start.predecessorWorldId !== state.predecessorWorldId
+      ) {
+        throw new Error('active context branch start receipt is invalid');
+      }
+      const branch = this.requireBranch(state.activeBranchId);
+      if (branch.status !== 'running') {
+        throw new Error(`active context branch is not running: ${branch.branchId}`);
+      }
+      const effects = this.database
+        .prepare(
+          `UPDATE context_effects
+           SET status = 'uncertain', resolved_at = ?, observation_json = NULL
+           WHERE branch_id = ? AND status = 'prepared'`,
+        )
+        .run(at, branch.branchId);
+      const uncertainEffects = generation(
+        'uncertainEffects',
+        Number(effects.changes),
+      );
+      const crashed = this.database
+        .prepare(
+          `UPDATE context_branches SET status = 'crashed', ended_at = ?
+           WHERE branch_id = ? AND status = 'running'`,
+        )
+        .run(at, branch.branchId);
+      if (crashed.changes !== 1) {
+        throw new Error(`context branch could not be recovered: ${branch.branchId}`);
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_branch_recoveries(
+             branch_id, world_id, base_revision, predecessor_branch_id,
+             predecessor_world_id, uncertain_effects, recovered_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          branch.branchId,
+          branch.worldId,
+          start.baseRevision,
+          start.predecessorBranchId,
+          start.predecessorWorldId,
+          uncertainEffects,
+          at,
+        );
+      const released = this.database
+        .prepare(
+          `UPDATE context_root_coordinator
+           SET active_branch_id = NULL, active_world_id = NULL, updated_at = ?
+           WHERE singleton = 1 AND active_branch_id = ?
+             AND active_world_id = ? AND base_revision = ?`,
+        )
+        .run(
+          at,
+          branch.branchId,
+          branch.worldId,
+          start.baseRevision,
+        );
+      if (released.changes !== 1) {
+        throw new Error('context root coordinator could not release crashed branch');
+      }
+      return {
+        ...start,
+        uncertainEffects,
+        recoveredAt: at,
+      };
+    });
   }
 
   getBranch(id: BranchId): BranchRecord | null {
@@ -518,7 +858,169 @@ export class ContextGraphStore {
     };
   }
 
+  getManifestProjection(
+    id: ManifestId,
+    options: { requireActiveShares?: boolean } = {},
+  ): ManifestProjection | null {
+    const row = this.database
+      .prepare(
+        `SELECT manifest_id, branch_id, world_id, manifest_hash, manifest_json,
+           projection_generation, policy_generation, cache_namespace, created_at
+         FROM context_manifests WHERE manifest_id = ?`,
+      )
+      .get(id) as
+      | {
+          manifest_id: string;
+          branch_id: string;
+          world_id: string;
+          manifest_hash: string;
+          manifest_json: string;
+          projection_generation: number;
+          policy_generation: number;
+          cache_namespace: string;
+          created_at: number;
+        }
+      | undefined;
+    if (!row) return null;
+    let decoded: ViewManifest;
+    try {
+      const parsed = JSON.parse(row.manifest_json) as ViewManifest;
+      decoded = createViewManifest({
+        branchId: parsed.branchId,
+        worldId: parsed.worldId,
+        parentBranchId: parsed.parentBranchId,
+        authorityEpoch: parsed.authorityEpoch,
+        eventIds: parsed.eventIds,
+        sharedEventIds: parsed.sharedEventIds,
+        policyGeneration: parsed.policyGeneration,
+      });
+      if (
+        parsed.hash !== decoded.hash ||
+        row.manifest_hash !== decoded.hash ||
+        row.manifest_json !== serialize(decoded)
+      ) {
+        throw new Error('canonical manifest bytes do not match');
+      }
+    } catch (error) {
+      throw new Error(`stored context manifest is invalid: ${id}`, {
+        cause: error,
+      });
+    }
+    const record: ManifestRecord = {
+      manifestId: manifestId(row.manifest_id),
+      branchId: branchId(row.branch_id),
+      worldId: worldId(row.world_id),
+      hash: row.manifest_hash,
+      json: row.manifest_json,
+      projectionGeneration: row.projection_generation,
+      policyGeneration: row.policy_generation,
+      cacheNamespace: row.cache_namespace,
+      createdAt: row.created_at,
+    };
+    if (
+      decoded.branchId !== record.branchId ||
+      decoded.worldId !== record.worldId ||
+      decoded.policyGeneration !== record.policyGeneration
+    ) {
+      throw new Error(`stored context manifest identity is invalid: ${id}`);
+    }
+    const localEvents = (
+      this.database
+        .prepare(
+          `SELECT events.* FROM context_manifest_events AS edges
+           JOIN context_world_events AS events
+             ON events.event_id = edges.event_id
+            AND events.world_id = edges.world_id
+           WHERE edges.manifest_id = ? ORDER BY edges.ordinal`,
+        )
+        .all(id) as unknown as WorldEventRow[]
+    ).map(mapWorldEvent);
+    if (
+      localEvents.length !== decoded.eventIds.length ||
+      localEvents.some(
+        (event, ordinal) =>
+          event.eventId !== decoded.eventIds[ordinal] ||
+          event.worldId !== decoded.worldId,
+      )
+    ) {
+      throw new Error(`stored context manifest local events are invalid: ${id}`);
+    }
+    const shares = (
+      this.database
+        .prepare(
+          `SELECT grants.grant_id, grants.shared_event_id,
+             grants.source_capsule_id, grants.source_world_id,
+             grants.destination_world_id, grants.canonical_text,
+             grants.content_hash, grants.status, grants.authority_epoch
+           FROM context_manifest_shares AS edges
+           JOIN context_share_grants AS grants
+             ON grants.grant_id = edges.grant_id
+            AND grants.destination_world_id = edges.destination_world_id
+            AND grants.shared_event_id = edges.shared_event_id
+           WHERE edges.manifest_id = ? ORDER BY edges.ordinal`,
+        )
+        .all(id) as {
+        grant_id: string;
+        shared_event_id: string;
+        source_capsule_id: string;
+        source_world_id: string;
+        destination_world_id: string;
+        canonical_text: string;
+        content_hash: string;
+        status: 'active' | 'revoked';
+        authority_epoch: number;
+      }[]
+    ).map((share): ManifestShareRecord => ({
+      grantId: shareGrantId(share.grant_id),
+      eventId: eventId(share.shared_event_id),
+      sourceCapsuleId: capsuleId(share.source_capsule_id),
+      sourceWorldId: worldId(share.source_world_id),
+      destinationWorldId: worldId(share.destination_world_id),
+      canonicalText: share.canonical_text,
+      contentHash: share.content_hash,
+      status: share.status,
+      authorityEpoch: share.authority_epoch,
+    }));
+    if (
+      shares.length !== decoded.sharedEventIds.length ||
+      shares.some(
+        (share, ordinal) =>
+          share.eventId !== decoded.sharedEventIds[ordinal] ||
+          share.destinationWorldId !== decoded.worldId ||
+          share.contentHash !== hashContextBytes(share.canonicalText),
+      )
+    ) {
+      throw new Error(`stored context manifest shares are invalid: ${id}`);
+    }
+    if (
+      options.requireActiveShares &&
+      shares.some((share) => share.status !== 'active')
+    ) {
+      throw new Error(`stored context manifest has a revoked share: ${id}`);
+    }
+    return { record, manifest: decoded, localEvents, shares };
+  }
+
   createCapsule(input: {
+    capsuleId: CapsuleId;
+    branchId: BranchId;
+    worldId: WorldId;
+    kind: CapsuleKind;
+    viewManifestHash: string | null;
+    sourceRootHash: string;
+    policyGeneration: number;
+    summarizerModel?: string;
+    summarizerPromptHash?: string;
+    content: unknown;
+    parentCapsuleIds?: readonly CapsuleId[];
+    createdAt: number;
+  }): CapsuleRecord {
+    return transaction(this.database, () =>
+      this.insertCapsuleInTransaction(input),
+    );
+  }
+
+  private insertCapsuleInTransaction(input: {
     capsuleId: CapsuleId;
     branchId: BranchId;
     worldId: WorldId;
@@ -534,41 +1036,37 @@ export class ContextGraphStore {
   }): CapsuleRecord {
     const contentJson = serialize(input.content);
     const contentHash = hashContextBytes(contentJson);
-    transaction(this.database, () => {
-      this.database
-        .prepare(
-          `
-          INSERT INTO context_capsules(
-            capsule_id, branch_id, world_id, capsule_kind,
-            view_manifest_hash, source_root_hash, policy_generation,
-            summarizer_model, summarizer_prompt_hash, content_json,
-            content_hash, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        )
-        .run(
-          input.capsuleId,
-          input.branchId,
-          input.worldId,
-          input.kind,
-          input.viewManifestHash,
-          input.sourceRootHash,
-          generation('policyGeneration', input.policyGeneration),
-          input.summarizerModel ?? null,
-          input.summarizerPromptHash ?? null,
-          contentJson,
-          contentHash,
-          timestamp('createdAt', input.createdAt),
-        );
-      const statement = this.database.prepare(`
-        INSERT INTO context_capsule_edges(
-          child_capsule_id, parent_capsule_id, world_id, ordinal
-        ) VALUES (?, ?, ?, ?)
-      `);
-      input.parentCapsuleIds?.forEach((id, ordinal) =>
-        statement.run(input.capsuleId, id, input.worldId, ordinal),
+    this.database
+      .prepare(
+        `INSERT INTO context_capsules(
+           capsule_id, branch_id, world_id, capsule_kind,
+           view_manifest_hash, source_root_hash, policy_generation,
+           summarizer_model, summarizer_prompt_hash, content_json,
+           content_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.capsuleId,
+        input.branchId,
+        input.worldId,
+        input.kind,
+        input.viewManifestHash,
+        input.sourceRootHash,
+        generation('policyGeneration', input.policyGeneration),
+        input.summarizerModel ?? null,
+        input.summarizerPromptHash ?? null,
+        contentJson,
+        contentHash,
+        timestamp('createdAt', input.createdAt),
       );
-    });
+    const statement = this.database.prepare(`
+      INSERT INTO context_capsule_edges(
+        child_capsule_id, parent_capsule_id, world_id, ordinal
+      ) VALUES (?, ?, ?, ?)
+    `);
+    input.parentCapsuleIds?.forEach((id, ordinal) =>
+      statement.run(input.capsuleId, id, input.worldId, ordinal),
+    );
     return {
       capsuleId: input.capsuleId,
       branchId: input.branchId,
@@ -664,45 +1162,224 @@ export class ContextGraphStore {
       input.expectedRevision,
     );
     const updatedAt = timestamp('updatedAt', input.updatedAt);
+    return transaction(this.database, () =>
+      this.advanceContinuationHeadInTransaction(
+        expectedRevision,
+        input.branchId,
+        updatedAt,
+      ),
+    );
+  }
+
+  private advanceContinuationHeadInTransaction(
+    expectedRevision: number,
+    targetBranchId: BranchId,
+    updatedAt: number,
+  ): ContinuationHead {
+    const current = this.getContinuationHead();
+    if (current.revision !== expectedRevision) {
+      throw new StaleContinuationHeadError(expectedRevision);
+    }
+    const target = this.requireBranch(targetBranchId);
+    if (target.status !== 'yielded') {
+      throw new Error(`continuation branch has not yielded: ${targetBranchId}`);
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_continuation_advances(
+           revision, predecessor_branch_id, predecessor_world_id,
+           branch_id, world_id, advanced_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        expectedRevision + 1,
+        current.branchId,
+        current.worldId,
+        target.branchId,
+        target.worldId,
+        updatedAt,
+      );
+    const result = this.database
+      .prepare(
+        `UPDATE context_continuation_head
+         SET branch_id = ?, world_id = ?, revision = revision + 1, updated_at = ?
+         WHERE singleton = 1 AND revision = ?`,
+      )
+      .run(target.branchId, target.worldId, updatedAt, expectedRevision);
+    if (result.changes !== 1) {
+      throw new StaleContinuationHeadError(expectedRevision);
+    }
+    const coordinator = this.database
+      .prepare(
+        `UPDATE context_root_coordinator
+         SET active_branch_id = NULL, active_world_id = NULL,
+           base_revision = ?, predecessor_branch_id = ?,
+           predecessor_world_id = ?, updated_at = ?
+         WHERE singleton = 1 AND base_revision = ?
+           AND predecessor_branch_id IS ?
+           AND predecessor_world_id IS ?
+           AND (
+             active_branch_id IS NULL
+             OR (active_branch_id = ? AND active_world_id = ?)
+           )`,
+      )
+      .run(
+        expectedRevision + 1,
+        target.branchId,
+        target.worldId,
+        updatedAt,
+        expectedRevision,
+        current.branchId,
+        current.worldId,
+        target.branchId,
+        target.worldId,
+      );
+    if (coordinator.changes !== 1) {
+      throw new Error('context root coordinator rejected continuation advance');
+    }
+    return this.getContinuationHead();
+  }
+
+  completeCoordinatedBranch(input: {
+    branchId: BranchId;
+    viewManifestHash: string;
+    privateCapsuleId: CapsuleId;
+    rootReceiptCapsuleId: CapsuleId;
+    sourceRootHash: string;
+    privateContent: unknown;
+    privateParentCapsuleIds?: readonly CapsuleId[];
+    outcome: BranchReturnOutcome;
+    commitments: readonly string[];
+    blockers: readonly string[];
+    artifactRefs: readonly string[];
+    endedAt: number;
+  }): CoordinatedBranchReturn {
+    if (!['completed', 'interrupted', 'failed'].includes(input.outcome)) {
+      throw new Error('invalid context branch return outcome');
+    }
+    const commitments = boundedStrings('commitments', input.commitments);
+    const blockers = boundedStrings('blockers', input.blockers);
+    const artifactRefs = boundedStrings('artifactRefs', input.artifactRefs);
+    const endedAt = timestamp('endedAt', input.endedAt);
     return transaction(this.database, () => {
-      const current = this.getContinuationHead();
-      if (current.revision !== expectedRevision) {
-        throw new StaleContinuationHeadError(expectedRevision);
+      const state = this.getRootCoordinatorState();
+      const branch = this.requireBranch(input.branchId);
+      if (
+        state.activeBranchId !== branch.branchId ||
+        state.activeWorldId !== branch.worldId
+      ) {
+        throw new Error(`context branch is not coordinator-active: ${branch.branchId}`);
       }
-      const target = this.requireBranch(input.branchId);
-      if (target.status !== 'yielded') {
-        throw new Error(`continuation branch has not yielded: ${input.branchId}`);
+      if (branch.status !== 'running') {
+        throw new Error(`context branch is not running: ${branch.branchId}`);
       }
-      this.database
+      const start = this.getBranchStart(branch.branchId);
+      if (!start) throw new Error('context branch has no start receipt');
+      const head = this.getContinuationHead();
+      if (
+        head.revision !== start.baseRevision ||
+        head.branchId !== start.predecessorBranchId ||
+        head.worldId !== start.predecessorWorldId ||
+        state.baseRevision !== start.baseRevision ||
+        state.predecessorBranchId !== start.predecessorBranchId ||
+        state.predecessorWorldId !== start.predecessorWorldId
+      ) {
+        throw new Error('context branch return does not match continuation head');
+      }
+      const manifest = this.database
         .prepare(
-          `
-          INSERT INTO context_continuation_advances(
-            revision, predecessor_branch_id, predecessor_world_id,
-            branch_id, world_id, advanced_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-        `,
+          `SELECT manifest_hash, policy_generation FROM context_manifests
+           WHERE branch_id = ? AND world_id = ?`,
         )
-        .run(
-          expectedRevision + 1,
-          current.branchId,
-          current.worldId,
-          target.branchId,
-          target.worldId,
-          updatedAt,
-        );
-      const result = this.database
-        .prepare(
-          `
-          UPDATE context_continuation_head
-          SET branch_id = ?, world_id = ?, revision = revision + 1, updated_at = ?
-          WHERE singleton = 1 AND revision = ?
-        `,
-        )
-        .run(target.branchId, target.worldId, updatedAt, expectedRevision);
-      if (result.changes !== 1) {
-        throw new StaleContinuationHeadError(expectedRevision);
+        .get(branch.branchId, branch.worldId) as
+        | { manifest_hash: string; policy_generation: number }
+        | undefined;
+      if (!manifest || manifest.manifest_hash !== input.viewManifestHash) {
+        throw new Error('context branch return does not match its view manifest');
       }
-      return this.getContinuationHead();
+      const effects = this.database
+        .prepare(
+          `SELECT effect_id, destination_world_id, effect_kind,
+             authority_epoch, payload_hash, status, prepared_at, resolved_at
+           FROM context_effects
+           WHERE branch_id = ? ORDER BY prepared_at, effect_id`,
+        )
+        .all(branch.branchId) as {
+        effect_id: string;
+        destination_world_id: string;
+        effect_kind: string;
+        authority_epoch: number;
+        payload_hash: string;
+        status: EffectStatus;
+        prepared_at: number;
+        resolved_at: number | null;
+      }[];
+      const effectReceipts: RootReturnEffectReceipt[] = effects.map((effect) => {
+        if (effect.status === 'prepared') {
+          throw new Error('context branch has a prepared effect');
+        }
+        if (effect.resolved_at === null) {
+          throw new Error('resolved context effect has no resolution time');
+        }
+        return {
+          effectId: effectId(effect.effect_id),
+          destinationWorldId: worldId(effect.destination_world_id),
+          kind: effect.effect_kind,
+          authorityEpoch: effect.authority_epoch,
+          payloadHash: effect.payload_hash,
+          status: effect.status,
+          preparedAt: effect.prepared_at,
+          resolvedAt: effect.resolved_at,
+        };
+      });
+      const privateCapsule = this.insertCapsuleInTransaction({
+        capsuleId: input.privateCapsuleId,
+        branchId: branch.branchId,
+        worldId: branch.worldId,
+        kind: 'private',
+        viewManifestHash: manifest.manifest_hash,
+        sourceRootHash: input.sourceRootHash,
+        policyGeneration: manifest.policy_generation,
+        content: input.privateContent,
+        parentCapsuleIds: input.privateParentCapsuleIds,
+        createdAt: endedAt,
+      });
+      const rootContent: RootReturnReceiptV1 = {
+        schemaVersion: 1,
+        branchId: branch.branchId,
+        worldId: branch.worldId,
+        viewManifestHash: manifest.manifest_hash,
+        outcome: input.outcome,
+        authorityEpoch: branch.authorityEpoch,
+        privateCapsuleId: privateCapsule.capsuleId,
+        effects: effectReceipts,
+        commitments,
+        blockers,
+        artifactRefs,
+      };
+      const rootReceipt = this.insertCapsuleInTransaction({
+        capsuleId: input.rootReceiptCapsuleId,
+        branchId: branch.branchId,
+        worldId: branch.worldId,
+        kind: 'root_receipt',
+        viewManifestHash: manifest.manifest_hash,
+        sourceRootHash: input.sourceRootHash,
+        policyGeneration: manifest.policy_generation,
+        content: rootContent,
+        createdAt: endedAt,
+      });
+      const finished = this.finishBranch(branch.branchId, 'yielded', endedAt);
+      const advanced = this.advanceContinuationHeadInTransaction(
+        start.baseRevision,
+        branch.branchId,
+        endedAt,
+      );
+      return {
+        branch: finished,
+        privateCapsule,
+        rootReceipt,
+        head: advanced,
+      };
     });
   }
 

@@ -138,20 +138,6 @@ test('context graph enforces same-world lineage and view edges', () => {
     const worldA = worldId('world:signal:contact-a');
     const worldB = worldId('world:signal:contact-b');
     createBranch(value.store, 'branch:a', worldA);
-
-    assert.throws(
-      () =>
-        value.store.createBranch({
-          branchId: branchId('branch:b-child'),
-          worldId: worldB,
-          parentBranchId: branchId('branch:a'),
-          authorityEpoch: 1,
-          startedAt: 11,
-        }),
-      /FOREIGN KEY constraint failed/,
-    );
-
-    createBranch(value.store, 'branch:b', worldB, 12);
     value.store.appendWorldEvent({
       eventId: eventId('event:b'),
       worldId: worldB,
@@ -190,6 +176,18 @@ test('context graph enforces same-world lineage and view edges', () => {
       count.count,
       0,
       'failed edge rolls back its manifest atomically',
+    );
+    value.store.finishBranch(branchId('branch:a'), 'yielded', 15);
+    assert.throws(
+      () =>
+        value.store.createBranch({
+          branchId: branchId('branch:b-child'),
+          worldId: worldB,
+          parentBranchId: branchId('branch:a'),
+          authorityEpoch: 1,
+          startedAt: 16,
+        }),
+      /FOREIGN KEY constraint failed/,
     );
   } finally {
     closeFixture(value);
@@ -335,7 +333,8 @@ test('manifests bind canonical hashes and exact active share events', () => {
       createdAt: 13,
     });
 
-    createBranch(value.store, 'branch:destination', destinationWorld, 14);
+    value.store.finishBranch(branchId('branch:source'), 'yielded', 14);
+    createBranch(value.store, 'branch:destination', destinationWorld, 15);
     const destinationView = createViewManifest({
       branchId: branchId('branch:destination'),
       worldId: destinationWorld,
@@ -369,8 +368,34 @@ test('manifests bind canonical hashes and exact active share events', () => {
       shared_event_id: 'event:share:one',
       destination_world_id: destinationWorld,
     });
+    const sourceProjection = value.store.getManifestProjection(
+      manifestId('manifest:source'),
+      { requireActiveShares: true },
+    );
+    assert.equal(sourceProjection?.localEvents[0]?.eventId, 'event:source');
+    assert.deepEqual(
+      JSON.parse(sourceProjection?.localEvents[0]?.payloadJson ?? '{}'),
+      { text: 'source-only text' },
+    );
+    const destinationProjection = value.store.getManifestProjection(
+      manifestId('manifest:destination'),
+      { requireActiveShares: true },
+    );
+    assert.deepEqual(destinationProjection?.localEvents, []);
+    assert.deepEqual(destinationProjection?.shares[0], {
+      grantId: shareGrantId('share:one'),
+      eventId: eventId('event:share:one'),
+      sourceCapsuleId: capsuleId('capsule:source'),
+      sourceWorldId: sourceWorld,
+      destinationWorldId: destinationWorld,
+      canonicalText: 'explicitly shared sentence',
+      contentHash: hashContextBytes('explicitly shared sentence'),
+      status: 'active',
+      authorityEpoch: 1,
+    });
 
-    createBranch(value.store, 'branch:tampered', destinationWorld, 16);
+    value.store.finishBranch(branchId('branch:destination'), 'yielded', 16);
+    createBranch(value.store, 'branch:tampered', destinationWorld, 17);
     assert.throws(
       () =>
         value.store.createManifest({
@@ -389,8 +414,21 @@ test('manifests bind canonical hashes and exact active share events', () => {
       /hash does not match/,
     );
 
-    value.store.revokeShareGrant(shareGrantId('share:one'), 18);
-    createBranch(value.store, 'branch:revoked', destinationWorld, 19);
+    value.store.finishBranch(branchId('branch:tampered'), 'crashed', 18);
+    value.store.revokeShareGrant(shareGrantId('share:one'), 19);
+    assert.equal(
+      value.store.getManifestProjection(manifestId('manifest:destination'))
+        ?.shares[0]?.status,
+      'revoked',
+    );
+    assert.throws(
+      () =>
+        value.store.getManifestProjection(manifestId('manifest:destination'), {
+          requireActiveShares: true,
+        }),
+      /revoked share/,
+    );
+    createBranch(value.store, 'branch:revoked', destinationWorld, 20);
     const revokedView = createViewManifest({
       ...destinationView,
       branchId: branchId('branch:revoked'),
@@ -417,8 +455,18 @@ test('continuation head compare-and-swap rejects a stale revision', () => {
   const value = fixture();
   try {
     createBranch(value.store, 'branch:1', 'world:console');
-    createBranch(value.store, 'branch:2', 'world:console', 11);
     value.store.finishBranch(branchId('branch:1'), 'yielded', 12);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_continuation_head
+             SET branch_id = 'branch:1', world_id = 'world:console',
+               revision = 1, updated_at = 12 WHERE singleton = 1`,
+          )
+          .run(),
+      /lacks an advance receipt/,
+    );
 
     const first = value.store.advanceContinuationHead({
       expectedRevision: 0,
@@ -432,6 +480,7 @@ test('continuation head compare-and-swap rejects a stale revision', () => {
       updatedAt: 12,
     });
 
+    createBranch(value.store, 'branch:2', 'world:console', 13);
     assert.throws(
       () =>
         value.store.advanceContinuationHead({
@@ -559,6 +608,289 @@ test('restart recovery converts prepared effects to uncertain without retry', ()
         }),
       /branch is not running/,
     );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('root coordinator serializes branches against one continuation head', () => {
+  const value = fixture();
+  try {
+    const first = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:coordinated-a1'),
+      worldId: worldId('world:signal:a'),
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 10,
+    });
+    assert.deepEqual(first.start, {
+      branchId: branchId('branch:coordinated-a1'),
+      worldId: worldId('world:signal:a'),
+      baseRevision: 0,
+      predecessorBranchId: null,
+      predecessorWorldId: null,
+      startedAt: 10,
+    });
+    assert.equal(first.state.activeBranchId, 'branch:coordinated-a1');
+    assert.throws(
+      () => value.store.finishBranch(first.branch.branchId, 'yielded', 11),
+      /return capsules are incomplete/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_root_coordinator
+             SET base_revision = 99, updated_at = 11 WHERE singleton = 1`,
+          )
+          .run(),
+      /invalid context root coordinator transition/,
+    );
+    assert.throws(
+      () =>
+        value.store.beginCoordinatedBranch({
+          branchId: branchId('branch:overlap'),
+          worldId: worldId('world:signal:b'),
+          expectedRevision: 0,
+          authorityEpoch: 1,
+          startedAt: 11,
+        }),
+      /already active/,
+    );
+
+    const firstView = createViewManifest({
+      branchId: first.branch.branchId,
+      worldId: first.branch.worldId,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:coordinated-a1'),
+      branchId: first.branch.branchId,
+      worldId: first.branch.worldId,
+      manifest: firstView,
+      projectionGeneration: 1,
+      createdAt: 11,
+    });
+    value.store.completeCoordinatedBranch({
+      branchId: first.branch.branchId,
+      viewManifestHash: firstView.hash,
+      privateCapsuleId: capsuleId('capsule:coordinated-a1-private'),
+      rootReceiptCapsuleId: capsuleId('capsule:coordinated-a1-root'),
+      sourceRootHash: hashContextBytes('coordinated-a1-root'),
+      privateContent: { summary: 'first local branch' },
+      outcome: 'completed',
+      commitments: [],
+      blockers: [],
+      artifactRefs: [],
+      endedAt: 12,
+    });
+    assert.deepEqual(value.store.getRootCoordinatorState(), {
+      activeBranchId: null,
+      activeWorldId: null,
+      baseRevision: 1,
+      predecessorBranchId: branchId('branch:coordinated-a1'),
+      predecessorWorldId: worldId('world:signal:a'),
+      updatedAt: 12,
+    });
+    assert.throws(
+      () =>
+        value.store.beginCoordinatedBranch({
+          branchId: branchId('branch:stale'),
+          worldId: worldId('world:signal:b'),
+          expectedRevision: 0,
+          authorityEpoch: 1,
+          startedAt: 13,
+        }),
+      StaleContinuationHeadError,
+    );
+    assert.equal(value.store.getBranch(branchId('branch:stale')), null);
+
+    const otherWorld = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:coordinated-b'),
+      worldId: worldId('world:signal:b'),
+      expectedRevision: 1,
+      authorityEpoch: 1,
+      startedAt: 14,
+    });
+    assert.equal(otherWorld.branch.parentBranchId, null);
+    value.store.recoverCoordinatedBranch(15);
+
+    const sameWorld = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:coordinated-a2'),
+      worldId: worldId('world:signal:a'),
+      expectedRevision: 1,
+      authorityEpoch: 1,
+      startedAt: 16,
+    });
+    assert.equal(sameWorld.branch.parentBranchId, 'branch:coordinated-a1');
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('coordinated return commits both capsules and head advance atomically', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:return');
+    value.store.appendWorldEvent({
+      eventId: eventId('event:return'),
+      worldId: world,
+      kind: 'inbound',
+      payload: { text: 'return me' },
+      occurredAt: 9,
+      recordedAt: 9,
+    });
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:return'),
+      worldId: world,
+      expectedRevision: 0,
+      authorityEpoch: 2,
+      startedAt: 10,
+    });
+    const view = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: world,
+      parentBranchId: null,
+      authorityEpoch: 2,
+      eventIds: [eventId('event:return')],
+      sharedEventIds: [],
+      policyGeneration: 3,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:return'),
+      branchId: opened.branch.branchId,
+      worldId: world,
+      manifest: view,
+      projectionGeneration: 4,
+      createdAt: 11,
+    });
+    value.store.prepareEffect({
+      effectId: effectId('effect:return'),
+      branchId: opened.branch.branchId,
+      worldId: world,
+      destinationWorldId: world,
+      kind: 'send',
+      authorityEpoch: 2,
+      payload: { text: 'attempted' },
+      preparedAt: 12,
+    });
+    const complete = (parentCapsuleIds?: readonly ReturnType<typeof capsuleId>[]) =>
+      value.store.completeCoordinatedBranch({
+        branchId: opened.branch.branchId,
+        viewManifestHash: view.hash,
+        privateCapsuleId: capsuleId('capsule:return-private'),
+        rootReceiptCapsuleId: capsuleId('capsule:return-root'),
+        sourceRootHash: hashContextBytes('branch trace root'),
+        privateContent: { summary: 'world-local outcome' },
+        privateParentCapsuleIds: parentCapsuleIds,
+        outcome: 'completed',
+        commitments: ['follow up locally'],
+        blockers: [],
+        artifactRefs: ['artifact:one'],
+        endedAt: 16,
+      });
+
+    assert.throws(() => complete(), /prepared effect/);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    value.store.resolveEffect(
+      effectId('effect:return'),
+      'failed',
+      13,
+      { accepted: false },
+    );
+    assert.throws(
+      () => complete([capsuleId('capsule:missing-parent')]),
+      /FOREIGN KEY constraint failed/,
+    );
+    const capsuleCount = value.database
+      .prepare('SELECT count(*) AS n FROM context_capsules')
+      .get() as { n: number };
+    assert.equal(capsuleCount.n, 0);
+    assert.equal(value.store.getBranch(opened.branch.branchId)?.status, 'running');
+    assert.equal(value.store.getContinuationHead().revision, 0);
+
+    const returned = complete();
+    assert.equal(returned.branch.status, 'yielded');
+    assert.equal(returned.head.revision, 1);
+    assert.equal(returned.head.branchId, opened.branch.branchId);
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    const rootReceipt = JSON.parse(returned.rootReceipt.contentJson);
+    assert.equal(rootReceipt.privateCapsuleId, 'capsule:return-private');
+    assert.deepEqual(rootReceipt.effects, [
+      {
+        effectId: 'effect:return',
+        destinationWorldId: world,
+        kind: 'send',
+        authorityEpoch: 2,
+        payloadHash: hashContextBytes(JSON.stringify({ text: 'attempted' })),
+        status: 'failed',
+        preparedAt: 12,
+        resolvedAt: 13,
+      },
+    ]);
+    const committedCapsules = value.database
+      .prepare(
+        `SELECT capsule_kind FROM context_capsules
+         WHERE branch_id = ? ORDER BY sequence`,
+      )
+      .all(opened.branch.branchId) as { capsule_kind: string }[];
+    assert.deepEqual(
+      committedCapsules.map((row) => row.capsule_kind),
+      ['private', 'root_receipt'],
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('root coordinator crash recovery makes prepared effects uncertain without advancing', () => {
+  const value = fixture();
+  try {
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:recover-active'),
+      worldId: worldId('world:signal:recovery'),
+      expectedRevision: 0,
+      authorityEpoch: 4,
+      startedAt: 10,
+    });
+    value.store.prepareEffect({
+      effectId: effectId('effect:recover-active'),
+      branchId: opened.branch.branchId,
+      worldId: opened.branch.worldId,
+      destinationWorldId: opened.branch.worldId,
+      kind: 'send',
+      authorityEpoch: 4,
+      payload: { text: 'issued state is unknown after restart' },
+      preparedAt: 11,
+    });
+
+    const recovered = value.store.recoverCoordinatedBranch(20);
+    assert.deepEqual(recovered, {
+      ...opened.start,
+      uncertainEffects: 1,
+      recoveredAt: 20,
+    });
+    assert.equal(value.store.getBranch(opened.branch.branchId)?.status, 'crashed');
+    assert.equal(
+      value.store.getEffect(effectId('effect:recover-active'))?.status,
+      'uncertain',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.recoverCoordinatedBranch(21), null);
+
+    const retry = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:recover-retry'),
+      worldId: opened.branch.worldId,
+      expectedRevision: 0,
+      authorityEpoch: 5,
+      startedAt: 22,
+    });
+    assert.equal(retry.start.baseRevision, 0);
   } finally {
     closeFixture(value);
   }

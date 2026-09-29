@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 29;
+const SCHEMA_VERSION = 30;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1446,6 +1446,197 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_graph_activation_no_delete
           BEFORE DELETE ON context_graph_activation BEGIN
             SELECT RAISE(ABORT, 'context graph activation state is permanent');
+          END;
+      `,
+    },
+    {
+      name: '0030-context-root-coordinator',
+      sql: `
+        CREATE TABLE context_v30_running_guard (
+          running_count INTEGER NOT NULL CHECK (running_count = 0)
+        );
+        INSERT INTO context_v30_running_guard(running_count)
+          SELECT count(*) FROM context_branches WHERE status = 'running';
+        DROP TABLE context_v30_running_guard;
+
+        CREATE UNIQUE INDEX context_branches_single_running_idx
+          ON context_branches(status) WHERE status = 'running';
+
+        CREATE TABLE context_branch_starts (
+          branch_id              TEXT PRIMARY KEY,
+          world_id               TEXT NOT NULL,
+          base_revision          INTEGER NOT NULL CHECK (typeof(base_revision) = 'integer' AND base_revision >= 0),
+          predecessor_branch_id  TEXT,
+          predecessor_world_id   TEXT,
+          started_at             INTEGER NOT NULL CHECK (typeof(started_at) = 'integer' AND started_at >= 0),
+          CHECK ((predecessor_branch_id IS NULL) = (predecessor_world_id IS NULL)),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (predecessor_branch_id, predecessor_world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_branch_starts_head_guard
+          BEFORE INSERT ON context_branch_starts
+          WHEN NEW.base_revision != (
+              SELECT revision FROM context_continuation_head WHERE singleton = 1
+            )
+            OR NEW.predecessor_branch_id IS NOT (
+              SELECT branch_id FROM context_continuation_head WHERE singleton = 1
+            )
+            OR NEW.predecessor_world_id IS NOT (
+              SELECT world_id FROM context_continuation_head WHERE singleton = 1
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'context branch start does not match continuation head');
+          END;
+        CREATE TRIGGER context_branch_starts_no_update
+          BEFORE UPDATE ON context_branch_starts BEGIN
+            SELECT RAISE(ABORT, 'context branch starts are immutable');
+          END;
+        CREATE TRIGGER context_branch_starts_no_delete
+          BEFORE DELETE ON context_branch_starts BEGIN
+            SELECT RAISE(ABORT, 'context branch starts are immutable');
+          END;
+        CREATE TRIGGER context_branches_coordinated_return_guard
+          BEFORE UPDATE OF status ON context_branches
+          WHEN NEW.status = 'yielded'
+            AND EXISTS (
+              SELECT 1 FROM context_branch_starts
+              WHERE branch_id = OLD.branch_id
+            )
+            AND (
+              NOT EXISTS (
+                SELECT 1 FROM context_capsules
+                WHERE branch_id = OLD.branch_id AND capsule_kind = 'private'
+              )
+              OR NOT EXISTS (
+                SELECT 1 FROM context_capsules
+                WHERE branch_id = OLD.branch_id AND capsule_kind = 'root_receipt'
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'coordinated branch return capsules are incomplete');
+          END;
+        CREATE TRIGGER context_continuation_head_advance_guard
+          BEFORE UPDATE ON context_continuation_head
+          WHEN NOT EXISTS (
+            SELECT 1 FROM context_continuation_advances
+            WHERE revision = NEW.revision
+              AND branch_id = NEW.branch_id
+              AND world_id = NEW.world_id
+              AND advanced_at = NEW.updated_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context continuation head lacks an advance receipt');
+          END;
+
+        CREATE TABLE context_root_coordinator (
+          singleton              INTEGER PRIMARY KEY CHECK (singleton = 1),
+          active_branch_id       TEXT UNIQUE,
+          active_world_id        TEXT,
+          base_revision          INTEGER NOT NULL CHECK (typeof(base_revision) = 'integer' AND base_revision >= 0),
+          predecessor_branch_id  TEXT,
+          predecessor_world_id   TEXT,
+          updated_at             INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at >= 0),
+          CHECK ((active_branch_id IS NULL) = (active_world_id IS NULL)),
+          CHECK ((predecessor_branch_id IS NULL) = (predecessor_world_id IS NULL)),
+          FOREIGN KEY (active_branch_id, active_world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (predecessor_branch_id, predecessor_world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        INSERT INTO context_root_coordinator(
+          singleton, active_branch_id, active_world_id, base_revision,
+          predecessor_branch_id, predecessor_world_id, updated_at
+        ) SELECT 1, NULL, NULL, revision, branch_id, world_id, updated_at
+          FROM context_continuation_head WHERE singleton = 1;
+        CREATE TRIGGER context_root_coordinator_transition_guard
+          BEFORE UPDATE ON context_root_coordinator
+          WHEN NEW.singleton != 1 OR NEW.updated_at < OLD.updated_at OR NOT (
+            (
+              OLD.active_branch_id IS NULL
+              AND NEW.active_branch_id IS NOT NULL
+              AND NEW.base_revision = OLD.base_revision
+              AND NEW.predecessor_branch_id IS OLD.predecessor_branch_id
+              AND NEW.predecessor_world_id IS OLD.predecessor_world_id
+              AND EXISTS (
+                SELECT 1 FROM context_branch_starts AS starts
+                JOIN context_branches AS branches
+                  ON branches.branch_id = starts.branch_id
+                 AND branches.world_id = starts.world_id
+                WHERE starts.branch_id = NEW.active_branch_id
+                  AND starts.world_id = NEW.active_world_id
+                  AND starts.base_revision = NEW.base_revision
+                  AND starts.predecessor_branch_id IS NEW.predecessor_branch_id
+                  AND starts.predecessor_world_id IS NEW.predecessor_world_id
+                  AND branches.status = 'running'
+              )
+            )
+            OR (
+              OLD.active_branch_id IS NOT NULL
+              AND NEW.active_branch_id IS NULL
+              AND NEW.base_revision = OLD.base_revision
+              AND NEW.predecessor_branch_id IS OLD.predecessor_branch_id
+              AND NEW.predecessor_world_id IS OLD.predecessor_world_id
+              AND (SELECT status FROM context_branches
+                   WHERE branch_id = OLD.active_branch_id) = 'crashed'
+            )
+            OR (
+              NEW.active_branch_id IS NULL
+              AND NEW.base_revision = OLD.base_revision + 1
+              AND NEW.base_revision = (
+                SELECT revision FROM context_continuation_head WHERE singleton = 1
+              )
+              AND NEW.predecessor_branch_id IS (
+                SELECT branch_id FROM context_continuation_head WHERE singleton = 1
+              )
+              AND NEW.predecessor_world_id IS (
+                SELECT world_id FROM context_continuation_head WHERE singleton = 1
+              )
+              AND (
+                OLD.active_branch_id IS NULL
+                OR (
+                  OLD.active_branch_id IS NEW.predecessor_branch_id
+                  AND OLD.active_world_id IS NEW.predecessor_world_id
+                )
+              )
+            )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context root coordinator transition');
+          END;
+        CREATE TRIGGER context_root_coordinator_no_delete
+          BEFORE DELETE ON context_root_coordinator BEGIN
+            SELECT RAISE(ABORT, 'context root coordinator is permanent');
+          END;
+
+        CREATE TABLE context_branch_recoveries (
+          branch_id              TEXT PRIMARY KEY,
+          world_id               TEXT NOT NULL,
+          base_revision          INTEGER NOT NULL CHECK (typeof(base_revision) = 'integer' AND base_revision >= 0),
+          predecessor_branch_id  TEXT,
+          predecessor_world_id   TEXT,
+          uncertain_effects      INTEGER NOT NULL CHECK (typeof(uncertain_effects) = 'integer' AND uncertain_effects >= 0),
+          recovered_at           INTEGER NOT NULL CHECK (typeof(recovered_at) = 'integer' AND recovered_at >= 0),
+          CHECK ((predecessor_branch_id IS NULL) = (predecessor_world_id IS NULL)),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (predecessor_branch_id, predecessor_world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_branch_recoveries_crashed_guard
+          BEFORE INSERT ON context_branch_recoveries
+          WHEN (SELECT status FROM context_branches WHERE branch_id = NEW.branch_id) != 'crashed'
+          BEGIN
+            SELECT RAISE(ABORT, 'context recovery requires a crashed branch');
+          END;
+        CREATE TRIGGER context_branch_recoveries_no_update
+          BEFORE UPDATE ON context_branch_recoveries BEGIN
+            SELECT RAISE(ABORT, 'context branch recoveries are immutable');
+          END;
+        CREATE TRIGGER context_branch_recoveries_no_delete
+          BEFORE DELETE ON context_branch_recoveries BEGIN
+            SELECT RAISE(ABORT, 'context branch recoveries are immutable');
           END;
       `,
     },

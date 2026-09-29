@@ -331,6 +331,22 @@ export async function createElpisRuntime(
         'context graph is active but this runtime supports shadow mode only',
       );
     }
+    const graphRecoveryAt = Date.now();
+    const recoveredBranch =
+      contextGraphStore.recoverCoordinatedBranch(graphRecoveryAt);
+    if (recoveredBranch) {
+      parsedConfig.logger.warn(
+        `recovered crashed context branch ${recoveredBranch.branchId}; ` +
+          `${recoveredBranch.uncertainEffects} effect(s) remain uncertain`,
+      );
+    }
+    const orphanedEffects =
+      contextGraphStore.recoverPreparedEffects(graphRecoveryAt);
+    if (orphanedEffects.length > 0) {
+      parsedConfig.logger.warn(
+        `recovered ${orphanedEffects.length} orphaned context effect(s) as uncertain`,
+      );
+    }
     gatewayResidentStore = (
       adapters.createGatewayResidentStore ?? createGatewayResidentStore
     )(db);

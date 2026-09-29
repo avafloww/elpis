@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    29,
+    30,
   );
   assert.deepEqual(
     (
@@ -196,6 +196,7 @@ test('current migration prefix preserves fleet history and creates resident stat
       { component: 'core', name: '0027-discord-person-settings' },
       { component: 'core', name: '0028-worker-completion-delivery' },
       { component: 'core', name: '0029-context-graph-dark-store' },
+      { component: 'core', name: '0030-context-root-coordinator' },
     ],
   );
   db.close();
@@ -206,6 +207,10 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
   const db = openDatabase(dir);
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TABLE context_branch_recoveries;
+    DROP TABLE context_root_coordinator;
+    DROP TABLE context_branch_starts;
+    DROP INDEX context_branches_single_running_idx;
     DROP TABLE context_manifest_shares;
     DROP TABLE context_manifest_events;
     DROP TABLE context_capsule_edges;
@@ -227,7 +232,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -416,7 +421,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    29,
+    30,
   );
   assert.deepEqual(
     (
@@ -443,6 +448,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0027-discord-person-settings',
       '0028-worker-completion-delivery',
       '0029-context-graph-dark-store',
+      '0030-context-root-coordinator',
     ],
   );
   runMigrations(db);
@@ -474,7 +480,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    16,
+    17,
   );
   db.close();
 });
@@ -514,7 +520,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 29);
+  assert.equal(version, 30);
   assert.equal(
     (
       reopened
@@ -538,4 +544,48 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
     /CHECK constraint failed/,
   );
   reopened.close();
+});
+
+test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.exec(`
+    DROP TRIGGER context_branches_coordinated_return_guard;
+    DROP TRIGGER context_continuation_head_advance_guard;
+    DROP TABLE context_branch_recoveries;
+    DROP TABLE context_root_coordinator;
+    DROP TABLE context_branch_starts;
+    DROP INDEX context_branches_single_running_idx;
+    DROP TRIGGER elpis_migrations_no_delete;
+    DELETE FROM elpis_migrations
+      WHERE component = 'core' AND name = '0030-context-root-coordinator';
+    PRAGMA user_version = 29;
+    INSERT INTO context_branches(
+      branch_id, world_id, parent_branch_id, status, authority_epoch,
+      started_at, ended_at
+    ) VALUES ('branch:ambiguous', 'world:internal', NULL, 'running', 1, 10, NULL);
+  `);
+
+  assert.throws(
+    () => runMigrations(db),
+    /CHECK constraint failed: running_count = 0/,
+  );
+  assert.equal(
+    (db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    29,
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          `SELECT count(*) AS n FROM elpis_migrations
+           WHERE component = 'core' AND name = '0030-context-root-coordinator'`,
+        )
+        .get() as { n: number }
+    ).n,
+    0,
+  );
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
 });

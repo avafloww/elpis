@@ -28,6 +28,12 @@ import {
   type GatewayConfigMaterializationOptions,
 } from '../src/llm/gateway-managed-config.js';
 import { TOOL_CONTRACT_VERSION } from '../src/llm/provenance.js';
+import {
+  ContextGraphStore,
+  branchId,
+  effectId,
+  worldId,
+} from '../src/store/context-graph.js';
 import { openDatabase, type Database } from '../src/store/db.js';
 import { createGatewayResidentStore } from '../src/store/gateway-resident.js';
 import { makeConfig } from './helpers.js';
@@ -542,6 +548,125 @@ test('database close failure does not replace the startup error', async () => {
   } finally {
     if (database?.isOpen) database.close();
     fs.rmSync(dataDirectory, { recursive: true, force: true });
+  }
+});
+
+test('dark startup records an interrupted branch without advancing or replaying it', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'elpis-context-recovery-'),
+  );
+  const runtimeRoot = path.join(directory, 'elpis-data');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const seeded = openDatabase(runtimeRoot);
+  const seededStore = new ContextGraphStore(seeded);
+  const opened = seededStore.beginCoordinatedBranch({
+    branchId: branchId('branch:startup-recovery'),
+    worldId: worldId('world:internal'),
+    expectedRevision: 0,
+    authorityEpoch: 1,
+    startedAt: 10,
+  });
+  seededStore.prepareEffect({
+    effectId: effectId('effect:startup-recovery'),
+    branchId: opened.branch.branchId,
+    worldId: opened.branch.worldId,
+    destinationWorldId: opened.branch.worldId,
+    kind: 'send',
+    authorityEpoch: 1,
+    payload: { text: 'must not replay' },
+    preparedAt: 11,
+  });
+  seeded.close();
+
+  const stop = new Error('stop after graph recovery');
+  const config = directConfig(directory, false, false);
+  const warnings: string[] = [];
+  config.logger.warn = (...args: unknown[]) => warnings.push(args.join(' '));
+  try {
+    await assert.rejects(
+      createElpisRuntime({
+        loadConfigFile: () => config,
+        resolveBuildIdentity: async () => buildIdentity,
+        fetchContextWindow: async () => {
+          throw stop;
+        },
+      }),
+      stop,
+    );
+
+    const recovered = openDatabase(runtimeRoot);
+    const recoveredStore = new ContextGraphStore(recovered);
+    assert.equal(
+      recoveredStore.getBranch(opened.branch.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(
+      recoveredStore.getEffect(effectId('effect:startup-recovery'))?.status,
+      'uncertain',
+    );
+    assert.equal(recoveredStore.getContinuationHead().revision, 0);
+    assert.equal(recoveredStore.getRootCoordinatorState().activeBranchId, null);
+    assert.match(warnings.join('\n'), /recovered crashed context branch/);
+    recovered.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('active graph refusal happens before any dark-mode recovery mutation', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'elpis-context-active-refusal-'),
+  );
+  const runtimeRoot = path.join(directory, 'elpis-data');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const seeded = openDatabase(runtimeRoot);
+  const seededStore = new ContextGraphStore(seeded);
+  const opened = seededStore.beginCoordinatedBranch({
+    branchId: branchId('branch:active-refusal'),
+    worldId: worldId('world:internal'),
+    expectedRevision: 0,
+    authorityEpoch: 1,
+    startedAt: 10,
+  });
+  seededStore.prepareEffect({
+    effectId: effectId('effect:active-refusal'),
+    branchId: opened.branch.branchId,
+    worldId: opened.branch.worldId,
+    destinationWorldId: opened.branch.worldId,
+    kind: 'send',
+    authorityEpoch: 1,
+    payload: { text: 'must remain prepared' },
+    preparedAt: 11,
+  });
+  seededStore.activate(0, 12);
+  seeded.close();
+
+  const config = directConfig(directory, false, false);
+  try {
+    await assert.rejects(
+      createElpisRuntime({
+        loadConfigFile: () => config,
+        resolveBuildIdentity: async () => buildIdentity,
+      }),
+      /context graph is active but this runtime supports shadow mode only/,
+    );
+    const unchanged = openDatabase(runtimeRoot);
+    const unchangedStore = new ContextGraphStore(unchanged);
+    assert.equal(
+      unchangedStore.getBranch(opened.branch.branchId)?.status,
+      'running',
+    );
+    assert.equal(
+      unchangedStore.getEffect(effectId('effect:active-refusal'))?.status,
+      'prepared',
+    );
+    assert.equal(
+      unchangedStore.getRootCoordinatorState().activeBranchId,
+      opened.branch.branchId,
+    );
+    unchanged.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

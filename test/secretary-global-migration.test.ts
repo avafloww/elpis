@@ -19,6 +19,10 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers)
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   db.exec(`
+    DROP TABLE context_branch_recoveries;
+    DROP TABLE context_root_coordinator;
+    DROP TABLE context_branch_starts;
+    DROP INDEX context_branches_single_running_idx;
     DROP TABLE context_manifest_shares;
     DROP TABLE context_manifest_events;
     DROP TABLE context_capsule_edges;
@@ -106,7 +110,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -166,7 +170,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    29,
+    30,
   );
   assert.equal(
     (
