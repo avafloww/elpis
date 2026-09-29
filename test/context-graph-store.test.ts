@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
+import { materializeWorldConversation } from '../src/context/view.js';
 import { openDatabase } from '../src/store/db.js';
 import {
   ContextGraphStore,
@@ -42,6 +43,132 @@ function closeFixture(value: {
   value.database.close();
   fs.rmSync(value.directory, { recursive: true, force: true });
 }
+
+test('world message projections materialize only exact ordered local text', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:a');
+    const worldB = worldId('world:signal:b');
+    const events = [
+      { id: eventId('event:a-1'), world: worldA, text: 'A_ONE_CANARY' },
+      { id: eventId('event:a-2'), world: worldA, text: 'A_TWO_CANARY' },
+      { id: eventId('event:b-1'), world: worldB, text: 'B_ONLY_CANARY' },
+    ];
+    events.forEach((event, index) =>
+      value.store.appendWorldEvent({
+        eventId: event.id,
+        worldId: event.world,
+        kind: 'inbound:signal',
+        payload: { text: event.text },
+        occurredAt: index + 1,
+        recordedAt: index + 1,
+      }),
+    );
+    const projections = events.map((event, index) =>
+      value.store.createEventMessageProjection({
+        sourceEventId: event.id,
+        worldId: event.world,
+        rendererGeneration: 1,
+        message: { role: 'user', content: `<incoming>${event.text}</incoming>` },
+        createdAt: index + 10,
+      }),
+    );
+    assert.match(projections[0].projectionId, /^event-message:[0-9a-f]{64}$/);
+    assert.equal(
+      projections[0].messageHash,
+      hashContextBytes(
+        JSON.stringify({
+          role: 'user',
+          content: '<incoming>A_ONE_CANARY</incoming>',
+        }),
+      ),
+    );
+    assert.deepEqual(
+      value.store.createEventMessageProjection({
+        sourceEventId: events[0].id,
+        worldId: worldA,
+        rendererGeneration: 1,
+        message: projections[0].message,
+        createdAt: 99,
+      }),
+      projections[0],
+    );
+    assert.throws(
+      () =>
+        value.store.createEventMessageProjection({
+          sourceEventId: events[0].id,
+          worldId: worldA,
+          rendererGeneration: 1,
+          message: { role: 'user', content: 'changed rendering' },
+          createdAt: 99,
+        }),
+      /projection identity conflict/,
+    );
+
+    const bMessages = materializeWorldConversation({
+      store: value.store,
+      worldId: worldB,
+      rendererGeneration: 1,
+      projectionIds: [projections[2].projectionId],
+    });
+    assert.deepEqual(bMessages, [
+      {
+        role: 'user',
+        content: '<incoming>B_ONLY_CANARY</incoming>',
+        worldId: worldB,
+        eventId: events[2].id,
+        sequence: 3,
+      },
+    ]);
+    assert.equal(JSON.stringify(bMessages).includes('A_ONE_CANARY'), false);
+    assert.throws(
+      () =>
+        materializeWorldConversation({
+          store: value.store,
+          worldId: worldB,
+          rendererGeneration: 1,
+          projectionIds: [projections[0].projectionId],
+        }),
+      /projection world mismatch/,
+    );
+    assert.throws(
+      () =>
+        materializeWorldConversation({
+          store: value.store,
+          worldId: worldA,
+          rendererGeneration: 1,
+          projectionIds: [
+            projections[1].projectionId,
+            projections[0].projectionId,
+          ],
+        }),
+      /projection order is invalid/,
+    );
+    assert.throws(
+      () =>
+        materializeWorldConversation({
+          store: value.store,
+          worldId: worldA,
+          rendererGeneration: 1,
+          projectionIds: [
+            projections[0].projectionId,
+            projections[0].projectionId,
+          ],
+        }),
+      /duplicate projection/,
+    );
+    assert.throws(() =>
+      value.database
+        .prepare('UPDATE context_event_message_projections SET created_at = 0')
+        .run(),
+    );
+    assert.throws(() =>
+      value.database.prepare('DELETE FROM context_event_message_projections').run(),
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
 
 function createBranch(
   store: ContextGraphStore,

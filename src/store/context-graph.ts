@@ -25,6 +25,8 @@ export type CapsuleId = ContextId<'CapsuleId'>;
 export type ShareGrantId = ContextId<'ShareGrantId'>;
 export type LegacyImportReceiptId = ContextId<'LegacyImportReceiptId'>;
 export type EffectId = ContextId<'EffectId'>;
+export type EventMessageProjectionId =
+  ContextId<'EventMessageProjectionId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
   ContextId<'ShadowRequestObservationId'>;
@@ -77,6 +79,14 @@ export const legacyImportReceiptId = (value: string): LegacyImportReceiptId =>
   );
 export const effectId = (value: string): EffectId =>
   branded<'EffectId'>('effectId', value, 'effect:');
+export const eventMessageProjectionId = (
+  value: string,
+): EventMessageProjectionId =>
+  branded<'EventMessageProjectionId'>(
+    'eventMessageProjectionId',
+    value,
+    'event-message:',
+  );
 export const shadowProjectionPlanId = (value: string): ShadowProjectionPlanId =>
   branded<'ShadowProjectionPlanId'>(
     'shadowProjectionPlanId',
@@ -107,6 +117,22 @@ export interface WorldEventRecord {
   readonly payloadHash: string;
   readonly occurredAt: number;
   readonly recordedAt: number;
+}
+
+export interface ProjectedUserMessage {
+  readonly role: 'user';
+  readonly content: string;
+}
+
+export interface EventMessageProjectionRecord {
+  readonly projectionId: EventMessageProjectionId;
+  readonly sourceEventId: EventId;
+  readonly worldId: WorldId;
+  readonly rendererGeneration: number;
+  readonly message: ProjectedUserMessage;
+  readonly messageJson: string;
+  readonly messageHash: string;
+  readonly createdAt: number;
 }
 
 export type ShadowProjectionSurface =
@@ -389,6 +415,37 @@ function exactShadowPlanKeys(
   }
 }
 
+function normalizeProjectedUserMessage(value: unknown): ProjectedUserMessage {
+  const message = shadowPlanObject(value, 'projected user message');
+  exactShadowPlanKeys(message, ['role', 'content'], 'projected user message');
+  if (
+    message.role !== 'user' ||
+    typeof message.content !== 'string' ||
+    Buffer.byteLength(message.content) > 8 * 1024 * 1024
+  ) {
+    throw new Error('projected user message is invalid');
+  }
+  return { role: 'user', content: message.content };
+}
+
+function renderedProjectionIdentity(input: {
+  sourceEventId: EventId;
+  worldId: WorldId;
+  rendererGeneration: number;
+  messageHash: string;
+}): EventMessageProjectionId {
+  const hash = hashContextBytes(
+    serialize({
+      schemaVersion: 1,
+      sourceEventId: input.sourceEventId,
+      worldId: input.worldId,
+      rendererGeneration: input.rendererGeneration,
+      messageHash: input.messageHash,
+    }),
+  );
+  return eventMessageProjectionId(`event-message:${hash}`);
+}
+
 function shadowCount(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${label} must be a non-negative safe integer`);
@@ -402,29 +459,49 @@ function validateShadowProjectionPlan(
   wakeEvent: EventId,
 ): void {
   const plan = shadowPlanObject(value, 'shadow projection plan');
+  const isV2 = plan.schemaVersion === 2;
+  if (plan.schemaVersion !== 1 && !isV2) {
+    throw new Error('shadow projection plan version is invalid');
+  }
   exactShadowPlanKeys(
     plan,
-    [
-      'schemaVersion',
-      'worldId',
-      'wakeEventId',
-      'projectionGeneration',
-      'policyGeneration',
-      'localEventIds',
-      'sharedEventIds',
-      'foreignWorlds',
-      'unlineagedRoles',
-      'systemLayers',
-      'blockers',
-    ],
+    isV2
+      ? [
+          'schemaVersion',
+          'worldId',
+          'wakeEventId',
+          'projectionGeneration',
+          'policyGeneration',
+          'rendererGeneration',
+          'localEventIds',
+          'localMessageProjectionIds',
+          'sharedEventIds',
+          'foreignWorlds',
+          'unlineagedRoles',
+          'systemLayers',
+          'blockers',
+        ]
+      : [
+          'schemaVersion',
+          'worldId',
+          'wakeEventId',
+          'projectionGeneration',
+          'policyGeneration',
+          'localEventIds',
+          'sharedEventIds',
+          'foreignWorlds',
+          'unlineagedRoles',
+          'systemLayers',
+          'blockers',
+        ],
     'shadow projection plan',
   );
   if (
-    plan.schemaVersion !== 1 ||
-    plan.projectionGeneration !== 1 ||
+    plan.projectionGeneration !== (isV2 ? 2 : 1) ||
     plan.policyGeneration !== 1 ||
     plan.worldId !== world ||
-    plan.wakeEventId !== wakeEvent
+    plan.wakeEventId !== wakeEvent ||
+    (isV2 && plan.rendererGeneration !== 1)
   ) {
     throw new Error('shadow projection plan identity or generation is invalid');
   }
@@ -445,6 +522,22 @@ function validateShadowProjectionPlan(
     !local.includes(wakeEvent)
   ) {
     throw new Error('shadow projection plan event lineage is invalid');
+  }
+  const localProjectionIds = isV2 ? plan.localMessageProjectionIds : [];
+  if (
+    !Array.isArray(localProjectionIds) ||
+    localProjectionIds.length > local.length ||
+    localProjectionIds.some((id) => {
+      try {
+        eventMessageProjectionId(String(id));
+        return typeof id !== 'string';
+      } catch {
+        return true;
+      }
+    }) ||
+    new Set(localProjectionIds).size !== localProjectionIds.length
+  ) {
+    throw new Error('shadow projection plan message projections are invalid');
   }
   if (!Array.isArray(plan.foreignWorlds) || plan.foreignWorlds.length > 4096) {
     throw new Error('shadow projection plan foreign worlds are invalid');
@@ -510,6 +603,13 @@ function validateShadowProjectionPlan(
     'unverified_share',
     'multimodal_unavailable',
     'duplicate_event',
+    ...(isV2
+      ? [
+          'unsupported_projected_role',
+          'unrendered_event',
+          'render_projection_mismatch',
+        ]
+      : []),
   ]);
   if (
     !Array.isArray(plan.blockers) ||
@@ -520,6 +620,17 @@ function validateShadowProjectionPlan(
     new Set(plan.blockers).size !== plan.blockers.length
   ) {
     throw new Error('shadow projection blockers are invalid');
+  }
+  if (isV2) {
+    const incomplete = localProjectionIds.length !== local.length;
+    const saysIncomplete = plan.blockers.includes('unrendered_event');
+    if (
+      incomplete !== saysIncomplete ||
+      (plan.blockers.includes('render_projection_mismatch') && !saysIncomplete) ||
+      (plan.blockers.includes('unsupported_projected_role') && !saysIncomplete)
+    ) {
+      throw new Error('shadow projection rendering state is inconsistent');
+    }
   }
 }
 
@@ -544,6 +655,16 @@ interface WorldEventRow {
   payload_hash: string;
   occurred_at: number;
   recorded_at: number;
+}
+
+interface EventMessageProjectionRow {
+  projection_id: string;
+  source_event_id: string;
+  world_id: string;
+  renderer_generation: number;
+  message_json: string;
+  message_hash: string;
+  created_at: number;
 }
 
 interface BranchRow {
@@ -631,6 +752,54 @@ function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
     payloadHash: row.payload_hash,
     occurredAt: row.occurred_at,
     recordedAt: row.recorded_at,
+  };
+}
+
+function mapEventMessageProjection(
+  row: EventMessageProjectionRow,
+): EventMessageProjectionRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.message_json);
+  } catch (error) {
+    throw new Error(
+      `stored event message projection is invalid: ${row.projection_id}`,
+      { cause: error },
+    );
+  }
+  const message = normalizeProjectedUserMessage(parsed);
+  const messageJson = serialize(message);
+  const sourceEventId = eventId(row.source_event_id);
+  const projectionWorldId = worldId(row.world_id);
+  const rendererGeneration = generation(
+    'rendererGeneration',
+    row.renderer_generation,
+  );
+  const messageHash = sha256('messageHash', row.message_hash);
+  if (
+    rendererGeneration < 1 ||
+    messageJson !== row.message_json ||
+    hashContextBytes(messageJson) !== messageHash ||
+    renderedProjectionIdentity({
+      sourceEventId,
+      worldId: projectionWorldId,
+      rendererGeneration,
+      messageHash,
+    }) !== row.projection_id
+  ) {
+    throw new Error(
+      `stored event message projection is invalid: ${row.projection_id}`,
+    );
+  }
+  return {
+    projectionId: eventMessageProjectionId(row.projection_id),
+    sourceEventId,
+    worldId: projectionWorldId,
+    rendererGeneration,
+    message,
+    messageJson,
+    messageHash,
+    createdAt: timestamp('createdAt', row.created_at),
   };
 }
 
@@ -728,6 +897,142 @@ export class ContextGraphStore {
     return row ? mapWorldEvent(row) : null;
   }
 
+  createEventMessageProjection(input: {
+    sourceEventId: EventId;
+    worldId: WorldId;
+    rendererGeneration: number;
+    message: ProjectedUserMessage;
+    createdAt: number;
+  }): EventMessageProjectionRecord {
+    const rendererGeneration = generation(
+      'rendererGeneration',
+      input.rendererGeneration,
+    );
+    if (rendererGeneration < 1) {
+      throw new Error('rendererGeneration must be positive');
+    }
+    const message = normalizeProjectedUserMessage(input.message);
+    const messageJson = serialize(message);
+    const messageHash = hashContextBytes(messageJson);
+    const projectionId = renderedProjectionIdentity({
+      sourceEventId: input.sourceEventId,
+      worldId: input.worldId,
+      rendererGeneration,
+      messageHash,
+    });
+    const existing = this.getEventMessageProjectionForSource(
+      input.sourceEventId,
+      rendererGeneration,
+    );
+    if (existing) {
+      if (
+        existing.projectionId !== projectionId ||
+        existing.worldId !== input.worldId ||
+        existing.messageHash !== messageHash ||
+        existing.messageJson !== messageJson
+      ) {
+        throw new Error(
+          `event message projection identity conflict: ${input.sourceEventId}`,
+        );
+      }
+      return existing;
+    }
+    const source = this.getWorldEvent(input.sourceEventId);
+    if (!source || source.worldId !== input.worldId) {
+      throw new Error('event message projection source is not in its world');
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_event_message_projections(
+           projection_id, source_event_id, world_id, renderer_generation,
+           message_json, message_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        projectionId,
+        input.sourceEventId,
+        input.worldId,
+        rendererGeneration,
+        messageJson,
+        messageHash,
+        timestamp('createdAt', input.createdAt),
+      );
+    return this.getEventMessageProjection(projectionId)!;
+  }
+
+  getEventMessageProjection(
+    id: EventMessageProjectionId,
+  ): EventMessageProjectionRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_event_message_projections WHERE projection_id = ?',
+      )
+      .get(id) as unknown as EventMessageProjectionRow | undefined;
+    if (!row) return null;
+    const projection = mapEventMessageProjection(row);
+    const source = this.getWorldEvent(projection.sourceEventId);
+    if (!source || source.worldId !== projection.worldId) {
+      throw new Error(
+        `stored event message projection has invalid source: ${id}`,
+      );
+    }
+    return projection;
+  }
+
+  getEventMessageProjectionForSource(
+    sourceEventId: EventId,
+    rendererGeneration: number,
+  ): EventMessageProjectionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_event_message_projections
+         WHERE source_event_id = ? AND renderer_generation = ?`,
+      )
+      .get(
+        sourceEventId,
+        generation('rendererGeneration', rendererGeneration),
+      ) as unknown as EventMessageProjectionRow | undefined;
+    if (!row) return null;
+    return this.getEventMessageProjection(
+      eventMessageProjectionId(row.projection_id),
+    );
+  }
+
+  private validateShadowMessageProjectionLineage(
+    plan: unknown,
+    planWorldId: WorldId,
+  ): void {
+    const parsed = plan as {
+      schemaVersion: number;
+      rendererGeneration?: number;
+      localEventIds: EventId[];
+      localMessageProjectionIds?: string[];
+    };
+    if (parsed.schemaVersion !== 2) return;
+    const positions = new Map(
+      parsed.localEventIds.map((id, index) => [id, index] as const),
+    );
+    let previousPosition = -1;
+    for (const rawId of parsed.localMessageProjectionIds ?? []) {
+      const projection = this.getEventMessageProjection(
+        eventMessageProjectionId(rawId),
+      );
+      const position = projection
+        ? positions.get(projection.sourceEventId)
+        : undefined;
+      if (
+        !projection ||
+        projection.worldId !== planWorldId ||
+        projection.rendererGeneration !== parsed.rendererGeneration ||
+        position === undefined ||
+        position <= previousPosition
+      ) {
+        throw new Error('shadow projection message lineage is invalid');
+      }
+      previousPosition = position;
+    }
+  }
+
   createShadowProjectionPlan(input: {
     planId: ShadowProjectionPlanId;
     worldId: WorldId;
@@ -756,6 +1061,7 @@ export class ContextGraphStore {
         );
       }
     }
+    this.validateShadowMessageProjectionLineage(input.plan, input.worldId);
     const planJson = serialize(input.plan);
 
     const planHash = hashContextBytes(planJson);
@@ -820,10 +1126,11 @@ export class ContextGraphStore {
       worldId(row.world_id),
       eventId(row.wake_event_id),
     );
+    this.validateShadowMessageProjectionLineage(parsed, worldId(row.world_id));
     if (
       !parsed ||
       typeof parsed !== 'object' ||
-      parsed.schemaVersion !== 1 ||
+      (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
       parsed.worldId !== row.world_id ||
       parsed.wakeEventId !== row.wake_event_id ||
       serialize(parsed) !== row.plan_json ||

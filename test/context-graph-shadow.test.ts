@@ -168,7 +168,9 @@ test('shadow projection plans retain lineage and blockers without request conten
       },
     ],
   });
+  assert.equal(plan.schemaVersion, 2);
   assert.deepEqual(plan.localEventIds, ['event:ingress:local']);
+  assert.deepEqual(plan.localMessageProjectionIds, []);
   assert.deepEqual(plan.foreignWorlds, [
     { worldId: 'world:discord:guild:guild-b', messageCount: 1 },
   ]);
@@ -182,6 +184,7 @@ test('shadow projection plans retain lineage and blockers without request conten
     'legacy_mixed_system',
     'unlineaged_history',
     'multiple_worlds',
+    'unrendered_event',
   ]);
   assert.equal(
     plan.systemLayers[0]?.byteLength,
@@ -215,10 +218,10 @@ test('shadow plans flag duplicate lineage without duplicating event identities',
     messages: [message, { ...message }],
   });
   assert.deepEqual(plan.localEventIds, [message.eventId]);
-  assert.deepEqual(plan.blockers, ['duplicate_event']);
+  assert.deepEqual(plan.blockers, ['duplicate_event', 'unrendered_event']);
 });
 
-test('shadow recorder persists only plan metadata and final projection hashes', () => {
+test('shadow recorder keeps content in world-bound projections, not plans or observations', () => {
   const value = fixture();
   try {
     const message = inbound();
@@ -264,7 +267,30 @@ test('shadow recorder persists only plan metadata and final projection hashes', 
          FROM context_shadow_request_observations`,
       )
       .get() as Record<string, unknown>;
+    const rendered = value.database
+      .prepare(
+        `SELECT projection_id, source_event_id, world_id,
+                renderer_generation, message_json, message_hash
+         FROM context_event_message_projections`,
+      )
+      .get() as Record<string, unknown>;
+    const parsedPlan = JSON.parse(plan.plan_json) as {
+      schemaVersion: number;
+      localMessageProjectionIds: string[];
+    };
     assert.equal(plan.plan_hash, hashContextBytes(plan.plan_json));
+    assert.equal(parsedPlan.schemaVersion, 2);
+    assert.deepEqual(parsedPlan.localMessageProjectionIds, [
+      rendered.projection_id,
+    ]);
+    assert.equal(
+      rendered.message_json,
+      JSON.stringify({ role: 'user', content: userCanary }),
+    );
+    assert.equal(
+      rendered.message_hash,
+      hashContextBytes(String(rendered.message_json)),
+    );
     assert.deepEqual(
       { ...observation },
       {
@@ -277,15 +303,116 @@ test('shadow recorder persists only plan metadata and final projection hashes', 
         expected_bytes: null,
       },
     );
-    const persisted = JSON.stringify({ plan, observation });
+    const metadataOnly = JSON.stringify({ plan, observation });
     for (const forbidden of [
       systemCanary,
       userCanary,
       projectionCanary,
       projectionBytes,
     ]) {
-      assert.equal(persisted.includes(forbidden), false);
+      assert.equal(metadataOnly.includes(forbidden), false);
     }
+    assert.equal(JSON.stringify(rendered).includes(systemCanary), false);
+    assert.equal(JSON.stringify(rendered).includes(projectionCanary), false);
+  } finally {
+    value.database.close();
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('shadow rendering never projects foreign or multimodal message content', () => {
+  const value = fixture();
+  try {
+    const a = value.recorder.recordInbound(
+      inbound({
+        id: 'message-a',
+        guildId: 'guild-a',
+        content: 'A_SOURCE_CANARY',
+      }),
+    );
+    const b = value.recorder.recordInbound(
+      inbound({
+        id: 'message-b',
+        guildId: 'guild-b',
+        content: 'B_SOURCE_CANARY',
+      }),
+    );
+    const multimodal = value.recorder.recordInbound(
+      inbound({
+        id: 'message-b-image',
+        guildId: 'guild-b',
+        content: 'B_IMAGE_SOURCE_CANARY',
+      }),
+    );
+    value.recorder.prepareRequestObservation({
+      wakeLineage: {
+        worldId: multimodal.worldId,
+        eventId: multimodal.eventId,
+        sequence: multimodal.sequence,
+      },
+      messages: [
+        {
+          role: 'user',
+          content: 'A_RENDERED_CANARY',
+          worldId: a.worldId,
+          eventId: a.eventId,
+          sequence: a.sequence,
+        },
+        {
+          role: 'user',
+          content: 'B_RENDERED_CANARY',
+          worldId: b.worldId,
+          eventId: b.eventId,
+          sequence: b.sequence,
+        },
+        {
+          role: 'user',
+          content: 'B_MULTIMODAL_RENDERED_CANARY',
+          contentParts: [{ type: 'text', text: 'visible multimodal part' }],
+          worldId: multimodal.worldId,
+          eventId: multimodal.eventId,
+          sequence: multimodal.sequence,
+        },
+      ],
+    });
+
+    const rows = value.database
+      .prepare(
+        `SELECT projection_id, world_id, message_json
+         FROM context_event_message_projections ORDER BY projection_id`,
+      )
+      .all() as Array<{
+      projection_id: string;
+      world_id: string;
+      message_json: string;
+    }>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].world_id, b.worldId);
+    assert.equal(
+      rows[0].message_json,
+      JSON.stringify({ role: 'user', content: 'B_RENDERED_CANARY' }),
+    );
+    assert.equal(JSON.stringify(rows).includes('A_RENDERED_CANARY'), false);
+    assert.equal(
+      JSON.stringify(rows).includes('B_MULTIMODAL_RENDERED_CANARY'),
+      false,
+    );
+
+    const storedPlan = value.database
+      .prepare('SELECT plan_json FROM context_shadow_projection_plans')
+      .get() as { plan_json: string };
+    const plan = JSON.parse(storedPlan.plan_json) as {
+      localEventIds: string[];
+      localMessageProjectionIds: string[];
+      blockers: string[];
+    };
+    assert.deepEqual(plan.localEventIds, [b.eventId, multimodal.eventId]);
+    assert.deepEqual(plan.localMessageProjectionIds, [rows[0].projection_id]);
+    assert.deepEqual(plan.blockers, [
+      'multiple_worlds',
+      'multimodal_unavailable',
+      'unrendered_event',
+    ]);
   } finally {
     value.database.close();
     fs.rmSync(value.directory, { recursive: true, force: true });

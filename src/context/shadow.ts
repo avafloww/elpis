@@ -17,6 +17,7 @@ import {
   eventId,
   shadowProjectionPlanId,
   shadowRequestObservationId,
+  type EventMessageProjectionId,
   type WorldEventRecord,
 } from '../store/context-graph.js';
 
@@ -26,7 +27,10 @@ export type ShadowProjectionBlocker =
   | 'multiple_worlds'
   | 'unverified_share'
   | 'multimodal_unavailable'
-  | 'duplicate_event';
+  | 'duplicate_event'
+  | 'unsupported_projected_role'
+  | 'unrendered_event'
+  | 'render_projection_mismatch';
 
 export interface ShadowProjectionPlanV1 {
   readonly schemaVersion: 1;
@@ -50,6 +54,21 @@ export interface ShadowProjectionPlanV1 {
   readonly blockers: readonly ShadowProjectionBlocker[];
 }
 
+export interface ShadowProjectionPlanV2
+  extends Omit<
+    ShadowProjectionPlanV1,
+    'schemaVersion' | 'projectionGeneration'
+  > {
+  readonly schemaVersion: 2;
+  readonly projectionGeneration: 2;
+  readonly rendererGeneration: 1;
+  readonly localMessageProjectionIds: readonly EventMessageProjectionId[];
+}
+
+export type ShadowProjectionPlan =
+  | ShadowProjectionPlanV1
+  | ShadowProjectionPlanV2;
+
 const blockerOrder: readonly ShadowProjectionBlocker[] = [
   'legacy_mixed_system',
   'unlineaged_history',
@@ -57,12 +76,17 @@ const blockerOrder: readonly ShadowProjectionBlocker[] = [
   'unverified_share',
   'multimodal_unavailable',
   'duplicate_event',
+  'unsupported_projected_role',
+  'unrendered_event',
+  'render_projection_mismatch',
 ];
 
 export function buildShadowProjectionPlan(input: {
   messages: readonly ChatMessage[];
   wakeLineage: NonNullable<InboundMessage['contextGraphLineage']>;
-}): ShadowProjectionPlanV1 {
+  localProjections?: ReadonlyMap<EventId, EventMessageProjectionId>;
+  projectionMismatches?: ReadonlySet<EventId>;
+}): ShadowProjectionPlanV2 {
   if (
     !isWorldId(input.wakeLineage.worldId) ||
     !isEventId(input.wakeLineage.eventId)
@@ -71,6 +95,7 @@ export function buildShadowProjectionPlan(input: {
   }
   const blockers = new Set<ShadowProjectionBlocker>();
   const localEventIds: EventId[] = [];
+  const localMessageProjectionIds: EventMessageProjectionId[] = [];
   const sharedEventIds: EventId[] = [];
   const seenEvents = new Set<EventId>();
   const foreignCounts = new Map<WorldId, number>();
@@ -113,6 +138,27 @@ export function buildShadowProjectionPlan(input: {
     seenEvents.add(message.eventId);
     if (message.worldId === input.wakeLineage.worldId) {
       localEventIds.push(message.eventId);
+      if (message.role !== 'user') {
+        blockers.add('unsupported_projected_role');
+        blockers.add('unrendered_event');
+        return;
+      }
+      if (message.contentParts) {
+        blockers.add('multimodal_unavailable');
+        blockers.add('unrendered_event');
+        return;
+      }
+      if (input.projectionMismatches?.has(message.eventId)) {
+        blockers.add('render_projection_mismatch');
+        blockers.add('unrendered_event');
+        return;
+      }
+      const projectionId = input.localProjections?.get(message.eventId);
+      if (!projectionId) {
+        blockers.add('unrendered_event');
+        return;
+      }
+      localMessageProjectionIds.push(projectionId);
       return;
     }
     foreignCounts.set(
@@ -131,12 +177,14 @@ export function buildShadowProjectionPlan(input: {
   });
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     worldId: input.wakeLineage.worldId,
     wakeEventId: input.wakeLineage.eventId,
-    projectionGeneration: 1,
+    projectionGeneration: 2,
     policyGeneration: 1,
+    rendererGeneration: 1,
     localEventIds,
+    localMessageProjectionIds,
     sharedEventIds,
     foreignWorlds: [...foreignCounts]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -155,9 +203,35 @@ export class ContextGraphShadowRecorder {
     wakeLineage: InboundMessage['contextGraphLineage'] | null;
   }): ProviderContentProjectionObserver | undefined {
     if (!input.wakeLineage) return undefined;
+    const localProjections = new Map<EventId, EventMessageProjectionId>();
+    const projectionMismatches = new Set<EventId>();
+    for (const message of input.messages) {
+      if (
+        message.worldId !== input.wakeLineage.worldId ||
+        !isEventId(message.eventId) ||
+        message.role !== 'user' ||
+        message.contentParts
+      ) {
+        continue;
+      }
+      try {
+        const projection = this.store.createEventMessageProjection({
+          sourceEventId: message.eventId,
+          worldId: input.wakeLineage.worldId,
+          rendererGeneration: 1,
+          message: { role: 'user', content: message.content },
+          createdAt: Date.now(),
+        });
+        localProjections.set(message.eventId, projection.projectionId);
+      } catch {
+        projectionMismatches.add(message.eventId);
+      }
+    }
     const plan = buildShadowProjectionPlan({
       messages: input.messages,
       wakeLineage: input.wakeLineage,
+      localProjections,
+      projectionMismatches,
     });
     const planJson = JSON.stringify(plan);
     const planHash = createHash('sha256').update(planJson).digest('hex');

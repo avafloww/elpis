@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 31;
+const SCHEMA_VERSION = 32;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1703,6 +1703,34 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_shadow_request_observations_no_delete
           BEFORE DELETE ON context_shadow_request_observations BEGIN
             SELECT RAISE(ABORT, 'context shadow request observations are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0032-context-event-message-projections',
+      sql: `
+        CREATE TABLE context_event_message_projections (
+          projection_id       TEXT PRIMARY KEY CHECK (length(projection_id) BETWEEN 1 AND 128),
+          source_event_id     TEXT NOT NULL CHECK (length(source_event_id) BETWEEN 1 AND 128),
+          world_id            TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          renderer_generation INTEGER NOT NULL CHECK (typeof(renderer_generation) = 'integer' AND renderer_generation >= 1),
+          message_json        TEXT NOT NULL CHECK (length(message_json) >= 1 AND json_valid(message_json)),
+          message_hash        TEXT NOT NULL CHECK (length(message_hash) = 64 AND message_hash NOT GLOB '*[^0-9a-f]*'),
+          created_at          INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          UNIQUE (source_event_id, renderer_generation),
+          UNIQUE (projection_id, world_id),
+          FOREIGN KEY (source_event_id, world_id)
+            REFERENCES context_world_events(event_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX context_event_message_projections_world_idx
+          ON context_event_message_projections(world_id, source_event_id, renderer_generation);
+        CREATE TRIGGER context_event_message_projections_no_update
+          BEFORE UPDATE ON context_event_message_projections BEGIN
+            SELECT RAISE(ABORT, 'context event message projections are immutable');
+          END;
+        CREATE TRIGGER context_event_message_projections_no_delete
+          BEFORE DELETE ON context_event_message_projections BEGIN
+            SELECT RAISE(ABORT, 'context event message projections are immutable');
           END;
       `,
     },
