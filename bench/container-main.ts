@@ -522,14 +522,16 @@ async function main(): Promise<void> {
         },
       }),
     createDiscord: (_config, agent): DiscordWiring => {
-      agent.setSend(async (channelId, text) => {
+      const send: DiscordWiring['send'] = async (channelId, text) => {
         sends.push({ channelId, text });
         recorder.add({ kind: 'send', channel: channelId, detail: text });
         recordRequiredOutcome();
-      });
+      };
+      agent.setSend(send);
       return {
         client: { user: { tag: 'agent#0000' } } as DiscordWiring['client'],
         async start() {},
+        send,
         typing() {},
         stopTyping() {
           scanNewMessages();
