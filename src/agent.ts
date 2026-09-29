@@ -39,7 +39,12 @@ import {
 } from './sandbox/wake-advisor.js';
 import type { Memory } from './store/memory.js';
 import { preview, cap, previewValue } from './sandbox/preview.js';
-import type { LLM, ChatMessage, LLMUsage } from './llm/llm.js';
+import type {
+  LLM,
+  ChatMessage,
+  LLMUsage,
+  ProviderContentProjectionObserver,
+} from './llm/llm.js';
 import type OpenAI from 'openai';
 import {
   RetriableError,
@@ -730,6 +735,10 @@ export interface AgentDeps {
       eventId: EventId;
       sequence: number;
     };
+    prepareRequestObservation(input: {
+      messages: readonly ChatMessage[];
+      wakeLineage: InboundMessage['contextGraphLineage'] | null;
+    }): ProviderContentProjectionObserver | undefined;
   };
   /** Durable timer store for one-shot run wakes. */
   scheduler?: Pick<
@@ -2724,6 +2733,19 @@ export class Agent {
       this.logger.info(
         `[agent] llm request built | duration=${formatDuration(Date.now() - requestBuildStart)} | request_messages=${requestMessages.length}`,
       );
+      let observeContentProjection:
+        ProviderContentProjectionObserver | undefined;
+      try {
+        observeContentProjection =
+          this.deps.contextGraphShadow?.prepareRequestObservation({
+            messages: requestMessages,
+            wakeLineage: this.lastInbound?.contextGraphLineage ?? null,
+          });
+      } catch {
+        this.logger.warn(
+          '[agent] context graph shadow request planning failed; provider request unchanged',
+        );
+      }
       this.mindFrontierDeliveredThisTurn = true;
       // Person-shaped turns get one required scratchpad opening. Synthetic and
       // harness-generated wakes keep the think tool available without forcing
@@ -2747,6 +2769,7 @@ export class Agent {
               forceThink: forceThinkForRequest,
               skillTool: SKILL_TOOL,
               signal: callController.signal,
+              observeContentProjection,
             });
             if (llmSettings.callTimeoutMs <= 0) {
               resp = await completion;

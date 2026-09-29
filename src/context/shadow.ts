@@ -1,15 +1,199 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { InboundMessage } from '../agent.js';
-import { worldIdForInbound, type WorldId } from '../context-graph.js';
+import type {
+  ChatMessage,
+  ProviderContentProjectionObserver,
+} from '../llm/llm.js';
+import {
+  isEventId,
+  isWorldId,
+  worldIdForInbound,
+  type EventId,
+  type WorldId,
+} from '../context-graph.js';
 import {
   ContextGraphStore,
   eventId,
+  shadowProjectionPlanId,
+  shadowRequestObservationId,
   type WorldEventRecord,
 } from '../store/context-graph.js';
 
+export type ShadowProjectionBlocker =
+  | 'legacy_mixed_system'
+  | 'unlineaged_history'
+  | 'multiple_worlds'
+  | 'unverified_share'
+  | 'multimodal_unavailable'
+  | 'duplicate_event';
+
+export interface ShadowProjectionPlanV1 {
+  readonly schemaVersion: 1;
+  readonly worldId: WorldId;
+  readonly wakeEventId: EventId;
+  readonly projectionGeneration: 1;
+  readonly policyGeneration: 1;
+  readonly localEventIds: readonly EventId[];
+  readonly sharedEventIds: readonly EventId[];
+  readonly foreignWorlds: readonly {
+    readonly worldId: WorldId;
+    readonly messageCount: number;
+  }[];
+  readonly unlineagedRoles: Readonly<Record<ChatMessage['role'], number>>;
+  readonly systemLayers: readonly {
+    readonly ordinal: number;
+    readonly sha256: string;
+    readonly byteLength: number;
+    readonly scope: 'legacy-mixed';
+  }[];
+  readonly blockers: readonly ShadowProjectionBlocker[];
+}
+
+const blockerOrder: readonly ShadowProjectionBlocker[] = [
+  'legacy_mixed_system',
+  'unlineaged_history',
+  'multiple_worlds',
+  'unverified_share',
+  'multimodal_unavailable',
+  'duplicate_event',
+];
+
+export function buildShadowProjectionPlan(input: {
+  messages: readonly ChatMessage[];
+  wakeLineage: NonNullable<InboundMessage['contextGraphLineage']>;
+}): ShadowProjectionPlanV1 {
+  if (
+    !isWorldId(input.wakeLineage.worldId) ||
+    !isEventId(input.wakeLineage.eventId)
+  ) {
+    throw new Error('shadow request wake lineage is invalid');
+  }
+  const blockers = new Set<ShadowProjectionBlocker>();
+  const localEventIds: EventId[] = [];
+  const sharedEventIds: EventId[] = [];
+  const seenEvents = new Set<EventId>();
+  const foreignCounts = new Map<WorldId, number>();
+  const unlineagedRoles: Record<ChatMessage['role'], number> = {
+    system: 0,
+    user: 0,
+    assistant: 0,
+    tool: 0,
+  };
+  const systemLayers: Array<{
+    ordinal: number;
+    sha256: string;
+    byteLength: number;
+    scope: 'legacy-mixed';
+  }> = [];
+
+  input.messages.forEach((message, ordinal) => {
+    if (message.role === 'system') {
+      const bytes = Buffer.from(message.content);
+      systemLayers.push({
+        ordinal,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        byteLength: bytes.byteLength,
+        scope: 'legacy-mixed',
+      });
+      blockers.add('legacy_mixed_system');
+      if (message.contentParts) blockers.add('multimodal_unavailable');
+      return;
+    }
+    if (message.contentParts) blockers.add('multimodal_unavailable');
+    if (!isWorldId(message.worldId) || !isEventId(message.eventId)) {
+      unlineagedRoles[message.role] += 1;
+      blockers.add('unlineaged_history');
+      return;
+    }
+    if (seenEvents.has(message.eventId)) {
+      blockers.add('duplicate_event');
+      return;
+    }
+    seenEvents.add(message.eventId);
+    if (message.worldId === input.wakeLineage.worldId) {
+      localEventIds.push(message.eventId);
+      return;
+    }
+    foreignCounts.set(
+      message.worldId,
+      (foreignCounts.get(message.worldId) ?? 0) + 1,
+    );
+    if (
+      message.sharedFromWorldId === message.worldId &&
+      typeof message.viewManifestHash === 'string'
+    ) {
+      sharedEventIds.push(message.eventId);
+      blockers.add('unverified_share');
+    } else {
+      blockers.add('multiple_worlds');
+    }
+  });
+
+  return {
+    schemaVersion: 1,
+    worldId: input.wakeLineage.worldId,
+    wakeEventId: input.wakeLineage.eventId,
+    projectionGeneration: 1,
+    policyGeneration: 1,
+    localEventIds,
+    sharedEventIds,
+    foreignWorlds: [...foreignCounts]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([worldId, messageCount]) => ({ worldId, messageCount })),
+    unlineagedRoles,
+    systemLayers,
+    blockers: blockerOrder.filter((blocker) => blockers.has(blocker)),
+  };
+}
+
 export class ContextGraphShadowRecorder {
   constructor(private readonly store: ContextGraphStore) {}
+
+  prepareRequestObservation(input: {
+    messages: readonly ChatMessage[];
+    wakeLineage: InboundMessage['contextGraphLineage'] | null;
+  }): ProviderContentProjectionObserver | undefined {
+    if (!input.wakeLineage) return undefined;
+    const plan = buildShadowProjectionPlan({
+      messages: input.messages,
+      wakeLineage: input.wakeLineage,
+    });
+    const planJson = JSON.stringify(plan);
+    const planHash = createHash('sha256').update(planJson).digest('hex');
+    const stored = this.store.createShadowProjectionPlan({
+      planId: shadowProjectionPlanId(`shadow-plan:${planHash}`),
+      worldId: plan.worldId,
+      wakeEventId: plan.wakeEventId,
+      plan,
+      createdAt: Date.now(),
+    });
+    const planReason = plan.blockers[0] ?? 'projection_unavailable';
+    return (projection) => {
+      const actualBytes = Buffer.byteLength(projection.bytes);
+      const actualHash = createHash('sha256')
+        .update(projection.bytes)
+        .digest('hex');
+      const integrityOk =
+        actualBytes === projection.byteLength &&
+        actualHash === projection.sha256;
+      this.store.recordShadowRequestObservation({
+        observationId: shadowRequestObservationId(
+          `shadow-observation:${randomUUID()}`,
+        ),
+        planId: stored.planId,
+        worldId: stored.worldId,
+        surface: projection.surface,
+        actualHash,
+        actualBytes,
+        result: 'ineligible',
+        reason: integrityOk ? planReason : 'projection_integrity',
+        expectedHash: null,
+        expectedBytes: null,
+        observedAt: Date.now(),
+      });
+    };
+  }
 
   recordInbound(message: InboundMessage): WorldEventRecord {
     const worldId = worldIdForInbound({

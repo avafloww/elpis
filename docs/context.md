@@ -16,6 +16,8 @@ Shadow mode does not change provider requests, compaction, send authority, cache
 
 Schema v30 adds the still-inactive root coordinator used by later branch execution. It binds one running branch to an exact continuation-head revision, keeps global predecessor order separate from same-world parent lineage, requires private and typed root-return capsules before yield, and records crash recovery without replay. Stored manifests can be reread as exact local-event and explicit-share projections; a provider-bound read can require every included share to remain active. On dark-mode boot, an interrupted coordinated branch becomes `crashed` and its prepared effects become `uncertain`; the continuation head does not advance. This does not activate graph requests or replace the legacy loop yet.
 
+Schema v31 adds immutable dark request-projection plans and observations. With shadow mode enabled, Agent freezes one plan from the final request-message array before a call and attaches the existing provider content-plane observer through retries. Plans may contain only world/event lineage, counts, blocker tokens, and system-layer hashes and lengths. Observations contain only provider surface, hashes, lengths, eligibility/comparison result, and a bounded reason. Raw model-visible request bytes are never stored. Every current legacy request remains ineligible because its system layer and history are not yet scoped; these records cannot advance the coordinator or change the real provider call.
+
 ## Message layers
 
 A request can contain:
@@ -71,7 +73,7 @@ Before each call, `prepareForApi()` may:
 
 Request projection must never mutate the in-memory history or transcript.
 
-Provider adapters also expose a process-local, fail-open observation seam for the final model-visible content plane. Chat observes translated `messages`; Responses and Codex observe the transformed `input`; Anthropic observes the finalized `system` and `messages` after its request fingerprint is applied. The observer receives canonical bytes, their SHA-256, byte length, and an exact surface label immediately before transport dispatch. It omits transport fields and tool declarations, never issues a second provider request, and cannot block or mutate the real request if it fails. No observer is installed by default, and the seam does not itself persist or log content. It exists so dark scoped-context validation can compare exact local projections without giving shadow state continuation or effect authority.
+Provider adapters also expose a process-local, fail-open observation seam for the final model-visible content plane. Chat observes translated `messages`; Responses and Codex observe the transformed `input`; Anthropic observes the finalized `system` and `messages` after its request fingerprint is applied. The observer receives canonical bytes, their SHA-256, byte length, and an exact surface label immediately before transport dispatch. It omits transport fields and tool declarations, never issues a second provider request, and cannot block or mutate the real request if it fails. When shadow mode is disabled no observer is installed. When enabled, Agent installs the schema-v31 hash-only recorder described above; the content-plane seam itself still does not log or persist bytes. Shadow observation remains fail-open and cannot give shadow state continuation or effect authority.
 
 ## Bare one-shot queries
 

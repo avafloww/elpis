@@ -214,6 +214,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
   // Reopening must interpret every legacy rotation as not yet proposed.
   db.exec(`
+    DROP TABLE context_shadow_request_observations;
+    DROP TABLE context_shadow_projection_plans;
     DROP TABLE context_branch_recoveries;
     DROP TABLE context_root_coordinator;
     DROP TABLE context_branch_starts;
@@ -245,7 +247,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0027-discord-person-settings',
           '0028-worker-completion-delivery',
           '0029-context-graph-dark-store',
-          '0030-context-root-coordinator'
+          '0030-context-root-coordinator',
+          '0031-context-shadow-projections'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

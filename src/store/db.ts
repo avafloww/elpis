@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 30;
+const SCHEMA_VERSION = 31;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1637,6 +1637,72 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_branch_recoveries_no_delete
           BEFORE DELETE ON context_branch_recoveries BEGIN
             SELECT RAISE(ABORT, 'context branch recoveries are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0031-context-shadow-projections',
+      sql: `
+        CREATE TABLE context_shadow_projection_plans (
+          plan_id       TEXT PRIMARY KEY CHECK (length(plan_id) BETWEEN 1 AND 128),
+          world_id      TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          wake_event_id TEXT NOT NULL CHECK (length(wake_event_id) BETWEEN 1 AND 128),
+          plan_json     TEXT NOT NULL CHECK (length(plan_json) >= 1 AND json_valid(plan_json)),
+          plan_hash     TEXT NOT NULL CHECK (length(plan_hash) = 64 AND plan_hash NOT GLOB '*[^0-9a-f]*'),
+          created_at    INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          UNIQUE (plan_id, world_id),
+          FOREIGN KEY (wake_event_id, world_id)
+            REFERENCES context_world_events(event_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_shadow_projection_plans_no_update
+          BEFORE UPDATE ON context_shadow_projection_plans BEGIN
+            SELECT RAISE(ABORT, 'context shadow projection plans are immutable');
+          END;
+        CREATE TRIGGER context_shadow_projection_plans_no_delete
+          BEFORE DELETE ON context_shadow_projection_plans BEGIN
+            SELECT RAISE(ABORT, 'context shadow projection plans are immutable');
+          END;
+
+        CREATE TABLE context_shadow_request_observations (
+          sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+          observation_id TEXT NOT NULL UNIQUE CHECK (length(observation_id) BETWEEN 1 AND 128),
+          plan_id         TEXT NOT NULL,
+          world_id        TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          surface         TEXT NOT NULL CHECK (surface IN ('openai-chat','openai-responses','codex-responses','anthropic-messages')),
+          actual_hash     TEXT NOT NULL CHECK (length(actual_hash) = 64 AND actual_hash NOT GLOB '*[^0-9a-f]*'),
+          actual_bytes    INTEGER NOT NULL CHECK (typeof(actual_bytes) = 'integer' AND actual_bytes >= 0),
+          result          TEXT NOT NULL CHECK (result IN ('ineligible','equal','different')),
+          reason          TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 64),
+          expected_hash   TEXT CHECK (expected_hash IS NULL OR (length(expected_hash) = 64 AND expected_hash NOT GLOB '*[^0-9a-f]*')),
+          expected_bytes  INTEGER CHECK (expected_bytes IS NULL OR (typeof(expected_bytes) = 'integer' AND expected_bytes >= 0)),
+          observed_at     INTEGER NOT NULL CHECK (typeof(observed_at) = 'integer' AND observed_at >= 0),
+          CHECK (
+            (result = 'ineligible' AND reason IS NOT NULL AND expected_hash IS NULL AND expected_bytes IS NULL)
+            OR
+            (
+              result = 'equal' AND reason IS NULL
+              AND expected_hash IS NOT NULL AND expected_bytes IS NOT NULL
+              AND actual_hash = expected_hash AND actual_bytes = expected_bytes
+            )
+            OR
+            (
+              result = 'different' AND reason IS NULL
+              AND expected_hash IS NOT NULL AND expected_bytes IS NOT NULL
+              AND (actual_hash != expected_hash OR actual_bytes != expected_bytes)
+            )
+          ),
+          FOREIGN KEY (plan_id, world_id)
+            REFERENCES context_shadow_projection_plans(plan_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX context_shadow_request_observations_plan_idx
+          ON context_shadow_request_observations(plan_id, sequence);
+        CREATE TRIGGER context_shadow_request_observations_no_update
+          BEFORE UPDATE ON context_shadow_request_observations BEGIN
+            SELECT RAISE(ABORT, 'context shadow request observations are immutable');
+          END;
+        CREATE TRIGGER context_shadow_request_observations_no_delete
+          BEFORE DELETE ON context_shadow_request_observations BEGIN
+            SELECT RAISE(ABORT, 'context shadow request observations are immutable');
           END;
       `,
     },

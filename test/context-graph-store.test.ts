@@ -18,6 +18,8 @@ import {
   legacyImportReceiptId,
   manifestId,
   shareGrantId,
+  shadowProjectionPlanId,
+  shadowRequestObservationId,
   worldId,
 } from '../src/store/context-graph.js';
 
@@ -73,6 +75,160 @@ function createLegacyCapsule(
     createdAt: 12,
   });
 }
+
+test('shadow request observations are hash-only, immutable, and result-bound', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:discord:guild:example');
+    const wake = eventId('event:shadow-wake');
+    value.store.appendWorldEvent({
+      eventId: wake,
+      worldId: world,
+      kind: 'inbound',
+      payload: { text: 'source testimony' },
+      occurredAt: 10,
+      recordedAt: 11,
+    });
+    const plan = {
+      schemaVersion: 1,
+      worldId: world,
+      wakeEventId: wake,
+      projectionGeneration: 1,
+      policyGeneration: 1,
+      localEventIds: [wake],
+      sharedEventIds: [],
+      foreignWorlds: [],
+      unlineagedRoles: { system: 0, user: 0, assistant: 0, tool: 0 },
+      systemLayers: [
+        {
+          ordinal: 0,
+          sha256: hashContextBytes('system layer'),
+          byteLength: 12,
+          scope: 'legacy-mixed',
+        },
+      ],
+      blockers: ['legacy_mixed_system'],
+    };
+    const missingLineagePlan = {
+      ...plan,
+      localEventIds: [wake, eventId('event:missing')],
+    };
+    const missingLineageHash = hashContextBytes(
+      JSON.stringify(missingLineagePlan),
+    );
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(`shadow-plan:${missingLineageHash}`),
+          worldId: world,
+          wakeEventId: wake,
+          plan: missingLineagePlan,
+          createdAt: 12,
+        }),
+      /local event is not in its world/,
+    );
+    const unsafePlan = { ...plan, content: 'forbidden raw request content' };
+    const unsafeHash = hashContextBytes(JSON.stringify(unsafePlan));
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(`shadow-plan:${unsafeHash}`),
+          worldId: world,
+          wakeEventId: wake,
+          plan: unsafePlan,
+          createdAt: 12,
+        }),
+      /unsupported field/,
+    );
+    const planHash = hashContextBytes(JSON.stringify(plan));
+    const planId = shadowProjectionPlanId(`shadow-plan:${planHash}`);
+    const created = value.store.createShadowProjectionPlan({
+      planId,
+      worldId: world,
+      wakeEventId: wake,
+      plan,
+      createdAt: 12,
+    });
+    assert.deepEqual(
+      value.store.createShadowProjectionPlan({
+        planId,
+        worldId: world,
+        wakeEventId: wake,
+        plan,
+        createdAt: 99,
+      }),
+      created,
+      'content-addressed plans are create-if-identical',
+    );
+
+    const actualHash = hashContextBytes('actual projection bytes');
+    const observed = value.store.recordShadowRequestObservation({
+      observationId: shadowRequestObservationId('shadow-observation:one'),
+      planId,
+      worldId: world,
+      surface: 'openai-chat',
+      actualHash,
+      actualBytes: 23,
+      result: 'ineligible',
+      reason: 'legacy_mixed_system',
+      expectedHash: null,
+      expectedBytes: null,
+      observedAt: 13,
+    });
+    assert.equal(observed.reason, 'legacy_mixed_system');
+    assert.deepEqual(value.store.listShadowRequestObservations(planId), [
+      observed,
+    ]);
+    assert.throws(
+      () =>
+        value.store.recordShadowRequestObservation({
+          observationId: shadowRequestObservationId(
+            'shadow-observation:false-equal',
+          ),
+          planId,
+          worldId: world,
+          surface: 'openai-chat',
+          actualHash,
+          actualBytes: 23,
+          result: 'equal',
+          reason: null,
+          expectedHash: hashContextBytes('different projection'),
+          expectedBytes: 23,
+          observedAt: 14,
+        }),
+      /result does not match/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            "UPDATE context_shadow_request_observations SET reason='changed' WHERE observation_id=?",
+          )
+          .run(observed.observationId),
+      /immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'DELETE FROM context_shadow_projection_plans WHERE plan_id=?',
+          )
+          .run(planId),
+      /immutable/,
+    );
+    const columns = (
+      value.database
+        .prepare(
+          "SELECT name FROM pragma_table_info('context_shadow_request_observations') ORDER BY cid",
+        )
+        .all() as { name: string }[]
+    ).map((row) => row.name);
+    assert.equal(columns.includes('bytes'), false);
+    assert.equal(columns.includes('content'), false);
+  } finally {
+    closeFixture(value);
+  }
+});
 
 test('context graph immutable records reject update and deletion', () => {
   const value = fixture();
@@ -224,12 +380,7 @@ test('capsule edges enforce causal DAG order at the database seam', () => {
               child_capsule_id, parent_capsule_id, world_id, ordinal
             ) VALUES (?, ?, ?, ?)`,
           )
-          .run(
-            'capsule:parent',
-            'capsule:child',
-            'world:legacy-unscoped',
-            0,
-          ),
+          .run('capsule:parent', 'capsule:child', 'world:legacy-unscoped', 0),
       /parent must predate child/,
     );
   } finally {
@@ -363,11 +514,14 @@ test('manifests bind canonical hashes and exact active share events', () => {
       shared_event_id: string;
       destination_world_id: string;
     };
-    assert.deepEqual({ ...shareEdge }, {
-      grant_id: 'share:one',
-      shared_event_id: 'event:share:one',
-      destination_world_id: destinationWorld,
-    });
+    assert.deepEqual(
+      { ...shareEdge },
+      {
+        grant_id: 'share:one',
+        shared_event_id: 'event:share:one',
+        destination_world_id: destinationWorld,
+      },
+    );
     const sourceProjection = value.store.getManifestProjection(
       manifestId('manifest:source'),
       { requireActiveShares: true },
@@ -551,7 +705,9 @@ test('continuation advances are immutable and preserve cross-world order', () =>
     assert.throws(
       () =>
         value.database
-          .prepare('DELETE FROM context_continuation_advances WHERE revision = 1')
+          .prepare(
+            'DELETE FROM context_continuation_advances WHERE revision = 1',
+          )
           .run(),
       /immutable/,
     );
@@ -778,7 +934,9 @@ test('coordinated return commits both capsules and head advance atomically', () 
       payload: { text: 'attempted' },
       preparedAt: 12,
     });
-    const complete = (parentCapsuleIds?: readonly ReturnType<typeof capsuleId>[]) =>
+    const complete = (
+      parentCapsuleIds?: readonly ReturnType<typeof capsuleId>[],
+    ) =>
       value.store.completeCoordinatedBranch({
         branchId: opened.branch.branchId,
         viewManifestHash: view.hash,
@@ -796,12 +954,9 @@ test('coordinated return commits both capsules and head advance atomically', () 
 
     assert.throws(() => complete(), /prepared effect/);
     assert.equal(value.store.getContinuationHead().revision, 0);
-    value.store.resolveEffect(
-      effectId('effect:return'),
-      'failed',
-      13,
-      { accepted: false },
-    );
+    value.store.resolveEffect(effectId('effect:return'), 'failed', 13, {
+      accepted: false,
+    });
     assert.throws(
       () => complete([capsuleId('capsule:missing-parent')]),
       /FOREIGN KEY constraint failed/,
@@ -810,7 +965,10 @@ test('coordinated return commits both capsules and head advance atomically', () 
       .prepare('SELECT count(*) AS n FROM context_capsules')
       .get() as { n: number };
     assert.equal(capsuleCount.n, 0);
-    assert.equal(value.store.getBranch(opened.branch.branchId)?.status, 'running');
+    assert.equal(
+      value.store.getBranch(opened.branch.branchId)?.status,
+      'running',
+    );
     assert.equal(value.store.getContinuationHead().revision, 0);
 
     const returned = complete();
@@ -874,7 +1032,10 @@ test('root coordinator crash recovery makes prepared effects uncertain without a
       uncertainEffects: 1,
       recoveredAt: 20,
     });
-    assert.equal(value.store.getBranch(opened.branch.branchId)?.status, 'crashed');
+    assert.equal(
+      value.store.getBranch(opened.branch.branchId)?.status,
+      'crashed',
+    );
     assert.equal(
       value.store.getEffect(effectId('effect:recover-active'))?.status,
       'uncertain',
@@ -939,7 +1100,9 @@ test('legacy import receipts are idempotent and reject changed testimony', () =>
         value.store.recordLegacyImport({
           receiptId: legacyImportReceiptId('legacy-import:2'),
           sourceRef: 'transcript:main:summary-7',
-          sourceHash: hashContextBytes('different bytes must not gain old provenance'),
+          sourceHash: hashContextBytes(
+            'different bytes must not gain old provenance',
+          ),
           sourceSize: 45,
           artifactRef: 'legacy:different',
           importGeneration: 1,

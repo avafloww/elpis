@@ -25,6 +25,9 @@ export type CapsuleId = ContextId<'CapsuleId'>;
 export type ShareGrantId = ContextId<'ShareGrantId'>;
 export type LegacyImportReceiptId = ContextId<'LegacyImportReceiptId'>;
 export type EffectId = ContextId<'EffectId'>;
+export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
+export type ShadowRequestObservationId =
+  ContextId<'ShadowRequestObservationId'>;
 
 function branded<Kind extends string>(
   label: string,
@@ -49,12 +52,14 @@ export function worldId(value: string): WorldId {
 }
 
 export function eventId(value: string): EventId {
-  if (!isEventId(value) || value.length > 128) throw new Error('invalid EventId');
+  if (!isEventId(value) || value.length > 128)
+    throw new Error('invalid EventId');
   return value;
 }
 
 export function branchId(value: string): BranchId {
-  if (!isBranchId(value) || value.length > 128) throw new Error('invalid BranchId');
+  if (!isBranchId(value) || value.length > 128)
+    throw new Error('invalid BranchId');
   return value;
 }
 
@@ -72,6 +77,20 @@ export const legacyImportReceiptId = (value: string): LegacyImportReceiptId =>
   );
 export const effectId = (value: string): EffectId =>
   branded<'EffectId'>('effectId', value, 'effect:');
+export const shadowProjectionPlanId = (value: string): ShadowProjectionPlanId =>
+  branded<'ShadowProjectionPlanId'>(
+    'shadowProjectionPlanId',
+    value,
+    'shadow-plan:',
+  );
+export const shadowRequestObservationId = (
+  value: string,
+): ShadowRequestObservationId =>
+  branded<'ShadowRequestObservationId'>(
+    'shadowRequestObservationId',
+    value,
+    'shadow-observation:',
+  );
 
 export type BranchStatus = 'running' | 'yielded' | 'crashed';
 export type CapsuleKind =
@@ -88,6 +107,34 @@ export interface WorldEventRecord {
   readonly payloadHash: string;
   readonly occurredAt: number;
   readonly recordedAt: number;
+}
+
+export type ShadowProjectionSurface =
+  'openai-chat' | 'openai-responses' | 'codex-responses' | 'anthropic-messages';
+export type ShadowProjectionResult = 'ineligible' | 'equal' | 'different';
+
+export interface ShadowProjectionPlanRecord {
+  readonly planId: ShadowProjectionPlanId;
+  readonly worldId: WorldId;
+  readonly wakeEventId: EventId;
+  readonly planJson: string;
+  readonly planHash: string;
+  readonly createdAt: number;
+}
+
+export interface ShadowRequestObservationRecord {
+  readonly sequence: number;
+  readonly observationId: ShadowRequestObservationId;
+  readonly planId: ShadowProjectionPlanId;
+  readonly worldId: WorldId;
+  readonly surface: ShadowProjectionSurface;
+  readonly actualHash: string;
+  readonly actualBytes: number;
+  readonly result: ShadowProjectionResult;
+  readonly reason: string | null;
+  readonly expectedHash: string | null;
+  readonly expectedBytes: number | null;
+  readonly observedAt: number;
 }
 
 export interface BranchRecord {
@@ -302,6 +349,180 @@ export function hashContextBytes(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function sha256(label: string, value: string): string {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new Error(`${label} must be a lowercase SHA-256`);
+  }
+  return value;
+}
+
+function boundedReason(value: string | null): string | null {
+  if (value === null) return null;
+  if (!value || value.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error('shadow observation reason must be a bounded token');
+  }
+  return value;
+}
+
+function shadowPlanObject(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactShadowPlanKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (
+    actual.length !== wanted.length ||
+    actual.some((key, i) => key !== wanted[i])
+  ) {
+    throw new Error(`${label} contains an unsupported field`);
+  }
+}
+
+function shadowCount(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value as number;
+}
+
+function validateShadowProjectionPlan(
+  value: unknown,
+  world: WorldId,
+  wakeEvent: EventId,
+): void {
+  const plan = shadowPlanObject(value, 'shadow projection plan');
+  exactShadowPlanKeys(
+    plan,
+    [
+      'schemaVersion',
+      'worldId',
+      'wakeEventId',
+      'projectionGeneration',
+      'policyGeneration',
+      'localEventIds',
+      'sharedEventIds',
+      'foreignWorlds',
+      'unlineagedRoles',
+      'systemLayers',
+      'blockers',
+    ],
+    'shadow projection plan',
+  );
+  if (
+    plan.schemaVersion !== 1 ||
+    plan.projectionGeneration !== 1 ||
+    plan.policyGeneration !== 1 ||
+    plan.worldId !== world ||
+    plan.wakeEventId !== wakeEvent
+  ) {
+    throw new Error('shadow projection plan identity or generation is invalid');
+  }
+  const local = plan.localEventIds;
+  const shared = plan.sharedEventIds;
+  if (
+    !Array.isArray(local) ||
+    !Array.isArray(shared) ||
+    local.length > 4096 ||
+    shared.length > 4096
+  ) {
+    throw new Error('shadow projection plan event lists are invalid');
+  }
+  const events = [...local, ...shared];
+  if (
+    events.some((id) => !isEventId(id) || id.length > 128) ||
+    new Set(events).size !== events.length ||
+    !local.includes(wakeEvent)
+  ) {
+    throw new Error('shadow projection plan event lineage is invalid');
+  }
+  if (!Array.isArray(plan.foreignWorlds) || plan.foreignWorlds.length > 4096) {
+    throw new Error('shadow projection plan foreign worlds are invalid');
+  }
+  const foreign = new Set<string>();
+  for (const item of plan.foreignWorlds) {
+    const row = shadowPlanObject(item, 'shadow projection foreign world');
+    exactShadowPlanKeys(
+      row,
+      ['worldId', 'messageCount'],
+      'shadow projection foreign world',
+    );
+    if (
+      !isWorldId(row.worldId) ||
+      row.worldId === world ||
+      foreign.has(row.worldId)
+    ) {
+      throw new Error(
+        'shadow projection plan foreign world identity is invalid',
+      );
+    }
+    foreign.add(row.worldId);
+    shadowCount(row.messageCount, 'shadow projection foreign message count');
+  }
+  const roles = shadowPlanObject(
+    plan.unlineagedRoles,
+    'shadow projection role counts',
+  );
+  exactShadowPlanKeys(
+    roles,
+    ['system', 'user', 'assistant', 'tool'],
+    'shadow projection role counts',
+  );
+  for (const role of ['system', 'user', 'assistant', 'tool']) {
+    shadowCount(roles[role], `shadow projection ${role} count`);
+  }
+  if (!Array.isArray(plan.systemLayers) || plan.systemLayers.length > 64) {
+    throw new Error('shadow projection system layers are invalid');
+  }
+  const ordinals = new Set<number>();
+  for (const item of plan.systemLayers) {
+    const layer = shadowPlanObject(item, 'shadow projection system layer');
+    exactShadowPlanKeys(
+      layer,
+      ['ordinal', 'sha256', 'byteLength', 'scope'],
+      'shadow projection system layer',
+    );
+    const ordinal = shadowCount(
+      layer.ordinal,
+      'shadow projection layer ordinal',
+    );
+    if (ordinals.has(ordinal) || layer.scope !== 'legacy-mixed') {
+      throw new Error('shadow projection system layer is invalid');
+    }
+    ordinals.add(ordinal);
+    sha256('shadow projection layer hash', String(layer.sha256));
+    shadowCount(layer.byteLength, 'shadow projection layer bytes');
+  }
+  const allowedBlockers = new Set([
+    'legacy_mixed_system',
+    'unlineaged_history',
+    'multiple_worlds',
+    'unverified_share',
+    'multimodal_unavailable',
+    'duplicate_event',
+  ]);
+  if (
+    !Array.isArray(plan.blockers) ||
+    plan.blockers.length > allowedBlockers.size ||
+    plan.blockers.some(
+      (entry) => typeof entry !== 'string' || !allowedBlockers.has(entry),
+    ) ||
+    new Set(plan.blockers).size !== plan.blockers.length
+  ) {
+    throw new Error('shadow projection blockers are invalid');
+  }
+}
+
 function transaction<T>(database: DatabaseSync, body: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -349,6 +570,55 @@ interface EffectRow {
   prepared_at: number;
   resolved_at: number | null;
   observation_json: string | null;
+}
+
+interface ShadowProjectionPlanRow {
+  plan_id: string;
+  world_id: string;
+  wake_event_id: string;
+  plan_json: string;
+  plan_hash: string;
+  created_at: number;
+}
+
+interface ShadowRequestObservationRow {
+  sequence: number;
+  observation_id: string;
+  plan_id: string;
+  world_id: string;
+  surface: ShadowProjectionSurface;
+  actual_hash: string;
+  actual_bytes: number;
+  result: ShadowProjectionResult;
+  reason: string | null;
+  expected_hash: string | null;
+  expected_bytes: number | null;
+  observed_at: number;
+}
+
+function mapShadowRequestObservation(
+  row: ShadowRequestObservationRow,
+): ShadowRequestObservationRecord {
+  return {
+    sequence: row.sequence,
+    observationId: shadowRequestObservationId(row.observation_id),
+    planId: shadowProjectionPlanId(row.plan_id),
+    worldId: worldId(row.world_id),
+    surface: row.surface,
+    actualHash: sha256('actualHash', row.actual_hash),
+    actualBytes: timestamp('actualBytes', row.actual_bytes),
+    result: row.result,
+    reason: row.reason,
+    expectedHash:
+      row.expected_hash === null
+        ? null
+        : sha256('expectedHash', row.expected_hash),
+    expectedBytes:
+      row.expected_bytes === null
+        ? null
+        : timestamp('expectedBytes', row.expected_bytes),
+    observedAt: timestamp('observedAt', row.observed_at),
+  };
 }
 
 function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
@@ -458,6 +728,246 @@ export class ContextGraphStore {
     return row ? mapWorldEvent(row) : null;
   }
 
+  createShadowProjectionPlan(input: {
+    planId: ShadowProjectionPlanId;
+    worldId: WorldId;
+    wakeEventId: EventId;
+    plan: unknown;
+    createdAt: number;
+  }): ShadowProjectionPlanRecord {
+    validateShadowProjectionPlan(input.plan, input.worldId, input.wakeEventId);
+    const lineage = input.plan as {
+      localEventIds: EventId[];
+      sharedEventIds: EventId[];
+    };
+    for (const id of lineage.localEventIds) {
+      const event = this.getWorldEvent(id);
+      if (!event || event.worldId !== input.worldId) {
+        throw new Error(
+          `shadow projection local event is not in its world: ${id}`,
+        );
+      }
+    }
+    for (const id of lineage.sharedEventIds) {
+      const event = this.getWorldEvent(id);
+      if (!event || event.worldId === input.worldId) {
+        throw new Error(
+          `shadow projection shared event lacks foreign lineage: ${id}`,
+        );
+      }
+    }
+    const planJson = serialize(input.plan);
+
+    const planHash = hashContextBytes(planJson);
+    if (input.planId !== `shadow-plan:${planHash}`) {
+      throw new Error(
+        'shadow projection plan identity does not match its bytes',
+      );
+    }
+    const wake = this.getWorldEvent(input.wakeEventId);
+    if (!wake || wake.worldId !== input.worldId) {
+      throw new Error('shadow projection plan wake event is not in its world');
+    }
+    const existing = this.getShadowProjectionPlan(input.planId);
+    if (existing) {
+      if (
+        existing.worldId !== input.worldId ||
+        existing.wakeEventId !== input.wakeEventId ||
+        existing.planHash !== planHash
+      ) {
+        throw new Error(
+          `shadow projection plan identity conflict: ${input.planId}`,
+        );
+      }
+      return existing;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_shadow_projection_plans(
+           plan_id, world_id, wake_event_id, plan_json, plan_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.planId,
+        input.worldId,
+        input.wakeEventId,
+        planJson,
+        planHash,
+        timestamp('createdAt', input.createdAt),
+      );
+    return this.getShadowProjectionPlan(input.planId)!;
+  }
+
+  getShadowProjectionPlan(
+    id: ShadowProjectionPlanId,
+  ): ShadowProjectionPlanRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_shadow_projection_plans WHERE plan_id = ?',
+      )
+      .get(id) as unknown as ShadowProjectionPlanRow | undefined;
+    if (!row) return null;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(row.plan_json) as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(`stored shadow projection plan is invalid: ${id}`, {
+        cause: error,
+      });
+    }
+    validateShadowProjectionPlan(
+      parsed,
+      worldId(row.world_id),
+      eventId(row.wake_event_id),
+    );
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.schemaVersion !== 1 ||
+      parsed.worldId !== row.world_id ||
+      parsed.wakeEventId !== row.wake_event_id ||
+      serialize(parsed) !== row.plan_json ||
+      hashContextBytes(row.plan_json) !== row.plan_hash ||
+      row.plan_id !== `shadow-plan:${row.plan_hash}`
+    ) {
+      throw new Error(`stored shadow projection plan is invalid: ${id}`);
+    }
+    return {
+      planId: shadowProjectionPlanId(row.plan_id),
+      worldId: worldId(row.world_id),
+      wakeEventId: eventId(row.wake_event_id),
+      planJson: row.plan_json,
+      planHash: sha256('planHash', row.plan_hash),
+      createdAt: timestamp('createdAt', row.created_at),
+    };
+  }
+
+  recordShadowRequestObservation(input: {
+    observationId: ShadowRequestObservationId;
+    planId: ShadowProjectionPlanId;
+    worldId: WorldId;
+    surface: ShadowProjectionSurface;
+    actualHash: string;
+    actualBytes: number;
+    result: ShadowProjectionResult;
+    reason: string | null;
+    expectedHash: string | null;
+    expectedBytes: number | null;
+    observedAt: number;
+  }): ShadowRequestObservationRecord {
+    const plan = this.getShadowProjectionPlan(input.planId);
+    if (!plan || plan.worldId !== input.worldId) {
+      throw new Error('shadow request observation plan is not in its world');
+    }
+    const actualHash = sha256('actualHash', input.actualHash);
+    const actualBytes = timestamp('actualBytes', input.actualBytes);
+    const reason = boundedReason(input.reason);
+    const expectedHash =
+      input.expectedHash === null
+        ? null
+        : sha256('expectedHash', input.expectedHash);
+    const expectedBytes =
+      input.expectedBytes === null
+        ? null
+        : timestamp('expectedBytes', input.expectedBytes);
+    if (input.result === 'ineligible') {
+      if (reason === null || expectedHash !== null || expectedBytes !== null) {
+        throw new Error('ineligible shadow observation requires only a reason');
+      }
+    } else {
+      if (reason !== null || expectedHash === null || expectedBytes === null) {
+        throw new Error(
+          'compared shadow observation requires an expected projection',
+        );
+      }
+      const equal =
+        actualHash === expectedHash && actualBytes === expectedBytes;
+      if ((input.result === 'equal') !== equal) {
+        throw new Error(
+          'shadow observation result does not match its projections',
+        );
+      }
+    }
+    const existing = this.getShadowRequestObservation(input.observationId);
+    if (existing) {
+      const expected = {
+        ...input,
+        actualHash,
+        actualBytes,
+        reason,
+        expectedHash,
+        expectedBytes,
+      };
+      if (
+        existing.planId !== expected.planId ||
+        existing.worldId !== expected.worldId ||
+        existing.surface !== expected.surface ||
+        existing.actualHash !== expected.actualHash ||
+        existing.actualBytes !== expected.actualBytes ||
+        existing.result !== expected.result ||
+        existing.reason !== expected.reason ||
+        existing.expectedHash !== expected.expectedHash ||
+        existing.expectedBytes !== expected.expectedBytes ||
+        existing.observedAt !== expected.observedAt
+      ) {
+        throw new Error(
+          `shadow request observation identity conflict: ${input.observationId}`,
+        );
+      }
+      return existing;
+    }
+    const result = this.database
+      .prepare(
+        `INSERT INTO context_shadow_request_observations(
+           observation_id, plan_id, world_id, surface, actual_hash, actual_bytes,
+           result, reason, expected_hash, expected_bytes, observed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.observationId,
+        input.planId,
+        input.worldId,
+        input.surface,
+        actualHash,
+        actualBytes,
+        input.result,
+        reason,
+        expectedHash,
+        expectedBytes,
+        timestamp('observedAt', input.observedAt),
+      );
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_shadow_request_observations WHERE sequence = ?',
+      )
+      .get(result.lastInsertRowid) as unknown as ShadowRequestObservationRow;
+    return mapShadowRequestObservation(row);
+  }
+
+  getShadowRequestObservation(
+    id: ShadowRequestObservationId,
+  ): ShadowRequestObservationRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_shadow_request_observations WHERE observation_id = ?',
+      )
+      .get(id) as unknown as ShadowRequestObservationRow | undefined;
+    return row ? mapShadowRequestObservation(row) : null;
+  }
+
+  listShadowRequestObservations(
+    planId: ShadowProjectionPlanId,
+  ): ShadowRequestObservationRecord[] {
+    return (
+      this.database
+        .prepare(
+          `SELECT * FROM context_shadow_request_observations
+           WHERE plan_id = ? ORDER BY sequence`,
+        )
+        .all(planId) as unknown as ShadowRequestObservationRow[]
+    ).map(mapShadowRequestObservation);
+  }
+
   getRootCoordinatorState(): RootCoordinatorState {
     const row = this.database
       .prepare(
@@ -540,10 +1050,7 @@ export class ContextGraphStore {
       'expectedRevision',
       input.expectedRevision,
     );
-    const authorityEpoch = generation(
-      'authorityEpoch',
-      input.authorityEpoch,
-    );
+    const authorityEpoch = generation('authorityEpoch', input.authorityEpoch);
     if (authorityEpoch < 1) throw new Error('authorityEpoch must be positive');
     const startedAt = timestamp('startedAt', input.startedAt);
     return transaction(this.database, () => {
@@ -553,14 +1060,18 @@ export class ContextGraphStore {
       }
       const state = this.getRootCoordinatorState();
       if (state.activeBranchId !== null) {
-        throw new Error(`context branch already active: ${state.activeBranchId}`);
+        throw new Error(
+          `context branch already active: ${state.activeBranchId}`,
+        );
       }
       if (
         state.baseRevision !== head.revision ||
         state.predecessorBranchId !== head.branchId ||
         state.predecessorWorldId !== head.worldId
       ) {
-        throw new Error('context root coordinator does not match continuation head');
+        throw new Error(
+          'context root coordinator does not match continuation head',
+        );
       }
       const localParent = this.database
         .prepare(
@@ -572,7 +1083,9 @@ export class ContextGraphStore {
         branchId: input.branchId,
         worldId: input.worldId,
         parentBranchId:
-          localParent === undefined ? undefined : branchId(localParent.branch_id),
+          localParent === undefined
+            ? undefined
+            : branchId(localParent.branch_id),
         authorityEpoch,
         startedAt,
       });
@@ -673,7 +1186,9 @@ export class ContextGraphStore {
         state.predecessorBranchId !== head.branchId ||
         state.predecessorWorldId !== head.worldId
       ) {
-        throw new Error('active context branch is detached from continuation head');
+        throw new Error(
+          'active context branch is detached from continuation head',
+        );
       }
       const start = this.getBranchStart(state.activeBranchId);
       if (
@@ -687,7 +1202,9 @@ export class ContextGraphStore {
       }
       const branch = this.requireBranch(state.activeBranchId);
       if (branch.status !== 'running') {
-        throw new Error(`active context branch is not running: ${branch.branchId}`);
+        throw new Error(
+          `active context branch is not running: ${branch.branchId}`,
+        );
       }
       const effects = this.database
         .prepare(
@@ -707,7 +1224,9 @@ export class ContextGraphStore {
         )
         .run(at, branch.branchId);
       if (crashed.changes !== 1) {
-        throw new Error(`context branch could not be recovered: ${branch.branchId}`);
+        throw new Error(
+          `context branch could not be recovered: ${branch.branchId}`,
+        );
       }
       this.database
         .prepare(
@@ -732,14 +1251,11 @@ export class ContextGraphStore {
            WHERE singleton = 1 AND active_branch_id = ?
              AND active_world_id = ? AND base_revision = ?`,
         )
-        .run(
-          at,
-          branch.branchId,
-          branch.worldId,
-          start.baseRevision,
-        );
+        .run(at, branch.branchId, branch.worldId, start.baseRevision);
       if (released.changes !== 1) {
-        throw new Error('context root coordinator could not release crashed branch');
+        throw new Error(
+          'context root coordinator could not release crashed branch',
+        );
       }
       return {
         ...start,
@@ -943,7 +1459,9 @@ export class ContextGraphStore {
           event.worldId !== decoded.worldId,
       )
     ) {
-      throw new Error(`stored context manifest local events are invalid: ${id}`);
+      throw new Error(
+        `stored context manifest local events are invalid: ${id}`,
+      );
     }
     const shares = (
       this.database
@@ -1268,7 +1786,9 @@ export class ContextGraphStore {
         state.activeBranchId !== branch.branchId ||
         state.activeWorldId !== branch.worldId
       ) {
-        throw new Error(`context branch is not coordinator-active: ${branch.branchId}`);
+        throw new Error(
+          `context branch is not coordinator-active: ${branch.branchId}`,
+        );
       }
       if (branch.status !== 'running') {
         throw new Error(`context branch is not running: ${branch.branchId}`);
@@ -1284,7 +1804,9 @@ export class ContextGraphStore {
         state.predecessorBranchId !== start.predecessorBranchId ||
         state.predecessorWorldId !== start.predecessorWorldId
       ) {
-        throw new Error('context branch return does not match continuation head');
+        throw new Error(
+          'context branch return does not match continuation head',
+        );
       }
       const manifest = this.database
         .prepare(
@@ -1292,10 +1814,11 @@ export class ContextGraphStore {
            WHERE branch_id = ? AND world_id = ?`,
         )
         .get(branch.branchId, branch.worldId) as
-        | { manifest_hash: string; policy_generation: number }
-        | undefined;
+        { manifest_hash: string; policy_generation: number } | undefined;
       if (!manifest || manifest.manifest_hash !== input.viewManifestHash) {
-        throw new Error('context branch return does not match its view manifest');
+        throw new Error(
+          'context branch return does not match its view manifest',
+        );
       }
       const effects = this.database
         .prepare(
@@ -1314,24 +1837,26 @@ export class ContextGraphStore {
         prepared_at: number;
         resolved_at: number | null;
       }[];
-      const effectReceipts: RootReturnEffectReceipt[] = effects.map((effect) => {
-        if (effect.status === 'prepared') {
-          throw new Error('context branch has a prepared effect');
-        }
-        if (effect.resolved_at === null) {
-          throw new Error('resolved context effect has no resolution time');
-        }
-        return {
-          effectId: effectId(effect.effect_id),
-          destinationWorldId: worldId(effect.destination_world_id),
-          kind: effect.effect_kind,
-          authorityEpoch: effect.authority_epoch,
-          payloadHash: effect.payload_hash,
-          status: effect.status,
-          preparedAt: effect.prepared_at,
-          resolvedAt: effect.resolved_at,
-        };
-      });
+      const effectReceipts: RootReturnEffectReceipt[] = effects.map(
+        (effect) => {
+          if (effect.status === 'prepared') {
+            throw new Error('context branch has a prepared effect');
+          }
+          if (effect.resolved_at === null) {
+            throw new Error('resolved context effect has no resolution time');
+          }
+          return {
+            effectId: effectId(effect.effect_id),
+            destinationWorldId: worldId(effect.destination_world_id),
+            kind: effect.effect_kind,
+            authorityEpoch: effect.authority_epoch,
+            payloadHash: effect.payload_hash,
+            status: effect.status,
+            preparedAt: effect.prepared_at,
+            resolvedAt: effect.resolved_at,
+          };
+        },
+      );
       const privateCapsule = this.insertCapsuleInTransaction({
         capsuleId: input.privateCapsuleId,
         branchId: branch.branchId,
