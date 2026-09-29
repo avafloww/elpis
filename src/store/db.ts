@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 33;
+const SCHEMA_VERSION = 34;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1764,6 +1764,160 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_system_layer_projections_no_delete
           BEFORE DELETE ON context_system_layer_projections BEGIN
             SELECT RAISE(ABORT, 'context system layer projections are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0034-context-local-branch-request-views',
+      sql: `
+        CREATE TABLE context_local_branch_request_views (
+          request_view_id              TEXT PRIMARY KEY CHECK (length(request_view_id) BETWEEN 1 AND 128),
+          branch_id                    TEXT NOT NULL UNIQUE,
+          world_id                     TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          manifest_id                  TEXT NOT NULL UNIQUE,
+          manifest_hash                TEXT NOT NULL CHECK (length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+          view_json                    TEXT NOT NULL CHECK (length(view_json) >= 1 AND json_valid(view_json)),
+          view_hash                    TEXT NOT NULL CHECK (length(view_hash) = 64 AND view_hash NOT GLOB '*[^0-9a-f]*'),
+          message_renderer_generation  INTEGER NOT NULL CHECK (typeof(message_renderer_generation) = 'integer' AND message_renderer_generation >= 1),
+          system_renderer_generation   INTEGER NOT NULL CHECK (typeof(system_renderer_generation) = 'integer' AND system_renderer_generation >= 1),
+          policy_generation            INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 1),
+          system_layer_count           INTEGER NOT NULL CHECK (typeof(system_layer_count) = 'integer' AND system_layer_count >= 1),
+          message_projection_count     INTEGER NOT NULL CHECK (typeof(message_projection_count) = 'integer' AND message_projection_count >= 0),
+          tool_mode                    TEXT NOT NULL CHECK (tool_mode = 'none'),
+          runnable                     INTEGER NOT NULL CHECK (runnable = 0),
+          created_at                   INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          UNIQUE (request_view_id, world_id),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (manifest_id, world_id)
+            REFERENCES context_manifests(manifest_id, world_id) ON DELETE RESTRICT
+        );
+        CREATE TRIGGER context_local_branch_request_views_lineage_guard
+          BEFORE INSERT ON context_local_branch_request_views
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_branch_starts AS starts
+            JOIN context_branches AS branches
+              ON branches.branch_id = starts.branch_id
+             AND branches.world_id = starts.world_id
+            JOIN context_manifests AS manifests
+              ON manifests.branch_id = starts.branch_id
+             AND manifests.world_id = starts.world_id
+            JOIN context_root_coordinator AS coordinator
+              ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head
+              ON head.singleton = 1
+            WHERE starts.branch_id = NEW.branch_id
+              AND starts.world_id = NEW.world_id
+              AND branches.status = 'running'
+              AND manifests.manifest_id = NEW.manifest_id
+              AND manifests.manifest_hash = NEW.manifest_hash
+              AND manifests.projection_generation = NEW.message_renderer_generation
+              AND manifests.policy_generation = NEW.policy_generation
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND coordinator.base_revision = starts.base_revision
+              AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+              AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+              AND head.revision = starts.base_revision
+              AND head.branch_id IS starts.predecessor_branch_id
+              AND head.world_id IS starts.predecessor_world_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context local branch request view lineage is invalid');
+          END;
+        CREATE TRIGGER context_local_branch_request_views_no_update
+          BEFORE UPDATE ON context_local_branch_request_views BEGIN
+            SELECT RAISE(ABORT, 'context local branch request views are immutable');
+          END;
+        CREATE TRIGGER context_local_branch_request_views_no_delete
+          BEFORE DELETE ON context_local_branch_request_views BEGIN
+            SELECT RAISE(ABORT, 'context local branch request views are immutable');
+          END;
+
+        CREATE TABLE context_local_branch_request_system_layers (
+          request_view_id TEXT NOT NULL,
+          layer_id        TEXT NOT NULL,
+          world_id        TEXT NOT NULL,
+          ordinal         INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+          PRIMARY KEY (request_view_id, layer_id),
+          UNIQUE (request_view_id, ordinal),
+          FOREIGN KEY (request_view_id, world_id)
+            REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (layer_id)
+            REFERENCES context_system_layer_projections(layer_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_local_branch_request_system_layers_scope_guard
+          BEFORE INSERT ON context_local_branch_request_system_layers
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_local_branch_request_views AS views
+            JOIN context_system_layer_projections AS layers
+              ON layers.layer_id = NEW.layer_id
+            WHERE views.request_view_id = NEW.request_view_id
+              AND views.world_id = NEW.world_id
+              AND layers.renderer_generation = views.system_renderer_generation
+              AND layers.policy_generation = views.policy_generation
+              AND (
+                (layers.visibility = 'global_contract' AND layers.world_id IS NULL AND layers.layer_kind = 'runtime_contract')
+                OR (layers.visibility = 'integrated_self' AND layers.world_id IS NULL AND layers.layer_kind IN ('identity','integrated_self'))
+                OR (layers.visibility = 'world' AND layers.world_id = views.world_id AND layers.layer_kind = 'world_policy')
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context local branch request system layer is invalid');
+          END;
+        CREATE TRIGGER context_local_branch_request_system_layers_no_update
+          BEFORE UPDATE ON context_local_branch_request_system_layers BEGIN
+            SELECT RAISE(ABORT, 'context local branch request system layer edges are immutable');
+          END;
+        CREATE TRIGGER context_local_branch_request_system_layers_no_delete
+          BEFORE DELETE ON context_local_branch_request_system_layers BEGIN
+            SELECT RAISE(ABORT, 'context local branch request system layer edges are immutable');
+          END;
+
+        CREATE TABLE context_local_branch_request_messages (
+          request_view_id TEXT NOT NULL,
+          projection_id   TEXT NOT NULL,
+          world_id        TEXT NOT NULL,
+          ordinal         INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+          PRIMARY KEY (request_view_id, projection_id),
+          UNIQUE (request_view_id, ordinal),
+          FOREIGN KEY (request_view_id, world_id)
+            REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (projection_id, world_id)
+            REFERENCES context_event_message_projections(projection_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_local_branch_request_messages_lineage_guard
+          BEFORE INSERT ON context_local_branch_request_messages
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_local_branch_request_views AS views
+            JOIN context_manifests AS manifests
+              ON manifests.manifest_id = views.manifest_id
+             AND manifests.world_id = views.world_id
+            JOIN context_manifest_events AS events
+              ON events.manifest_id = manifests.manifest_id
+             AND events.world_id = manifests.world_id
+             AND events.ordinal = NEW.ordinal
+            JOIN context_event_message_projections AS projections
+              ON projections.projection_id = NEW.projection_id
+             AND projections.world_id = NEW.world_id
+             AND projections.source_event_id = events.event_id
+            WHERE views.request_view_id = NEW.request_view_id
+              AND views.world_id = NEW.world_id
+              AND projections.renderer_generation = views.message_renderer_generation
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context local branch request message is invalid');
+          END;
+        CREATE TRIGGER context_local_branch_request_messages_no_update
+          BEFORE UPDATE ON context_local_branch_request_messages BEGIN
+            SELECT RAISE(ABORT, 'context local branch request message edges are immutable');
+          END;
+        CREATE TRIGGER context_local_branch_request_messages_no_delete
+          BEFORE DELETE ON context_local_branch_request_messages BEGIN
+            SELECT RAISE(ABORT, 'context local branch request message edges are immutable');
           END;
       `,
     },

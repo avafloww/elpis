@@ -1,10 +1,12 @@
 import type { ChatMessage } from '../llm/llm.js';
-import type {
-  ContextGraphStore,
-  EventMessageProjectionId,
-  SystemLayerProjectionId,
-  SystemLayerKind,
-  WorldId,
+import {
+  hashContextBytes,
+  type ContextGraphStore,
+  type EventMessageProjectionId,
+  type LocalBranchRequestViewId,
+  type SystemLayerProjectionId,
+  type SystemLayerKind,
+  type WorldId,
 } from '../store/context-graph.js';
 
 const SYSTEM_LAYER_ORDER: Readonly<Record<SystemLayerKind, number>> = {
@@ -135,4 +137,62 @@ export function materializeWorldConversation(input: {
       sequence: source.sequence,
     };
   });
+}
+
+export interface MaterializedLocalBranchRequest {
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly messages: readonly ChatMessage[];
+  readonly candidateJson: string;
+  readonly candidateHash: string;
+  readonly candidateBytes: number;
+  readonly executionMode: 'dark';
+  readonly scope: 'local-only';
+  readonly runnable: false;
+  readonly toolMode: 'none';
+}
+
+export function materializeLocalBranchRequest(input: {
+  store: ContextGraphStore;
+  requestViewId: LocalBranchRequestViewId;
+}): MaterializedLocalBranchRequest {
+  const record = input.store.getLocalBranchRequestView(input.requestViewId);
+  if (!record) {
+    throw new Error(`local branch request view is missing: ${input.requestViewId}`);
+  }
+  const system = materializeSystemProjection({
+    store: input.store,
+    worldId: record.worldId,
+    rendererGeneration: record.view.systemRendererGeneration,
+    policyGeneration: record.view.policyGeneration,
+    layerIds: record.view.systemLayerProjectionIds,
+  });
+  const conversation = materializeWorldConversation({
+    store: input.store,
+    worldId: record.worldId,
+    rendererGeneration: record.view.messageRendererGeneration,
+    projectionIds: record.view.messageProjectionIds,
+  });
+  const messages: ChatMessage[] = [
+    system,
+    ...conversation.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+  const candidateJson = JSON.stringify({
+    schemaVersion: 1,
+    surface: 'provider-neutral-messages',
+    messages,
+  });
+  return {
+    requestViewId: record.requestViewId,
+    messages,
+    candidateJson,
+    candidateHash: hashContextBytes(candidateJson),
+    candidateBytes: Buffer.byteLength(candidateJson),
+    executionMode: 'dark',
+    scope: 'local-only',
+    runnable: false,
+    toolMode: 'none',
+  };
 }

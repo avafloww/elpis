@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
 import {
+  materializeLocalBranchRequest,
   materializeSystemProjection,
   materializeWorldConversation,
 } from '../src/context/view.js';
@@ -1609,6 +1610,507 @@ test('legacy import receipts are idempotent and reject changed testimony', () =>
           importedAt: 100,
         }),
       LegacyImportConflictError,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('local branch request views bind one coordinated world without lifecycle effects', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:a');
+    const worldB = worldId('world:signal:b');
+    const eventA = value.store.appendWorldEvent({
+      eventId: eventId('event:request-a'),
+      worldId: worldA,
+      kind: 'inbound:signal',
+      payload: { text: 'A_PRIVATE_CANARY' },
+      occurredAt: 1,
+      recordedAt: 1,
+    });
+    const eventB1 = value.store.appendWorldEvent({
+      eventId: eventId('event:request-b1'),
+      worldId: worldB,
+      kind: 'inbound:signal',
+      payload: { text: 'B_ONE_CANARY' },
+      occurredAt: 2,
+      recordedAt: 2,
+    });
+    const eventB2 = value.store.appendWorldEvent({
+      eventId: eventId('event:request-b2'),
+      worldId: worldB,
+      kind: 'inbound:signal',
+      payload: { text: 'B_TWO_CANARY' },
+      occurredAt: 3,
+      recordedAt: 3,
+    });
+    const projectionA = value.store.createEventMessageProjection({
+      sourceEventId: eventA.eventId,
+      sourceSequence: eventA.sequence,
+      worldId: worldA,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '<incoming>A_PRIVATE_CANARY</incoming>' },
+      createdAt: 4,
+    });
+    const projectionB1 = value.store.createEventMessageProjection({
+      sourceEventId: eventB1.eventId,
+      sourceSequence: eventB1.sequence,
+      worldId: worldB,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '<incoming>B_ONE_CANARY</incoming>' },
+      createdAt: 5,
+    });
+    const projectionB2 = value.store.createEventMessageProjection({
+      sourceEventId: eventB2.eventId,
+      sourceSequence: eventB2.sequence,
+      worldId: worldB,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '<incoming>B_TWO_CANARY</incoming>' },
+      createdAt: 6,
+    });
+    const layer = (input: {
+      kind: 'runtime_contract' | 'identity' | 'world_policy';
+      visibility: 'global_contract' | 'integrated_self' | 'world';
+      worldId: ReturnType<typeof worldId> | null;
+      source: string;
+      content: string;
+      createdAt: number;
+    }) =>
+      value.store.createSystemLayerProjection({
+        kind: input.kind,
+        visibility: input.visibility,
+        worldId: input.worldId,
+        rendererGeneration: 1,
+        policyGeneration: 1,
+        sourceKind: 'synthetic_fixture',
+        sourceHash: hashContextBytes(input.source),
+        content: input.content,
+        createdAt: input.createdAt,
+      });
+    const contract = layer({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      source: 'request-contract',
+      content: 'CONTRACT_CANARY',
+      createdAt: 7,
+    });
+    const identity = layer({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      source: 'request-identity',
+      content: '\nIDENTITY_CANARY',
+      createdAt: 8,
+    });
+    const policyA = layer({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldA,
+      source: 'request-policy-a',
+      content: '\nA_POLICY_CANARY',
+      createdAt: 9,
+    });
+    const policyB = layer({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldB,
+      source: 'request-policy-b',
+      content: '\nB_POLICY_CANARY',
+      createdAt: 10,
+    });
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:request-b'),
+      worldId: worldB,
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 11,
+    });
+    const manifest = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: worldB,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [eventB1.eventId, eventB2.eventId],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:request-b'),
+      branchId: opened.branch.branchId,
+      worldId: worldB,
+      manifest,
+      projectionGeneration: 1,
+      createdAt: 12,
+    });
+    const base = {
+      branchId: opened.branch.branchId,
+      worldId: worldB,
+      manifestId: manifestId('manifest:request-b'),
+      systemRendererGeneration: 1,
+      systemLayerProjectionIds: [
+        contract.layerId,
+        identity.layerId,
+        policyB.layerId,
+      ],
+      messageProjectionIds: [projectionB1.projectionId, projectionB2.projectionId],
+      createdAt: 13,
+    };
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          ...base,
+          systemLayerProjectionIds: [
+            contract.layerId,
+            identity.layerId,
+            policyA.layerId,
+          ],
+        }),
+      /system layer is invalid/,
+    );
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          ...base,
+          messageProjectionIds: [
+            projectionB2.projectionId,
+            projectionB1.projectionId,
+          ],
+        }),
+      /message lineage is invalid/,
+    );
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          ...base,
+          messageProjectionIds: [projectionB1.projectionId],
+        }),
+      /coverage is incomplete/,
+    );
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          ...base,
+          messageProjectionIds: [projectionB1.projectionId, projectionA.projectionId],
+        }),
+      /message lineage is invalid/,
+    );
+    const lifecycleBefore = {
+      branch: value.store.getBranch(opened.branch.branchId),
+      coordinator: value.store.getRootCoordinatorState(),
+      head: value.store.getContinuationHead(),
+      activation: value.store.getActivationState(),
+    };
+    const created = value.store.createLocalBranchRequestView(base);
+    assert.match(created.requestViewId, /^branch-request-view:[0-9a-f]{64}$/);
+    assert.equal(created.view.executionMode, 'dark');
+    assert.equal(created.view.scope, 'local-only');
+    assert.equal(created.view.runnable, false);
+    assert.equal(created.view.toolMode, 'none');
+    assert.deepEqual(value.store.createLocalBranchRequestView(base), created);
+    const materialized = materializeLocalBranchRequest({
+      store: value.store,
+      requestViewId: created.requestViewId,
+    });
+    assert.deepEqual(materialized.messages, [
+      {
+        role: 'system',
+        content: 'CONTRACT_CANARY\nIDENTITY_CANARY\nB_POLICY_CANARY',
+      },
+      { role: 'user', content: '<incoming>B_ONE_CANARY</incoming>' },
+      { role: 'user', content: '<incoming>B_TWO_CANARY</incoming>' },
+    ]);
+    assert.equal(materialized.candidateHash, hashContextBytes(materialized.candidateJson));
+    assert.equal(
+      materialized.candidateBytes,
+      Buffer.byteLength(materialized.candidateJson),
+    );
+    assert.equal(materialized.candidateJson.includes('A_PRIVATE_CANARY'), false);
+    assert.equal(materialized.candidateJson.includes('A_POLICY_CANARY'), false);
+    assert.deepEqual(
+      {
+        branch: value.store.getBranch(opened.branch.branchId),
+        coordinator: value.store.getRootCoordinatorState(),
+        head: value.store.getContinuationHead(),
+        activation: value.store.getActivationState(),
+      },
+      lifecycleBefore,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'UPDATE context_local_branch_request_views SET created_at = 0 WHERE request_view_id = ?',
+          )
+          .run(created.requestViewId),
+      /immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'DELETE FROM context_local_branch_request_messages WHERE request_view_id = ?',
+          )
+          .run(created.requestViewId),
+      /immutable/,
+    );
+    value.store.recoverCoordinatedBranch(14);
+    assert.throws(
+      () => value.store.createLocalBranchRequestView(base),
+      /active coordinated branch/,
+    );
+    value.database.exec(
+      'DROP TRIGGER context_local_branch_request_views_no_update',
+    );
+    value.database
+      .prepare(
+        'UPDATE context_local_branch_request_views SET view_hash = ? WHERE request_view_id = ?',
+      )
+      .run('0'.repeat(64), created.requestViewId);
+    assert.throws(
+      () => value.store.getLocalBranchRequestView(created.requestViewId),
+      /stored local branch request view is invalid/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('local branch request views reject manifests with explicit shares', () => {
+  const value = fixture();
+  try {
+    const sourceWorld = worldId('world:signal:source');
+    const destinationWorld = worldId('world:signal:destination');
+    createBranch(value.store, 'branch:share-source', sourceWorld, 1);
+    const sourceManifest = createViewManifest({
+      branchId: branchId('branch:share-source'),
+      worldId: sourceWorld,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:share-source'),
+      branchId: branchId('branch:share-source'),
+      worldId: sourceWorld,
+      manifest: sourceManifest,
+      projectionGeneration: 1,
+      createdAt: 2,
+    });
+    value.store.createCapsule({
+      capsuleId: capsuleId('capsule:share-source'),
+      branchId: branchId('branch:share-source'),
+      worldId: sourceWorld,
+      kind: 'private',
+      viewManifestHash: sourceManifest.hash,
+      sourceRootHash: hashContextBytes('share-source-root'),
+      policyGeneration: 1,
+      content: { text: 'shareable fixture' },
+      createdAt: 3,
+    });
+    value.store.createShareGrant({
+      grantId: shareGrantId('share:request-view'),
+      sharedEventId: eventId('event:request-view-share'),
+      sourceCapsuleId: capsuleId('capsule:share-source'),
+      sourceWorldId: sourceWorld,
+      destinationWorldId: destinationWorld,
+      canonicalText: 'explicit share fixture',
+      authorityEpoch: 1,
+      createdAt: 4,
+    });
+    value.store.finishBranch(branchId('branch:share-source'), 'yielded', 5);
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:share-destination'),
+      worldId: destinationWorld,
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 6,
+    });
+    const destinationManifest = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: destinationWorld,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [],
+      sharedEventIds: [eventId('event:request-view-share')],
+      policyGeneration: 1,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:share-destination'),
+      branchId: opened.branch.branchId,
+      worldId: destinationWorld,
+      manifest: destinationManifest,
+      projectionGeneration: 1,
+      shareGrantIds: [shareGrantId('share:request-view')],
+      createdAt: 7,
+    });
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          branchId: opened.branch.branchId,
+          worldId: destinationWorld,
+          manifestId: manifestId('manifest:share-destination'),
+          systemRendererGeneration: 1,
+          systemLayerProjectionIds: [],
+          messageProjectionIds: [],
+          createdAt: 8,
+        }),
+      /manifest is invalid/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('local branch request views reject non-monotonic manifest event order', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:request-order');
+    const first = value.store.appendWorldEvent({
+      eventId: eventId('event:request-order-first'),
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: 'first' },
+      occurredAt: 1,
+      recordedAt: 1,
+    });
+    const later = value.store.appendWorldEvent({
+      eventId: eventId('event:request-order-later'),
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: 'later' },
+      occurredAt: 2,
+      recordedAt: 2,
+    });
+    const firstProjection = value.store.createEventMessageProjection({
+      sourceEventId: first.eventId,
+      sourceSequence: first.sequence,
+      worldId: world,
+      rendererGeneration: 1,
+      message: { role: 'user', content: 'first' },
+      createdAt: 3,
+    });
+    const laterProjection = value.store.createEventMessageProjection({
+      sourceEventId: later.eventId,
+      sourceSequence: later.sequence,
+      worldId: world,
+      rendererGeneration: 1,
+      message: { role: 'user', content: 'later' },
+      createdAt: 4,
+    });
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:request-order'),
+      worldId: world,
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 5,
+    });
+    const manifest = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: world,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [later.eventId, first.eventId],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    value.store.createManifest({
+      manifestId: manifestId('manifest:request-order'),
+      branchId: opened.branch.branchId,
+      worldId: world,
+      manifest,
+      projectionGeneration: 1,
+      createdAt: 6,
+    });
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          branchId: opened.branch.branchId,
+          worldId: world,
+          manifestId: manifestId('manifest:request-order'),
+          systemRendererGeneration: 1,
+          systemLayerProjectionIds: [],
+          messageProjectionIds: [
+            laterProjection.projectionId,
+            firstProjection.projectionId,
+          ],
+          createdAt: 7,
+        }),
+      /manifest event order is invalid/,
+    );
+    const row = value.database
+      .prepare('SELECT count(*) AS count FROM context_local_branch_request_views')
+      .get() as { count: number };
+    assert.equal(row.count, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('manifest rereads reject canonical authority drift from the branch', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:manifest-lineage');
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:manifest-lineage'),
+      worldId: world,
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 1,
+    });
+    const malformed = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: world,
+      parentBranchId: null,
+      authorityEpoch: 2,
+      eventIds: [],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    const projectionGeneration = 1;
+    const cacheNamespace = `context:${hashContextBytes(
+      `${world}\u0000${projectionGeneration}\u0000${malformed.hash}`,
+    )}`;
+    value.database
+      .prepare(
+        `INSERT INTO context_manifests(
+           manifest_id, branch_id, world_id, manifest_hash, manifest_json,
+           projection_generation, policy_generation, cache_namespace, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'manifest:authority-drift',
+        opened.branch.branchId,
+        world,
+        malformed.hash,
+        JSON.stringify(malformed),
+        projectionGeneration,
+        malformed.policyGeneration,
+        cacheNamespace,
+        2,
+      );
+    assert.throws(
+      () =>
+        value.store.getManifestProjection(
+          manifestId('manifest:authority-drift'),
+        ),
+      /stored context manifest identity is invalid/,
+    );
+    assert.throws(
+      () =>
+        value.store.createLocalBranchRequestView({
+          branchId: opened.branch.branchId,
+          worldId: world,
+          manifestId: manifestId('manifest:authority-drift'),
+          systemRendererGeneration: 1,
+          systemLayerProjectionIds: [],
+          messageProjectionIds: [],
+          createdAt: 3,
+        }),
+      /stored context manifest identity is invalid/,
     );
   } finally {
     closeFixture(value);

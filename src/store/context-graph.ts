@@ -28,6 +28,7 @@ export type EffectId = ContextId<'EffectId'>;
 export type EventMessageProjectionId =
   ContextId<'EventMessageProjectionId'>;
 export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
+export type LocalBranchRequestViewId = ContextId<'LocalBranchRequestViewId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
   ContextId<'ShadowRequestObservationId'>;
@@ -95,6 +96,14 @@ export const systemLayerProjectionId = (
     'systemLayerProjectionId',
     value,
     'system-layer:',
+  );
+export const localBranchRequestViewId = (
+  value: string,
+): LocalBranchRequestViewId =>
+  branded<'LocalBranchRequestViewId'>(
+    'localBranchRequestViewId',
+    value,
+    'branch-request-view:',
   );
 export const shadowProjectionPlanId = (value: string): ShadowProjectionPlanId =>
   branded<'ShadowProjectionPlanId'>(
@@ -172,6 +181,35 @@ export interface SystemLayerProjectionRecord {
   readonly content: string;
   readonly contentHash: string;
   readonly contentBytes: number;
+  readonly createdAt: number;
+}
+
+export interface LocalBranchRequestViewV1 {
+  readonly schemaVersion: 1;
+  readonly executionMode: 'dark';
+  readonly scope: 'local-only';
+  readonly runnable: false;
+  readonly toolMode: 'none';
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly manifestId: ManifestId;
+  readonly manifestHash: string;
+  readonly messageRendererGeneration: number;
+  readonly systemRendererGeneration: number;
+  readonly policyGeneration: number;
+  readonly systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+  readonly messageProjectionIds: readonly EventMessageProjectionId[];
+}
+
+export interface LocalBranchRequestViewRecord {
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly manifestId: ManifestId;
+  readonly manifestHash: string;
+  readonly view: LocalBranchRequestViewV1;
+  readonly viewJson: string;
+  readonly viewHash: string;
   readonly createdAt: number;
 }
 
@@ -551,6 +589,107 @@ function systemLayerIdentity(input: {
   return systemLayerProjectionId(`system-layer:${hash}`);
 }
 
+function normalizeLocalBranchRequestView(
+  value: unknown,
+): LocalBranchRequestViewV1 {
+  const view = shadowPlanObject(value, 'local branch request view');
+  exactShadowPlanKeys(
+    view,
+    [
+      'schemaVersion',
+      'executionMode',
+      'scope',
+      'runnable',
+      'toolMode',
+      'branchId',
+      'worldId',
+      'manifestId',
+      'manifestHash',
+      'messageRendererGeneration',
+      'systemRendererGeneration',
+      'policyGeneration',
+      'systemLayerProjectionIds',
+      'messageProjectionIds',
+    ],
+    'local branch request view',
+  );
+  if (
+    view.schemaVersion !== 1 ||
+    view.executionMode !== 'dark' ||
+    view.scope !== 'local-only' ||
+    view.runnable !== false ||
+    view.toolMode !== 'none' ||
+    !isBranchId(view.branchId) ||
+    !isWorldId(view.worldId) ||
+    typeof view.manifestId !== 'string' ||
+    typeof view.manifestHash !== 'string'
+  ) {
+    throw new Error('local branch request view identity is invalid');
+  }
+  const normalizedManifestId = manifestId(view.manifestId);
+  const manifestHash = sha256('manifestHash', view.manifestHash);
+  const messageRendererGeneration = generation(
+    'messageRendererGeneration',
+    view.messageRendererGeneration as number,
+  );
+  const systemRendererGeneration = generation(
+    'systemRendererGeneration',
+    view.systemRendererGeneration as number,
+  );
+  const policyGeneration = generation(
+    'policyGeneration',
+    view.policyGeneration as number,
+  );
+  if (
+    messageRendererGeneration < 1 ||
+    systemRendererGeneration < 1 ||
+    policyGeneration < 1 ||
+    !Array.isArray(view.systemLayerProjectionIds) ||
+    view.systemLayerProjectionIds.length < 1 ||
+    view.systemLayerProjectionIds.length > 64 ||
+    !Array.isArray(view.messageProjectionIds) ||
+    view.messageProjectionIds.length > 4096
+  ) {
+    throw new Error('local branch request view metadata is invalid');
+  }
+  const systemLayerProjectionIds = view.systemLayerProjectionIds.map((id) =>
+    systemLayerProjectionId(String(id)),
+  );
+  const messageProjectionIds = view.messageProjectionIds.map((id) =>
+    eventMessageProjectionId(String(id)),
+  );
+  if (
+    new Set(systemLayerProjectionIds).size !== systemLayerProjectionIds.length ||
+    new Set(messageProjectionIds).size !== messageProjectionIds.length
+  ) {
+    throw new Error('local branch request view references must be unique');
+  }
+  return {
+    schemaVersion: 1,
+    executionMode: 'dark',
+    scope: 'local-only',
+    runnable: false,
+    toolMode: 'none',
+    branchId: branchId(view.branchId),
+    worldId: worldId(view.worldId),
+    manifestId: normalizedManifestId,
+    manifestHash,
+    messageRendererGeneration,
+    systemRendererGeneration,
+    policyGeneration,
+    systemLayerProjectionIds,
+    messageProjectionIds,
+  };
+}
+
+function localBranchRequestViewIdentity(
+  view: LocalBranchRequestViewV1,
+): LocalBranchRequestViewId {
+  return localBranchRequestViewId(
+    `branch-request-view:${hashContextBytes(serialize(view))}`,
+  );
+}
+
 function shadowCount(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${label} must be a non-negative safe integer`);
@@ -853,6 +992,24 @@ interface SystemLayerProjectionRow {
   created_at: number;
 }
 
+interface LocalBranchRequestViewRow {
+  request_view_id: string;
+  branch_id: string;
+  world_id: string;
+  manifest_id: string;
+  manifest_hash: string;
+  view_json: string;
+  view_hash: string;
+  message_renderer_generation: number;
+  system_renderer_generation: number;
+  policy_generation: number;
+  system_layer_count: number;
+  message_projection_count: number;
+  tool_mode: string;
+  runnable: number;
+  created_at: number;
+}
+
 interface BranchRow {
   branch_id: string;
   world_id: string;
@@ -1042,6 +1199,55 @@ function mapSystemLayerProjection(
     contentHash,
     contentBytes,
     createdAt: timestamp('createdAt', row.created_at),
+  };
+}
+
+function mapLocalBranchRequestView(
+  row: LocalBranchRequestViewRow,
+): LocalBranchRequestViewRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.view_json);
+  } catch (error) {
+    throw new Error(
+      `stored local branch request view is invalid: ${row.request_view_id}`,
+      { cause: error },
+    );
+  }
+  const view = normalizeLocalBranchRequestView(parsed);
+  const viewJson = serialize(view);
+  const viewHash = sha256('viewHash', row.view_hash);
+  const createdAt = timestamp('createdAt', row.created_at);
+  if (
+    row.tool_mode !== 'none' ||
+    row.runnable !== 0 ||
+    row.branch_id !== view.branchId ||
+    row.world_id !== view.worldId ||
+    row.manifest_id !== view.manifestId ||
+    row.manifest_hash !== view.manifestHash ||
+    row.message_renderer_generation !== view.messageRendererGeneration ||
+    row.system_renderer_generation !== view.systemRendererGeneration ||
+    row.policy_generation !== view.policyGeneration ||
+    row.system_layer_count !== view.systemLayerProjectionIds.length ||
+    row.message_projection_count !== view.messageProjectionIds.length ||
+    row.view_json !== viewJson ||
+    hashContextBytes(viewJson) !== viewHash ||
+    localBranchRequestViewIdentity(view) !== row.request_view_id
+  ) {
+    throw new Error(
+      `stored local branch request view is invalid: ${row.request_view_id}`,
+    );
+  }
+  return {
+    requestViewId: localBranchRequestViewId(row.request_view_id),
+    branchId: view.branchId,
+    worldId: view.worldId,
+    manifestId: view.manifestId,
+    manifestHash: view.manifestHash,
+    view,
+    viewJson,
+    viewHash,
+    createdAt,
   };
 }
 
@@ -1355,6 +1561,312 @@ export class ContextGraphStore {
       )
       .get(id) as unknown as SystemLayerProjectionRow | undefined;
     return row ? mapSystemLayerProjection(row) : null;
+  }
+
+  private validateLocalBranchRequestEventOrder(
+    events: readonly WorldEventRecord[],
+  ): void {
+    let previousSequence = -1;
+    for (const event of events) {
+      if (event.sequence <= previousSequence) {
+        throw new Error('local branch request manifest event order is invalid');
+      }
+      previousSequence = event.sequence;
+    }
+  }
+
+  private validateLocalBranchRequestSystemLayers(input: {
+    worldId: WorldId;
+    rendererGeneration: number;
+    policyGeneration: number;
+    layerIds: readonly SystemLayerProjectionId[];
+  }): void {
+    const order: Readonly<Record<SystemLayerKind, number>> = {
+      runtime_contract: 0,
+      identity: 1,
+      integrated_self: 2,
+      world_policy: 3,
+      private_frontier: 4,
+      legacy_memory: 5,
+      legacy_focus: 6,
+      runtime_hint: 7,
+    };
+    let previousOrder = -1;
+    let hasIdentity = false;
+    for (const layerId of input.layerIds) {
+      const layer = this.getSystemLayerProjection(layerId);
+      if (
+        !layer ||
+        layer.rendererGeneration !== input.rendererGeneration ||
+        layer.policyGeneration !== input.policyGeneration ||
+        order[layer.kind] <= previousOrder ||
+        (layer.visibility === 'global_contract' &&
+          (layer.worldId !== null || layer.kind !== 'runtime_contract')) ||
+        (layer.visibility === 'integrated_self' &&
+          (layer.worldId !== null ||
+            (layer.kind !== 'identity' && layer.kind !== 'integrated_self'))) ||
+        (layer.visibility === 'world' &&
+          (layer.worldId !== input.worldId || layer.kind !== 'world_policy')) ||
+        (layer.visibility !== 'global_contract' &&
+          layer.visibility !== 'integrated_self' &&
+          layer.visibility !== 'world')
+      ) {
+        throw new Error(`local branch request system layer is invalid: ${layerId}`);
+      }
+      previousOrder = order[layer.kind];
+      hasIdentity ||= layer.kind === 'identity' || layer.kind === 'integrated_self';
+    }
+    const first = this.getSystemLayerProjection(input.layerIds[0]!);
+    if (first?.kind !== 'runtime_contract' || !hasIdentity) {
+      throw new Error('local branch request system projection is incomplete');
+    }
+  }
+
+  createLocalBranchRequestView(input: {
+    branchId: BranchId;
+    worldId: WorldId;
+    manifestId: ManifestId;
+    systemRendererGeneration: number;
+    systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+    messageProjectionIds: readonly EventMessageProjectionId[];
+    createdAt: number;
+  }): LocalBranchRequestViewRecord {
+    const branch = this.getBranch(input.branchId);
+    const start = this.getBranchStart(input.branchId);
+    const coordinator = this.getRootCoordinatorState();
+    const head = this.getContinuationHead();
+    if (
+      !branch ||
+      branch.status !== 'running' ||
+      branch.worldId !== input.worldId ||
+      !start ||
+      start.worldId !== input.worldId ||
+      start.startedAt !== branch.startedAt ||
+      coordinator.activeBranchId !== input.branchId ||
+      coordinator.activeWorldId !== input.worldId ||
+      coordinator.baseRevision !== start.baseRevision ||
+      coordinator.predecessorBranchId !== start.predecessorBranchId ||
+      coordinator.predecessorWorldId !== start.predecessorWorldId ||
+      head.revision !== start.baseRevision ||
+      head.branchId !== start.predecessorBranchId ||
+      head.worldId !== start.predecessorWorldId
+    ) {
+      throw new Error('local branch request view requires the active coordinated branch');
+    }
+    const projection = this.getManifestProjection(input.manifestId, {
+      requireActiveShares: true,
+    });
+    if (
+      !projection ||
+      projection.record.branchId !== input.branchId ||
+      projection.record.worldId !== input.worldId ||
+      projection.shares.length !== 0 ||
+      projection.manifest.sharedEventIds.length !== 0
+    ) {
+      throw new Error('local branch request view manifest is invalid');
+    }
+    this.validateLocalBranchRequestEventOrder(projection.localEvents);
+    if (
+      input.messageProjectionIds.length !== projection.localEvents.length ||
+      new Set(input.messageProjectionIds).size !== input.messageProjectionIds.length
+    ) {
+      throw new Error('local branch request message coverage is incomplete');
+    }
+    input.messageProjectionIds.forEach((projectionId, ordinal) => {
+      const message = this.getEventMessageProjection(projectionId);
+      const event = projection.localEvents[ordinal];
+      if (
+        !message ||
+        !event ||
+        message.sourceEventId !== event.eventId ||
+        message.worldId !== input.worldId ||
+        message.rendererGeneration !== projection.record.projectionGeneration
+      ) {
+        throw new Error('local branch request message lineage is invalid');
+      }
+    });
+    const systemRendererGeneration = generation(
+      'systemRendererGeneration',
+      input.systemRendererGeneration,
+    );
+    if (systemRendererGeneration < 1) {
+      throw new Error('systemRendererGeneration must be positive');
+    }
+    const systemLayerProjectionIds = [...input.systemLayerProjectionIds];
+    if (
+      systemLayerProjectionIds.length < 1 ||
+      systemLayerProjectionIds.length > 64 ||
+      new Set(systemLayerProjectionIds).size !== systemLayerProjectionIds.length
+    ) {
+      throw new Error('local branch request system layer references are invalid');
+    }
+    this.validateLocalBranchRequestSystemLayers({
+      worldId: input.worldId,
+      rendererGeneration: systemRendererGeneration,
+      policyGeneration: projection.record.policyGeneration,
+      layerIds: systemLayerProjectionIds,
+    });
+    const view = normalizeLocalBranchRequestView({
+      schemaVersion: 1,
+      executionMode: 'dark',
+      scope: 'local-only',
+      runnable: false,
+      toolMode: 'none',
+      branchId: input.branchId,
+      worldId: input.worldId,
+      manifestId: input.manifestId,
+      manifestHash: projection.record.hash,
+      messageRendererGeneration: projection.record.projectionGeneration,
+      systemRendererGeneration,
+      policyGeneration: projection.record.policyGeneration,
+      systemLayerProjectionIds,
+      messageProjectionIds: [...input.messageProjectionIds],
+    });
+    const viewJson = serialize(view);
+    const viewHash = hashContextBytes(viewJson);
+    const requestViewId = localBranchRequestViewIdentity(view);
+    const existing = this.getLocalBranchRequestView(requestViewId);
+    if (existing) {
+      if (existing.viewJson !== viewJson || existing.viewHash !== viewHash) {
+        throw new Error(`local branch request view identity conflict: ${requestViewId}`);
+      }
+      return existing;
+    }
+    transaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO context_local_branch_request_views(
+             request_view_id, branch_id, world_id, manifest_id, manifest_hash,
+             view_json, view_hash, message_renderer_generation,
+             system_renderer_generation, policy_generation, system_layer_count,
+             message_projection_count, tool_mode, runnable, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, ?)`,
+        )
+        .run(
+          requestViewId,
+          input.branchId,
+          input.worldId,
+          input.manifestId,
+          projection.record.hash,
+          viewJson,
+          viewHash,
+          projection.record.projectionGeneration,
+          systemRendererGeneration,
+          projection.record.policyGeneration,
+          systemLayerProjectionIds.length,
+          input.messageProjectionIds.length,
+          timestamp('createdAt', input.createdAt),
+        );
+      const systemStatement = this.database.prepare(
+        `INSERT INTO context_local_branch_request_system_layers(
+           request_view_id, layer_id, world_id, ordinal
+         ) VALUES (?, ?, ?, ?)`,
+      );
+      systemLayerProjectionIds.forEach((layerId, ordinal) =>
+        systemStatement.run(requestViewId, layerId, input.worldId, ordinal),
+      );
+      const messageStatement = this.database.prepare(
+        `INSERT INTO context_local_branch_request_messages(
+           request_view_id, projection_id, world_id, ordinal
+         ) VALUES (?, ?, ?, ?)`,
+      );
+      input.messageProjectionIds.forEach((projectionId, ordinal) =>
+        messageStatement.run(
+          requestViewId,
+          projectionId,
+          input.worldId,
+          ordinal,
+        ),
+      );
+    });
+    return this.getLocalBranchRequestView(requestViewId)!;
+  }
+
+  getLocalBranchRequestView(
+    id: LocalBranchRequestViewId,
+  ): LocalBranchRequestViewRecord | null {
+    const row = this.database
+      .prepare('SELECT * FROM context_local_branch_request_views WHERE request_view_id = ?')
+      .get(id) as unknown as LocalBranchRequestViewRow | undefined;
+    if (!row) return null;
+    const record = mapLocalBranchRequestView(row);
+    const manifest = this.getManifestProjection(record.manifestId, {
+      requireActiveShares: true,
+    });
+    const branch = this.getBranch(record.branchId);
+    const start = this.getBranchStart(record.branchId);
+    if (
+      !manifest ||
+      !branch ||
+      !start ||
+      start.worldId !== record.worldId ||
+      start.startedAt !== branch.startedAt ||
+      manifest.record.branchId !== record.branchId ||
+      manifest.record.worldId !== record.worldId ||
+      manifest.record.hash !== record.manifestHash ||
+      manifest.record.projectionGeneration !==
+        record.view.messageRendererGeneration ||
+      manifest.record.policyGeneration !== record.view.policyGeneration ||
+      manifest.shares.length !== 0 ||
+      manifest.manifest.sharedEventIds.length !== 0
+    ) {
+      throw new Error(`stored local branch request view manifest is invalid: ${id}`);
+    }
+    this.validateLocalBranchRequestEventOrder(manifest.localEvents);
+    const systemLayerProjectionIds = (
+      this.database
+        .prepare(
+          `SELECT layer_id FROM context_local_branch_request_system_layers
+           WHERE request_view_id = ? ORDER BY ordinal`,
+        )
+        .all(id) as { layer_id: string }[]
+    ).map((edge) => systemLayerProjectionId(edge.layer_id));
+    const messageProjectionIds = (
+      this.database
+        .prepare(
+          `SELECT projection_id FROM context_local_branch_request_messages
+           WHERE request_view_id = ? ORDER BY ordinal`,
+        )
+        .all(id) as { projection_id: string }[]
+    ).map((edge) => eventMessageProjectionId(edge.projection_id));
+    if (
+      systemLayerProjectionIds.length !==
+        record.view.systemLayerProjectionIds.length ||
+      systemLayerProjectionIds.some(
+        (layerId, ordinal) =>
+          layerId !== record.view.systemLayerProjectionIds[ordinal],
+      ) ||
+      messageProjectionIds.length !== record.view.messageProjectionIds.length ||
+      messageProjectionIds.some(
+        (projectionId, ordinal) =>
+          projectionId !== record.view.messageProjectionIds[ordinal],
+      ) ||
+      messageProjectionIds.length !== manifest.localEvents.length
+    ) {
+      throw new Error(`stored local branch request view edges are invalid: ${id}`);
+    }
+    this.validateLocalBranchRequestSystemLayers({
+      worldId: record.worldId,
+      rendererGeneration: record.view.systemRendererGeneration,
+      policyGeneration: record.view.policyGeneration,
+      layerIds: systemLayerProjectionIds,
+    });
+    messageProjectionIds.forEach((projectionId, ordinal) => {
+      const message = this.getEventMessageProjection(projectionId);
+      const event = manifest.localEvents[ordinal];
+      if (
+        !message ||
+        !event ||
+        message.sourceEventId !== event.eventId ||
+        message.worldId !== record.worldId ||
+        message.rendererGeneration !== record.view.messageRendererGeneration
+      ) {
+        throw new Error(
+          `stored local branch request view message lineage is invalid: ${id}`,
+        );
+      }
+    });
+    return record;
   }
 
   private validateShadowMessageProjectionLineage(
@@ -2204,9 +2716,14 @@ export class ContextGraphStore {
       cacheNamespace: row.cache_namespace,
       createdAt: row.created_at,
     };
+    const branch = this.getBranch(record.branchId);
     if (
+      !branch ||
+      branch.worldId !== record.worldId ||
       decoded.branchId !== record.branchId ||
       decoded.worldId !== record.worldId ||
+      decoded.parentBranchId !== branch.parentBranchId ||
+      decoded.authorityEpoch !== branch.authorityEpoch ||
       decoded.policyGeneration !== record.policyGeneration
     ) {
       throw new Error(`stored context manifest identity is invalid: ${id}`);
