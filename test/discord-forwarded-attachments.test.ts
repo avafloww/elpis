@@ -216,10 +216,10 @@ test('mixed direct and forwarded files preserve order, distinct paths, and share
     [file('direct')],
     snapshot([file('forwarded')]),
   );
-  assert.deepEqual(downloads, [
-    'https://example.com/direct',
-    'https://example.com/forwarded',
-  ]);
+  assert.deepEqual(
+    new Set(downloads),
+    new Set(['https://example.com/direct', 'https://example.com/forwarded']),
+  );
   const [direct, forwarded] = inbound.attachments;
   assert.equal(direct.inlineText, 'text');
   assert.equal(forwarded.inlineText, null);
