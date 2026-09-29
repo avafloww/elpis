@@ -597,14 +597,16 @@ test('send enforces exact room, contact permission, unsupported options, and fin
   assert.equal(h.client.sends.length, 1);
 });
 
-test('send validates every attachment before one Signal dispatch', async () => {
+test('send validates every attachment before ordered one-file Signal dispatches', async () => {
   const root = mkdtempSync(join(tmpdir(), 'elpis-signal-outbound-'));
   try {
     const pdf = join(root, 'resume.pdf');
+    const html = join(root, 'resume.html');
     const link = join(root, 'link.pdf');
     const directory = join(root, 'directory.pdf');
     const oversized = join(root, 'oversized.pdf');
     writeFileSync(pdf, '%PDF-synthetic');
+    writeFileSync(html, '<!doctype html><title>synthetic</title>');
     symlinkSync(pdf, link);
     mkdirSync(directory);
     writeFileSync(oversized, '');
@@ -614,7 +616,10 @@ test('send validates every attachment before one Signal dispatch', async () => {
     await h.transport.start();
     assert.deepEqual(
       await h.transport.send(BRAMBLE_ROOM, '**draft**', {
-        files: [{ path: pdf, name: 'resume.pdf' }],
+        files: [
+          { path: pdf, name: 'resume.pdf' },
+          { path: html, name: 'resume.html' },
+        ],
       }),
       { signal: { status: 'accepted' } },
     );
@@ -625,6 +630,12 @@ test('send validates every attachment before one Signal dispatch', async () => {
         styles: [{ style: 'BOLD', start: 0, length: 5 }],
         attachments: [pdf],
       },
+      {
+        recipient: BRAMBLE_ACI,
+        message: '',
+        styles: [],
+        attachments: [html],
+      },
     ]);
 
     const rejects: Array<{
@@ -633,6 +644,10 @@ test('send validates every attachment before one Signal dispatch', async () => {
     }> = [
       { files: [{ path: 'relative.pdf' }], pattern: /absolute/ },
       { files: [{ path: join(root, 'missing.pdf') }], pattern: /regular file/ },
+      {
+        files: [{ path: pdf }, { path: join(root, 'missing.pdf') }],
+        pattern: /regular file/,
+      },
       { files: [{ path: directory }], pattern: /regular file/ },
       { files: [{ path: link }], pattern: /regular non-symlink/ },
       { files: [{ path: oversized }], pattern: /25 MiB/ },
@@ -647,7 +662,7 @@ test('send validates every attachment before one Signal dispatch', async () => {
         h.transport.send(BRAMBLE_ROOM, 'must not send', { files: rejection.files }),
         rejection.pattern,
       );
-      assert.equal(h.client.sends.length, 1);
+      assert.equal(h.client.sends.length, 2);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

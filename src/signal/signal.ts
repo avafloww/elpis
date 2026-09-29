@@ -459,12 +459,20 @@ class ConfiguredSignalTransport implements SignalTransport {
       throw new Error(`Signal channel signal:${contact.alias} is muted`);
     const attachments = signalOutboundAttachmentPaths(opts?.files);
     const formatted = formatSignalMarkdown(content);
-    await this.client.sendText(
-      contact.aci,
-      formatted.text,
-      formatted.styles,
-      attachments,
-    );
+    if (attachments.length === 0) {
+      await this.client.sendText(contact.aci, formatted.text, formatted.styles);
+    } else {
+      // Signal clients can silently drop mixed attachment types from one message.
+      // Separate ordered sends preserve every validated file.
+      for (let index = 0; index < attachments.length; index++) {
+        await this.client.sendText(
+          contact.aci,
+          index === 0 ? formatted.text : '',
+          index === 0 ? formatted.styles : [],
+          [attachments[index]!],
+        );
+      }
+    }
     return { signal: { status: 'accepted' } };
   }
 
