@@ -750,6 +750,11 @@ export function createCodexLLM(
         options.signal,
         options.runTool,
         options.skillTool,
+        undefined,
+        {
+          observer: options.observeContentProjection,
+          surface: 'codex-responses',
+        },
       );
       stampGeneration(result.message, {
         ...identity,

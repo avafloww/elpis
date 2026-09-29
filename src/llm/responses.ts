@@ -53,6 +53,7 @@ import {
   classifyError,
   computeCharsSent,
   isUsageLimitCode,
+  observeProviderContentProjection,
   prepareForApi,
   sanitizeAssistantMessage,
   type ChatMessage,
@@ -61,6 +62,8 @@ import {
   type LlmClientConfig,
   type RunTool,
   type SkillTool,
+  type ProviderContentProjectionObserver,
+  type ProviderContentSurface,
 } from './llm.js';
 
 /** The subset of the Responses `reasoning` item shape we store and replay.
@@ -481,6 +484,10 @@ export async function streamResponsesComplete(
   runTool: RunTool = RUN_TOOL,
   skillTool?: SkillTool,
   maxOutputBytes?: number,
+  contentProjection?: {
+    observer?: ProviderContentProjectionObserver;
+    surface?: ProviderContentSurface;
+  },
 ): Promise<CompleteResult> {
   try {
     try {
@@ -571,6 +578,11 @@ export async function streamResponsesComplete(
       const request = transformRequest
         ? transformRequest(baseRequest)
         : baseRequest;
+      observeProviderContentProjection(
+        contentProjection?.observer,
+        contentProjection?.surface ?? 'openai-responses',
+        { input: request.input },
+      );
       config.logger.info('[llm/responses] stage=request-start');
       const stream = await awaitBeforeProgressDeadline(
         client.responses.create(

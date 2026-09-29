@@ -34,7 +34,9 @@ test('anthropicModelTool preserves run and skill input schemas', () => {
 test('Anthropic completion sends the resident skill declaration in its wire body', async () => {
   const originalFetch = globalThis.fetch;
   let capturedBody: any = null;
+  let observed: any = null;
   globalThis.fetch = async (_input, init) => {
+    assert.ok(observed, 'projection must be observed before transport dispatch');
     capturedBody = JSON.parse(
       new TextDecoder().decode(init?.body as Uint8Array),
     );
@@ -60,8 +62,17 @@ test('Anthropic completion sends the resident skill declaration in its wire body
     const llm = createAnthropicOAuthLLM(config, store as any, undefined);
     await llm.complete([sys(), { role: 'user', content: 'hello' }], {
       skillTool: SKILL_TOOL,
+      observeContentProjection: (projection) => {
+        observed = projection;
+        throw new Error('observer failure must not block the request');
+      },
     });
     assert.ok(capturedBody);
+    assert.equal(observed.surface, 'anthropic-messages');
+    assert.deepEqual(JSON.parse(observed.bytes), {
+      messages: capturedBody.messages,
+      system: capturedBody.system,
+    });
     assert.match(capturedBody.system[0].text, /cch=[0-9a-f]{5}/);
     assert.equal(capturedBody.system[0].text.includes('cch=00000'), false);
     assert.ok(

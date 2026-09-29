@@ -15,6 +15,7 @@ import {
   RetriableError,
   NonRetriableError,
   UsageLimitError,
+  providerContentProjection,
 } from '../src/llm/llm.js';
 import type { Config } from '../src/config.js';
 
@@ -133,6 +134,20 @@ function usageChunk(): Chunk {
   };
 }
 
+test('provider content projection is canonical across object insertion order', () => {
+  const first = providerContentProjection('openai-chat', {
+    messages: [{ role: 'user', content: 'canary' }],
+    nested: { z: 2, a: 1, omitted: undefined },
+  });
+  const second = providerContentProjection('openai-chat', {
+    nested: { a: 1, omitted: undefined, z: 2 },
+    messages: [{ content: 'canary', role: 'user' }],
+  });
+  assert.equal(first.bytes, second.bytes);
+  assert.equal(first.sha256, second.sha256);
+  assert.equal(first.byteLength, Buffer.byteLength(first.bytes));
+});
+
 test('streamComplete: a 429 throw is classified RetriableError', async () => {
   const client = mockClient({
     throwValue: { status: 429, message: 'rate limited' },
@@ -186,6 +201,38 @@ test('streamComplete: a 400 throw is classified NonRetriableError', async () => 
       ]),
     (e: unknown) => e instanceof NonRetriableError,
   );
+});
+
+test('streamComplete observes the exact content plane before the one transport call', async () => {
+  let calls = 0;
+  let observed: any;
+  const client = mockClient({
+    chunks: [contentChunk('ok'), usageChunk()],
+    onCreate: (params) => {
+      calls++;
+      assert.ok(observed, 'projection must be observed before transport dispatch');
+      assert.deepEqual(JSON.parse(observed.bytes), {
+        messages: (params as any).messages,
+      });
+    },
+  });
+  const result = await streamComplete(
+    client,
+    stubConfig(os.tmpdir()),
+    [{ role: 'user', content: 'projection canary' }],
+    undefined,
+    {
+      observeContentProjection: (projection: unknown) => {
+        observed = projection;
+        throw new Error('observer failure must not block the request');
+      },
+    } as any,
+  );
+  assert.equal(result.message.content, 'ok');
+  assert.equal(calls, 1);
+  assert.equal(observed.surface, 'openai-chat');
+  assert.equal(observed.byteLength, Buffer.byteLength(observed.bytes));
+  assert.match(observed.sha256, /^[0-9a-f]{64}$/);
 });
 
 test('streamComplete: signal goes to the options arg, not the request body params', async () => {

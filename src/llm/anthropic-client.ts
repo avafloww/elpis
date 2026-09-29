@@ -47,6 +47,7 @@ import {
   classifyError,
   prepareForApi,
   computeCharsSent,
+  observeProviderContentProjection,
   sanitizeAssistantMessage,
   type ChatMessage,
   type CompleteOptions,
@@ -59,6 +60,7 @@ import {
   type AnthropicThinkingBlock,
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
+  type ProviderContentProjectionObserver,
 } from './llm.js';
 import {
   endpointAt,
@@ -344,8 +346,20 @@ async function postAnthropic(
   body: Record<string, unknown>,
   stream: boolean,
   signal?: AbortSignal,
+  observeContentProjection?: ProviderContentProjectionObserver,
 ): Promise<Response> {
-  const serialized = new TextEncoder().encode(patchCch(JSON.stringify(body)));
+  const finalized = patchCch(JSON.stringify(body));
+  try {
+    const projected = JSON.parse(finalized) as Record<string, unknown>;
+    observeProviderContentProjection(
+      observeContentProjection,
+      'anthropic-messages',
+      { system: projected.system, messages: projected.messages },
+    );
+  } catch {
+    // Observation cannot block the already-valid provider request body.
+  }
+  const serialized = new TextEncoder().encode(finalized);
   let res: Response;
   try {
     res = await transport({ body: serialized, stream, signal });
@@ -381,6 +395,7 @@ async function anthropicComplete(
     toolChoice?: 'required' | 'auto';
     maxTokens?: number;
     maxOutputBytes?: number;
+    observeContentProjection?: ProviderContentProjectionObserver;
   } = {},
 ): Promise<CompleteResult> {
   try {
@@ -423,7 +438,6 @@ async function anthropicComplete(
     if (config.llm.reasoningEffort && config.llm.reasoningEffort !== 'none') {
       body.output_config = { effort: config.llm.reasoningEffort };
     }
-
     let content = '';
     let visibleOutputBytes = 0;
     let reasoning = '';
@@ -446,7 +460,13 @@ async function anthropicComplete(
       });
 
     try {
-      const res = await postAnthropic(transport, body, true, controller.signal);
+      const res = await postAnthropic(
+        transport,
+        body,
+        true,
+        controller.signal,
+        options.observeContentProjection,
+      );
       requestId =
         res.headers.get('request-id') ??
         res.headers.get('x-request-id') ??
@@ -800,6 +820,7 @@ export function createAnthropicLLM(
         runTool: options.runTool,
         skillTool: options.skillTool,
         toolChoice: options.toolChoice,
+        observeContentProjection: options.observeContentProjection,
       });
       stampGeneration(result.message, {
         ...identity,

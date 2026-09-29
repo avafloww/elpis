@@ -18,6 +18,8 @@ import {
 // streaming, sanitizer, usage, and request-diet contracts are shared; only the wire format differs.
 
 import OpenAI from 'openai';
+import { createHash } from 'node:crypto';
+
 import { createOpenAICompatibleFetch } from '@elpis/provider-transport';
 import { Agent } from 'undici';
 import type { DatabaseSync } from 'node:sqlite';
@@ -999,6 +1001,76 @@ export interface CompleteResult {
   requestId?: string;
 }
 
+export type ProviderContentSurface =
+  | 'openai-chat'
+  | 'openai-responses'
+  | 'codex-responses'
+  | 'anthropic-messages';
+
+export interface ProviderContentProjection {
+  readonly surface: ProviderContentSurface;
+  readonly bytes: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+}
+
+export type ProviderContentProjectionObserver = (
+  projection: ProviderContentProjection,
+) => void;
+
+function canonicalProjectionValue(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error('provider content projection contains a non-finite number');
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalProjectionValue);
+  if (typeof value !== 'object') {
+    throw new Error('provider content projection contains an unsupported value');
+  }
+  const object = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(object).sort()) {
+    const child = object[key];
+    if (child !== undefined) out[key] = canonicalProjectionValue(child);
+  }
+  return out;
+}
+
+export function providerContentProjection(
+  surface: ProviderContentSurface,
+  content: unknown,
+): ProviderContentProjection {
+  const bytes = JSON.stringify(canonicalProjectionValue(content));
+  return Object.freeze({
+    surface,
+    bytes,
+    byteLength: Buffer.byteLength(bytes),
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  });
+}
+
+export function observeProviderContentProjection(
+  observer: ProviderContentProjectionObserver | undefined,
+  surface: ProviderContentSurface,
+  content: unknown,
+): void {
+  if (!observer) return;
+  try {
+    observer(providerContentProjection(surface, content));
+  } catch {
+    // Observation is explicitly non-semantic and cannot block provider dispatch.
+  }
+}
+
 export interface CompleteOptions {
   /** Force the first model-facing tool call of this outer user turn to `think`. */
   forceThink?: boolean;
@@ -1010,6 +1082,8 @@ export interface CompleteOptions {
   toolChoice?: 'required' | 'auto';
   /** Caller cancellation for the whole completion, including provider setup. */
   signal?: AbortSignal;
+  /** Process-local observation of the final model-visible content plane. */
+  observeContentProjection?: ProviderContentProjectionObserver;
 }
 
 export interface LLM {
@@ -1140,6 +1214,7 @@ export async function streamComplete(
     maxOutputBytes?: number;
     chatTemplateKwargs?: Record<string, unknown>;
     signal?: AbortSignal;
+    observeContentProjection?: ProviderContentProjectionObserver;
   } = {},
 ): Promise<CompleteResult> {
   try {
@@ -1183,6 +1258,9 @@ export async function streamComplete(
       stream_options: { include_usage: true as const },
     };
     const params = withEffort(config, base);
+    observeProviderContentProjection(options.observeContentProjection, 'openai-chat', {
+      messages: params.messages,
+    });
     let content = '';
     let visibleOutputBytes = 0;
     let reasoningContent = '';
@@ -1569,6 +1647,7 @@ export function createLLM(
           }
         : {}),
       signal: options.signal,
+      observeContentProjection: options.observeContentProjection,
     });
   }
 
@@ -1706,6 +1785,11 @@ export function createLLM(
             options.signal,
             options.runTool,
             options.skillTool,
+            undefined,
+            {
+              observer: options.observeContentProjection,
+              surface: 'openai-responses',
+            },
           );
           stampGeneration(result.message, {
             ...generationIdentityForConfig(parsed, 'responses'),

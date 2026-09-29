@@ -106,6 +106,51 @@ test('Chat streaming preserves output and usage while exposing the finish reason
   }
 });
 
+test('Responses observes the transformed input before one transport call', async () => {
+  let calls = 0;
+  let observed: any;
+  const client = {
+    responses: {
+      create: async (request: any) => {
+        calls++;
+        assert.ok(observed, 'projection must be observed before transport dispatch');
+        assert.deepEqual(JSON.parse(observed.bytes), { input: request.input });
+        return stream([
+          {
+            type: 'response.completed',
+            response: {
+              status: 'completed',
+              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+            },
+          },
+        ]);
+      },
+    },
+  };
+  await streamResponsesComplete(
+    client as any,
+    makeConfig(),
+    [{ role: 'user', content: 'responses projection canary' }],
+    undefined,
+    {},
+    (request) => ({ ...request, input: [...(request.input as any[]), { role: 'user', content: [{ type: 'input_text', text: 'transform canary' }] }] }),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      surface: 'codex-responses',
+      observer: (projection) => {
+        observed = projection;
+        throw new Error('observer failure must not block the request');
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(observed.surface, 'codex-responses');
+  assert.match(observed.sha256, /^[0-9a-f]{64}$/);
+});
+
 test('Responses terminal envelope maps status even with Codex usage-only terminal payloads', async () => {
   for (const [type, status, expected] of [
     ['response.completed', undefined, 'complete'],

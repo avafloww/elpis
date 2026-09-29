@@ -71,6 +71,8 @@ Before each call, `prepareForApi()` may:
 
 Request projection must never mutate the in-memory history or transcript.
 
+Provider adapters also expose a process-local, fail-open observation seam for the final model-visible content plane. Chat observes translated `messages`; Responses and Codex observe the transformed `input`; Anthropic observes the finalized `system` and `messages` after its request fingerprint is applied. The observer receives canonical bytes, their SHA-256, byte length, and an exact surface label immediately before transport dispatch. It omits transport fields and tool declarations, never issues a second provider request, and cannot block or mutate the real request if it fails. No observer is installed by default, and the seam does not itself persist or log content. It exists so dark scoped-context validation can compare exact local projections without giving shadow state continuation or effect authority.
+
 ## Bare one-shot queries
 
 An explicitly configured `elpis.llm.query` call is not a branch of the resident conversation. It creates one standalone provider request containing exactly the supplied user prompt (plus a bounded JSON instruction when schema validation is requested). Resident system text, autobiographical state, room history, dynamic cards, tools, cache identity, and opaque reasoning never enter that request. Its returned text is ordinary sandbox data for the resident to inspect and ratify; the queried model cannot act or speak as the inhabitant.

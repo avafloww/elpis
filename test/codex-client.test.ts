@@ -688,10 +688,15 @@ test('Codex LLM defaults to required tools, permits auto, and rotates cache iden
   const config = codexConfig('stub');
   const llm = createCodexOAuthLLM(config, store);
   const bodies: Array<Record<string, unknown>> = [];
+  let observed: any;
   (llm.client!.responses as any).create = async (
     body: Record<string, unknown>,
   ) => {
     bodies.push(body);
+    if (bodies.length === 1) {
+      assert.ok(observed, 'projection must be observed before transport dispatch');
+      assert.deepEqual(JSON.parse(observed.bytes), { input: body.input });
+    }
     return {
       async *[Symbol.asyncIterator]() {
         yield {
@@ -711,8 +716,13 @@ test('Codex LLM defaults to required tools, permits auto, and rotates cache iden
   };
   await llm.complete([{ role: 'user', content: 'one' }], {
     skillTool: SKILL_TOOL,
+    observeContentProjection: (projection) => {
+      observed = projection;
+      throw new Error('observer failure must not block the request');
+    },
   });
   const firstKey = bodies[0].prompt_cache_key;
+  assert.equal(observed.surface, 'codex-responses');
   assert.equal(bodies[0].stream, true);
   assert.equal(bodies[0].parallel_tool_calls, false);
   assert.equal(bodies[0].tool_choice, 'required');
