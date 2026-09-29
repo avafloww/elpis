@@ -899,6 +899,7 @@ export class ContextGraphStore {
 
   createEventMessageProjection(input: {
     sourceEventId: EventId;
+    sourceSequence: number;
     worldId: WorldId;
     rendererGeneration: number;
     message: ProjectedUserMessage;
@@ -910,6 +911,19 @@ export class ContextGraphStore {
     );
     if (rendererGeneration < 1) {
       throw new Error('rendererGeneration must be positive');
+    }
+    const sourceSequence = generation('sourceSequence', input.sourceSequence);
+    if (sourceSequence < 1) {
+      throw new Error('sourceSequence must be positive');
+    }
+    const source = this.getWorldEvent(input.sourceEventId);
+    if (
+      !source ||
+      source.worldId !== input.worldId ||
+      !source.kind.startsWith('inbound:') ||
+      source.sequence !== sourceSequence
+    ) {
+      throw new Error('event message projection source lineage is invalid');
     }
     const message = normalizeProjectedUserMessage(input.message);
     const messageJson = serialize(message);
@@ -936,10 +950,6 @@ export class ContextGraphStore {
         );
       }
       return existing;
-    }
-    const source = this.getWorldEvent(input.sourceEventId);
-    if (!source || source.worldId !== input.worldId) {
-      throw new Error('event message projection source is not in its world');
     }
     this.database
       .prepare(
@@ -971,7 +981,11 @@ export class ContextGraphStore {
     if (!row) return null;
     const projection = mapEventMessageProjection(row);
     const source = this.getWorldEvent(projection.sourceEventId);
-    if (!source || source.worldId !== projection.worldId) {
+    if (
+      !source ||
+      source.worldId !== projection.worldId ||
+      !source.kind.startsWith('inbound:')
+    ) {
       throw new Error(
         `stored event message projection has invalid source: ${id}`,
       );
@@ -1009,6 +1023,18 @@ export class ContextGraphStore {
       localMessageProjectionIds?: string[];
     };
     if (parsed.schemaVersion !== 2) return;
+    let previousEventSequence = -1;
+    for (const id of parsed.localEventIds) {
+      const event = this.getWorldEvent(id);
+      if (
+        !event ||
+        event.worldId !== planWorldId ||
+        event.sequence <= previousEventSequence
+      ) {
+        throw new Error('shadow projection local event order is invalid');
+      }
+      previousEventSequence = event.sequence;
+    }
     const positions = new Map(
       parsed.localEventIds.map((id, index) => [id, index] as const),
     );

@@ -344,6 +344,13 @@ test('shadow rendering never projects foreign or multimodal message content', ()
         content: 'B_IMAGE_SOURCE_CANARY',
       }),
     );
+    const partial = value.recorder.recordInbound(
+      inbound({
+        id: 'message-b-partial',
+        guildId: 'guild-b',
+        content: 'B_PARTIAL_SOURCE_CANARY',
+      }),
+    );
     value.recorder.prepareRequestObservation({
       wakeLineage: {
         worldId: multimodal.worldId,
@@ -373,6 +380,12 @@ test('shadow rendering never projects foreign or multimodal message content', ()
           eventId: multimodal.eventId,
           sequence: multimodal.sequence,
         },
+        {
+          role: 'user',
+          content: 'B_PARTIAL_LINEAGE_RENDERED_CANARY',
+          worldId: partial.worldId,
+          eventId: partial.eventId,
+        },
       ],
     });
 
@@ -397,6 +410,10 @@ test('shadow rendering never projects foreign or multimodal message content', ()
       JSON.stringify(rows).includes('B_MULTIMODAL_RENDERED_CANARY'),
       false,
     );
+    assert.equal(
+      JSON.stringify(rows).includes('B_PARTIAL_LINEAGE_RENDERED_CANARY'),
+      false,
+    );
 
     const storedPlan = value.database
       .prepare('SELECT plan_json FROM context_shadow_projection_plans')
@@ -406,12 +423,17 @@ test('shadow rendering never projects foreign or multimodal message content', ()
       localMessageProjectionIds: string[];
       blockers: string[];
     };
-    assert.deepEqual(plan.localEventIds, [b.eventId, multimodal.eventId]);
+    assert.deepEqual(plan.localEventIds, [
+      b.eventId,
+      multimodal.eventId,
+      partial.eventId,
+    ]);
     assert.deepEqual(plan.localMessageProjectionIds, [rows[0].projection_id]);
     assert.deepEqual(plan.blockers, [
       'multiple_worlds',
       'multimodal_unavailable',
       'unrendered_event',
+      'render_projection_mismatch',
     ]);
   } finally {
     value.database.close();

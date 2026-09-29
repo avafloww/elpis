@@ -214,9 +214,19 @@ export class ContextGraphShadowRecorder {
       ) {
         continue;
       }
+      const sourceSequence = message.sequence;
+      if (
+        typeof sourceSequence !== 'number' ||
+        !Number.isSafeInteger(sourceSequence) ||
+        sourceSequence < 1
+      ) {
+        projectionMismatches.add(message.eventId);
+        continue;
+      }
       try {
         const projection = this.store.createEventMessageProjection({
           sourceEventId: message.eventId,
+          sourceSequence,
           worldId: input.wakeLineage.worldId,
           rendererGeneration: 1,
           message: { role: 'user', content: message.content },

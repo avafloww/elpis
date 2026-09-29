@@ -67,6 +67,7 @@ test('world message projections materialize only exact ordered local text', () =
     const projections = events.map((event, index) =>
       value.store.createEventMessageProjection({
         sourceEventId: event.id,
+        sourceSequence: index + 1,
         worldId: event.world,
         rendererGeneration: 1,
         message: { role: 'user', content: `<incoming>${event.text}</incoming>` },
@@ -86,6 +87,7 @@ test('world message projections materialize only exact ordered local text', () =
     assert.deepEqual(
       value.store.createEventMessageProjection({
         sourceEventId: events[0].id,
+        sourceSequence: 1,
         worldId: worldA,
         rendererGeneration: 1,
         message: projections[0].message,
@@ -97,12 +99,45 @@ test('world message projections materialize only exact ordered local text', () =
       () =>
         value.store.createEventMessageProjection({
           sourceEventId: events[0].id,
+          sourceSequence: 1,
           worldId: worldA,
           rendererGeneration: 1,
           message: { role: 'user', content: 'changed rendering' },
           createdAt: 99,
         }),
       /projection identity conflict/,
+    );
+    assert.throws(
+      () =>
+        value.store.createEventMessageProjection({
+          sourceEventId: events[0].id,
+          sourceSequence: 2,
+          worldId: worldA,
+          rendererGeneration: 1,
+          message: projections[0].message,
+          createdAt: 99,
+        }),
+      /source lineage is invalid/,
+    );
+    const nonInbound = value.store.appendWorldEvent({
+      eventId: eventId('event:derived'),
+      worldId: worldA,
+      kind: 'capsule',
+      payload: { text: 'derived' },
+      occurredAt: 4,
+      recordedAt: 4,
+    });
+    assert.throws(
+      () =>
+        value.store.createEventMessageProjection({
+          sourceEventId: nonInbound.eventId,
+          sourceSequence: nonInbound.sequence,
+          worldId: worldA,
+          rendererGeneration: 1,
+          message: { role: 'user', content: 'not authentic ingress' },
+          createdAt: 99,
+        }),
+      /source lineage is invalid/,
     );
 
     const bMessages = materializeWorldConversation({
@@ -143,6 +178,36 @@ test('world message projections materialize only exact ordered local text', () =
           ],
         }),
       /projection order is invalid/,
+    );
+    const reorderedPlan = {
+      schemaVersion: 2,
+      worldId: worldA,
+      wakeEventId: events[0].id,
+      projectionGeneration: 2,
+      policyGeneration: 1,
+      rendererGeneration: 1,
+      localEventIds: [events[1].id, events[0].id],
+      localMessageProjectionIds: [
+        projections[1].projectionId,
+        projections[0].projectionId,
+      ],
+      sharedEventIds: [],
+      foreignWorlds: [],
+      unlineagedRoles: { system: 0, user: 0, assistant: 0, tool: 0 },
+      systemLayers: [],
+      blockers: [],
+    };
+    const reorderedHash = hashContextBytes(JSON.stringify(reorderedPlan));
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(`shadow-plan:${reorderedHash}`),
+          worldId: worldA,
+          wakeEventId: events[0].id,
+          plan: reorderedPlan,
+          createdAt: 99,
+        }),
+      /local event order is invalid/,
     );
     assert.throws(
       () =>
