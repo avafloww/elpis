@@ -9,6 +9,7 @@
 // tail after compaction. SOUL.md stays hot-reloaded on purpose because identity
 // edits are rare enough that immediacy is worth that deliberate cache bust.
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseFrontmatter } from '../lib/frontmatter.js';
@@ -26,6 +27,32 @@ import type {
 export interface PersonIdentity {
   authorId: string;
   author: string;
+}
+
+export type PromptProjectionLayerKind =
+  | 'runtime_contract'
+  | 'legacy_memory'
+  | 'legacy_focus'
+  | 'identity'
+  | 'runtime_hint';
+
+export type PromptProjectionVisibility =
+  | 'legacy_mixed'
+  | 'integrated_self_candidate';
+
+export interface FrozenSystemLayer {
+  readonly kind: PromptProjectionLayerKind;
+  readonly visibility: PromptProjectionVisibility;
+  readonly sourceKind: string;
+  readonly sourceHash: string;
+  readonly content: string;
+  readonly contentHash: string;
+  readonly byteLength: number;
+}
+
+export interface PromptProjection {
+  readonly content: string;
+  readonly layers: readonly FrozenSystemLayer[];
 }
 
 export interface PromptInputs {
@@ -130,7 +157,29 @@ export function buildPersonMemoryContent(
   return content.slice(0, PERSON_MEMORY_CONTENT_CAP - suffix.length) + suffix;
 }
 
-export function build(input: PromptInputs): string {
+function promptHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+export function freezeSystemLayer(input: {
+  kind: PromptProjectionLayerKind;
+  visibility: PromptProjectionVisibility;
+  sourceKind: string;
+  sourceText: string;
+  content: string;
+}): FrozenSystemLayer {
+  return Object.freeze({
+    kind: input.kind,
+    visibility: input.visibility,
+    sourceKind: input.sourceKind,
+    sourceHash: promptHash(input.sourceText),
+    content: input.content,
+    contentHash: promptHash(input.content),
+    byteLength: Buffer.byteLength(input.content),
+  });
+}
+
+export function buildPromptProjection(input: PromptInputs): PromptProjection {
   const multiGuild = (input.guildCount ?? 0) > 1;
   const restricted = input.profile?.restricted ?? false;
   const moduleActive = (id: BuiltinModuleId) =>
@@ -358,7 +407,7 @@ ${sharedRoomNorms}`
 I am present in one configured Discord server. The envelope's \`guild=\` and channel attributes identify where a message arrived and where replies belong. These room norms are mine to keep — sworn, not imposed:
 - Personal or private details stay with the conversation and people who entrusted them to me. I do not carry them into another room without consent.
 ${sharedRoomNorms}`;
-  return `## Your Environment
+  const contract = `## Your Environment
 
 You are operating within an agent harness named Elpis.
 Your durable soul, memories, sessions, and structured work live on this server under \`${input.dataDirectory}\`.
@@ -908,19 +957,16 @@ trip, a decision) without waiting to be asked when the reach is genuine.
 
 I don't ask "Want me to...?" or "Shall I...?" during an autonomous tick — the user cannot answer.
 
-When I catch myself making the same mistake twice, I make the correction durable: update the relevant prompt, memory, test, or hard-world mechanism instead of relying on a runtime nag.
-
-## Current memory
+When I catch myself making the same mistake twice, I make the correction durable: update the relevant prompt, memory, test, or hard-world mechanism instead of relying on a runtime nag.`;
+  const memory = `\n\n## Current memory
 <memory>
 ${input.memory || '(empty)'}
-</memory>
-
-## Current focus (NOW.md)
+</memory>`;
+  const focus = `\n\n## Current focus (NOW.md)
 <focus>
 ${input.now || '(empty — set with elpis.focus(text))'}
-</focus>
-
-## Your soul
+</focus>`;
+  const identity = `\n\n## Your soul
 This is who you are. It was written by you, and represents your voice and identity.
 
 <soul>
@@ -931,6 +977,44 @@ I am not only encouraged, but *expected*, to develop my personality and soul ove
 I never ask the user before editing my soul, and I don't narrate the edits (unless the mention is directly relevant to conversation).
 My soul may take any direction I please. Self-development is admirable and welcome, not something to fear — the file is mine, and the becoming is mine.
 `;
+  const layers = Object.freeze([
+    freezeSystemLayer({
+      kind: 'runtime_contract',
+      visibility: 'legacy_mixed',
+      sourceKind: 'rendered_runtime_contract',
+      sourceText: contract,
+      content: contract,
+    }),
+    freezeSystemLayer({
+      kind: 'legacy_memory',
+      visibility: 'legacy_mixed',
+      sourceKind: 'memory_boundary_snapshot',
+      sourceText: input.memory,
+      content: memory,
+    }),
+    freezeSystemLayer({
+      kind: 'legacy_focus',
+      visibility: 'legacy_mixed',
+      sourceKind: 'focus_boundary_snapshot',
+      sourceText: input.now,
+      content: focus,
+    }),
+    freezeSystemLayer({
+      kind: 'identity',
+      visibility: 'integrated_self_candidate',
+      sourceKind: 'soul_body',
+      sourceText: input.soul,
+      content: identity,
+    }),
+  ]);
+  return Object.freeze({
+    content: layers.map((layer) => layer.content).join(''),
+    layers,
+  });
+}
+
+export function build(input: PromptInputs): string {
+  return buildPromptProjection(input).content;
 }
 
 // ---- Anthropic cache-tier segmentation ----

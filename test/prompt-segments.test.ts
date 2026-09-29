@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { build, segmentSystemPrompt } from '../src/llm/prompt.js';
+import { createHash } from 'node:crypto';
+import {
+  build,
+  buildPromptProjection,
+  segmentSystemPrompt,
+} from '../src/llm/prompt.js';
 
 const inputs = {
   soul: 'SOUL_BODY_MARKER_XYZ',
@@ -10,6 +15,44 @@ const inputs = {
   dataDirectory: '/DD',
   guildCount: 1,
 };
+
+test('prompt projection preserves exact bytes and freezes typed sources', () => {
+  const mutable = { ...inputs };
+  const projection = buildPromptProjection(mutable);
+  const full = build(inputs);
+  assert.equal(projection.content, full);
+  assert.equal(
+    createHash('sha256').update(projection.content).digest('hex'),
+    'f3547b359c7505c2e680242df0046e9fbe42cecf0458aaeb0f09888c29f1721e',
+  );
+  assert.equal(Buffer.byteLength(projection.content), 53_349);
+  assert.deepEqual(
+    projection.layers.map((layer) => [layer.kind, layer.visibility]),
+    [
+      ['runtime_contract', 'legacy_mixed'],
+      ['legacy_memory', 'legacy_mixed'],
+      ['legacy_focus', 'legacy_mixed'],
+      ['identity', 'integrated_self_candidate'],
+    ],
+  );
+  assert.equal(
+    projection.layers.map((layer) => layer.content).join(''),
+    projection.content,
+  );
+  assert.equal(Object.isFrozen(projection), true);
+  assert.equal(Object.isFrozen(projection.layers), true);
+  assert.equal(projection.layers.every(Object.isFrozen), true);
+  mutable.soul = 'MUTATED_AFTER_RENDER';
+  mutable.memory = 'MUTATED_AFTER_RENDER';
+  assert.doesNotMatch(projection.content, /MUTATED_AFTER_RENDER/);
+  for (const layer of projection.layers) {
+    assert.equal(layer.byteLength, Buffer.byteLength(layer.content));
+    assert.equal(
+      layer.contentHash,
+      createHash('sha256').update(layer.content).digest('hex'),
+    );
+  }
+});
 
 test('segmentSystemPrompt: three tiers, SOUL relocated to the tail', () => {
   const full = build(inputs);

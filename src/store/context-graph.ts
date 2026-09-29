@@ -27,6 +27,7 @@ export type LegacyImportReceiptId = ContextId<'LegacyImportReceiptId'>;
 export type EffectId = ContextId<'EffectId'>;
 export type EventMessageProjectionId =
   ContextId<'EventMessageProjectionId'>;
+export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
   ContextId<'ShadowRequestObservationId'>;
@@ -87,6 +88,14 @@ export const eventMessageProjectionId = (
     value,
     'event-message:',
   );
+export const systemLayerProjectionId = (
+  value: string,
+): SystemLayerProjectionId =>
+  branded<'SystemLayerProjectionId'>(
+    'systemLayerProjectionId',
+    value,
+    'system-layer:',
+  );
 export const shadowProjectionPlanId = (value: string): ShadowProjectionPlanId =>
   branded<'ShadowProjectionPlanId'>(
     'shadowProjectionPlanId',
@@ -107,6 +116,22 @@ export type CapsuleKind =
   'private' | 'root_receipt' | 'self_delta' | 'legacy_opaque';
 export type EffectStatus = 'prepared' | 'observed' | 'failed' | 'uncertain';
 export type ContextGraphMode = 'dark' | 'active';
+export type SystemLayerKind =
+  | 'runtime_contract'
+  | 'identity'
+  | 'integrated_self'
+  | 'world_policy'
+  | 'private_frontier'
+  | 'legacy_memory'
+  | 'legacy_focus'
+  | 'runtime_hint';
+export type SystemLayerVisibility =
+  | 'global_contract'
+  | 'integrated_self'
+  | 'integrated_self_candidate'
+  | 'world'
+  | 'private_root'
+  | 'legacy_mixed';
 
 export interface WorldEventRecord {
   readonly sequence: number;
@@ -132,6 +157,21 @@ export interface EventMessageProjectionRecord {
   readonly message: ProjectedUserMessage;
   readonly messageJson: string;
   readonly messageHash: string;
+  readonly createdAt: number;
+}
+
+export interface SystemLayerProjectionRecord {
+  readonly layerId: SystemLayerProjectionId;
+  readonly kind: SystemLayerKind;
+  readonly visibility: SystemLayerVisibility;
+  readonly worldId: WorldId | null;
+  readonly rendererGeneration: number;
+  readonly policyGeneration: number;
+  readonly sourceKind: string;
+  readonly sourceHash: string;
+  readonly content: string;
+  readonly contentHash: string;
+  readonly contentBytes: number;
   readonly createdAt: number;
 }
 
@@ -446,6 +486,71 @@ function renderedProjectionIdentity(input: {
   return eventMessageProjectionId(`event-message:${hash}`);
 }
 
+const SYSTEM_LAYER_KINDS = new Set<SystemLayerKind>([
+  'runtime_contract',
+  'identity',
+  'integrated_self',
+  'world_policy',
+  'private_frontier',
+  'legacy_memory',
+  'legacy_focus',
+  'runtime_hint',
+]);
+const SYSTEM_LAYER_VISIBILITIES = new Set<SystemLayerVisibility>([
+  'global_contract',
+  'integrated_self',
+  'integrated_self_candidate',
+  'world',
+  'private_root',
+  'legacy_mixed',
+]);
+
+function systemLayerKind(value: unknown): SystemLayerKind {
+  if (typeof value !== 'string' || !SYSTEM_LAYER_KINDS.has(value as SystemLayerKind)) {
+    throw new Error('system layer kind is invalid');
+  }
+  return value as SystemLayerKind;
+}
+
+function systemLayerVisibility(value: unknown): SystemLayerVisibility {
+  if (
+    typeof value !== 'string' ||
+    !SYSTEM_LAYER_VISIBILITIES.has(value as SystemLayerVisibility)
+  ) {
+    throw new Error('system layer visibility is invalid');
+  }
+  return value as SystemLayerVisibility;
+}
+
+function systemLayerSourceKind(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > 64 ||
+    !/^[a-z0-9:_-]+$/.test(value)
+  ) {
+    throw new Error('system layer source kind is invalid');
+  }
+  return value;
+}
+
+function systemLayerIdentity(input: {
+  kind: SystemLayerKind;
+  visibility: SystemLayerVisibility;
+  worldId: WorldId | null;
+  rendererGeneration: number;
+  policyGeneration: number;
+  sourceKind: string;
+  sourceHash: string;
+  contentHash: string;
+  contentBytes: number;
+}): SystemLayerProjectionId {
+  const hash = hashContextBytes(
+    serialize({ schemaVersion: 1, ...input }),
+  );
+  return systemLayerProjectionId(`system-layer:${hash}`);
+}
+
 function shadowCount(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${label} must be a non-negative safe integer`);
@@ -460,12 +565,13 @@ function validateShadowProjectionPlan(
 ): void {
   const plan = shadowPlanObject(value, 'shadow projection plan');
   const isV2 = plan.schemaVersion === 2;
-  if (plan.schemaVersion !== 1 && !isV2) {
+  const isV3 = plan.schemaVersion === 3;
+  if (plan.schemaVersion !== 1 && !isV2 && !isV3) {
     throw new Error('shadow projection plan version is invalid');
   }
   exactShadowPlanKeys(
     plan,
-    isV2
+    isV3
       ? [
           'schemaVersion',
           'worldId',
@@ -473,15 +579,32 @@ function validateShadowProjectionPlan(
           'projectionGeneration',
           'policyGeneration',
           'rendererGeneration',
+          'systemRendererGeneration',
           'localEventIds',
           'localMessageProjectionIds',
           'sharedEventIds',
           'foreignWorlds',
           'unlineagedRoles',
-          'systemLayers',
+          'systemLayerProjectionIds',
           'blockers',
         ]
-      : [
+      : isV2
+        ? [
+            'schemaVersion',
+            'worldId',
+            'wakeEventId',
+            'projectionGeneration',
+            'policyGeneration',
+            'rendererGeneration',
+            'localEventIds',
+            'localMessageProjectionIds',
+            'sharedEventIds',
+            'foreignWorlds',
+            'unlineagedRoles',
+            'systemLayers',
+            'blockers',
+          ]
+        : [
           'schemaVersion',
           'worldId',
           'wakeEventId',
@@ -497,11 +620,12 @@ function validateShadowProjectionPlan(
     'shadow projection plan',
   );
   if (
-    plan.projectionGeneration !== (isV2 ? 2 : 1) ||
+    plan.projectionGeneration !== (isV3 ? 3 : isV2 ? 2 : 1) ||
     plan.policyGeneration !== 1 ||
     plan.worldId !== world ||
     plan.wakeEventId !== wakeEvent ||
-    (isV2 && plan.rendererGeneration !== 1)
+    ((isV2 || isV3) && plan.rendererGeneration !== 1) ||
+    (isV3 && plan.systemRendererGeneration !== 1)
   ) {
     throw new Error('shadow projection plan identity or generation is invalid');
   }
@@ -523,7 +647,8 @@ function validateShadowProjectionPlan(
   ) {
     throw new Error('shadow projection plan event lineage is invalid');
   }
-  const localProjectionIds = isV2 ? plan.localMessageProjectionIds : [];
+  const localProjectionIds =
+    isV2 || isV3 ? plan.localMessageProjectionIds : [];
   if (
     !Array.isArray(localProjectionIds) ||
     localProjectionIds.length > local.length ||
@@ -574,40 +699,75 @@ function validateShadowProjectionPlan(
   for (const role of ['system', 'user', 'assistant', 'tool']) {
     shadowCount(roles[role], `shadow projection ${role} count`);
   }
-  if (!Array.isArray(plan.systemLayers) || plan.systemLayers.length > 64) {
-    throw new Error('shadow projection system layers are invalid');
-  }
-  const ordinals = new Set<number>();
-  for (const item of plan.systemLayers) {
-    const layer = shadowPlanObject(item, 'shadow projection system layer');
-    exactShadowPlanKeys(
-      layer,
-      ['ordinal', 'sha256', 'byteLength', 'scope'],
-      'shadow projection system layer',
-    );
-    const ordinal = shadowCount(
-      layer.ordinal,
-      'shadow projection layer ordinal',
-    );
-    if (ordinals.has(ordinal) || layer.scope !== 'legacy-mixed') {
-      throw new Error('shadow projection system layer is invalid');
+  const systemLayerProjectionIds = isV3
+    ? Array.isArray(plan.systemLayerProjectionIds)
+      ? plan.systemLayerProjectionIds
+      : null
+    : [];
+  if (isV3) {
+    if (
+      systemLayerProjectionIds === null ||
+      systemLayerProjectionIds.length > 64 ||
+      systemLayerProjectionIds.some((id) => {
+        try {
+          systemLayerProjectionId(String(id));
+          return typeof id !== 'string';
+        } catch {
+          return true;
+        }
+      }) ||
+      new Set(systemLayerProjectionIds).size !== systemLayerProjectionIds.length
+    ) {
+      throw new Error('shadow projection system layer references are invalid');
     }
-    ordinals.add(ordinal);
-    sha256('shadow projection layer hash', String(layer.sha256));
-    shadowCount(layer.byteLength, 'shadow projection layer bytes');
+  } else {
+    if (!Array.isArray(plan.systemLayers) || plan.systemLayers.length > 64) {
+      throw new Error('shadow projection system layers are invalid');
+    }
+    const ordinals = new Set<number>();
+    for (const item of plan.systemLayers) {
+      const layer = shadowPlanObject(item, 'shadow projection system layer');
+      exactShadowPlanKeys(
+        layer,
+        ['ordinal', 'sha256', 'byteLength', 'scope'],
+        'shadow projection system layer',
+      );
+      const ordinal = shadowCount(
+        layer.ordinal,
+        'shadow projection layer ordinal',
+      );
+      if (ordinals.has(ordinal) || layer.scope !== 'legacy-mixed') {
+        throw new Error('shadow projection system layer is invalid');
+      }
+      ordinals.add(ordinal);
+      sha256('shadow projection layer hash', String(layer.sha256));
+      shadowCount(layer.byteLength, 'shadow projection layer bytes');
+    }
   }
   const allowedBlockers = new Set([
-    'legacy_mixed_system',
+    ...(!isV3 ? ['legacy_mixed_system'] : []),
     'unlineaged_history',
     'multiple_worlds',
     'unverified_share',
     'multimodal_unavailable',
     'duplicate_event',
-    ...(isV2
+    ...(isV2 || isV3
       ? [
           'unsupported_projected_role',
           'unrendered_event',
           'render_projection_mismatch',
+        ]
+      : []),
+    ...(isV3
+      ? [
+          'legacy_monocontext_contract',
+          'legacy_mixed_memory',
+          'legacy_mixed_focus',
+          'identity_candidate_unapproved',
+          'runtime_hint_unscoped',
+          'system_layer_unavailable',
+          'system_layer_mismatch',
+          'unbound_effect_tools',
         ]
       : []),
   ]);
@@ -621,7 +781,7 @@ function validateShadowProjectionPlan(
   ) {
     throw new Error('shadow projection blockers are invalid');
   }
-  if (isV2) {
+  if (isV2 || isV3) {
     const incomplete = localProjectionIds.length !== local.length;
     const saysIncomplete = plan.blockers.includes('unrendered_event');
     if (
@@ -630,6 +790,17 @@ function validateShadowProjectionPlan(
       (plan.blockers.includes('unsupported_projected_role') && !saysIncomplete)
     ) {
       throw new Error('shadow projection rendering state is inconsistent');
+    }
+  }
+  if (isV3) {
+    const systemUnavailable = systemLayerProjectionIds?.length === 0;
+    const saysUnavailable = plan.blockers.includes('system_layer_unavailable');
+    if (
+      systemUnavailable !== saysUnavailable ||
+      (plan.blockers.includes('system_layer_mismatch') && !saysUnavailable) ||
+      !plan.blockers.includes('unbound_effect_tools')
+    ) {
+      throw new Error('shadow projection system state is inconsistent');
     }
   }
 }
@@ -664,6 +835,21 @@ interface EventMessageProjectionRow {
   renderer_generation: number;
   message_json: string;
   message_hash: string;
+  created_at: number;
+}
+
+interface SystemLayerProjectionRow {
+  layer_id: string;
+  layer_kind: string;
+  visibility: string;
+  world_id: string | null;
+  renderer_generation: number;
+  policy_generation: number;
+  source_kind: string;
+  source_hash: string;
+  content_text: string;
+  content_hash: string;
+  content_bytes: number;
   created_at: number;
 }
 
@@ -799,6 +985,62 @@ function mapEventMessageProjection(
     message,
     messageJson,
     messageHash,
+    createdAt: timestamp('createdAt', row.created_at),
+  };
+}
+
+function mapSystemLayerProjection(
+  row: SystemLayerProjectionRow,
+): SystemLayerProjectionRecord {
+  const kind = systemLayerKind(row.layer_kind);
+  const visibility = systemLayerVisibility(row.visibility);
+  const projectionWorldId =
+    row.world_id === null ? null : worldId(row.world_id);
+  const rendererGeneration = generation(
+    'rendererGeneration',
+    row.renderer_generation,
+  );
+  const policyGeneration = generation(
+    'policyGeneration',
+    row.policy_generation,
+  );
+  const sourceKind = systemLayerSourceKind(row.source_kind);
+  const sourceHash = sha256('sourceHash', row.source_hash);
+  const contentHash = sha256('contentHash', row.content_hash);
+  const contentBytes = shadowCount(row.content_bytes, 'contentBytes');
+  if (
+    rendererGeneration < 1 ||
+    policyGeneration < 1 ||
+    (visibility === 'world') !== (projectionWorldId !== null) ||
+    Buffer.byteLength(row.content_text) !== contentBytes ||
+    contentBytes > 8 * 1024 * 1024 ||
+    hashContextBytes(row.content_text) !== contentHash ||
+    systemLayerIdentity({
+      kind,
+      visibility,
+      worldId: projectionWorldId,
+      rendererGeneration,
+      policyGeneration,
+      sourceKind,
+      sourceHash,
+      contentHash,
+      contentBytes,
+    }) !== row.layer_id
+  ) {
+    throw new Error(`stored system layer projection is invalid: ${row.layer_id}`);
+  }
+  return {
+    layerId: systemLayerProjectionId(row.layer_id),
+    kind,
+    visibility,
+    worldId: projectionWorldId,
+    rendererGeneration,
+    policyGeneration,
+    sourceKind,
+    sourceHash,
+    content: row.content_text,
+    contentHash,
+    contentBytes,
     createdAt: timestamp('createdAt', row.created_at),
   };
 }
@@ -1012,6 +1254,109 @@ export class ContextGraphStore {
     );
   }
 
+  createSystemLayerProjection(input: {
+    kind: SystemLayerKind;
+    visibility: SystemLayerVisibility;
+    worldId: WorldId | null;
+    rendererGeneration: number;
+    policyGeneration: number;
+    sourceKind: string;
+    sourceHash: string;
+    content: string;
+    createdAt: number;
+  }): SystemLayerProjectionRecord {
+    const kind = systemLayerKind(input.kind);
+    const visibility = systemLayerVisibility(input.visibility);
+    const sourceKind = systemLayerSourceKind(input.sourceKind);
+    const sourceHash = sha256('sourceHash', input.sourceHash);
+    const rendererGeneration = generation(
+      'rendererGeneration',
+      input.rendererGeneration,
+    );
+    const policyGeneration = generation(
+      'policyGeneration',
+      input.policyGeneration,
+    );
+    const projectionWorldId =
+      input.worldId === null ? null : worldId(input.worldId);
+    if (
+      rendererGeneration < 1 ||
+      policyGeneration < 1 ||
+      (visibility === 'world') !== (projectionWorldId !== null) ||
+      typeof input.content !== 'string'
+    ) {
+      throw new Error('system layer projection metadata is invalid');
+    }
+    const contentBytes = Buffer.byteLength(input.content);
+    if (contentBytes > 8 * 1024 * 1024) {
+      throw new Error('system layer projection content is too large');
+    }
+    const contentHash = hashContextBytes(input.content);
+    const layerId = systemLayerIdentity({
+      kind,
+      visibility,
+      worldId: projectionWorldId,
+      rendererGeneration,
+      policyGeneration,
+      sourceKind,
+      sourceHash,
+      contentHash,
+      contentBytes,
+    });
+    const existing = this.getSystemLayerProjection(layerId);
+    if (existing) {
+      if (
+        existing.kind !== kind ||
+        existing.visibility !== visibility ||
+        existing.worldId !== projectionWorldId ||
+        existing.rendererGeneration !== rendererGeneration ||
+        existing.policyGeneration !== policyGeneration ||
+        existing.sourceKind !== sourceKind ||
+        existing.sourceHash !== sourceHash ||
+        existing.contentHash !== contentHash ||
+        existing.contentBytes !== contentBytes ||
+        existing.content !== input.content
+      ) {
+        throw new Error(`system layer projection identity conflict: ${layerId}`);
+      }
+      return existing;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_system_layer_projections(
+           layer_id, layer_kind, visibility, world_id, renderer_generation,
+           policy_generation, source_kind, source_hash, content_text,
+           content_hash, content_bytes, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        layerId,
+        kind,
+        visibility,
+        projectionWorldId,
+        rendererGeneration,
+        policyGeneration,
+        sourceKind,
+        sourceHash,
+        input.content,
+        contentHash,
+        contentBytes,
+        timestamp('createdAt', input.createdAt),
+      );
+    return this.getSystemLayerProjection(layerId)!;
+  }
+
+  getSystemLayerProjection(
+    id: SystemLayerProjectionId,
+  ): SystemLayerProjectionRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_system_layer_projections WHERE layer_id = ?',
+      )
+      .get(id) as unknown as SystemLayerProjectionRow | undefined;
+    return row ? mapSystemLayerProjection(row) : null;
+  }
+
   private validateShadowMessageProjectionLineage(
     plan: unknown,
     planWorldId: WorldId,
@@ -1022,7 +1367,7 @@ export class ContextGraphStore {
       localEventIds: EventId[];
       localMessageProjectionIds?: string[];
     };
-    if (parsed.schemaVersion !== 2) return;
+    if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3) return;
     let previousEventSequence = -1;
     for (const id of parsed.localEventIds) {
       const event = this.getWorldEvent(id);
@@ -1059,6 +1404,95 @@ export class ContextGraphStore {
     }
   }
 
+  private validateShadowSystemLayerLineage(
+    plan: unknown,
+    planWorldId: WorldId,
+  ): void {
+    const parsed = plan as {
+      schemaVersion: number;
+      systemRendererGeneration?: number;
+      policyGeneration: number;
+      systemLayerProjectionIds?: string[];
+      blockers: string[];
+    };
+    if (parsed.schemaVersion !== 3) return;
+    const order: Readonly<Record<SystemLayerKind, number>> = {
+      runtime_contract: 0,
+      legacy_memory: 1,
+      legacy_focus: 2,
+      identity: 3,
+      integrated_self: 4,
+      world_policy: 5,
+      private_frontier: 6,
+      runtime_hint: 7,
+    };
+    const expectedBlockers = new Set<string>();
+    let previousOrder = -1;
+    for (const rawId of parsed.systemLayerProjectionIds ?? []) {
+      const layer = this.getSystemLayerProjection(
+        systemLayerProjectionId(rawId),
+      );
+      if (
+        !layer ||
+        layer.rendererGeneration !== parsed.systemRendererGeneration ||
+        layer.policyGeneration !== parsed.policyGeneration ||
+        (layer.visibility === 'world' && layer.worldId !== planWorldId) ||
+        (layer.visibility !== 'world' && layer.worldId !== null) ||
+        order[layer.kind] <= previousOrder
+      ) {
+        throw new Error('shadow projection system layer lineage is invalid');
+      }
+      previousOrder = order[layer.kind];
+      if (
+        layer.kind === 'runtime_contract' &&
+        layer.visibility === 'legacy_mixed'
+      ) {
+        expectedBlockers.add('legacy_monocontext_contract');
+      } else if (
+        layer.kind === 'legacy_memory' &&
+        layer.visibility === 'legacy_mixed'
+      ) {
+        expectedBlockers.add('legacy_mixed_memory');
+      } else if (
+        layer.kind === 'legacy_focus' &&
+        layer.visibility === 'legacy_mixed'
+      ) {
+        expectedBlockers.add('legacy_mixed_focus');
+      } else if (
+        layer.kind === 'identity' &&
+        layer.visibility === 'integrated_self_candidate'
+      ) {
+        expectedBlockers.add('identity_candidate_unapproved');
+      } else if (
+        layer.kind === 'runtime_hint' &&
+        layer.visibility === 'legacy_mixed'
+      ) {
+        expectedBlockers.add('runtime_hint_unscoped');
+      } else if (
+        !(
+          (layer.kind === 'runtime_contract' &&
+            layer.visibility === 'global_contract') ||
+          ((layer.kind === 'identity' || layer.kind === 'integrated_self') &&
+            layer.visibility === 'integrated_self') ||
+          (layer.kind === 'world_policy' && layer.visibility === 'world')
+        )
+      ) {
+        throw new Error('shadow projection system layer scope is unsupported');
+      }
+    }
+    for (const blocker of [
+      'legacy_monocontext_contract',
+      'legacy_mixed_memory',
+      'legacy_mixed_focus',
+      'identity_candidate_unapproved',
+      'runtime_hint_unscoped',
+    ]) {
+      if (parsed.blockers.includes(blocker) !== expectedBlockers.has(blocker)) {
+        throw new Error('shadow projection system blocker lineage is invalid');
+      }
+    }
+  }
+
   createShadowProjectionPlan(input: {
     planId: ShadowProjectionPlanId;
     worldId: WorldId;
@@ -1088,6 +1522,7 @@ export class ContextGraphStore {
       }
     }
     this.validateShadowMessageProjectionLineage(input.plan, input.worldId);
+    this.validateShadowSystemLayerLineage(input.plan, input.worldId);
     const planJson = serialize(input.plan);
 
     const planHash = hashContextBytes(planJson);
@@ -1153,10 +1588,13 @@ export class ContextGraphStore {
       eventId(row.wake_event_id),
     );
     this.validateShadowMessageProjectionLineage(parsed, worldId(row.world_id));
+    this.validateShadowSystemLayerLineage(parsed, worldId(row.world_id));
     if (
       !parsed ||
       typeof parsed !== 'object' ||
-      (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
+      (parsed.schemaVersion !== 1 &&
+        parsed.schemaVersion !== 2 &&
+        parsed.schemaVersion !== 3) ||
       parsed.worldId !== row.world_id ||
       parsed.wakeEventId !== row.wake_event_id ||
       serialize(parsed) !== row.plan_json ||

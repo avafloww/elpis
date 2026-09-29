@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    32,
+    33,
   );
   assert.deepEqual(
     (
@@ -199,6 +199,7 @@ test('current migration prefix preserves fleet history and creates resident stat
       { component: 'core', name: '0030-context-root-coordinator' },
       { component: 'core', name: '0031-context-shadow-projections' },
       { component: 'core', name: '0032-context-event-message-projections' },
+      { component: 'core', name: '0033-context-system-layer-projections' },
     ],
   );
   db.close();
@@ -209,6 +210,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
   const db = openDatabase(dir);
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TABLE context_system_layer_projections;
     DROP TABLE context_event_message_projections;
     DROP TABLE context_shadow_request_observations;
     DROP TABLE context_shadow_projection_plans;
@@ -237,7 +239,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -426,7 +428,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    32,
+    33,
   );
   assert.deepEqual(
     (
@@ -456,6 +458,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0030-context-root-coordinator',
       '0031-context-shadow-projections',
       '0032-context-event-message-projections',
+      '0033-context-system-layer-projections',
     ],
   );
   runMigrations(db);
@@ -487,7 +490,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    19,
+    20,
   );
   db.close();
 });
@@ -527,7 +530,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 32);
+  assert.equal(version, 33);
   assert.equal(
     (
       reopened
@@ -559,6 +562,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
   db.exec(`
     DROP TRIGGER context_branches_coordinated_return_guard;
     DROP TRIGGER context_continuation_head_advance_guard;
+    DROP TABLE context_system_layer_projections;
     DROP TABLE context_event_message_projections;
     DROP TABLE context_shadow_request_observations;
     DROP TABLE context_shadow_projection_plans;
@@ -568,7 +572,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP INDEX context_branches_single_running_idx;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,

@@ -74,11 +74,16 @@ import type {
   SecretaryMindActivityBatch,
 } from './store/mind.js';
 import {
-  build as buildPrompt,
+  buildPromptProjection,
   buildPersonMemoryContent,
+  freezeSystemLayer,
   loadPeopleFiles,
 } from './llm/prompt.js';
-import type { PersonFile, PersonIdentity } from './llm/prompt.js';
+import type {
+  FrozenSystemLayer,
+  PersonFile,
+  PersonIdentity,
+} from './llm/prompt.js';
 import {
   GHOST_REPLY_NUDGE,
   YIELD_TURN_NUDGE,
@@ -737,6 +742,7 @@ export interface AgentDeps {
     };
     prepareRequestObservation(input: {
       messages: readonly ChatMessage[];
+      systemLayers?: readonly FrozenSystemLayer[];
       wakeLineage: InboundMessage['contextGraphLineage'] | null;
     }): ProviderContentProjectionObserver | undefined;
   };
@@ -2724,9 +2730,9 @@ export class Agent {
       // leak-retry / transient-retry attempts AND across turns — which is what
       // keeps the provider's cached prefix alive for the whole conversation.
       const requestBuildStart = Date.now();
-      const systemMessage = this.buildSystemMessage();
+      const systemProjection = this.buildSystemProjection();
       const requestMessages = this.buildRequestMessages(
-        systemMessage,
+        systemProjection.message,
         !this.mindFrontierDeliveredThisTurn,
         true,
       );
@@ -2739,6 +2745,7 @@ export class Agent {
         observeContentProjection =
           this.deps.contextGraphShadow?.prepareRequestObservation({
             messages: requestMessages,
+            systemLayers: systemProjection.layers,
             wakeLineage: this.lastInbound?.contextGraphLineage ?? null,
           });
       } catch {
@@ -3868,12 +3875,15 @@ Then put only the acknowledgement in that speech body; keep private reasoning ou
     return messages;
   }
 
-  private buildSystemMessage(): ChatMessage {
+  private buildSystemProjection(): {
+    message: ChatMessage;
+    layers: readonly FrozenSystemLayer[];
+  } {
     const llmSettings = mainLlmSettings(this.config);
     // The frontmatter envelope (agent name — src/store/soul.ts) is harness
     // metadata, not identity prose: only the body reaches the prompt.
     const soul = parseSoul(readFileOr(this.config.paths.soulPath)).body;
-    const prompt = buildPrompt({
+    const projection = buildPromptProjection({
       soul,
       memory: this.memoryView,
       now: this.nowView,
@@ -3892,7 +3902,26 @@ Then put only the acknowledgement in that speech body; keep private reasoning ou
     const externalThinkingHint = llmSettings.externalThinking
       ? `\n\n# Juice: ${externalThinkingJuice(llmSettings.reasoningEffort)} !important`
       : '';
-    return system(prompt + externalThinkingHint);
+    const layers = externalThinkingHint
+      ? Object.freeze([
+          ...projection.layers,
+          freezeSystemLayer({
+            kind: 'runtime_hint',
+            visibility: 'legacy_mixed',
+            sourceKind: 'llm_reasoning_config',
+            sourceText: externalThinkingHint,
+            content: externalThinkingHint,
+          }),
+        ])
+      : projection.layers;
+    return {
+      message: system(layers.map((layer) => layer.content).join('')),
+      layers,
+    };
+  }
+
+  private buildSystemMessage(): ChatMessage {
+    return this.buildSystemProjection().message;
   }
 
   /** Console: the request body the next LLM call would send, built on demand —

@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 32;
+const SCHEMA_VERSION = 33;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1731,6 +1731,39 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_event_message_projections_no_delete
           BEFORE DELETE ON context_event_message_projections BEGIN
             SELECT RAISE(ABORT, 'context event message projections are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0033-context-system-layer-projections',
+      sql: `
+        CREATE TABLE context_system_layer_projections (
+          layer_id             TEXT PRIMARY KEY CHECK (length(layer_id) BETWEEN 1 AND 128),
+          layer_kind           TEXT NOT NULL CHECK (layer_kind IN ('runtime_contract','identity','integrated_self','world_policy','private_frontier','legacy_memory','legacy_focus','runtime_hint')),
+          visibility           TEXT NOT NULL CHECK (visibility IN ('global_contract','integrated_self','integrated_self_candidate','world','private_root','legacy_mixed')),
+          world_id             TEXT CHECK (world_id IS NULL OR length(world_id) BETWEEN 1 AND 256),
+          renderer_generation  INTEGER NOT NULL CHECK (typeof(renderer_generation) = 'integer' AND renderer_generation >= 1),
+          policy_generation    INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 1),
+          source_kind          TEXT NOT NULL CHECK (length(source_kind) BETWEEN 1 AND 64),
+          source_hash          TEXT NOT NULL CHECK (length(source_hash) = 64 AND source_hash NOT GLOB '*[^0-9a-f]*'),
+          content_text         TEXT NOT NULL,
+          content_hash         TEXT NOT NULL CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+          content_bytes        INTEGER NOT NULL CHECK (typeof(content_bytes) = 'integer' AND content_bytes >= 0),
+          created_at           INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          CHECK (
+            (visibility = 'world' AND world_id IS NOT NULL)
+            OR (visibility != 'world' AND world_id IS NULL)
+          )
+        );
+        CREATE INDEX context_system_layer_projections_scope_idx
+          ON context_system_layer_projections(visibility, world_id, layer_kind, renderer_generation, policy_generation);
+        CREATE TRIGGER context_system_layer_projections_no_update
+          BEFORE UPDATE ON context_system_layer_projections BEGIN
+            SELECT RAISE(ABORT, 'context system layer projections are immutable');
+          END;
+        CREATE TRIGGER context_system_layer_projections_no_delete
+          BEFORE DELETE ON context_system_layer_projections BEGIN
+            SELECT RAISE(ABORT, 'context system layer projections are immutable');
           END;
       `,
     },

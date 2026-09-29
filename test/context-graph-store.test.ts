@@ -5,7 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
-import { materializeWorldConversation } from '../src/context/view.js';
+import {
+  materializeSystemProjection,
+  materializeWorldConversation,
+} from '../src/context/view.js';
 import { openDatabase } from '../src/store/db.js';
 import {
   ContextGraphStore,
@@ -21,6 +24,7 @@ import {
   shareGrantId,
   shadowProjectionPlanId,
   shadowRequestObservationId,
+  systemLayerProjectionId,
   worldId,
 } from '../src/store/context-graph.js';
 
@@ -229,6 +233,309 @@ test('world message projections materialize only exact ordered local text', () =
     );
     assert.throws(() =>
       value.database.prepare('DELETE FROM context_event_message_projections').run(),
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('system layers materialize only explicit branch-visible scope', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:a');
+    const worldB = worldId('world:signal:b');
+    const create = (input: {
+      kind:
+        | 'runtime_contract'
+        | 'identity'
+        | 'world_policy'
+        | 'private_frontier'
+        | 'legacy_memory';
+      visibility:
+        | 'global_contract'
+        | 'integrated_self'
+        | 'integrated_self_candidate'
+        | 'world'
+        | 'private_root'
+        | 'legacy_mixed';
+      worldId: ReturnType<typeof worldId> | null;
+      source: string;
+      content: string;
+      createdAt: number;
+    }) =>
+      value.store.createSystemLayerProjection({
+        kind: input.kind,
+        visibility: input.visibility,
+        worldId: input.worldId,
+        rendererGeneration: 1,
+        policyGeneration: 1,
+        sourceKind: 'synthetic_fixture',
+        sourceHash: hashContextBytes(input.source),
+        content: input.content,
+        createdAt: input.createdAt,
+      });
+    const contract = create({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      source: 'contract-v1',
+      content: 'CONTRACT_CANARY',
+      createdAt: 1,
+    });
+    const identity = create({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      source: 'identity-v1',
+      content: '\nIDENTITY_CANARY',
+      createdAt: 2,
+    });
+    const worldPolicyA = create({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldA,
+      source: 'policy-a',
+      content: '\nWORLD_A_CANARY',
+      createdAt: 3,
+    });
+    const worldPolicyB = create({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldB,
+      source: 'policy-b',
+      content: '\nWORLD_B_CANARY',
+      createdAt: 4,
+    });
+    const candidate = create({
+      kind: 'identity',
+      visibility: 'integrated_self_candidate',
+      worldId: null,
+      source: 'candidate-v1',
+      content: '\nCANDIDATE_CANARY',
+      createdAt: 5,
+    });
+    const legacy = create({
+      kind: 'legacy_memory',
+      visibility: 'legacy_mixed',
+      worldId: null,
+      source: 'legacy-v1',
+      content: '\nLEGACY_CANARY',
+      createdAt: 6,
+    });
+    assert.match(contract.layerId, /^system-layer:[0-9a-f]{64}$/);
+    assert.notEqual(worldPolicyA.layerId, worldPolicyB.layerId);
+    assert.deepEqual(
+      value.store.createSystemLayerProjection({
+        kind: contract.kind,
+        visibility: contract.visibility,
+        worldId: contract.worldId,
+        rendererGeneration: contract.rendererGeneration,
+        policyGeneration: contract.policyGeneration,
+        sourceKind: contract.sourceKind,
+        sourceHash: contract.sourceHash,
+        content: contract.content,
+        createdAt: 99,
+      }),
+      contract,
+    );
+    const materialized = materializeSystemProjection({
+      store: value.store,
+      worldId: worldA,
+      rendererGeneration: 1,
+      policyGeneration: 1,
+      layerIds: [contract.layerId, identity.layerId, worldPolicyA.layerId],
+    });
+    assert.deepEqual(materialized, {
+      role: 'system',
+      content: 'CONTRACT_CANARY\nIDENTITY_CANARY\nWORLD_A_CANARY',
+    });
+    assert.equal(materialized.content.includes('WORLD_B_CANARY'), false);
+    assert.throws(
+      () =>
+        materializeSystemProjection({
+          store: value.store,
+          worldId: worldB,
+          rendererGeneration: 1,
+          policyGeneration: 1,
+          layerIds: [contract.layerId, identity.layerId, worldPolicyA.layerId],
+        }),
+      /world mismatch/,
+    );
+    for (const blocked of [candidate.layerId, legacy.layerId]) {
+      assert.throws(
+        () =>
+          materializeSystemProjection({
+            store: value.store,
+            worldId: worldA,
+            rendererGeneration: 1,
+            policyGeneration: 1,
+            layerIds: [contract.layerId, blocked],
+          }),
+        /not branch-visible/,
+      );
+    }
+    assert.throws(
+      () =>
+        materializeSystemProjection({
+          store: value.store,
+          worldId: worldA,
+          rendererGeneration: 1,
+          policyGeneration: 1,
+          layerIds: [identity.layerId, contract.layerId],
+        }),
+      /order is invalid/,
+    );
+    assert.throws(
+      () =>
+        materializeSystemProjection({
+          store: value.store,
+          worldId: worldA,
+          rendererGeneration: 1,
+          policyGeneration: 1,
+          layerIds: [contract.layerId, identity.layerId, identity.layerId],
+        }),
+      /duplicate system layer/,
+    );
+    assert.throws(
+      () =>
+        materializeSystemProjection({
+          store: value.store,
+          worldId: worldA,
+          rendererGeneration: 1,
+          policyGeneration: 1,
+          layerIds: [
+            contract.layerId,
+            systemLayerProjectionId(`system-layer:${'0'.repeat(64)}`),
+          ],
+        }),
+      /is missing/,
+    );
+    const privateLayer = create({
+      kind: 'private_frontier',
+      visibility: 'private_root',
+      worldId: null,
+      source: 'private-root-v1',
+      content: '\nPRIVATE_ROOT_CANARY',
+      createdAt: 7,
+    });
+    const wake = value.store.appendWorldEvent({
+      eventId: eventId('event:system-plan-wake'),
+      worldId: worldA,
+      kind: 'inbound:signal',
+      payload: { text: 'wake' },
+      occurredAt: 8,
+      recordedAt: 8,
+    });
+    const planFor = (
+      layerId: typeof contract.layerId,
+      blockers: string[],
+    ) => ({
+      schemaVersion: 3,
+      worldId: worldA,
+      wakeEventId: wake.eventId,
+      projectionGeneration: 3,
+      policyGeneration: 1,
+      rendererGeneration: 1,
+      systemRendererGeneration: 1,
+      localEventIds: [wake.eventId],
+      localMessageProjectionIds: [],
+      sharedEventIds: [],
+      foreignWorlds: [],
+      unlineagedRoles: { system: 0, user: 0, assistant: 0, tool: 0 },
+      systemLayerProjectionIds: [layerId],
+      blockers,
+    });
+    const malformedPlan = {
+      ...planFor(privateLayer.layerId, [
+        'unrendered_event',
+        'system_layer_unavailable',
+        'unbound_effect_tools',
+      ]),
+      systemLayerProjectionIds: 'not-an-array',
+    };
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(
+            `shadow-plan:${hashContextBytes(JSON.stringify(malformedPlan))}`,
+          ),
+          worldId: worldA,
+          wakeEventId: wake.eventId,
+          plan: malformedPlan,
+          createdAt: 9,
+        }),
+      /system layer references are invalid/,
+    );
+    const privatePlan = planFor(privateLayer.layerId, [
+      'unrendered_event',
+      'unbound_effect_tools',
+    ]);
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(
+            `shadow-plan:${hashContextBytes(JSON.stringify(privatePlan))}`,
+          ),
+          worldId: worldA,
+          wakeEventId: wake.eventId,
+          plan: privatePlan,
+          createdAt: 9,
+        }),
+      /system layer scope is unsupported/,
+    );
+    const missingBlockerPlan = planFor(candidate.layerId, [
+      'unrendered_event',
+      'unbound_effect_tools',
+    ]);
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(
+            `shadow-plan:${hashContextBytes(JSON.stringify(missingBlockerPlan))}`,
+          ),
+          worldId: worldA,
+          wakeEventId: wake.eventId,
+          plan: missingBlockerPlan,
+          createdAt: 10,
+        }),
+      /system blocker lineage is invalid/,
+    );
+    const staleBlockerPlan = planFor(candidate.layerId, [
+      'legacy_mixed_system',
+      'identity_candidate_unapproved',
+      'unrendered_event',
+      'unbound_effect_tools',
+    ]);
+    assert.throws(
+      () =>
+        value.store.createShadowProjectionPlan({
+          planId: shadowProjectionPlanId(
+            `shadow-plan:${hashContextBytes(JSON.stringify(staleBlockerPlan))}`,
+          ),
+          worldId: worldA,
+          wakeEventId: wake.eventId,
+          plan: staleBlockerPlan,
+          createdAt: 11,
+        }),
+      /blockers are invalid/,
+    );
+    assert.throws(() =>
+      value.database
+        .prepare('UPDATE context_system_layer_projections SET created_at = 0')
+        .run(),
+    );
+    assert.throws(() =>
+      value.database.prepare('DELETE FROM context_system_layer_projections').run(),
+    );
+    value.database.exec('DROP TRIGGER context_system_layer_projections_no_update');
+    value.database
+      .prepare(
+        'UPDATE context_system_layer_projections SET content_text = ? WHERE layer_id = ?',
+      )
+      .run('CORRUPTED', contract.layerId);
+    assert.throws(
+      () => value.store.getSystemLayerProjection(contract.layerId),
+      /stored system layer projection is invalid/,
     );
   } finally {
     closeFixture(value);

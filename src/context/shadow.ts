@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ProviderContentProjectionObserver,
 } from '../llm/llm.js';
+import type { FrozenSystemLayer } from '../llm/prompt.js';
 import {
   isEventId,
   isWorldId,
@@ -18,6 +19,7 @@ import {
   shadowProjectionPlanId,
   shadowRequestObservationId,
   type EventMessageProjectionId,
+  type SystemLayerProjectionId,
   type WorldEventRecord,
 } from '../store/context-graph.js';
 
@@ -30,7 +32,15 @@ export type ShadowProjectionBlocker =
   | 'duplicate_event'
   | 'unsupported_projected_role'
   | 'unrendered_event'
-  | 'render_projection_mismatch';
+  | 'render_projection_mismatch'
+  | 'legacy_monocontext_contract'
+  | 'legacy_mixed_memory'
+  | 'legacy_mixed_focus'
+  | 'identity_candidate_unapproved'
+  | 'runtime_hint_unscoped'
+  | 'system_layer_unavailable'
+  | 'system_layer_mismatch'
+  | 'unbound_effect_tools';
 
 export interface ShadowProjectionPlanV1 {
   readonly schemaVersion: 1;
@@ -65,9 +75,21 @@ export interface ShadowProjectionPlanV2
   readonly localMessageProjectionIds: readonly EventMessageProjectionId[];
 }
 
+export interface ShadowProjectionPlanV3
+  extends Omit<
+    ShadowProjectionPlanV2,
+    'schemaVersion' | 'projectionGeneration' | 'systemLayers'
+  > {
+  readonly schemaVersion: 3;
+  readonly projectionGeneration: 3;
+  readonly systemRendererGeneration: 1;
+  readonly systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+}
+
 export type ShadowProjectionPlan =
   | ShadowProjectionPlanV1
-  | ShadowProjectionPlanV2;
+  | ShadowProjectionPlanV2
+  | ShadowProjectionPlanV3;
 
 const blockerOrder: readonly ShadowProjectionBlocker[] = [
   'legacy_mixed_system',
@@ -79,6 +101,14 @@ const blockerOrder: readonly ShadowProjectionBlocker[] = [
   'unsupported_projected_role',
   'unrendered_event',
   'render_projection_mismatch',
+  'legacy_monocontext_contract',
+  'legacy_mixed_memory',
+  'legacy_mixed_focus',
+  'identity_candidate_unapproved',
+  'runtime_hint_unscoped',
+  'system_layer_unavailable',
+  'system_layer_mismatch',
+  'unbound_effect_tools',
 ];
 
 export function buildShadowProjectionPlan(input: {
@@ -86,7 +116,9 @@ export function buildShadowProjectionPlan(input: {
   wakeLineage: NonNullable<InboundMessage['contextGraphLineage']>;
   localProjections?: ReadonlyMap<EventId, EventMessageProjectionId>;
   projectionMismatches?: ReadonlySet<EventId>;
-}): ShadowProjectionPlanV2 {
+  systemLayerProjectionIds?: readonly SystemLayerProjectionId[];
+  systemLayerBlockers?: readonly ShadowProjectionBlocker[];
+}): ShadowProjectionPlanV3 {
   if (
     !isWorldId(input.wakeLineage.worldId) ||
     !isEventId(input.wakeLineage.eventId)
@@ -105,23 +137,11 @@ export function buildShadowProjectionPlan(input: {
     assistant: 0,
     tool: 0,
   };
-  const systemLayers: Array<{
-    ordinal: number;
-    sha256: string;
-    byteLength: number;
-    scope: 'legacy-mixed';
-  }> = [];
+  let systemMessageCount = 0;
 
-  input.messages.forEach((message, ordinal) => {
+  input.messages.forEach((message) => {
     if (message.role === 'system') {
-      const bytes = Buffer.from(message.content);
-      systemLayers.push({
-        ordinal,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        byteLength: bytes.byteLength,
-        scope: 'legacy-mixed',
-      });
-      blockers.add('legacy_mixed_system');
+      systemMessageCount += 1;
       if (message.contentParts) blockers.add('multimodal_unavailable');
       return;
     }
@@ -176,13 +196,24 @@ export function buildShadowProjectionPlan(input: {
     }
   });
 
+  for (const blocker of input.systemLayerBlockers ?? []) blockers.add(blocker);
+  if (
+    systemMessageCount !== 1 ||
+    !input.systemLayerProjectionIds ||
+    input.systemLayerProjectionIds.length === 0
+  ) {
+    blockers.add('system_layer_unavailable');
+  }
+  blockers.add('unbound_effect_tools');
+
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     worldId: input.wakeLineage.worldId,
     wakeEventId: input.wakeLineage.eventId,
-    projectionGeneration: 2,
+    projectionGeneration: 3,
     policyGeneration: 1,
     rendererGeneration: 1,
+    systemRendererGeneration: 1,
     localEventIds,
     localMessageProjectionIds,
     sharedEventIds,
@@ -190,7 +221,7 @@ export function buildShadowProjectionPlan(input: {
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([worldId, messageCount]) => ({ worldId, messageCount })),
     unlineagedRoles,
-    systemLayers,
+    systemLayerProjectionIds: [...(input.systemLayerProjectionIds ?? [])],
     blockers: blockerOrder.filter((blocker) => blockers.has(blocker)),
   };
 }
@@ -200,9 +231,78 @@ export class ContextGraphShadowRecorder {
 
   prepareRequestObservation(input: {
     messages: readonly ChatMessage[];
+    systemLayers?: readonly FrozenSystemLayer[];
     wakeLineage: InboundMessage['contextGraphLineage'] | null;
   }): ProviderContentProjectionObserver | undefined {
     if (!input.wakeLineage) return undefined;
+    const systemLayerProjectionIds: SystemLayerProjectionId[] = [];
+    const systemLayerBlockers = new Set<ShadowProjectionBlocker>();
+    const systemMessages = input.messages.filter(
+      (message) => message.role === 'system',
+    );
+    const renderedLayers = input.systemLayers ?? [];
+    const systemMatches =
+      systemMessages.length === 1 &&
+      renderedLayers.length > 0 &&
+      renderedLayers.map((layer) => layer.content).join('') ===
+        systemMessages[0].content;
+    if (!systemMatches) {
+      systemLayerBlockers.add('system_layer_mismatch');
+    } else {
+      try {
+        for (const layer of renderedLayers) {
+          if (
+            createHash('sha256').update(layer.content).digest('hex') !==
+              layer.contentHash ||
+            Buffer.byteLength(layer.content) !== layer.byteLength ||
+            !/^[0-9a-f]{64}$/.test(layer.sourceHash)
+          ) {
+            throw new Error('frozen system layer integrity mismatch');
+          }
+          const storedLayer = this.store.createSystemLayerProjection({
+            kind: layer.kind,
+            visibility: layer.visibility,
+            worldId: null,
+            rendererGeneration: 1,
+            policyGeneration: 1,
+            sourceKind: layer.sourceKind,
+            sourceHash: layer.sourceHash,
+            content: layer.content,
+            createdAt: Date.now(),
+          });
+          if (
+            storedLayer.contentHash !== layer.contentHash ||
+            storedLayer.contentBytes !== layer.byteLength
+          ) {
+            throw new Error('stored system layer integrity mismatch');
+          }
+          systemLayerProjectionIds.push(storedLayer.layerId);
+          switch (layer.kind) {
+            case 'runtime_contract':
+              systemLayerBlockers.add('legacy_monocontext_contract');
+              break;
+            case 'legacy_memory':
+              systemLayerBlockers.add('legacy_mixed_memory');
+              break;
+            case 'legacy_focus':
+              systemLayerBlockers.add('legacy_mixed_focus');
+              break;
+            case 'identity':
+              systemLayerBlockers.add('identity_candidate_unapproved');
+              break;
+            case 'runtime_hint':
+              systemLayerBlockers.add('runtime_hint_unscoped');
+              break;
+          }
+        }
+      } catch {
+        systemLayerProjectionIds.length = 0;
+        systemLayerBlockers.add('system_layer_mismatch');
+      }
+    }
+    if (systemLayerProjectionIds.length === 0) {
+      systemLayerBlockers.add('system_layer_unavailable');
+    }
     const localProjections = new Map<EventId, EventMessageProjectionId>();
     const projectionMismatches = new Set<EventId>();
     for (const message of input.messages) {
@@ -242,6 +342,8 @@ export class ContextGraphShadowRecorder {
       wakeLineage: input.wakeLineage,
       localProjections,
       projectionMismatches,
+      systemLayerProjectionIds,
+      systemLayerBlockers: [...systemLayerBlockers],
     });
     const planJson = JSON.stringify(plan);
     const planHash = createHash('sha256').update(planJson).digest('hex');

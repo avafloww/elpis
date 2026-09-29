@@ -14,6 +14,7 @@ import {
   ContextGraphStore,
   hashContextBytes,
 } from '../src/store/context-graph.js';
+import { freezeSystemLayer } from '../src/llm/prompt.js';
 import { openDatabase } from '../src/store/db.js';
 import { buildTestAgent, EMPTY_WAKE, makeStubLLM } from './helpers.js';
 
@@ -168,7 +169,7 @@ test('shadow projection plans retain lineage and blockers without request conten
       },
     ],
   });
-  assert.equal(plan.schemaVersion, 2);
+  assert.equal(plan.schemaVersion, 3);
   assert.deepEqual(plan.localEventIds, ['event:ingress:local']);
   assert.deepEqual(plan.localMessageProjectionIds, []);
   assert.deepEqual(plan.foreignWorlds, [
@@ -181,16 +182,13 @@ test('shadow projection plans retain lineage and blockers without request conten
     tool: 0,
   });
   assert.deepEqual(plan.blockers, [
-    'legacy_mixed_system',
     'unlineaged_history',
     'multiple_worlds',
     'unrendered_event',
+    'system_layer_unavailable',
+    'unbound_effect_tools',
   ]);
-  assert.equal(
-    plan.systemLayers[0]?.byteLength,
-    Buffer.byteLength(privateSystem),
-  );
-  assert.match(plan.systemLayers[0]?.sha256 ?? '', /^[0-9a-f]{64}$/);
+  assert.deepEqual(plan.systemLayerProjectionIds, []);
   const serialized = JSON.stringify(plan);
   for (const forbidden of [
     privateSystem,
@@ -218,7 +216,12 @@ test('shadow plans flag duplicate lineage without duplicating event identities',
     messages: [message, { ...message }],
   });
   assert.deepEqual(plan.localEventIds, [message.eventId]);
-  assert.deepEqual(plan.blockers, ['duplicate_event', 'unrendered_event']);
+  assert.deepEqual(plan.blockers, [
+    'duplicate_event',
+    'unrendered_event',
+    'system_layer_unavailable',
+    'unbound_effect_tools',
+  ]);
 });
 
 test('shadow recorder keeps content in world-bound projections, not plans or observations', () => {
@@ -236,6 +239,15 @@ test('shadow recorder keeps content in world-bound projections, not plans or obs
         eventId: wake.eventId,
         sequence: wake.sequence,
       },
+      systemLayers: [
+        freezeSystemLayer({
+          kind: 'runtime_contract',
+          visibility: 'legacy_mixed',
+          sourceKind: 'synthetic_contract',
+          sourceText: 'synthetic contract source',
+          content: systemCanary,
+        }),
+      ],
       messages: [
         { role: 'system', content: systemCanary },
         {
@@ -274,15 +286,42 @@ test('shadow recorder keeps content in world-bound projections, not plans or obs
          FROM context_event_message_projections`,
       )
       .get() as Record<string, unknown>;
+    const systemLayer = value.database
+      .prepare(
+        `SELECT layer_id, layer_kind, visibility, source_kind,
+                content_text, content_hash, content_bytes
+         FROM context_system_layer_projections`,
+      )
+      .get() as Record<string, unknown>;
     const parsedPlan = JSON.parse(plan.plan_json) as {
       schemaVersion: number;
       localMessageProjectionIds: string[];
+      systemLayerProjectionIds: string[];
     };
     assert.equal(plan.plan_hash, hashContextBytes(plan.plan_json));
-    assert.equal(parsedPlan.schemaVersion, 2);
+    assert.equal(parsedPlan.schemaVersion, 3);
     assert.deepEqual(parsedPlan.localMessageProjectionIds, [
       rendered.projection_id,
     ]);
+    assert.deepEqual(parsedPlan.systemLayerProjectionIds, [systemLayer.layer_id]);
+    assert.deepEqual(
+      {
+        layer_kind: systemLayer.layer_kind,
+        visibility: systemLayer.visibility,
+        source_kind: systemLayer.source_kind,
+        content_text: systemLayer.content_text,
+        content_hash: systemLayer.content_hash,
+        content_bytes: systemLayer.content_bytes,
+      },
+      {
+        layer_kind: 'runtime_contract',
+        visibility: 'legacy_mixed',
+        source_kind: 'synthetic_contract',
+        content_text: systemCanary,
+        content_hash: hashContextBytes(systemCanary),
+        content_bytes: Buffer.byteLength(systemCanary),
+      },
+    );
     assert.equal(
       rendered.message_json,
       JSON.stringify({ role: 'user', content: userCanary }),
@@ -298,7 +337,7 @@ test('shadow recorder keeps content in world-bound projections, not plans or obs
         actual_hash: hashContextBytes(projectionBytes),
         actual_bytes: Buffer.byteLength(projectionBytes),
         result: 'ineligible',
-        reason: 'legacy_mixed_system',
+        reason: 'legacy_monocontext_contract',
         expected_hash: null,
         expected_bytes: null,
       },
@@ -314,6 +353,7 @@ test('shadow recorder keeps content in world-bound projections, not plans or obs
     }
     assert.equal(JSON.stringify(rendered).includes(systemCanary), false);
     assert.equal(JSON.stringify(rendered).includes(projectionCanary), false);
+    assert.equal(String(systemLayer.content_text), systemCanary);
   } finally {
     value.database.close();
     fs.rmSync(value.directory, { recursive: true, force: true });
@@ -434,6 +474,9 @@ test('shadow rendering never projects foreign or multimodal message content', ()
       'multimodal_unavailable',
       'unrendered_event',
       'render_projection_mismatch',
+      'system_layer_unavailable',
+      'system_layer_mismatch',
+      'unbound_effect_tools',
     ]);
   } finally {
     value.database.close();
@@ -490,6 +533,15 @@ test('Agent installs one shadow observer for the frozen request projection', asy
     built.agent.enqueue(inbound());
     await idle;
     assert.equal(prepared.messages, llmMessages);
+    assert.ok(Object.isFrozen(prepared.systemLayers));
+    assert.equal(
+      prepared.systemLayers.map((layer: { content: string }) => layer.content).join(''),
+      prepared.messages[0].content,
+    );
+    for (const layer of prepared.systemLayers) {
+      assert.equal(layer.contentHash, hashContextBytes(layer.content));
+      assert.equal(layer.byteLength, Buffer.byteLength(layer.content));
+    }
     assert.deepEqual(prepared.wakeLineage, {
       worldId: 'world:discord:guild:guild-a',
       eventId: 'event:ingress:test',
