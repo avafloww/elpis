@@ -241,6 +241,32 @@ test('resident source candidate writes roll back late failures and stored record
     assert.deepEqual({ ...empty }, { snapshots: 0, candidates: 0 });
 
     value.database.exec('DROP TRIGGER test_resident_candidate_late_failure');
+    assert.throws(
+      () =>
+        value.store.createResidentSourceInspectionCandidate(
+          {
+            soul: residentSoulSnapshot(value.directory),
+            provenance: residentRunProvenance('7'),
+            observedAt: 100,
+          },
+          () => {
+            throw new Error('forced resident presentation failure');
+          },
+        ),
+      /forced resident presentation failure/,
+    );
+    const afterPresentationFailure = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_soul_source_snapshots) AS snapshots,
+           (SELECT count(*) FROM context_resident_source_inspection_candidates) AS candidates`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...afterPresentationFailure },
+      { snapshots: 0, candidates: 0 },
+    );
+
     const created = value.store.createResidentSourceInspectionCandidate({
       soul: residentSoulSnapshot(value.directory),
       provenance: residentRunProvenance('5'),

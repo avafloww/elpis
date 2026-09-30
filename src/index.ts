@@ -41,7 +41,7 @@ import { createContextTracker } from './llm/context-tracker.js';
 import { createDensityModel } from './llm/density.js';
 import { createCompactor, type SummaryInputBudget } from './llm/compactor.js';
 import { resolveCompactionRoleBudget } from './llm/compaction-role.js';
-import { createSecretRegistry } from './lib/secrets.js';
+import { createSecretRegistry, redactSecrets } from './lib/secrets.js';
 import { createResidentRunAuthority } from './kernel/resident-run-provenance.js';
 import { ContextResources } from './context-resources.js';
 import { MotorSkills } from './motor-skills.js';
@@ -109,6 +109,8 @@ import { createMuteStore } from './store/mutes.js';
 import { createDiscordPersonSettingsStore } from './store/discord-person-settings.js';
 import { openDatabase } from './store/db.js';
 import { ContextGraphStore } from './store/context-graph.js';
+import { createResidentSourceInspectionRecorder } from './context/resident-source-inspection.js';
+
 import {
   ContextGraphShadowRecorder,
   originWorldForChannel,
@@ -713,6 +715,12 @@ export async function createElpisRuntime(
       agent.moderateChannel(channelId, 'mute', 'self', reason),
   };
   const residentRunAuthority = createResidentRunAuthority();
+  const residentSourceInspector = createResidentSourceInspectionRecorder({
+    store: contextGraphStore,
+    soulPath: config.paths.soulPath,
+    previewMaxBytes: config.sandbox.previewMaxBytes,
+    redactForOutput: (text) => redactSecrets(text, secretRegistry),
+  });
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
@@ -720,6 +728,7 @@ export async function createElpisRuntime(
     logger: config.logger,
     create: adapters.createSandbox ?? createSandbox,
     residentRunVerifier: residentRunAuthority.verifier,
+    residentSourceInspector,
   });
 
   llms = createLlmRoleClients(config, {

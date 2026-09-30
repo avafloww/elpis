@@ -15,6 +15,7 @@ import type {
   ResidentRunScopeHandle,
   ResidentRunToken,
   ResidentRunVerifier,
+  ResidentToolCallSnapshotV1,
 } from '../kernel/resident-run-provenance.js';
 import { transform } from './transform.js';
 import type { SandboxRegistration, SandboxRegistry } from './registry.js';
@@ -45,6 +46,7 @@ export interface SandboxManagerOptions {
   classifierTimeoutMs?: number;
   wakeAdvisorTimeoutMs?: number;
   residentRunVerifier?: ResidentRunVerifier;
+  residentSourceInspector?: (snapshot: ResidentToolCallSnapshotV1) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -77,10 +79,13 @@ class ResidentRunLease {
   constructor(
     private readonly verifier: ResidentRunVerifier,
     readonly handle: ResidentRunScopeHandle,
+    private readonly inspector:
+      ((snapshot: ResidentToolCallSnapshotV1) => string) | undefined,
     private readonly onClose: () => void,
   ) {
     this.binding = Object.freeze({
       handle,
+      inspectIdentityCandidate: () => this.inspectIdentityCandidate(),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -88,6 +93,22 @@ class ResidentRunLease {
 
   get lifecycle(): 'active' | 'detached' | 'closed' {
     return this.state;
+  }
+
+  inspectIdentityCandidate(): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run')
+      throw new Error(
+        `resident source inspection: provenance is for ${snapshot.toolName}, not run`,
+      );
+    if (!this.inspector)
+      throw new Error('resident source inspection: recorder is not configured');
+    const result = this.inspector(snapshot);
+    if (typeof result !== 'string')
+      throw new Error(
+        'resident source inspection: recorder returned a non-string result',
+      );
+    return result;
   }
 
   observeSandboxResult(result: RunResult): void {
@@ -146,6 +167,9 @@ export class SandboxManager {
   private readonly classifierTimeoutMs: number;
   private readonly wakeAdvisorTimeoutMs: number;
   private readonly residentRunVerifier?: ResidentRunVerifier;
+  private readonly residentSourceInspector?: (
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -164,6 +188,7 @@ export class SandboxManager {
     this.wakeAdvisorTimeoutMs =
       options.wakeAdvisorTimeoutMs ?? WAKE_ADVISOR_TIMEOUT_MS;
     this.residentRunVerifier = options.residentRunVerifier;
+    this.residentSourceInspector = options.residentSourceInspector;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -327,8 +352,11 @@ export class SandboxManager {
       throw error;
     }
     let lease!: ResidentRunLease;
-    lease = new ResidentRunLease(this.residentRunVerifier, handle, () =>
-      this.releaseResidentRunLease(lease),
+    lease = new ResidentRunLease(
+      this.residentRunVerifier,
+      handle,
+      this.residentSourceInspector,
+      () => this.releaseResidentRunLease(lease),
     );
     this.residentRunLeases.add(lease);
     return lease;

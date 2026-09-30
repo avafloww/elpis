@@ -23,6 +23,7 @@ import { ContextResources } from '../src/context-resources.js';
 import {
   createResidentRunAuthority,
   type ResidentRunVerifier,
+  type ResidentToolCallSnapshotV1,
 } from '../src/kernel/resident-run-provenance.js';
 import { residentRunHandleForScope } from '../src/kernel/resident-run-scope.js';
 
@@ -33,6 +34,7 @@ function fixture(
     coldStart?: boolean;
     retirementGraceMs?: number;
     residentRunVerifier?: ResidentRunVerifier;
+    residentSourceInspector?: (snapshot: ResidentToolCallSnapshotV1) => string;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -105,6 +107,7 @@ function fixture(
     now,
     coldStart: opts.coldStart,
     residentRunVerifier: opts.residentRunVerifier,
+    residentSourceInspector: opts.residentSourceInspector,
   });
   return {
     dir,
@@ -925,6 +928,56 @@ test('resident run tokens reject invalid presence, wrong authority, wrong tool, 
   }
 });
 
+test('resident identity inspection is active-run-only on core and persistent surfaces', async () => {
+  const authority = createResidentRunAuthority();
+  const seen: ResidentToolCallSnapshotV1[] = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentSourceInspector: (snapshot) => {
+      seen.push(snapshot);
+      return 'CANDIDATE ONLY — NOT AUTHORIZED\nsynthetic inspection';
+    },
+  });
+  try {
+    const direct = await f.manager.run({
+      code: 'elpis.context.inspectIdentityCandidate()',
+    });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+    assert.equal(seen.length, 0);
+
+    const core = await f.manager.run({
+      code: 'elpis.context.inspectIdentityCandidate()',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(core.ok, true);
+    assert.match(core.preview ?? '', /CANDIDATE ONLY — NOT AUTHORIZED/);
+
+    const item = f.mind.create({ title: 'resident identity inspection' });
+    const persistent = await f.manager.run({
+      sandbox: item.id,
+      code: 'elpis.context.inspectIdentityCandidate()',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(persistent.ok, true);
+    assert.match(persistent.preview ?? '', /synthetic inspection/);
+    assert.equal(seen.length, 2);
+    assert.ok(seen.every((snapshot) => snapshot.toolName === 'run'));
+    assert.ok(seen.every((snapshot) => snapshot.callIndex === 0));
+    assert.notEqual(seen[0]?.batchId, seen[1]?.batchId);
+
+    const inherited = await f.manager.run({
+      sandbox: item.id,
+      code: 'elpis.context.inspectIdentityCandidate()',
+    });
+    assert.equal(inherited.ok, false);
+    assert.match(inherited.error ?? '', /active resident run/);
+    assert.equal(seen.length, 2);
+  } finally {
+    f.close();
+  }
+});
+
 test('persistent invocations bind fresh resident handles without inheritance', async () => {
   const authority = createResidentRunAuthority();
   const f = fixture({ residentRunVerifier: authority.verifier });
@@ -1035,7 +1088,15 @@ test('resident provenance detaches at the real deadline and closes on settlement
     detach: (handle) => authority.verifier.detach(handle),
     close: (handle) => authority.verifier.close(handle),
   };
-  const f = fixture({ deadlineMs: 15, residentRunVerifier: verifier });
+  let inspections = 0;
+  const f = fixture({
+    deadlineMs: 15,
+    residentRunVerifier: verifier,
+    residentSourceInspector: () => {
+      inspections++;
+      return 'should not run after detach';
+    },
+  });
   const continued = Promise.withResolvers<void>();
   let continuationLifecycle = '';
   f.deps.memory!.read = () => {
@@ -1049,7 +1110,7 @@ test('resident provenance detaches at the real deadline and closes on settlement
   };
   try {
     const result = await f.manager.run({
-      code: `await elpis.sleep(60); elpis.memory.read(); 7`,
+      code: `await elpis.sleep(60); try { elpis.context.inspectIdentityCandidate(); } catch {} elpis.memory.read(); 7`,
       residentRunToken: committedRunToken(authority),
     });
     assert.equal(result.detached, true);
@@ -1057,6 +1118,7 @@ test('resident provenance detaches at the real deadline and closes on settlement
     assert.equal(authority.verifier.lifecycle(accepted!), 'detached');
     await continued.promise;
     assert.equal(continuationLifecycle, 'detached');
+    assert.equal(inspections, 0);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(authority.verifier.lifecycle(accepted!), 'closed');
   } finally {

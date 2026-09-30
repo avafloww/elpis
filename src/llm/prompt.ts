@@ -37,8 +37,7 @@ export type PromptProjectionLayerKind =
   | 'runtime_hint';
 
 export type PromptProjectionVisibility =
-  | 'legacy_mixed'
-  | 'integrated_self_candidate';
+  'legacy_mixed' | 'integrated_self_candidate';
 
 export interface FrozenSystemLayer {
   readonly kind: PromptProjectionLayerKind;
@@ -810,6 +809,11 @@ Literal Discord user mentions remain clickable but do not notify by default; not
 \`elpis.channel(ref).mute(reason?)\` is the killswitch: it makes you a silent observer in that
 room — you keep hearing, every \`send()\` there throws until an operator lifts it. Deliberately
 the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living in several servers" above.
+
+### \`elpis.context\`
+\`elpis.context.inspectIdentityCandidate()\` records the exact current prompt-facing SOUL source and the exact scoped runtime contract as one private, immutable **candidate-only** inspection tied to this live resident \`run\` call. It returns a top-level review string: full exact content when the configured preview budget permits, otherwise exact UTF-8-safe head/tail ranges with the omitted body-byte interval named. It accepts no arguments, is unavailable in worker sandboxes, and rejects direct, restored, inherited, detached, or closed runs. If the exact presentation would be changed by registered-secret redaction, the action fails and rolls the new candidate back rather than committing bytes you were not shown.
+
+Inspection does **not** authorize, approve, activate, profile, dispatch, send, or issue any effect. Any future authorization must happen in a later assistant tool batch with a different batch ID and must revalidate the exact candidate against the then-current SOUL.
 
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):

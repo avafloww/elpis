@@ -40,6 +40,7 @@ const WORKER_KEYS = [
 
 const CORE_KEYS = [
   'channel',
+  'context',
   'fill',
   'focus',
   'inbound',
@@ -318,6 +319,23 @@ test('LLM tool is full-resident-only and enforces per-run call and input budgets
       /"undefined"/,
     );
   }
+});
+
+test('resident identity inspection exists on resident surfaces but not worker sandboxes', async () => {
+  for (const surface of ['core', 'full'] as const) {
+    const resident = createSandbox(deps(surface));
+    const result = await resident.run(
+      `({ kind: typeof elpis.context, inspect: typeof elpis.context.inspectIdentityCandidate, failure: (() => { try { elpis.context.inspectIdentityCandidate(); return 'missing'; } catch (error) { return String(error); } })() })`,
+    );
+    assert.match(result.preview ?? '', /kind: "object"/);
+    assert.match(result.preview ?? '', /inspect: "function"/);
+    assert.match(result.preview ?? '', /active resident run/);
+  }
+  const worker = createSandbox(deps('worker'));
+  assert.match(
+    (await worker.run('typeof elpis.context')).preview ?? '',
+    /"undefined"/,
+  );
 });
 
 test('full sandbox retains compatibility last-value state', async () => {

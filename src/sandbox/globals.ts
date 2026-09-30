@@ -64,6 +64,7 @@ import {
 } from '../llm/tool-runtime.js';
 import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
+import { residentSourceInspectionActionForScope } from '../kernel/resident-source-inspection-scope.js';
 
 // ─── Per-run scope (A5 / / ) ─────────────────────────────────────────
 // Each run(code) call establishes its OWN scope via AsyncLocalStorage so that
@@ -448,6 +449,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
     enumerable: true,
     configurable: true,
   });
+
+  e.context = {
+    inspectIdentityCandidate: (...args: unknown[]) => {
+      if (args.length !== 0)
+        throw new Error(
+          'elpis.context.inspectIdentityCandidate: no arguments are accepted',
+        );
+      const scope = runScope.getStore();
+      const inspect = scope && residentSourceInspectionActionForScope(scope);
+      if (!inspect)
+        throw new Error(
+          'elpis.context.inspectIdentityCandidate: unavailable without an active resident run',
+        );
+      return inspect();
+    },
+  };
 
   e.personSettings = {
     discord: {
@@ -2334,6 +2351,7 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
   if (deps.surface === 'core') {
     const coreElpis = new Set([
       'inbound',
+      'context',
       'personSettings',
       'channel',
       'memory',

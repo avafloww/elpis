@@ -2510,7 +2510,25 @@ export class ContextGraphStore {
     soul: PromptFacingSoulSnapshot;
     provenance: ResidentToolCallSnapshotV1;
     observedAt: number;
-  }): ResidentSourceInspectionCaptureV1 {
+  }): ResidentSourceInspectionCaptureV1;
+  /** The optional finalizer runs synchronously after strict reread but before
+   * commit, so an unpresentable resident review rolls back new source rows. */
+  createResidentSourceInspectionCandidate<T>(
+    input: {
+      soul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      observedAt: number;
+    },
+    finalize: (capture: ResidentSourceInspectionCaptureV1) => T,
+  ): T;
+  createResidentSourceInspectionCandidate<T>(
+    input: {
+      soul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      observedAt: number;
+    },
+    finalize?: (capture: ResidentSourceInspectionCaptureV1) => T,
+  ): ResidentSourceInspectionCaptureV1 | T {
     const observedAt = timestamp(
       'resident inspection observedAt',
       input.observedAt,
@@ -2526,6 +2544,8 @@ export class ContextGraphStore {
       capturedAt: observedAt,
     });
     const provenance = normalizeResidentInspectionProvenance(input.provenance);
+    const finish = (capture: ResidentSourceInspectionCaptureV1) =>
+      finalize ? finalize(capture) : capture;
 
     return transaction(this.database, () => {
       const activation = this.getActivationState();
@@ -2571,7 +2591,7 @@ export class ContextGraphStore {
             'resident source inspection call already captured different sources',
           );
         }
-        return existing;
+        return finish(existing);
       }
 
       const storedSoul = this.getResidentSoulSourceSnapshot(soul.snapshotId);
@@ -2633,7 +2653,7 @@ export class ContextGraphStore {
       const created = this.getResidentSourceInspectionCandidate(candidateId);
       if (!created)
         throw new Error('resident source inspection candidate was not stored');
-      return created;
+      return finish(created);
     });
   }
 

@@ -23,9 +23,9 @@ test('prompt projection preserves exact bytes and freezes typed sources', () => 
   assert.equal(projection.content, full);
   assert.equal(
     createHash('sha256').update(projection.content).digest('hex'),
-    'f3547b359c7505c2e680242df0046e9fbe42cecf0458aaeb0f09888c29f1721e',
+    'c06feb16c1c38ebaa0361dfc02828cb2903928284f1ccf1840c060e0f1bd17be',
   );
-  assert.equal(Buffer.byteLength(projection.content), 53_349);
+  assert.equal(Buffer.byteLength(projection.content), 54_355);
   assert.deepEqual(
     projection.layers.map((layer) => [layer.kind, layer.visibility]),
     [
