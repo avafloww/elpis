@@ -5,7 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
-import { assembleDarkLocalBranch } from '../src/context/root.js';
+import {
+  assembleDarkLocalBranch,
+  assembleNextDarkPendingBranch,
+} from '../src/context/root.js';
 import { MAX_LOCAL_BRANCH_REQUEST_CANDIDATE_BYTES } from '../src/context/candidate.js';
 import {
   materializeLocalBranchRequest,
@@ -3378,10 +3381,9 @@ test('dark pending inspection returns only the contiguous same-world renderable 
   }
 });
 
-function createPendingAttemptFixture(
+function createPendingAssemblyInputs(
   value: ReturnType<typeof fixture>,
   prefix: string,
-  selected: readonly number[],
 ) {
   const world = worldId('world:signal:' + prefix);
   const systemLayerProjectionIds = createDarkAssemblyInputs(
@@ -3398,19 +3400,28 @@ function createPendingAttemptFixture(
       time: 30 + number,
     }),
   );
+  return { world, systemLayerProjectionIds, pending };
+}
+
+function createPendingAttemptFixture(
+  value: ReturnType<typeof fixture>,
+  prefix: string,
+  selected: readonly number[],
+) {
+  const input = createPendingAssemblyInputs(value, prefix);
   const assembled = assembleDarkLocalBranch({
     store: value.store,
     expectedActivationEpoch: 0,
     expectedHeadRevision: 0,
-    worldId: world,
+    worldId: input.world,
     branchId: branchId('branch:' + prefix),
     messageProjectionIds: selected.map(
-      (index) => pending[index]!.projection!.projectionId,
+      (index) => input.pending[index]!.projection!.projectionId,
     ),
-    systemLayerProjectionIds,
+    systemLayerProjectionIds: input.systemLayerProjectionIds,
     assembledAt: 40,
   });
-  return { world, pending, assembled };
+  return { ...input, assembled };
 }
 
 function insertDarkPendingAttempt(
@@ -3779,5 +3790,428 @@ test('dark pending attempt receipts reject skipped and non-maximal admitted pref
     );
   } finally {
     closeFixture(skipped);
+  }
+});
+
+test('atomic dark pending assembly commits one bounded attempt and recovery makes it retryable', () => {
+  const value = fixture();
+  try {
+    const input = createPendingAssemblyInputs(
+      value,
+      'pending-atomic-retry',
+    );
+    const first = assembleNextDarkPendingBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      queueGeneration: 1,
+      maxEvents: 2,
+      branchId: branchId('branch:pending-atomic-first'),
+      systemLayerProjectionIds: input.systemLayerProjectionIds,
+      assembledAt: 40,
+    });
+    assert.equal(first.status, 'assembled');
+    if (first.status !== 'assembled') return;
+    assert.deepEqual(first.attempt, {
+      branchId: first.assembly.branch.branchId,
+      worldId: input.world,
+      requestViewId: first.assembly.requestView.requestViewId,
+      activationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 2,
+      selectedCount: 2,
+      firstSourceSequence: input.pending[0]!.receipt.admission.sourceSequence,
+      lastSourceSequence: input.pending[1]!.receipt.admission.sourceSequence,
+      assembledAt: 40,
+    });
+    assert.deepEqual(first.assembly.request.messages.slice(1), [
+      {
+        role: 'user',
+        content: '<incoming>PENDING-ATOMIC-RETRY_1_PRIVATE_CANARY</incoming>',
+      },
+      {
+        role: 'user',
+        content: '<incoming>PENDING-ATOMIC-RETRY_2_PRIVATE_CANARY</incoming>',
+      },
+    ]);
+    assert.equal(
+      first.assembly.request.candidateJson.includes(
+        'PENDING-ATOMIC-RETRY_3_PRIVATE_CANARY',
+      ),
+      false,
+    );
+    assert.equal(tableCount(value.database, 'context_branches'), 1);
+    assert.equal(
+      tableCount(value.database, 'context_dark_pending_branch_attempts'),
+      1,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+
+    const recovered = value.store.recoverCoordinatedBranch(41);
+    assert.equal(recovered?.uncertainEffects, 0);
+    assert.deepEqual(
+      value.store.getDarkPendingBranchAbandonment(
+        first.assembly.branch.branchId,
+      ),
+      {
+        branchId: first.assembly.branch.branchId,
+        abandonedAt: 41,
+        reason: 'coordinator_recovery',
+      },
+    );
+    assert.equal(
+      value.store.getBranch(first.assembly.branch.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      3,
+    );
+    assert.equal(tableCount(value.database, 'context_branch_recoveries'), 1);
+    assert.deepEqual(
+      materializeLocalBranchRequest({
+        store: value.store,
+        requestViewId: first.assembly.requestView.requestViewId,
+      }),
+      first.assembly.request,
+    );
+
+    const retry = assembleNextDarkPendingBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      queueGeneration: 1,
+      maxEvents: 2,
+      branchId: branchId('branch:pending-atomic-retry'),
+      systemLayerProjectionIds: input.systemLayerProjectionIds,
+      assembledAt: 42,
+    });
+    assert.equal(retry.status, 'assembled');
+    if (retry.status === 'assembled') {
+      assert.equal(
+        retry.attempt.firstSourceSequence,
+        first.attempt.firstSourceSequence,
+      );
+      assert.equal(
+        retry.attempt.lastSourceSequence,
+        first.attempt.lastSourceSequence,
+      );
+      assert.deepEqual(
+        retry.assembly.request.messages,
+        first.assembly.request.messages,
+      );
+      value.store.recoverCoordinatedBranch(43);
+    }
+    assert.equal(
+      tableCount(value.database, 'context_dark_pending_branch_attempts'),
+      2,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_dark_pending_branch_abandonments'),
+      2,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      3,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('atomic dark pending assembly stops at the first world boundary', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:pending-boundary-a');
+    const systemLayerProjectionIds = createDarkAssemblyInputs(
+      value,
+      worldA,
+      'pending-boundary-system',
+    ).systemLayerProjectionIds;
+    admitPendingFixture(value, {
+      id: 'event:pending-boundary-a1',
+      world: worldA,
+      rendererGeneration: 7,
+      content: 'PENDING_BOUNDARY_A1_PRIVATE_CANARY',
+      time: 31,
+    });
+    admitPendingFixture(value, {
+      id: 'event:pending-boundary-a2',
+      world: worldA,
+      rendererGeneration: 7,
+      content: 'PENDING_BOUNDARY_A2_PRIVATE_CANARY',
+      time: 32,
+    });
+    admitPendingFixture(value, {
+      id: 'event:pending-boundary-b1',
+      world: 'world:signal:pending-boundary-b',
+      rendererGeneration: 7,
+      content: 'PENDING_BOUNDARY_B1_PRIVATE_CANARY',
+      time: 33,
+    });
+    const assembled = assembleNextDarkPendingBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+      branchId: branchId('branch:pending-world-boundary'),
+      systemLayerProjectionIds,
+      assembledAt: 40,
+    });
+    assert.equal(assembled.status, 'assembled');
+    if (assembled.status === 'assembled') {
+      assert.equal(assembled.attempt.selectedCount, 2);
+      assert.equal(
+        assembled.assembly.request.candidateJson.includes(
+          'PENDING_BOUNDARY_B1_PRIVATE_CANARY',
+        ),
+        false,
+      );
+      assert.deepEqual(
+        assembled.assembly.request.messages.slice(1).map((item) => item.content),
+        [
+          '<incoming>PENDING_BOUNDARY_A1_PRIVATE_CANARY</incoming>',
+          '<incoming>PENDING_BOUNDARY_A2_PRIVATE_CANARY</incoming>',
+        ],
+      );
+      value.store.recoverCoordinatedBranch(41);
+    }
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('atomic dark pending assembly returns blockers without reserving a branch', () => {
+  const empty = fixture();
+  try {
+    assert.deepEqual(
+      assembleNextDarkPendingBranch({
+        store: empty.store,
+        expectedActivationEpoch: 0,
+        expectedHeadRevision: 0,
+        queueGeneration: 1,
+        maxEvents: 4,
+        branchId: branchId('branch:pending-empty'),
+        systemLayerProjectionIds: [],
+        assembledAt: 1,
+      }),
+      { status: 'empty' },
+    );
+    assert.equal(tableCount(empty.database, 'context_branches'), 0);
+    assert.equal(
+      tableCount(empty.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(empty);
+  }
+
+  const unavailable = fixture();
+  try {
+    admitPendingFixture(unavailable, {
+      id: 'event:pending-atomic-unavailable',
+      world: 'world:signal:pending-atomic-unavailable',
+      rendererGeneration: 7,
+      content: 'PENDING_ATOMIC_UNAVAILABLE_PRIVATE_CANARY',
+      time: 10,
+      project: false,
+    });
+    const blocked = assembleNextDarkPendingBranch({
+      store: unavailable.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      queueGeneration: 1,
+      maxEvents: 4,
+      branchId: branchId('branch:pending-unavailable'),
+      systemLayerProjectionIds: [],
+      assembledAt: 11,
+    });
+    assert.equal(blocked.status, 'blocked');
+    if (blocked.status === 'blocked') {
+      assert.equal(blocked.reason, 'projection_unavailable');
+    }
+    assert.equal(tableCount(unavailable.database, 'context_branches'), 0);
+    assert.equal(
+      tableCount(unavailable.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(unavailable);
+  }
+
+  const stale = fixture();
+  try {
+    const input = createPendingAssemblyInputs(stale, 'pending-atomic-stale');
+    assert.throws(
+      () =>
+        assembleNextDarkPendingBranch({
+          store: stale.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 1,
+          queueGeneration: 1,
+          maxEvents: 2,
+          branchId: branchId('branch:pending-stale'),
+          systemLayerProjectionIds: input.systemLayerProjectionIds,
+          assembledAt: 40,
+        }),
+      StaleContinuationHeadError,
+    );
+    assert.equal(tableCount(stale.database, 'context_branches'), 0);
+    assert.equal(tableCount(stale.database, 'context_manifests'), 0);
+    assert.equal(
+      tableCount(stale.database, 'context_local_branch_request_views'),
+      0,
+    );
+    assert.equal(
+      tableCount(stale.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(stale);
+  }
+});
+
+test('atomic dark pending assembly rolls back when the attempt receipt fails', () => {
+  const value = fixture();
+  try {
+    const input = createPendingAssemblyInputs(
+      value,
+      'pending-atomic-attempt-failure',
+    );
+    assert.throws(
+      () =>
+        assembleNextDarkPendingBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          queueGeneration: 1,
+          maxEvents: 2,
+          branchId: branchId('branch:pending-attempt-chronology'),
+          systemLayerProjectionIds: input.systemLayerProjectionIds,
+          assembledAt: 30,
+        }),
+      /context dark pending branch attempt lineage is invalid/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_dark_pending_branch_attempts',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+
+    value.database.exec(
+      [
+        'CREATE TEMP TRIGGER force_pending_attempt_failure',
+        'BEFORE INSERT ON context_dark_pending_branch_attempts',
+        'BEGIN',
+        "SELECT RAISE(ABORT, 'forced pending attempt failure');",
+        'END;',
+      ].join('\n'),
+    );
+    assert.throws(
+      () =>
+        assembleNextDarkPendingBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          queueGeneration: 1,
+          maxEvents: 2,
+          branchId: branchId('branch:pending-attempt-failure'),
+          systemLayerProjectionIds: input.systemLayerProjectionIds,
+          assembledAt: 40,
+        }),
+      /forced pending attempt failure/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_dark_pending_branch_attempts',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      3,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('pending recovery rolls abandonment back when crash cannot proceed', () => {
+  const value = fixture();
+  try {
+    const input = createPendingAssemblyInputs(
+      value,
+      'pending-atomic-recovery-failure',
+    );
+    const assembled = assembleNextDarkPendingBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      queueGeneration: 1,
+      maxEvents: 2,
+      branchId: branchId('branch:pending-recovery-failure'),
+      systemLayerProjectionIds: input.systemLayerProjectionIds,
+      assembledAt: 40,
+    });
+    assert.equal(assembled.status, 'assembled');
+    if (assembled.status !== 'assembled') return;
+    assert.throws(
+      () => value.store.recoverCoordinatedBranch(39),
+      /context dark pending branch abandonment lineage is invalid/,
+    );
+    assert.equal(
+      value.store.getBranch(assembled.assembly.branch.branchId)?.status,
+      'running',
+    );
+    assert.equal(
+      value.store.getDarkPendingBranchAbandonment(
+        assembled.assembly.branch.branchId,
+      ),
+      null,
+    );
+    assert.equal(tableCount(value.database, 'context_branch_recoveries'), 0);
+
+    value.database.exec(
+      [
+        'CREATE TEMP TRIGGER force_pending_abandonment_failure',
+        'BEFORE INSERT ON context_dark_pending_branch_abandonments',
+        'BEGIN',
+        "SELECT RAISE(ABORT, 'forced pending abandonment failure');",
+        'END;',
+      ].join('\n'),
+    );
+    assert.throws(
+      () => value.store.recoverCoordinatedBranch(41),
+      /forced pending abandonment failure/,
+    );
+    assert.equal(
+      value.store.getBranch(assembled.assembly.branch.branchId)?.status,
+      'running',
+    );
+    assert.equal(
+      value.store.getRootCoordinatorState().activeBranchId,
+      assembled.assembly.branch.branchId,
+    );
+    assert.equal(
+      value.store.getDarkPendingBranchAbandonment(
+        assembled.assembly.branch.branchId,
+      ),
+      null,
+    );
+    assert.equal(tableCount(value.database, 'context_branch_recoveries'), 0);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
   }
 });

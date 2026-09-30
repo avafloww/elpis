@@ -4,6 +4,7 @@ import type {
   BranchRecord,
   BranchStartRecord,
   ContextGraphStore,
+  DarkPendingBranchAssemblyResult,
   EventMessageProjectionId,
   LocalBranchRequestViewRecord,
   ManifestRecord,
@@ -22,12 +23,41 @@ export interface AssembleDarkLocalBranchInput {
   readonly assembledAt: number;
 }
 
+export interface AssembleNextDarkPendingBranchInput {
+  readonly store: ContextGraphStore;
+  readonly expectedActivationEpoch: number;
+  readonly expectedHeadRevision: number;
+  readonly queueGeneration: number;
+  readonly maxEvents: number;
+  readonly branchId: BranchId;
+  readonly systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+  readonly assembledAt: number;
+}
+
 export interface AssembledDarkLocalBranch {
   readonly branch: BranchRecord;
   readonly start: BranchStartRecord;
   readonly manifest: ManifestRecord;
   readonly requestView: LocalBranchRequestViewRecord;
   readonly request: MaterializedLocalBranchRequest;
+}
+
+/**
+ * Atomically selects the current dark pending prefix, assembles its bounded
+ * non-runnable request, and records one recoverable attempt.
+ */
+export function assembleNextDarkPendingBranch(
+  input: AssembleNextDarkPendingBranchInput,
+): DarkPendingBranchAssemblyResult {
+  return input.store.assembleNextDarkPendingBranchRecords({
+    expectedActivationEpoch: input.expectedActivationEpoch,
+    expectedHeadRevision: input.expectedHeadRevision,
+    queueGeneration: input.queueGeneration,
+    maxEvents: input.maxEvents,
+    branchId: input.branchId,
+    systemLayerProjectionIds: input.systemLayerProjectionIds,
+    assembledAt: input.assembledAt,
+  });
 }
 
 /**

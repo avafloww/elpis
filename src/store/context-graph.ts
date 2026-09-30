@@ -230,6 +230,33 @@ export type DarkPendingInspection =
         | 'projection_unavailable';
     };
 
+export interface DarkPendingBranchAttemptRecord {
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly activationEpoch: number;
+  readonly queueGeneration: number;
+  readonly maxEvents: number;
+  readonly selectedCount: number;
+  readonly firstSourceSequence: number;
+  readonly lastSourceSequence: number;
+  readonly assembledAt: number;
+}
+
+export interface DarkPendingBranchAbandonmentRecord {
+  readonly branchId: BranchId;
+  readonly abandonedAt: number;
+  readonly reason: 'coordinator_recovery';
+}
+
+export type DarkPendingBranchAssemblyResult =
+  | Exclude<DarkPendingInspection, { readonly status: 'ready' }>
+  | {
+      readonly status: 'assembled';
+      readonly attempt: DarkPendingBranchAttemptRecord;
+      readonly assembly: DarkLocalBranchAssemblyRecord;
+    };
+
 export interface ProjectedUserMessage {
   readonly role: 'user';
   readonly content: string;
@@ -1078,6 +1105,25 @@ interface DarkPendingInspectionRow extends DarkIngressAdmissionRow {
   projection_renderer_generation: number | null;
 }
 
+interface DarkPendingBranchAttemptRow {
+  branch_id: string;
+  world_id: string;
+  request_view_id: string;
+  activation_epoch: number;
+  queue_generation: number;
+  max_events: number;
+  selected_count: number;
+  first_source_sequence: number;
+  last_source_sequence: number;
+  assembled_at: number;
+}
+
+interface DarkPendingBranchAbandonmentRow {
+  branch_id: string;
+  abandoned_at: number;
+  reason: string;
+}
+
 interface EventMessageProjectionRow {
   projection_id: string;
   source_event_id: string;
@@ -1259,6 +1305,63 @@ function mapDarkIngressAdmission(
     wakeClass: row.wake_class,
     messageRendererGeneration,
     admittedAt: timestamp('admittedAt', row.admitted_at),
+  };
+}
+
+function mapDarkPendingBranchAttempt(
+  row: DarkPendingBranchAttemptRow,
+): DarkPendingBranchAttemptRecord {
+  const activationEpoch = generation('activationEpoch', row.activation_epoch);
+  const queueGeneration = generation('queueGeneration', row.queue_generation);
+  const maxEvents = generation('maxEvents', row.max_events);
+  const selectedCount = generation('selectedCount', row.selected_count);
+  const firstSourceSequence = generation(
+    'firstSourceSequence',
+    row.first_source_sequence,
+  );
+  const lastSourceSequence = generation(
+    'lastSourceSequence',
+    row.last_source_sequence,
+  );
+  if (
+    queueGeneration < 1 ||
+    maxEvents < 1 ||
+    maxEvents > 1_024 ||
+    selectedCount < 1 ||
+    selectedCount > maxEvents ||
+    firstSourceSequence < 1 ||
+    lastSourceSequence < firstSourceSequence
+  ) {
+    throw new Error(
+      `stored dark pending branch attempt is invalid: ${row.branch_id}`,
+    );
+  }
+  return {
+    branchId: branchId(row.branch_id),
+    worldId: worldId(row.world_id),
+    requestViewId: localBranchRequestViewId(row.request_view_id),
+    activationEpoch,
+    queueGeneration,
+    maxEvents,
+    selectedCount,
+    firstSourceSequence,
+    lastSourceSequence,
+    assembledAt: timestamp('assembledAt', row.assembled_at),
+  };
+}
+
+function mapDarkPendingBranchAbandonment(
+  row: DarkPendingBranchAbandonmentRow,
+): DarkPendingBranchAbandonmentRecord {
+  if (row.reason !== 'coordinator_recovery') {
+    throw new Error(
+      `stored dark pending branch abandonment is invalid: ${row.branch_id}`,
+    );
+  }
+  return {
+    branchId: branchId(row.branch_id),
+    abandonedAt: timestamp('abandonedAt', row.abandoned_at),
+    reason: row.reason,
   };
 }
 
@@ -1535,6 +1638,32 @@ export class ContextGraphStore {
       )
       .get(id) as DarkIngressAdmissionRow | undefined;
     return row ? mapDarkIngressAdmission(row) : null;
+  }
+
+  getDarkPendingBranchAttempt(
+    id: BranchId,
+  ): DarkPendingBranchAttemptRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT branch_id, world_id, request_view_id, activation_epoch,
+                queue_generation, max_events, selected_count,
+                first_source_sequence, last_source_sequence, assembled_at
+         FROM context_dark_pending_branch_attempts WHERE branch_id = ?`,
+      )
+      .get(id) as unknown as DarkPendingBranchAttemptRow | undefined;
+    return row ? mapDarkPendingBranchAttempt(row) : null;
+  }
+
+  getDarkPendingBranchAbandonment(
+    id: BranchId,
+  ): DarkPendingBranchAbandonmentRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT branch_id, abandoned_at, reason
+         FROM context_dark_pending_branch_abandonments WHERE branch_id = ?`,
+      )
+      .get(id) as unknown as DarkPendingBranchAbandonmentRow | undefined;
+    return row ? mapDarkPendingBranchAbandonment(row) : null;
   }
 
   inspectNextDarkPendingBatch(input: {
@@ -2864,6 +2993,92 @@ export class ContextGraphStore {
     );
   }
 
+  assembleNextDarkPendingBranchRecords(input: {
+    expectedActivationEpoch: number;
+    expectedHeadRevision: number;
+    queueGeneration: number;
+    maxEvents: number;
+    branchId: BranchId;
+    systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+    assembledAt: number;
+  }): DarkPendingBranchAssemblyResult {
+    const expectedActivationEpoch = generation(
+      'expectedActivationEpoch',
+      input.expectedActivationEpoch,
+    );
+    const expectedHeadRevision = generation(
+      'expectedHeadRevision',
+      input.expectedHeadRevision,
+    );
+    const queueGeneration = generation(
+      'queueGeneration',
+      input.queueGeneration,
+    );
+    const maxEvents = generation('maxEvents', input.maxEvents);
+    const assembledAt = timestamp('assembledAt', input.assembledAt);
+    if (queueGeneration < 1) {
+      throw new Error('queueGeneration must be positive');
+    }
+    if (maxEvents < 1 || maxEvents > 1_024) {
+      throw new Error('maxEvents must be between 1 and 1024');
+    }
+
+    return transaction(this.database, () => {
+      const inspection = this.inspectNextDarkPendingBatch({
+        expectedActivationEpoch,
+        queueGeneration,
+        maxEvents,
+      });
+      if (inspection.status !== 'ready') return inspection;
+      if (inspection.items.length < 1) {
+        throw new Error('dark pending inspection returned an empty ready batch');
+      }
+      const assembly = this.assembleDarkLocalBranchRecordsInTransaction(
+        {
+          expectedActivationEpoch,
+          expectedHeadRevision,
+          worldId: inspection.worldId,
+          branchId: input.branchId,
+          messageProjectionIds: inspection.items.map(
+            (item) => item.projectionId,
+          ),
+          systemLayerProjectionIds: input.systemLayerProjectionIds,
+          assembledAt,
+        },
+        expectedActivationEpoch,
+        expectedHeadRevision,
+        assembledAt,
+      );
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_pending_branch_attempts(
+             branch_id, world_id, request_view_id, activation_epoch,
+             queue_generation, max_events, selected_count,
+             first_source_sequence, last_source_sequence, assembled_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          assembly.branch.branchId,
+          assembly.branch.worldId,
+          assembly.requestView.requestViewId,
+          expectedActivationEpoch,
+          queueGeneration,
+          maxEvents,
+          inspection.items.length,
+          inspection.items[0]!.sourceSequence,
+          inspection.items[inspection.items.length - 1]!.sourceSequence,
+          assembledAt,
+        );
+      const attempt = this.getDarkPendingBranchAttempt(
+        assembly.branch.branchId,
+      );
+      if (!attempt) {
+        throw new Error('dark pending branch attempt was not persisted');
+      }
+      return { status: 'assembled', attempt, assembly };
+    });
+  }
+
   private assembleDarkLocalBranchRecordsInTransaction(
     input: {
       expectedActivationEpoch: number;
@@ -3222,6 +3437,19 @@ export class ContextGraphStore {
         throw new Error(
           `active context branch is not running: ${branch.branchId}`,
         );
+      }
+      const pendingAttempt = this.getDarkPendingBranchAttempt(branch.branchId);
+      if (
+        pendingAttempt !== null &&
+        this.getDarkPendingBranchAbandonment(branch.branchId) === null
+      ) {
+        this.database
+          .prepare(
+            `INSERT INTO context_dark_pending_branch_abandonments(
+               branch_id, abandoned_at, reason
+             ) VALUES (?, ?, 'coordinator_recovery')`,
+          )
+          .run(branch.branchId, at);
       }
       const effects = this.database
         .prepare(
