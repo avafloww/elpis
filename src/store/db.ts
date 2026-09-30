@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 39;
+const SCHEMA_VERSION = 40;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -2809,6 +2809,243 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_system_profile_advances_no_delete
           BEFORE DELETE ON context_system_profile_advances BEGIN
             SELECT RAISE(ABORT, 'context system profile advances are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0040-context-system-profile-request-view-bindings',
+      sql: `
+        CREATE TABLE context_system_profile_request_view_bindings (
+          binding_id            TEXT PRIMARY KEY CHECK (length(binding_id) BETWEEN 1 AND 128),
+          request_view_id       TEXT NOT NULL UNIQUE CHECK (length(request_view_id) BETWEEN 1 AND 128),
+          world_id              TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          activation_epoch      INTEGER NOT NULL CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          profile_id            TEXT NOT NULL CHECK (length(profile_id) BETWEEN 1 AND 128),
+          profile_head_revision INTEGER NOT NULL CHECK (typeof(profile_head_revision) = 'integer' AND profile_head_revision >= 1),
+          request_view_hash     TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_hash          TEXT NOT NULL CHECK (length(profile_hash) = 64 AND profile_hash NOT GLOB '*[^0-9a-f]*'),
+          binding_json          TEXT NOT NULL CHECK (length(binding_json) >= 1 AND json_valid(binding_json)),
+          binding_hash          TEXT NOT NULL CHECK (length(binding_hash) = 64 AND binding_hash NOT GLOB '*[^0-9a-f]*'),
+          bound_at              INTEGER NOT NULL CHECK (typeof(bound_at) = 'integer' AND bound_at >= 0),
+          UNIQUE (binding_id, request_view_id, world_id),
+          FOREIGN KEY (request_view_id, world_id)
+            REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (profile_id, world_id, activation_epoch)
+            REFERENCES context_system_profiles(profile_id, world_id, activation_epoch) ON DELETE RESTRICT,
+          FOREIGN KEY (world_id, activation_epoch, profile_head_revision)
+            REFERENCES context_system_profile_advances(world_id, activation_epoch, revision) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_system_profile_request_view_bindings_conflict_guard
+          BEFORE INSERT ON context_system_profile_request_view_bindings
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_profile_request_view_bindings
+            WHERE binding_id = NEW.binding_id OR request_view_id = NEW.request_view_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile request view binding identity already exists');
+          END;
+        CREATE TRIGGER context_system_profile_request_view_bindings_lineage_guard
+          BEFORE INSERT ON context_system_profile_request_view_bindings
+          WHEN NOT (
+            EXISTS (
+              SELECT 1
+              FROM context_local_branch_request_views AS views
+              JOIN context_branches AS branches
+                ON branches.branch_id = views.branch_id
+               AND branches.world_id = views.world_id
+              JOIN context_branch_starts AS starts
+                ON starts.branch_id = branches.branch_id
+               AND starts.world_id = branches.world_id
+              JOIN context_manifests AS manifests
+                ON manifests.manifest_id = views.manifest_id
+               AND manifests.world_id = views.world_id
+              JOIN context_root_coordinator AS coordinator
+                ON coordinator.singleton = 1
+              JOIN context_continuation_head AS head
+                ON head.singleton = 1
+              JOIN context_graph_activation AS activation
+                ON activation.singleton = 1
+              JOIN context_system_profiles AS profiles
+                ON profiles.profile_id = NEW.profile_id
+               AND profiles.world_id = NEW.world_id
+               AND profiles.activation_epoch = NEW.activation_epoch
+              JOIN context_system_profile_advances AS advances
+                ON advances.world_id = NEW.world_id
+               AND advances.activation_epoch = NEW.activation_epoch
+               AND advances.revision = NEW.profile_head_revision
+               AND advances.profile_id = NEW.profile_id
+              WHERE views.request_view_id = NEW.request_view_id
+                AND views.world_id = NEW.world_id
+                AND views.view_hash = NEW.request_view_hash
+                AND profiles.profile_hash = NEW.profile_hash
+                AND branches.status = 'running'
+                AND coordinator.active_branch_id = branches.branch_id
+                AND coordinator.active_world_id = branches.world_id
+                AND coordinator.base_revision = starts.base_revision
+                AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                AND head.revision = starts.base_revision
+                AND head.branch_id IS starts.predecessor_branch_id
+                AND head.world_id IS starts.predecessor_world_id
+                AND activation.mode = 'dark'
+                AND activation.epoch = NEW.activation_epoch
+                AND profiles.system_renderer_generation = views.system_renderer_generation
+                AND profiles.policy_generation = views.policy_generation
+                AND profiles.created_at <= advances.advanced_at
+                AND advances.advanced_at <= views.created_at
+                AND views.created_at <= NEW.bound_at
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_system_profile_advances AS later
+                  WHERE later.world_id = NEW.world_id
+                    AND later.activation_epoch = NEW.activation_epoch
+                    AND later.revision > NEW.profile_head_revision
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_dark_pending_branch_attempts
+                  WHERE request_view_id = NEW.request_view_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_effects WHERE branch_id = branches.branch_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_capsules WHERE branch_id = branches.branch_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_manifest_shares
+                  WHERE manifest_id = views.manifest_id
+                )
+                AND (
+                  SELECT COUNT(*) FROM context_manifest_events
+                  WHERE manifest_id = views.manifest_id
+                ) = views.message_projection_count
+                AND (
+                  SELECT COUNT(*) FROM context_local_branch_request_messages
+                  WHERE request_view_id = views.request_view_id
+                ) = views.message_projection_count
+                AND (
+                  SELECT COUNT(*) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = views.system_layer_count
+                AND (
+                  views.message_projection_count = 0
+                  OR (
+                    (
+                      SELECT MIN(ordinal) FROM context_manifest_events
+                      WHERE manifest_id = views.manifest_id
+                    ) = 0
+                    AND (
+                      SELECT MAX(ordinal) FROM context_manifest_events
+                      WHERE manifest_id = views.manifest_id
+                    ) = views.message_projection_count - 1
+                    AND (
+                      SELECT MIN(ordinal) FROM context_local_branch_request_messages
+                      WHERE request_view_id = views.request_view_id
+                    ) = 0
+                    AND (
+                      SELECT MAX(ordinal) FROM context_local_branch_request_messages
+                      WHERE request_view_id = views.request_view_id
+                    ) = views.message_projection_count - 1
+                  )
+                )
+                AND views.system_layer_count = 2
+                  + CASE WHEN profiles.integrated_self_approval_id IS NULL THEN 0 ELSE 1 END
+                  + CASE WHEN profiles.world_policy_approval_id IS NULL THEN 0 ELSE 1 END
+                AND (
+                  SELECT MIN(ordinal) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = 0
+                AND (
+                  SELECT MAX(ordinal) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = views.system_layer_count - 1
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM context_local_branch_request_system_layers AS edges
+                  WHERE edges.request_view_id = views.request_view_id
+                    AND edges.layer_id IS NOT CASE edges.ordinal
+                      WHEN 0 THEN (
+                        SELECT layer_id FROM context_system_layer_approvals
+                        WHERE approval_id = profiles.scoped_runtime_contract_approval_id
+                      )
+                      WHEN 1 THEN (
+                        SELECT layer_id FROM context_system_layer_approvals
+                        WHERE approval_id = profiles.identity_approval_id
+                      )
+                      WHEN 2 THEN CASE
+                        WHEN profiles.integrated_self_approval_id IS NOT NULL THEN (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.integrated_self_approval_id
+                        )
+                        ELSE (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.world_policy_approval_id
+                        )
+                      END
+                      WHEN 3 THEN CASE
+                        WHEN profiles.integrated_self_approval_id IS NOT NULL
+                         AND profiles.world_policy_approval_id IS NOT NULL THEN (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.world_policy_approval_id
+                        )
+                        ELSE NULL
+                      END
+                      ELSE NULL
+                    END
+                )
+            )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile request view binding lineage is invalid');
+          END;
+        CREATE TRIGGER context_system_profile_request_view_bindings_no_update
+          BEFORE UPDATE ON context_system_profile_request_view_bindings BEGIN
+            SELECT RAISE(ABORT, 'context system profile request view bindings are immutable');
+          END;
+        CREATE TRIGGER context_system_profile_request_view_bindings_no_delete
+          BEFORE DELETE ON context_system_profile_request_view_bindings BEGIN
+            SELECT RAISE(ABORT, 'context system profile request view bindings are immutable');
+          END;
+        CREATE TRIGGER context_bound_request_view_system_layers_sealed
+          BEFORE INSERT ON context_local_branch_request_system_layers
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_profile_request_view_bindings
+            WHERE request_view_id = NEW.request_view_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'bound request view system layers are sealed');
+          END;
+        CREATE TRIGGER context_bound_request_view_messages_sealed
+          BEFORE INSERT ON context_local_branch_request_messages
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_profile_request_view_bindings
+            WHERE request_view_id = NEW.request_view_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'bound request view messages are sealed');
+          END;
+        CREATE TRIGGER context_bound_request_view_manifest_events_sealed
+          BEFORE INSERT ON context_manifest_events
+          WHEN EXISTS (
+            SELECT 1
+            FROM context_system_profile_request_view_bindings AS bindings
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = bindings.request_view_id
+            WHERE views.manifest_id = NEW.manifest_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'bound request view manifest events are sealed');
+          END;
+        CREATE TRIGGER context_bound_request_view_manifest_shares_sealed
+          BEFORE INSERT ON context_manifest_shares
+          WHEN EXISTS (
+            SELECT 1
+            FROM context_system_profile_request_view_bindings AS bindings
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = bindings.request_view_id
+            WHERE views.manifest_id = NEW.manifest_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'bound request view manifest shares are sealed');
           END;
       `,
     },

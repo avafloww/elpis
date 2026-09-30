@@ -7,6 +7,8 @@ import {
   type ContextGraphStore,
   type EventMessageProjectionId,
   type LocalBranchRequestViewId,
+  type SystemProfileRequestViewBindingId,
+  type SystemProfileRequestViewBindingRecord,
   type SystemLayerProjectionId,
   type SystemLayerKind,
   type WorldId,
@@ -143,6 +145,28 @@ export function materializeWorldConversation(input: {
 }
 
 export type { MaterializedLocalBranchRequest } from './candidate.js';
+
+export interface ProfileBoundMaterializedLocalBranchRequest {
+  readonly binding: SystemProfileRequestViewBindingRecord;
+  readonly request: MaterializedLocalBranchRequest;
+}
+
+export function materializeProfileBoundLocalBranchRequest(input: {
+  store: ContextGraphStore;
+  bindingId: SystemProfileRequestViewBindingId;
+}): ProfileBoundMaterializedLocalBranchRequest {
+  const binding = input.store.getSystemProfileRequestViewBinding(input.bindingId);
+  if (!binding) {
+    throw new Error(`system profile request view binding is missing: ${input.bindingId}`);
+  }
+  return {
+    binding,
+    request: materializeLocalBranchRequest({
+      store: input.store,
+      requestViewId: binding.binding.requestViewId,
+    }),
+  };
+}
 
 export function materializeLocalBranchRequest(input: {
   store: ContextGraphStore;

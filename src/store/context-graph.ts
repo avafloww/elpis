@@ -34,6 +34,8 @@ export type EventMessageProjectionId = ContextId<'EventMessageProjectionId'>;
 export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
 export type SystemLayerApprovalId = ContextId<'SystemLayerApprovalId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
+export type SystemProfileRequestViewBindingId =
+  ContextId<'SystemProfileRequestViewBindingId'>;
 export type LocalBranchRequestViewId = ContextId<'LocalBranchRequestViewId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
@@ -113,6 +115,14 @@ export const systemLayerApprovalId = (
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
+export const systemProfileRequestViewBindingId = (
+  value: string,
+): SystemProfileRequestViewBindingId =>
+  branded<'SystemProfileRequestViewBindingId'>(
+    'systemProfileRequestViewBindingId',
+    value,
+    'profile-view-binding:',
+  );
 export const localBranchRequestViewId = (
   value: string,
 ): LocalBranchRequestViewId =>
@@ -351,6 +361,25 @@ export interface SystemProfileHead {
   readonly predecessorProfileId: SystemProfileId | null;
   readonly profileId: SystemProfileId;
   readonly advancedAt: number;
+}
+
+export interface SystemProfileRequestViewBindingV1 {
+  readonly schemaVersion: 1;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly worldId: WorldId;
+  readonly activationEpoch: number;
+  readonly profileId: SystemProfileId;
+  readonly profileHash: string;
+  readonly profileHeadRevision: number;
+  readonly boundAt: number;
+}
+
+export interface SystemProfileRequestViewBindingRecord {
+  readonly bindingId: SystemProfileRequestViewBindingId;
+  readonly binding: SystemProfileRequestViewBindingV1;
+  readonly bindingJson: string;
+  readonly bindingHash: string;
 }
 
 export interface LocalBranchRequestViewV1 {
@@ -944,6 +973,70 @@ function systemProfileIdentity(profile: SystemProfileV1): SystemProfileId {
   );
 }
 
+function normalizeSystemProfileRequestViewBinding(
+  value: unknown,
+): SystemProfileRequestViewBindingV1 {
+  const binding = shadowPlanObject(
+    value,
+    'system profile request view binding',
+  );
+  exactShadowPlanKeys(
+    binding,
+    [
+      'schemaVersion',
+      'requestViewId',
+      'requestViewHash',
+      'worldId',
+      'activationEpoch',
+      'profileId',
+      'profileHash',
+      'profileHeadRevision',
+      'boundAt',
+    ],
+    'system profile request view binding',
+  );
+  if (
+    binding.schemaVersion !== 1 ||
+    typeof binding.requestViewId !== 'string' ||
+    typeof binding.requestViewHash !== 'string' ||
+    !isWorldId(binding.worldId) ||
+    typeof binding.profileId !== 'string' ||
+    typeof binding.profileHash !== 'string'
+  ) {
+    throw new Error('system profile request view binding identity is invalid');
+  }
+  const activationEpoch = generation(
+    'activationEpoch',
+    binding.activationEpoch as number,
+  );
+  const profileHeadRevision = generation(
+    'profileHeadRevision',
+    binding.profileHeadRevision as number,
+  );
+  if (profileHeadRevision < 1) {
+    throw new Error('system profile request view binding revision is invalid');
+  }
+  return {
+    schemaVersion: 1,
+    requestViewId: localBranchRequestViewId(binding.requestViewId),
+    requestViewHash: sha256('requestViewHash', binding.requestViewHash),
+    worldId: worldId(binding.worldId),
+    activationEpoch,
+    profileId: systemProfileId(binding.profileId),
+    profileHash: sha256('profileHash', binding.profileHash),
+    profileHeadRevision,
+    boundAt: timestamp('boundAt', binding.boundAt as number),
+  };
+}
+
+function systemProfileRequestViewBindingIdentity(
+  binding: SystemProfileRequestViewBindingV1,
+): SystemProfileRequestViewBindingId {
+  return systemProfileRequestViewBindingId(
+    `profile-view-binding:${hashContextBytes(serialize(binding))}`,
+  );
+}
+
 function normalizeLocalBranchRequestView(
   value: unknown,
 ): LocalBranchRequestViewV1 {
@@ -1426,6 +1519,20 @@ interface SystemProfileAdvanceRow {
   advanced_at: number;
 }
 
+interface SystemProfileRequestViewBindingRow {
+  binding_id: string;
+  request_view_id: string;
+  world_id: string;
+  activation_epoch: number;
+  profile_id: string;
+  profile_head_revision: number;
+  request_view_hash: string;
+  profile_hash: string;
+  binding_json: string;
+  binding_hash: string;
+  bound_at: number;
+}
+
 interface LocalBranchRequestViewRow {
   request_view_id: string;
   branch_id: string;
@@ -1846,6 +1953,46 @@ function mapSystemProfileHead(row: SystemProfileAdvanceRow): SystemProfileHead {
         : systemProfileId(row.predecessor_profile_id),
     profileId: systemProfileId(row.profile_id),
     advancedAt: timestamp('advancedAt', row.advanced_at),
+  };
+}
+
+function mapSystemProfileRequestViewBinding(
+  row: SystemProfileRequestViewBindingRow,
+): SystemProfileRequestViewBindingRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.binding_json);
+  } catch (error) {
+    throw new Error(
+      `stored system profile request view binding is invalid: ${row.binding_id}`,
+      { cause: error },
+    );
+  }
+  const binding = normalizeSystemProfileRequestViewBinding(parsed);
+  const bindingJson = serialize(binding);
+  const bindingHash = sha256('bindingHash', row.binding_hash);
+  if (
+    row.request_view_id !== binding.requestViewId ||
+    row.world_id !== binding.worldId ||
+    row.activation_epoch !== binding.activationEpoch ||
+    row.profile_id !== binding.profileId ||
+    row.profile_head_revision !== binding.profileHeadRevision ||
+    row.request_view_hash !== binding.requestViewHash ||
+    row.profile_hash !== binding.profileHash ||
+    row.bound_at !== binding.boundAt ||
+    row.binding_json !== bindingJson ||
+    hashContextBytes(bindingJson) !== bindingHash ||
+    systemProfileRequestViewBindingIdentity(binding) !== row.binding_id
+  ) {
+    throw new Error(
+      `stored system profile request view binding is invalid: ${row.binding_id}`,
+    );
+  }
+  return {
+    bindingId: systemProfileRequestViewBindingId(row.binding_id),
+    binding,
+    bindingJson,
+    bindingHash,
   };
 }
 
@@ -2806,19 +2953,33 @@ export class ContextGraphStore {
     return record;
   }
 
-  getSystemProfileHead(
+  private getSystemProfileHeadPrefix(
     targetWorldId: WorldId,
     activationEpoch: number,
+    throughRevision: number | null,
   ): SystemProfileHead | null {
     const normalizedWorldId = worldId(targetWorldId);
     const normalizedEpoch = generation('activationEpoch', activationEpoch);
+    const normalizedRevision =
+      throughRevision === null
+        ? null
+        : generation('profileHeadRevision', throughRevision);
+    if (normalizedRevision !== null && normalizedRevision < 1) {
+      throw new Error('system profile head revision is invalid');
+    }
     const rows = this.database
       .prepare(
         `SELECT * FROM context_system_profile_advances
          WHERE world_id = ? AND activation_epoch = ?
+           AND (? IS NULL OR revision <= ?)
          ORDER BY revision ASC`,
       )
-      .all(normalizedWorldId, normalizedEpoch) as unknown as SystemProfileAdvanceRow[];
+      .all(
+        normalizedWorldId,
+        normalizedEpoch,
+        normalizedRevision,
+        normalizedRevision,
+      ) as unknown as SystemProfileAdvanceRow[];
     if (rows.length === 0) return null;
     let previous: SystemProfileHead | null = null;
     for (const row of rows) {
@@ -2843,7 +3004,24 @@ export class ContextGraphStore {
       }
       previous = head;
     }
+    if (
+      normalizedRevision !== null &&
+      previous?.revision !== normalizedRevision
+    ) {
+      throw new Error('stored system profile head revision is missing');
+    }
     return previous;
+  }
+
+  getSystemProfileHead(
+    targetWorldId: WorldId,
+    activationEpoch: number,
+  ): SystemProfileHead | null {
+    return this.getSystemProfileHeadPrefix(
+      targetWorldId,
+      activationEpoch,
+      null,
+    );
   }
 
   advanceSystemProfileHead(input: {
@@ -2898,6 +3076,241 @@ export class ContextGraphStore {
         );
       return this.getSystemProfileHead(targetWorldId, activation.epoch)!;
     });
+  }
+
+  private systemProfileLayerIds(
+    profile: SystemProfileV1,
+  ): readonly SystemLayerProjectionId[] {
+    const layers = [
+      this.requireSystemProfileApproval(
+        profile.approvals.scopedRuntimeContract,
+        'scoped_runtime_contract',
+      ).layer.layerId,
+      this.requireSystemProfileApproval(
+        profile.approvals.identity,
+        'identity',
+      ).layer.layerId,
+    ];
+    if (profile.approvals.integratedSelf !== null) {
+      layers.push(
+        this.requireSystemProfileApproval(
+          profile.approvals.integratedSelf,
+          'integrated_self',
+        ).layer.layerId,
+      );
+    }
+    if (profile.approvals.worldPolicy !== null) {
+      layers.push(
+        this.requireSystemProfileApproval(
+          profile.approvals.worldPolicy,
+          'world_policy',
+        ).layer.layerId,
+      );
+    }
+    return layers;
+  }
+
+  createSystemProfileRequestViewBinding(input: {
+    requestViewId: LocalBranchRequestViewId;
+    expectedProfileId: SystemProfileId;
+    expectedProfileHeadRevision: number;
+    boundAt: number;
+  }): SystemProfileRequestViewBindingRecord {
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new StaleActivationStateError(activation.epoch);
+      }
+      const requestView = this.getLocalBranchRequestView(input.requestViewId);
+      if (!requestView) {
+        throw new Error(`local branch request view not found: ${input.requestViewId}`);
+      }
+      const profileHeadRevision = generation(
+        'expectedProfileHeadRevision',
+        input.expectedProfileHeadRevision,
+      );
+      const expectedProfileId = systemProfileId(input.expectedProfileId);
+      const boundAt = timestamp('boundAt', input.boundAt);
+      const existingForView =
+        this.getSystemProfileRequestViewBindingForView(requestView.requestViewId);
+      if (existingForView) {
+        if (
+          existingForView.binding.worldId !== requestView.worldId ||
+          existingForView.binding.activationEpoch !== activation.epoch ||
+          existingForView.binding.profileId !== expectedProfileId ||
+          existingForView.binding.profileHeadRevision !== profileHeadRevision ||
+          existingForView.binding.boundAt !== boundAt
+        ) {
+          throw new Error(
+            `system profile request view binding identity conflict: ${existingForView.bindingId}`,
+          );
+        }
+        return existingForView;
+      }
+      const head = this.getSystemProfileHead(
+        requestView.worldId,
+        activation.epoch,
+      );
+      if (
+        !head ||
+        head.revision !== profileHeadRevision ||
+        head.profileId !== expectedProfileId
+      ) {
+        throw new StaleSystemProfileHeadError(profileHeadRevision);
+      }
+      const profile = this.getSystemProfile(head.profileId);
+      if (!profile) {
+        throw new Error('system profile request view binding profile is missing');
+      }
+      const layerIds = this.systemProfileLayerIds(profile.profile);
+      if (
+        profile.profile.systemRendererGeneration !==
+          requestView.view.systemRendererGeneration ||
+        profile.profile.policyGeneration !== requestView.view.policyGeneration ||
+        layerIds.length !== requestView.view.systemLayerProjectionIds.length ||
+        layerIds.some(
+          (layerId, ordinal) =>
+            layerId !== requestView.view.systemLayerProjectionIds[ordinal],
+        )
+      ) {
+        throw new Error('system profile request view binding layers are invalid');
+      }
+      if (
+        profile.createdAt > head.advancedAt ||
+        head.advancedAt > requestView.createdAt ||
+        requestView.createdAt > boundAt
+      ) {
+        throw new Error('system profile request view binding chronology is invalid');
+      }
+      const binding = normalizeSystemProfileRequestViewBinding({
+        schemaVersion: 1,
+        requestViewId: requestView.requestViewId,
+        requestViewHash: requestView.viewHash,
+        worldId: requestView.worldId,
+        activationEpoch: activation.epoch,
+        profileId: profile.profileId,
+        profileHash: profile.profileHash,
+        profileHeadRevision: head.revision,
+        boundAt,
+      });
+      const bindingJson = serialize(binding);
+      const bindingHash = hashContextBytes(bindingJson);
+      const bindingId = systemProfileRequestViewBindingIdentity(binding);
+      const collision = this.database
+        .prepare(
+          `SELECT binding_id FROM context_system_profile_request_view_bindings
+           WHERE binding_id = ? OR request_view_id = ?`,
+        )
+        .get(bindingId, requestView.requestViewId) as unknown as
+        | { binding_id: string }
+        | undefined;
+      if (collision) {
+        const existing = this.getSystemProfileRequestViewBinding(
+          systemProfileRequestViewBindingId(collision.binding_id),
+        );
+        if (
+          !existing ||
+          existing.bindingId !== bindingId ||
+          existing.bindingJson !== bindingJson ||
+          existing.bindingHash !== bindingHash
+        ) {
+          throw new Error(
+            `system profile request view binding identity conflict: ${collision.binding_id}`,
+          );
+        }
+        return existing;
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_system_profile_request_view_bindings(
+             binding_id, request_view_id, world_id, activation_epoch,
+             profile_id, profile_head_revision, request_view_hash, profile_hash,
+             binding_json, binding_hash, bound_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          bindingId,
+          binding.requestViewId,
+          binding.worldId,
+          binding.activationEpoch,
+          binding.profileId,
+          binding.profileHeadRevision,
+          binding.requestViewHash,
+          binding.profileHash,
+          bindingJson,
+          bindingHash,
+          binding.boundAt,
+        );
+      return this.getSystemProfileRequestViewBinding(bindingId)!;
+    });
+  }
+
+  getSystemProfileRequestViewBinding(
+    id: SystemProfileRequestViewBindingId,
+  ): SystemProfileRequestViewBindingRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_system_profile_request_view_bindings
+         WHERE binding_id = ?`,
+      )
+      .get(id) as unknown as SystemProfileRequestViewBindingRow | undefined;
+    if (!row) return null;
+    const record = mapSystemProfileRequestViewBinding(row);
+    const requestView = this.getLocalBranchRequestView(
+      record.binding.requestViewId,
+    );
+    const profile = this.getSystemProfile(record.binding.profileId);
+    const head = this.getSystemProfileHeadPrefix(
+      record.binding.worldId,
+      record.binding.activationEpoch,
+      record.binding.profileHeadRevision,
+    );
+    if (
+      !requestView ||
+      !profile ||
+      !head ||
+      requestView.worldId !== record.binding.worldId ||
+      requestView.viewHash !== record.binding.requestViewHash ||
+      profile.profileHash !== record.binding.profileHash ||
+      profile.profile.worldId !== record.binding.worldId ||
+      profile.profile.activationEpoch !== record.binding.activationEpoch ||
+      head.profileId !== profile.profileId ||
+      profile.profile.systemRendererGeneration !==
+        requestView.view.systemRendererGeneration ||
+      profile.profile.policyGeneration !== requestView.view.policyGeneration ||
+      profile.createdAt > head.advancedAt ||
+      head.advancedAt > requestView.createdAt ||
+      requestView.createdAt > record.binding.boundAt
+    ) {
+      throw new Error(`stored system profile request view binding lineage is invalid: ${id}`);
+    }
+    const layerIds = this.systemProfileLayerIds(profile.profile);
+    if (
+      layerIds.length !== requestView.view.systemLayerProjectionIds.length ||
+      layerIds.some(
+        (layerId, ordinal) =>
+          layerId !== requestView.view.systemLayerProjectionIds[ordinal],
+      )
+    ) {
+      throw new Error(`stored system profile request view binding layers are invalid: ${id}`);
+    }
+    return record;
+  }
+
+  getSystemProfileRequestViewBindingForView(
+    requestViewId: LocalBranchRequestViewId,
+  ): SystemProfileRequestViewBindingRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT binding_id FROM context_system_profile_request_view_bindings
+         WHERE request_view_id = ?`,
+      )
+      .get(requestViewId) as unknown as { binding_id: string } | undefined;
+    return row
+      ? this.getSystemProfileRequestViewBinding(
+          systemProfileRequestViewBindingId(row.binding_id),
+        )
+      : null;
   }
 
   private validateLocalBranchRequestEventOrder(

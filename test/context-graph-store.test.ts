@@ -12,6 +12,7 @@ import {
 import { MAX_LOCAL_BRANCH_REQUEST_CANDIDATE_BYTES } from '../src/context/candidate.js';
 import {
   materializeLocalBranchRequest,
+  materializeProfileBoundLocalBranchRequest,
   materializeSystemProjection,
   materializeWorldConversation,
 } from '../src/context/view.js';
@@ -4586,6 +4587,324 @@ test('system profiles bind exact approvals and advance one append-only world hea
          ) VALUES (?, 0, 4, ?, ?, 60)`,
       ).run(worldA, profileA.profileId, profileA.profileId),
       /invalid context system profile advance/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('profile bindings seal one exact historical request view', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:bound-profile');
+    const sourceEventId = eventId('event:bound-profile');
+    value.store.appendWorldEvent({
+      eventId: sourceEventId,
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: 'BOUND_PROFILE_MESSAGE' },
+      occurredAt: 1,
+      recordedAt: 1,
+    });
+    const message = value.store.createEventMessageProjection({
+      sourceEventId,
+      sourceSequence: 1,
+      worldId: world,
+      rendererGeneration: 2,
+      message: { role: 'user', content: '<incoming>BOUND_PROFILE_MESSAGE</incoming>' },
+      createdAt: 10,
+    });
+    const approve = (input: {
+      kind: 'runtime_contract' | 'identity' | 'world_policy';
+      visibility: 'global_contract' | 'integrated_self' | 'world';
+      worldId: ReturnType<typeof worldId> | null;
+      sourceKind: 'authored_scoped_contract' | 'soul_snapshot' | 'routing_policy';
+      role: 'scoped_runtime_contract' | 'identity' | 'world_policy';
+      source: string;
+      content: string;
+    }) => {
+      const layer = value.store.createSystemLayerProjection({
+        kind: input.kind,
+        visibility: input.visibility,
+        worldId: input.worldId,
+        rendererGeneration: 2,
+        policyGeneration: 3,
+        sourceKind: input.sourceKind,
+        sourceHash: hashContextBytes(input.source),
+        content: input.content,
+        createdAt: 10,
+      });
+      const approval = value.store.approveSystemLayer({
+        layerId: layer.layerId,
+        role: input.role,
+        basisRef: `fixture:${input.source}`,
+        approvalGeneration: 1,
+        approvedAt: 20,
+      });
+      return { layer, approval };
+    };
+    const contract = approve({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      sourceKind: 'authored_scoped_contract',
+      role: 'scoped_runtime_contract',
+      source: 'bound-contract',
+      content: 'BOUND_CONTRACT\n',
+    });
+    const identityA = approve({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
+      source: 'bound-identity-a',
+      content: 'BOUND_IDENTITY_A\n',
+    });
+    const policy = approve({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: world,
+      sourceKind: 'routing_policy',
+      role: 'world_policy',
+      source: 'bound-policy',
+      content: 'BOUND_POLICY\n',
+    });
+    const profileA = value.store.createSystemProfile({
+      worldId: world,
+      scopedRuntimeContractApprovalId: contract.approval.approvalId,
+      identityApprovalId: identityA.approval.approvalId,
+      worldPolicyApprovalId: policy.approval.approvalId,
+      createdAt: 22,
+    });
+    value.store.advanceSystemProfileHead({
+      worldId: world,
+      expectedRevision: 0,
+      expectedProfileId: null,
+      profileId: profileA.profileId,
+      advancedAt: 25,
+    });
+    const assembly = assembleDarkLocalBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 0,
+      worldId: world,
+      branchId: branchId('branch:bound-profile'),
+      messageProjectionIds: [message.projectionId],
+      systemLayerProjectionIds: [
+        contract.layer.layerId,
+        identityA.layer.layerId,
+        policy.layer.layerId,
+      ],
+      assembledAt: 40,
+    });
+    const binding = value.store.createSystemProfileRequestViewBinding({
+      requestViewId: assembly.requestView.requestViewId,
+      expectedProfileId: profileA.profileId,
+      expectedProfileHeadRevision: 1,
+      boundAt: 41,
+    });
+    assert.match(binding.bindingId, /^profile-view-binding:[0-9a-f]{64}$/);
+    assert.equal(binding.binding.requestViewHash, assembly.requestView.viewHash);
+    assert.equal(binding.binding.profileHash, profileA.profileHash);
+    assert.deepEqual(
+      value.store.getSystemProfileRequestViewBinding(binding.bindingId),
+      binding,
+    );
+    assert.deepEqual(
+      value.store.getSystemProfileRequestViewBindingForView(
+        assembly.requestView.requestViewId,
+      ),
+      binding,
+    );
+    const materialized = materializeProfileBoundLocalBranchRequest({
+      store: value.store,
+      bindingId: binding.bindingId,
+    });
+    assert.equal(materialized.binding.bindingId, binding.bindingId);
+    assert.equal(materialized.request.candidateHash, assembly.request.candidateHash);
+    assert.deepEqual(
+      value.store.createSystemProfileRequestViewBinding({
+        requestViewId: assembly.requestView.requestViewId,
+        expectedProfileId: profileA.profileId,
+        expectedProfileHeadRevision: 1,
+        boundAt: 41,
+      }),
+      binding,
+    );
+    assert.throws(
+      () => value.store.createSystemProfileRequestViewBinding({
+        requestViewId: assembly.requestView.requestViewId,
+        expectedProfileId: profileA.profileId,
+        expectedProfileHeadRevision: 1,
+        boundAt: 42,
+      }),
+      /binding identity conflict/,
+    );
+    const storedBinding = value.database.prepare(
+      `SELECT * FROM context_system_profile_request_view_bindings
+       WHERE binding_id = ?`,
+    ).get(binding.bindingId) as Record<string, string | number>;
+    value.database.exec(`
+      SAVEPOINT reject_retroactive_effect_binding;
+      DROP TRIGGER context_system_profile_request_view_bindings_no_delete;
+      DELETE FROM context_system_profile_request_view_bindings
+        WHERE binding_id = '${binding.bindingId}';
+    `);
+    value.store.prepareEffect({
+      effectId: effectId('effect:bound-profile-before-binding'),
+      branchId: assembly.branch.branchId,
+      worldId: world,
+      destinationWorldId: world,
+      kind: 'send',
+      authorityEpoch: assembly.branch.authorityEpoch,
+      payload: { text: 'must not gain a binding retroactively' },
+      preparedAt: 40,
+    });
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_system_profile_request_view_bindings(
+           binding_id, request_view_id, world_id, activation_epoch,
+           profile_id, profile_head_revision, request_view_hash, profile_hash,
+           binding_json, binding_hash, bound_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        storedBinding.binding_id,
+        storedBinding.request_view_id,
+        storedBinding.world_id,
+        storedBinding.activation_epoch,
+        storedBinding.profile_id,
+        storedBinding.profile_head_revision,
+        storedBinding.request_view_hash,
+        storedBinding.profile_hash,
+        storedBinding.binding_json,
+        storedBinding.binding_hash,
+        storedBinding.bound_at,
+      ),
+      /binding lineage is invalid/,
+    );
+    value.database.exec(`
+      ROLLBACK TO reject_retroactive_effect_binding;
+      RELEASE reject_retroactive_effect_binding;
+    `);
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT OR REPLACE INTO context_system_profile_request_view_bindings(
+           binding_id, request_view_id, world_id, activation_epoch,
+           profile_id, profile_head_revision, request_view_hash, profile_hash,
+           binding_json, binding_hash, bound_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        storedBinding.binding_id,
+        storedBinding.request_view_id,
+        storedBinding.world_id,
+        storedBinding.activation_epoch,
+        storedBinding.profile_id,
+        storedBinding.profile_head_revision,
+        storedBinding.request_view_hash,
+        storedBinding.profile_hash,
+        storedBinding.binding_json,
+        storedBinding.binding_hash,
+        storedBinding.bound_at,
+      ),
+      /binding identity already exists/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `UPDATE context_system_profile_request_view_bindings
+         SET bound_at = bound_at + 1 WHERE binding_id = ?`,
+      ).run(binding.bindingId),
+      /bindings are immutable/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `DELETE FROM context_system_profile_request_view_bindings
+         WHERE binding_id = ?`,
+      ).run(binding.bindingId),
+      /bindings are immutable/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_local_branch_request_system_layers(
+           request_view_id, layer_id, world_id, ordinal
+         ) VALUES (?, ?, ?, 99)`,
+      ).run(
+        assembly.requestView.requestViewId,
+        contract.layer.layerId,
+        world,
+      ),
+      /bound request view system layers are sealed/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_local_branch_request_messages(
+           request_view_id, projection_id, world_id, ordinal
+         ) VALUES (?, ?, ?, 99)`,
+      ).run(
+        assembly.requestView.requestViewId,
+        message.projectionId,
+        world,
+      ),
+      /bound request view messages are sealed/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_manifest_events(
+           manifest_id, event_id, world_id, ordinal
+         ) VALUES (?, ?, ?, 99)`,
+      ).run(assembly.manifest.manifestId, sourceEventId, world),
+      /bound request view manifest events are sealed/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_manifest_shares(
+           manifest_id, grant_id, shared_event_id, destination_world_id, ordinal
+         ) VALUES (?, 'share:sealed-fixture', ?, ?, 99)`,
+      ).run(assembly.manifest.manifestId, sourceEventId, world),
+      /bound request view manifest shares are sealed/,
+    );
+    const identityB = approve({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
+      source: 'bound-identity-b',
+      content: 'BOUND_IDENTITY_B\n',
+    });
+    const profileB = value.store.createSystemProfile({
+      worldId: world,
+      scopedRuntimeContractApprovalId: contract.approval.approvalId,
+      identityApprovalId: identityB.approval.approvalId,
+      worldPolicyApprovalId: policy.approval.approvalId,
+      createdAt: 42,
+    });
+    value.store.advanceSystemProfileHead({
+      worldId: world,
+      expectedRevision: 1,
+      expectedProfileId: profileA.profileId,
+      profileId: profileB.profileId,
+      advancedAt: 43,
+    });
+    assert.deepEqual(
+      value.store.getSystemProfileRequestViewBinding(binding.bindingId),
+      binding,
+    );
+    assert.deepEqual(
+      value.store.createSystemProfileRequestViewBinding({
+        requestViewId: assembly.requestView.requestViewId,
+        expectedProfileId: profileA.profileId,
+        expectedProfileHeadRevision: 1,
+        boundAt: 41,
+      }),
+      binding,
+    );
+    assert.equal(
+      materializeProfileBoundLocalBranchRequest({
+        store: value.store,
+        bindingId: binding.bindingId,
+      }).request.candidateHash,
+      assembly.request.candidateHash,
     );
   } finally {
     closeFixture(value);

@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    39,
+    40,
   );
   assert.deepEqual(
     (
@@ -206,6 +206,10 @@ test('current migration prefix preserves fleet history and creates resident stat
       { component: 'core', name: '0037-context-system-layer-approvals' },
       { component: 'core', name: '0038-context-system-layer-approval-sources' },
       { component: 'core', name: '0039-context-system-profiles' },
+      {
+        component: 'core',
+        name: '0040-context-system-profile-request-view-bindings',
+      },
     ],
   );
   db.close();
@@ -227,6 +231,11 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TABLE context_dark_pending_branch_attempts;
     DROP TABLE context_dark_ingress_admissions;
     DROP TABLE context_dark_ingress_generations;
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_local_branch_request_messages;
     DROP TABLE context_local_branch_request_system_layers;
     DROP TABLE context_local_branch_request_views;
@@ -263,7 +272,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -452,7 +461,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    39,
+    40,
   );
   assert.deepEqual(
     (
@@ -489,6 +498,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0037-context-system-layer-approvals',
       '0038-context-system-layer-approval-sources',
       '0039-context-system-profiles',
+      '0040-context-system-profile-request-view-bindings',
     ],
   );
   runMigrations(db);
@@ -520,7 +530,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    26,
+    27,
   );
   db.close();
 });
@@ -560,7 +570,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 39);
+  assert.equal(version, 40);
   assert.equal(
     (
       reopened
@@ -603,6 +613,11 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP TABLE context_dark_pending_branch_attempts;
     DROP TABLE context_dark_ingress_admissions;
     DROP TABLE context_dark_ingress_generations;
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_local_branch_request_messages;
     DROP TABLE context_local_branch_request_system_layers;
     DROP TABLE context_local_branch_request_views;
@@ -620,7 +635,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP INDEX context_branches_single_running_idx;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,
@@ -694,13 +709,19 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
     'a'.repeat(64),
   );
   db.exec(`
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_system_profile_advances;
     DROP TABLE context_system_profiles;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
         AND name IN (
           '0038-context-system-layer-approval-sources',
-          '0039-context-system-profiles'
+          '0039-context-system-profiles',
+          '0040-context-system-profile-request-view-bindings'
         );
     PRAGMA user_version = 37;
   `);
@@ -741,6 +762,11 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   }
   db.exec(`
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_system_profile_advances;
     DROP TABLE context_system_profiles;
     DROP TRIGGER context_system_layer_approvals_chronology_guard;
@@ -770,7 +796,7 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
   );
   db.exec(`
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name = '0039-context-system-profiles';
+      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings');
     PRAGMA user_version = 38;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -833,11 +859,16 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     DROP TABLE context_dark_pending_branch_attempts;
     DROP TABLE context_dark_ingress_admissions;
     DROP TABLE context_dark_ingress_generations;
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_system_profile_advances;
     DROP TABLE context_system_profiles;
     DROP TABLE context_system_layer_approvals;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles');
+      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings');
     PRAGMA user_version = 34;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -914,7 +945,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    39,
+    40,
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });

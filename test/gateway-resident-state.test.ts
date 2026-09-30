@@ -225,6 +225,11 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
     DROP TABLE context_dark_pending_branch_attempts;
     DROP TABLE context_dark_ingress_admissions;
     DROP TABLE context_dark_ingress_generations;
+    DROP TRIGGER context_bound_request_view_system_layers_sealed;
+    DROP TRIGGER context_bound_request_view_messages_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_events_sealed;
+    DROP TRIGGER context_bound_request_view_manifest_shares_sealed;
+    DROP TABLE context_system_profile_request_view_bindings;
     DROP TABLE context_local_branch_request_messages;
     DROP TABLE context_local_branch_request_system_layers;
     DROP TABLE context_local_branch_request_views;
@@ -276,7 +281,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0036-context-dark-pending-branch-attempts',
           '0037-context-system-layer-approvals',
           '0038-context-system-layer-approval-sources',
-          '0039-context-system-profiles'
+          '0039-context-system-profiles',
+          '0040-context-system-profile-request-view-bindings'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;
