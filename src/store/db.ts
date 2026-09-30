@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 38;
+const SCHEMA_VERSION = 39;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -2594,9 +2594,226 @@ export function runMigrations(db: DatabaseSync): void {
           END;
       `,
     },
+    {
+      name: '0039-context-system-profiles',
+      sql: `
+        CREATE TABLE context_system_layer_approval_chronology_guard (
+          valid INTEGER NOT NULL CHECK (valid = 1)
+        );
+        INSERT INTO context_system_layer_approval_chronology_guard(valid)
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1
+          FROM context_system_layer_approvals AS approvals
+          JOIN context_system_layer_projections AS layers
+            ON layers.layer_id = approvals.layer_id
+          WHERE approvals.approved_at < layers.created_at
+        ) THEN 1 ELSE 0 END;
+        DROP TABLE context_system_layer_approval_chronology_guard;
+        CREATE TRIGGER context_system_layer_approvals_chronology_guard
+          BEFORE INSERT ON context_system_layer_approvals
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_system_layer_projections AS layers
+            WHERE layers.layer_id = NEW.layer_id
+              AND layers.created_at <= NEW.approved_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system layer approval chronology is invalid');
+          END;
+
+        CREATE TABLE context_system_profiles (
+          profile_id                        TEXT PRIMARY KEY CHECK (length(profile_id) BETWEEN 1 AND 128),
+          world_id                          TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          activation_epoch                  INTEGER NOT NULL CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          system_renderer_generation        INTEGER NOT NULL CHECK (typeof(system_renderer_generation) = 'integer' AND system_renderer_generation >= 1),
+          policy_generation                 INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 1),
+          scoped_runtime_contract_approval_id TEXT NOT NULL,
+          identity_approval_id              TEXT NOT NULL,
+          integrated_self_approval_id       TEXT,
+          world_policy_approval_id          TEXT,
+          profile_json                      TEXT NOT NULL,
+          profile_hash                      TEXT NOT NULL CHECK (length(profile_hash) = 64 AND profile_hash NOT GLOB '*[^0-9a-f]*'),
+          created_at                        INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          UNIQUE (profile_id, world_id, activation_epoch),
+          FOREIGN KEY (scoped_runtime_contract_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT,
+          FOREIGN KEY (identity_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT,
+          FOREIGN KEY (integrated_self_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT,
+          FOREIGN KEY (world_policy_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE INDEX context_system_profiles_world_idx
+          ON context_system_profiles(world_id, activation_epoch, created_at, profile_id);
+        CREATE TRIGGER context_system_profiles_conflict_guard
+          BEFORE INSERT ON context_system_profiles
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_profiles WHERE profile_id = NEW.profile_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile identity already exists');
+          END;
+        CREATE TRIGGER context_system_profiles_lineage_guard
+          BEFORE INSERT ON context_system_profiles
+          WHEN NEW.world_id = 'world:legacy-unscoped'
+            OR NOT EXISTS (
+              SELECT 1 FROM context_graph_activation
+              WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM context_system_layer_approvals AS approvals
+              JOIN context_system_layer_projections AS layers
+                ON layers.layer_id = approvals.layer_id
+              WHERE approvals.approval_id = NEW.scoped_runtime_contract_approval_id
+                AND approvals.approval_role = 'scoped_runtime_contract'
+                AND approvals.approval_generation >= 1
+                AND layers.created_at <= approvals.approved_at
+                AND approvals.approved_at <= NEW.created_at
+                AND layers.world_id IS NULL
+                AND layers.renderer_generation = NEW.system_renderer_generation
+                AND layers.policy_generation = NEW.policy_generation
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM context_system_layer_approvals AS approvals
+              JOIN context_system_layer_projections AS layers
+                ON layers.layer_id = approvals.layer_id
+              WHERE approvals.approval_id = NEW.identity_approval_id
+                AND approvals.approval_role = 'identity'
+                AND approvals.approval_generation >= 1
+                AND layers.created_at <= approvals.approved_at
+                AND approvals.approved_at <= NEW.created_at
+                AND layers.world_id IS NULL
+                AND layers.renderer_generation = NEW.system_renderer_generation
+                AND layers.policy_generation = NEW.policy_generation
+            )
+            OR (
+              NEW.integrated_self_approval_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM context_system_layer_approvals AS approvals
+                JOIN context_system_layer_projections AS layers
+                  ON layers.layer_id = approvals.layer_id
+                WHERE approvals.approval_id = NEW.integrated_self_approval_id
+                  AND approvals.approval_role = 'integrated_self'
+                  AND approvals.approval_generation >= 1
+                  AND layers.created_at <= approvals.approved_at
+                  AND approvals.approved_at <= NEW.created_at
+                  AND layers.world_id IS NULL
+                  AND layers.renderer_generation = NEW.system_renderer_generation
+                  AND layers.policy_generation = NEW.policy_generation
+              )
+            )
+            OR (
+              NEW.world_policy_approval_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM context_system_layer_approvals AS approvals
+                JOIN context_system_layer_projections AS layers
+                  ON layers.layer_id = approvals.layer_id
+                WHERE approvals.approval_id = NEW.world_policy_approval_id
+                  AND approvals.approval_role = 'world_policy'
+                  AND approvals.approval_generation >= 1
+                  AND layers.created_at <= approvals.approved_at
+                  AND approvals.approved_at <= NEW.created_at
+                  AND layers.world_id = NEW.world_id
+                  AND layers.renderer_generation = NEW.system_renderer_generation
+                  AND layers.policy_generation = NEW.policy_generation
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile lineage is invalid');
+          END;
+        CREATE TRIGGER context_system_profiles_no_update
+          BEFORE UPDATE ON context_system_profiles BEGIN
+            SELECT RAISE(ABORT, 'context system profiles are immutable');
+          END;
+        CREATE TRIGGER context_system_profiles_no_delete
+          BEFORE DELETE ON context_system_profiles BEGIN
+            SELECT RAISE(ABORT, 'context system profiles are immutable');
+          END;
+
+        CREATE TABLE context_system_profile_advances (
+          world_id               TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          activation_epoch       INTEGER NOT NULL CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          revision               INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision >= 1),
+          predecessor_profile_id TEXT,
+          profile_id             TEXT NOT NULL,
+          advanced_at            INTEGER NOT NULL CHECK (typeof(advanced_at) = 'integer' AND advanced_at >= 0),
+          PRIMARY KEY (world_id, activation_epoch, revision),
+          UNIQUE (world_id, activation_epoch, profile_id),
+          CHECK (predecessor_profile_id IS NULL OR predecessor_profile_id != profile_id),
+          FOREIGN KEY (profile_id, world_id, activation_epoch)
+            REFERENCES context_system_profiles(profile_id, world_id, activation_epoch) ON DELETE RESTRICT,
+          FOREIGN KEY (predecessor_profile_id, world_id, activation_epoch)
+            REFERENCES context_system_profiles(profile_id, world_id, activation_epoch) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_system_profile_advances_conflict_guard
+          BEFORE INSERT ON context_system_profile_advances
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_profile_advances
+            WHERE (world_id = NEW.world_id
+              AND activation_epoch = NEW.activation_epoch
+              AND revision = NEW.revision)
+               OR (world_id = NEW.world_id
+              AND activation_epoch = NEW.activation_epoch
+              AND profile_id = NEW.profile_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile advance identity already exists');
+          END;
+        CREATE TRIGGER context_system_profile_advances_guard
+          BEFORE INSERT ON context_system_profile_advances
+          WHEN NOT EXISTS (
+              SELECT 1 FROM context_graph_activation
+              WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+            )
+            OR NOT EXISTS (
+              SELECT 1 FROM context_system_profiles
+              WHERE profile_id = NEW.profile_id
+                AND world_id = NEW.world_id
+                AND activation_epoch = NEW.activation_epoch
+                AND created_at <= NEW.advanced_at
+            )
+            OR NEW.revision != COALESCE((
+              SELECT MAX(revision) + 1
+              FROM context_system_profile_advances
+              WHERE world_id = NEW.world_id
+                AND activation_epoch = NEW.activation_epoch
+            ), 1)
+            OR NEW.predecessor_profile_id IS NOT (
+              SELECT profile_id
+              FROM context_system_profile_advances
+              WHERE world_id = NEW.world_id
+                AND activation_epoch = NEW.activation_epoch
+              ORDER BY revision DESC
+              LIMIT 1
+            )
+            OR NEW.advanced_at < COALESCE((
+              SELECT advanced_at
+              FROM context_system_profile_advances
+              WHERE world_id = NEW.world_id
+                AND activation_epoch = NEW.activation_epoch
+              ORDER BY revision DESC
+              LIMIT 1
+            ), 0)
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context system profile advance');
+          END;
+        CREATE TRIGGER context_system_profile_advances_no_update
+          BEFORE UPDATE ON context_system_profile_advances BEGIN
+            SELECT RAISE(ABORT, 'context system profile advances are immutable');
+          END;
+        CREATE TRIGGER context_system_profile_advances_no_delete
+          BEFORE DELETE ON context_system_profile_advances BEGIN
+            SELECT RAISE(ABORT, 'context system profile advances are immutable');
+          END;
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-
 
 }
 

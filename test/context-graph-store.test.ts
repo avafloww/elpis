@@ -4211,6 +4211,16 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       assert.equal(approval.basisHash, specs[index].layer.sourceHash);
       assert.deepEqual(value.store.getSystemLayerApproval(approval.approvalId), approval);
     });
+    assert.throws(
+      () => value.store.approveSystemLayer({
+        layerId: specs[1].layer.layerId,
+        role: 'identity',
+        basisRef: 'fixture:identity:backdated',
+        approvalGeneration: 2,
+        approvedAt: 9,
+      }),
+      /system layer approval predates its layer/,
+    );
     assert.deepEqual(
       value.store.approveSystemLayer({
         layerId: specs[1].layer.layerId,
@@ -4294,6 +4304,288 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
     assert.throws(
       () => value.store.getSystemLayerApproval(corruptId),
       /stored system layer approval is invalid/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('system profiles bind exact approvals and advance one append-only world head', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:profile-a');
+    const worldB = worldId('world:signal:profile-b');
+    const approve = (input: {
+      kind: 'runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
+      visibility: 'global_contract' | 'integrated_self' | 'world';
+      worldId: ReturnType<typeof worldId> | null;
+      sourceKind: 'authored_scoped_contract' | 'soul_snapshot' | 'accepted_self_delta' | 'routing_policy';
+      role: 'scoped_runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
+      source: string;
+      rendererGeneration?: number;
+      policyGeneration?: number;
+    }) => {
+      const layer = value.store.createSystemLayerProjection({
+        kind: input.kind,
+        visibility: input.visibility,
+        worldId: input.worldId,
+        rendererGeneration: input.rendererGeneration ?? 2,
+        policyGeneration: input.policyGeneration ?? 3,
+        sourceKind: input.sourceKind,
+        sourceHash: hashContextBytes(input.source),
+        content: `profile:${input.source}`,
+        createdAt: 10,
+      });
+      return value.store.approveSystemLayer({
+        layerId: layer.layerId,
+        role: input.role,
+        basisRef: `fixture:${input.source}`,
+        approvalGeneration: 1,
+        approvedAt: 20,
+      });
+    };
+    const contract = approve({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      sourceKind: 'authored_scoped_contract',
+      role: 'scoped_runtime_contract',
+      source: 'profile-contract',
+    });
+    const identity = approve({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
+      source: 'profile-identity-a',
+    });
+    const integratedSelf = approve({
+      kind: 'integrated_self',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'accepted_self_delta',
+      role: 'integrated_self',
+      source: 'profile-self',
+    });
+    const policyA = approve({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldA,
+      sourceKind: 'routing_policy',
+      role: 'world_policy',
+      source: 'profile-policy-a',
+    });
+    assert.throws(
+      () => value.store.createSystemProfile({
+        worldId: worldA,
+        scopedRuntimeContractApprovalId: contract.approvalId,
+        identityApprovalId: identity.approvalId,
+        worldPolicyApprovalId: policyA.approvalId,
+        createdAt: 19,
+      }),
+      /system profile scoped_runtime_contract lineage is invalid/,
+    );
+    const profileA = value.store.createSystemProfile({
+      worldId: worldA,
+      scopedRuntimeContractApprovalId: contract.approvalId,
+      identityApprovalId: identity.approvalId,
+      integratedSelfApprovalId: integratedSelf.approvalId,
+      worldPolicyApprovalId: policyA.approvalId,
+      createdAt: 30,
+    });
+    assert.match(profileA.profileId, /^system-profile:[0-9a-f]{64}$/);
+    assert.equal(profileA.profile.activationEpoch, 0);
+    assert.equal(profileA.profile.systemRendererGeneration, 2);
+    assert.equal(profileA.profile.policyGeneration, 3);
+    assert.deepEqual(value.store.getSystemProfile(profileA.profileId), profileA);
+    assert.deepEqual(
+      value.store.createSystemProfile({
+        worldId: worldA,
+        scopedRuntimeContractApprovalId: contract.approvalId,
+        identityApprovalId: identity.approvalId,
+        integratedSelfApprovalId: integratedSelf.approvalId,
+        worldPolicyApprovalId: policyA.approvalId,
+        createdAt: 30,
+      }),
+      profileA,
+    );
+    assert.throws(
+      () => value.store.createSystemProfile({
+        worldId: worldA,
+        scopedRuntimeContractApprovalId: contract.approvalId,
+        identityApprovalId: identity.approvalId,
+        integratedSelfApprovalId: integratedSelf.approvalId,
+        worldPolicyApprovalId: policyA.approvalId,
+        createdAt: 31,
+      }),
+      /system profile identity conflict/,
+    );
+    assert.throws(
+      () => value.store.advanceSystemProfileHead({
+        worldId: worldA,
+        expectedRevision: 0,
+        expectedProfileId: null,
+        profileId: profileA.profileId,
+        advancedAt: 29,
+      }),
+      /invalid context system profile advance/,
+    );
+    const head1 = value.store.advanceSystemProfileHead({
+      worldId: worldA,
+      expectedRevision: 0,
+      expectedProfileId: null,
+      profileId: profileA.profileId,
+      advancedAt: 40,
+    });
+    assert.equal(head1.revision, 1);
+    assert.equal(head1.predecessorProfileId, null);
+
+    const identityB = approve({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
+      source: 'profile-identity-b',
+    });
+    const profileB = value.store.createSystemProfile({
+      worldId: worldA,
+      scopedRuntimeContractApprovalId: contract.approvalId,
+      identityApprovalId: identityB.approvalId,
+      integratedSelfApprovalId: integratedSelf.approvalId,
+      worldPolicyApprovalId: policyA.approvalId,
+      createdAt: 32,
+    });
+    assert.throws(
+      () => value.store.advanceSystemProfileHead({
+        worldId: worldA,
+        expectedRevision: 0,
+        expectedProfileId: null,
+        profileId: profileB.profileId,
+        advancedAt: 41,
+      }),
+      /system profile head is not at revision 0/,
+    );
+    assert.throws(
+      () => value.store.advanceSystemProfileHead({
+        worldId: worldA,
+        expectedRevision: 1,
+        expectedProfileId: profileA.profileId,
+        profileId: profileB.profileId,
+        advancedAt: 39,
+      }),
+      /invalid context system profile advance/,
+    );
+    const head2 = value.store.advanceSystemProfileHead({
+      worldId: worldA,
+      expectedRevision: 1,
+      expectedProfileId: profileA.profileId,
+      profileId: profileB.profileId,
+      advancedAt: 42,
+    });
+    assert.deepEqual(
+      {
+        revision: head2.revision,
+        predecessor: head2.predecessorProfileId,
+        profile: head2.profileId,
+      },
+      { revision: 2, predecessor: profileA.profileId, profile: profileB.profileId },
+    );
+    assert.deepEqual(value.store.getSystemProfile(profileA.profileId), profileA);
+
+    value.database.exec(`
+      SAVEPOINT corrupt_old_profile_head;
+      DROP TRIGGER context_system_profile_advances_no_update;
+      UPDATE context_system_profile_advances
+        SET advanced_at = 29
+        WHERE world_id = '${worldA}' AND activation_epoch = 0 AND revision = 1;
+    `);
+    assert.throws(
+      () => value.store.getSystemProfileHead(worldA, 0),
+      /stored system profile head target is invalid/,
+    );
+    value.database.exec(`
+      ROLLBACK TO corrupt_old_profile_head;
+      RELEASE corrupt_old_profile_head;
+    `);
+
+    value.database.exec(`
+      SAVEPOINT corrupt_latest_profile_head;
+      DROP TRIGGER context_system_profile_advances_no_update;
+      UPDATE context_system_profile_advances
+        SET advanced_at = 39
+        WHERE world_id = '${worldA}' AND activation_epoch = 0 AND revision = 2;
+    `);
+    assert.throws(
+      () => value.store.getSystemProfileHead(worldA, 0),
+      /stored system profile head chronology is invalid/,
+    );
+    value.database.exec(`
+      ROLLBACK TO corrupt_latest_profile_head;
+      RELEASE corrupt_latest_profile_head;
+    `);
+
+    value.database.exec(`
+      SAVEPOINT corrupt_profile_creation_time;
+      DROP TRIGGER context_system_profiles_no_update;
+      UPDATE context_system_profiles
+        SET created_at = 43
+        WHERE profile_id = '${profileB.profileId}';
+    `);
+    assert.throws(
+      () => value.store.getSystemProfileHead(worldA, 0),
+      /stored system profile head target is invalid/,
+    );
+    value.database.exec(`
+      ROLLBACK TO corrupt_profile_creation_time;
+      RELEASE corrupt_profile_creation_time;
+    `);
+
+    const policyB = approve({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: worldB,
+      sourceKind: 'routing_policy',
+      role: 'world_policy',
+      source: 'profile-policy-b',
+    });
+    assert.throws(
+      () => value.store.createSystemProfile({
+        worldId: worldA,
+        scopedRuntimeContractApprovalId: contract.approvalId,
+        identityApprovalId: identity.approvalId,
+        worldPolicyApprovalId: policyB.approvalId,
+        createdAt: 50,
+      }),
+      /system profile world_policy lineage is invalid/,
+    );
+    const wrongGeneration = approve({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
+      source: 'profile-identity-wrong-generation',
+      rendererGeneration: 4,
+    });
+    assert.throws(
+      () => value.store.createSystemProfile({
+        worldId: worldA,
+        scopedRuntimeContractApprovalId: contract.approvalId,
+        identityApprovalId: wrongGeneration.approvalId,
+        createdAt: 51,
+      }),
+      /system profile identity lineage is invalid/,
+    );
+    assert.throws(
+      () => value.database.prepare(
+        `INSERT INTO context_system_profile_advances(
+           world_id, activation_epoch, revision, predecessor_profile_id,
+           profile_id, advanced_at
+         ) VALUES (?, 0, 4, ?, ?, 60)`,
+      ).run(worldA, profileA.profileId, profileA.profileId),
+      /invalid context system profile advance/,
     );
   } finally {
     closeFixture(value);

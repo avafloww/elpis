@@ -55,13 +55,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 38, 'user_version bumped to 38');
+  assert.equal(v1, 39, 'user_version bumped to 39');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 38);
+  assert.equal(v2, 39);
   db.close();
 });
 
@@ -101,7 +101,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    38,
+    39,
   );
   db.close();
 });
@@ -187,7 +187,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 38, 'user_version upgraded to 38');
+  assert.equal(finalVersion, 39, 'user_version upgraded to 39');
 
   // Assert fleet tables exist
   const tableNames = (
@@ -227,7 +227,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   upgradedDb.close();
 });
 
-test('system layer approvals require exact scoped lineage and remain immutable', () => {
+test('system layer approvals and profiles require exact scoped lineage and remain immutable', () => {
   const db = openDatabase(tmpDir());
   const insertLayer = db.prepare(`
     INSERT INTO context_system_layer_projections(
@@ -342,6 +342,16 @@ test('system layer approvals require exact scoped lineage and remain immutable',
     'fixture:routing',
     policyHash,
   );
+  assert.throws(() =>
+    db.prepare(`
+      INSERT INTO context_system_layer_approvals(
+        approval_id, layer_id, approval_role, basis_kind, basis_ref,
+        basis_hash, approval_generation, approved_at
+      ) VALUES ('approval:backdated', 'layer:contract',
+        'scoped_runtime_contract', 'authored_scoped_contract',
+        'fixture:backdated', ?, 2, 99)
+    `).run(contractHash),
+  );
 
   assert.throws(() =>
     approve.run(
@@ -455,6 +465,81 @@ test('system layer approvals require exact scoped lineage and remain immutable',
         "DELETE FROM context_system_layer_approvals WHERE approval_id = 'approval:identity'",
       )
       .run(),
+  );
+
+  const insertProfile = db.prepare(`
+    INSERT INTO context_system_profiles(
+      profile_id, world_id, activation_epoch, system_renderer_generation,
+      policy_generation, scoped_runtime_contract_approval_id,
+      identity_approval_id, integrated_self_approval_id,
+      world_policy_approval_id, profile_json, profile_hash, created_at
+    ) VALUES (?, ?, 0, 1, 1, 'approval:contract', 'approval:identity',
+      NULL, ?, ?, ?, ?)
+  `);
+  insertProfile.run(
+    'profile:a',
+    'world:test-a',
+    'approval:policy',
+    '{"profile":"a"}',
+    '1'.repeat(64),
+    300,
+  );
+  insertProfile.run(
+    'profile:b',
+    'world:test-a',
+    'approval:policy',
+    '{"profile":"b"}',
+    '2'.repeat(64),
+    301,
+  );
+  assert.throws(() =>
+    insertProfile.run(
+      'profile:wrong-world',
+      'world:test-b',
+      'approval:policy',
+      '{"profile":"wrong-world"}',
+      '3'.repeat(64),
+      302,
+    ),
+  );
+  assert.throws(() =>
+    db.prepare(`
+      INSERT OR REPLACE INTO context_system_profiles(
+        profile_id, world_id, activation_epoch, system_renderer_generation,
+        policy_generation, scoped_runtime_contract_approval_id,
+        identity_approval_id, integrated_self_approval_id,
+        world_policy_approval_id, profile_json, profile_hash, created_at
+      ) VALUES ('profile:a', 'world:test-a', 0, 1, 1,
+        'approval:contract', 'approval:identity', NULL, 'approval:policy',
+        '{"profile":"changed"}', ?, 303)
+    `).run('4'.repeat(64)),
+  );
+  const advance = db.prepare(`
+    INSERT INTO context_system_profile_advances(
+      world_id, activation_epoch, revision, predecessor_profile_id,
+      profile_id, advanced_at
+    ) VALUES ('world:test-a', 0, ?, ?, ?, ?)
+  `);
+  advance.run(1, null, 'profile:a', 400);
+  assert.throws(() => advance.run(3, 'profile:a', 'profile:b', 401));
+  advance.run(2, 'profile:a', 'profile:b', 402);
+  assert.throws(() =>
+    db.prepare(`
+      INSERT OR REPLACE INTO context_system_profile_advances(
+        world_id, activation_epoch, revision, predecessor_profile_id,
+        profile_id, advanced_at
+      ) VALUES ('world:test-a', 0, 2, 'profile:a', 'profile:b', 403)
+    `).run(),
+  );
+  assert.throws(() =>
+    db.prepare(
+      "UPDATE context_system_profiles SET created_at = 999 WHERE profile_id = 'profile:a'",
+    ).run(),
+  );
+  assert.throws(() =>
+    db.prepare(
+      "DELETE FROM context_system_profile_advances WHERE world_id = 'world:test-a'",
+    ).run(),
   );
   db.close();
 });

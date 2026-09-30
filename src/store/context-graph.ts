@@ -33,6 +33,7 @@ export type EffectId = ContextId<'EffectId'>;
 export type EventMessageProjectionId = ContextId<'EventMessageProjectionId'>;
 export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
 export type SystemLayerApprovalId = ContextId<'SystemLayerApprovalId'>;
+export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type LocalBranchRequestViewId = ContextId<'LocalBranchRequestViewId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
@@ -110,6 +111,8 @@ export const systemLayerApprovalId = (
     value,
     'system-layer-approval:',
   );
+export const systemProfileId = (value: string): SystemProfileId =>
+  branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
 export const localBranchRequestViewId = (
   value: string,
 ): LocalBranchRequestViewId =>
@@ -317,6 +320,37 @@ export interface SystemLayerApprovalRecord {
   readonly basisHash: string;
   readonly approvalGeneration: number;
   readonly approvedAt: number;
+}
+
+export interface SystemProfileV1 {
+  readonly schemaVersion: 1;
+  readonly worldId: WorldId;
+  readonly activationEpoch: number;
+  readonly systemRendererGeneration: number;
+  readonly policyGeneration: number;
+  readonly approvals: {
+    readonly scopedRuntimeContract: SystemLayerApprovalId;
+    readonly identity: SystemLayerApprovalId;
+    readonly integratedSelf: SystemLayerApprovalId | null;
+    readonly worldPolicy: SystemLayerApprovalId | null;
+  };
+}
+
+export interface SystemProfileRecord {
+  readonly profileId: SystemProfileId;
+  readonly profile: SystemProfileV1;
+  readonly profileJson: string;
+  readonly profileHash: string;
+  readonly createdAt: number;
+}
+
+export interface SystemProfileHead {
+  readonly worldId: WorldId;
+  readonly activationEpoch: number;
+  readonly revision: number;
+  readonly predecessorProfileId: SystemProfileId | null;
+  readonly profileId: SystemProfileId;
+  readonly advancedAt: number;
 }
 
 export interface LocalBranchRequestViewV1 {
@@ -542,6 +576,13 @@ export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
     this.name = 'StaleContinuationHeadError';
+  }
+}
+
+export class StaleSystemProfileHeadError extends Error {
+  constructor(expectedRevision: number) {
+    super(`system profile head is not at revision ${expectedRevision}`);
+    this.name = 'StaleSystemProfileHeadError';
   }
 }
 
@@ -834,6 +875,73 @@ function systemLayerIdentity(input: {
 }): SystemLayerProjectionId {
   const hash = hashContextBytes(serialize({ schemaVersion: 1, ...input }));
   return systemLayerProjectionId(`system-layer:${hash}`);
+}
+
+function normalizeSystemProfile(value: unknown): SystemProfileV1 {
+  const profile = shadowPlanObject(value, 'system profile');
+  exactShadowPlanKeys(
+    profile,
+    [
+      'schemaVersion',
+      'worldId',
+      'activationEpoch',
+      'systemRendererGeneration',
+      'policyGeneration',
+      'approvals',
+    ],
+    'system profile',
+  );
+  const approvals = shadowPlanObject(profile.approvals, 'system profile approvals');
+  exactShadowPlanKeys(
+    approvals,
+    ['scopedRuntimeContract', 'identity', 'integratedSelf', 'worldPolicy'],
+    'system profile approvals',
+  );
+  if (profile.schemaVersion !== 1 || !isWorldId(profile.worldId)) {
+    throw new Error('system profile identity is invalid');
+  }
+  const activationEpoch = generation(
+    'activationEpoch',
+    profile.activationEpoch as number,
+  );
+  const systemRendererGeneration = generation(
+    'systemRendererGeneration',
+    profile.systemRendererGeneration as number,
+  );
+  const policyGeneration = generation(
+    'policyGeneration',
+    profile.policyGeneration as number,
+  );
+  if (systemRendererGeneration < 1 || policyGeneration < 1) {
+    throw new Error('system profile generations are invalid');
+  }
+  return {
+    schemaVersion: 1,
+    worldId: worldId(profile.worldId),
+    activationEpoch,
+    systemRendererGeneration,
+    policyGeneration,
+    approvals: {
+      scopedRuntimeContract: systemLayerApprovalId(
+        String(approvals.scopedRuntimeContract),
+      ),
+      identity: systemLayerApprovalId(String(approvals.identity)),
+      integratedSelf:
+        approvals.integratedSelf === null
+          ? null
+          : systemLayerApprovalId(String(approvals.integratedSelf)),
+      worldPolicy:
+        approvals.worldPolicy === null
+          ? null
+          : systemLayerApprovalId(String(approvals.worldPolicy)),
+    },
+  };
+}
+
+function systemProfileIdentity(profile: SystemProfileV1): SystemProfileId {
+  return systemProfileId(
+    `system-profile:${hashContextBytes(serialize(profile))}`,
+  );
 }
 
 function normalizeLocalBranchRequestView(
@@ -1294,6 +1402,30 @@ interface SystemLayerApprovalRow {
   approved_at: number;
 }
 
+interface SystemProfileRow {
+  profile_id: string;
+  world_id: string;
+  activation_epoch: number;
+  system_renderer_generation: number;
+  policy_generation: number;
+  scoped_runtime_contract_approval_id: string;
+  identity_approval_id: string;
+  integrated_self_approval_id: string | null;
+  world_policy_approval_id: string | null;
+  profile_json: string;
+  profile_hash: string;
+  created_at: number;
+}
+
+interface SystemProfileAdvanceRow {
+  world_id: string;
+  activation_epoch: number;
+  revision: number;
+  predecessor_profile_id: string | null;
+  profile_id: string;
+  advanced_at: number;
+}
+
 interface LocalBranchRequestViewRow {
   request_view_id: string;
   branch_id: string;
@@ -1629,7 +1761,9 @@ function mapSystemLayerApproval(
     row.approval_generation,
   );
   const approvalId = systemLayerApprovalId(row.approval_id);
+  const approvedAt = timestamp('approvedAt', row.approved_at);
   if (
+    approvedAt < layer.createdAt ||
     approvalGeneration < 1 ||
     row.layer_id !== layer.layerId ||
     !systemLayerApprovalMatches(layer, role) ||
@@ -1656,7 +1790,62 @@ function mapSystemLayerApproval(
     basisRef,
     basisHash,
     approvalGeneration,
-    approvedAt: timestamp('approvedAt', row.approved_at),
+    approvedAt,
+  };
+}
+
+function mapSystemProfile(row: SystemProfileRow): SystemProfileRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.profile_json);
+  } catch (error) {
+    throw new Error(`stored system profile is invalid: ${row.profile_id}`, {
+      cause: error,
+    });
+  }
+  const profile = normalizeSystemProfile(parsed);
+  const profileJson = serialize(profile);
+  const profileHash = sha256('profileHash', row.profile_hash);
+  if (
+    row.world_id !== profile.worldId ||
+    row.activation_epoch !== profile.activationEpoch ||
+    row.system_renderer_generation !== profile.systemRendererGeneration ||
+    row.policy_generation !== profile.policyGeneration ||
+    row.scoped_runtime_contract_approval_id !==
+      profile.approvals.scopedRuntimeContract ||
+    row.identity_approval_id !== profile.approvals.identity ||
+    row.integrated_self_approval_id !== profile.approvals.integratedSelf ||
+    row.world_policy_approval_id !== profile.approvals.worldPolicy ||
+    row.profile_json !== profileJson ||
+    hashContextBytes(profileJson) !== profileHash ||
+    systemProfileIdentity(profile) !== row.profile_id
+  ) {
+    throw new Error(`stored system profile is invalid: ${row.profile_id}`);
+  }
+  return {
+    profileId: systemProfileId(row.profile_id),
+    profile,
+    profileJson,
+    profileHash,
+    createdAt: timestamp('createdAt', row.created_at),
+  };
+}
+
+function mapSystemProfileHead(row: SystemProfileAdvanceRow): SystemProfileHead {
+  const revision = generation('revision', row.revision);
+  if (revision < 1) {
+    throw new Error('stored system profile head revision is invalid');
+  }
+  return {
+    worldId: worldId(row.world_id),
+    activationEpoch: generation('activationEpoch', row.activation_epoch),
+    revision,
+    predecessorProfileId:
+      row.predecessor_profile_id === null
+        ? null
+        : systemProfileId(row.predecessor_profile_id),
+    profileId: systemProfileId(row.profile_id),
+    advancedAt: timestamp('advancedAt', row.advanced_at),
   };
 }
 
@@ -2402,6 +2591,10 @@ export class ContextGraphStore {
     if (approvalGeneration < 1) {
       throw new Error('system layer approval generation is invalid');
     }
+    const approvedAt = timestamp('approvedAt', input.approvedAt);
+    if (approvedAt < layer.createdAt) {
+      throw new Error('system layer approval predates its layer');
+    }
     const basisHash = layer.sourceHash;
     const approvalId = systemLayerApprovalIdentity({
       layerId: layer.layerId,
@@ -2434,7 +2627,7 @@ export class ContextGraphStore {
         existing.basisRef !== basisRef ||
         existing.basisHash !== basisHash ||
         existing.approvalGeneration !== approvalGeneration ||
-        existing.approvedAt !== timestamp('approvedAt', input.approvedAt)
+        existing.approvedAt !== approvedAt
       ) {
         throw new Error(
           `system layer approval identity conflict: ${collision.approval_id}`,
@@ -2457,7 +2650,7 @@ export class ContextGraphStore {
         basisRef,
         basisHash,
         approvalGeneration,
-        timestamp('approvedAt', input.approvedAt),
+        approvedAt,
       );
     return this.getSystemLayerApproval(approvalId)!;
   }
@@ -2478,6 +2671,233 @@ export class ContextGraphStore {
       throw new Error(`stored system layer approval has no layer: ${row.approval_id}`);
     }
     return mapSystemLayerApproval(row, layer);
+  }
+
+  private requireSystemProfileApproval(
+    id: SystemLayerApprovalId,
+    role: SystemLayerApprovalRole,
+  ): {
+    approval: SystemLayerApprovalRecord;
+    layer: SystemLayerProjectionRecord;
+  } {
+    const approval = this.getSystemLayerApproval(id);
+    if (!approval || approval.role !== role) {
+      throw new Error(`system profile ${role} approval is invalid`);
+    }
+    const layer = this.getSystemLayerProjection(approval.layerId);
+    if (!layer) {
+      throw new Error(`system profile ${role} layer is missing`);
+    }
+    return { approval, layer };
+  }
+
+  private validateSystemProfileLineage(
+    profile: SystemProfileV1,
+    createdAt: number,
+  ): void {
+    if (profile.worldId === LEGACY_WORLD_ID) {
+      throw new Error('system profile cannot target the legacy world');
+    }
+    const refs: readonly [
+      SystemLayerApprovalRole,
+      SystemLayerApprovalId | null,
+    ][] = [
+      ['scoped_runtime_contract', profile.approvals.scopedRuntimeContract],
+      ['identity', profile.approvals.identity],
+      ['integrated_self', profile.approvals.integratedSelf],
+      ['world_policy', profile.approvals.worldPolicy],
+    ];
+    for (const [role, approvalId] of refs) {
+      if (approvalId === null) continue;
+      const { approval, layer } = this.requireSystemProfileApproval(approvalId, role);
+      if (
+        approval.approvedAt > createdAt ||
+        layer.rendererGeneration !== profile.systemRendererGeneration ||
+        layer.policyGeneration !== profile.policyGeneration ||
+        (role === 'world_policy'
+          ? layer.worldId !== profile.worldId
+          : layer.worldId !== null)
+      ) {
+        throw new Error(`system profile ${role} lineage is invalid`);
+      }
+    }
+  }
+
+  createSystemProfile(input: {
+    worldId: WorldId;
+    scopedRuntimeContractApprovalId: SystemLayerApprovalId;
+    identityApprovalId: SystemLayerApprovalId;
+    integratedSelfApprovalId?: SystemLayerApprovalId | null;
+    worldPolicyApprovalId?: SystemLayerApprovalId | null;
+    createdAt: number;
+  }): SystemProfileRecord {
+    const targetWorldId = worldId(input.worldId);
+    const activation = this.getActivationState();
+    if (activation.mode !== 'dark') {
+      throw new StaleActivationStateError(activation.epoch);
+    }
+    const contract = this.requireSystemProfileApproval(
+      input.scopedRuntimeContractApprovalId,
+      'scoped_runtime_contract',
+    );
+    const profile: SystemProfileV1 = {
+      schemaVersion: 1,
+      worldId: targetWorldId,
+      activationEpoch: activation.epoch,
+      systemRendererGeneration: contract.layer.rendererGeneration,
+      policyGeneration: contract.layer.policyGeneration,
+      approvals: {
+        scopedRuntimeContract: input.scopedRuntimeContractApprovalId,
+        identity: input.identityApprovalId,
+        integratedSelf: input.integratedSelfApprovalId ?? null,
+        worldPolicy: input.worldPolicyApprovalId ?? null,
+      },
+    };
+    const createdAt = timestamp('createdAt', input.createdAt);
+    this.validateSystemProfileLineage(profile, createdAt);
+    const profileJson = serialize(profile);
+    const profileHash = hashContextBytes(profileJson);
+    const profileId = systemProfileIdentity(profile);
+    const existing = this.getSystemProfile(profileId);
+    if (existing) {
+      if (
+        existing.profileJson !== profileJson ||
+        existing.profileHash !== profileHash ||
+        existing.createdAt !== createdAt
+      ) {
+        throw new Error(`system profile identity conflict: ${profileId}`);
+      }
+      return existing;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_system_profiles(
+           profile_id, world_id, activation_epoch,
+           system_renderer_generation, policy_generation,
+           scoped_runtime_contract_approval_id, identity_approval_id,
+           integrated_self_approval_id, world_policy_approval_id,
+           profile_json, profile_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        profileId,
+        profile.worldId,
+        profile.activationEpoch,
+        profile.systemRendererGeneration,
+        profile.policyGeneration,
+        profile.approvals.scopedRuntimeContract,
+        profile.approvals.identity,
+        profile.approvals.integratedSelf,
+        profile.approvals.worldPolicy,
+        profileJson,
+        profileHash,
+        createdAt,
+      );
+    return this.getSystemProfile(profileId)!;
+  }
+
+  getSystemProfile(id: SystemProfileId): SystemProfileRecord | null {
+    const row = this.database
+      .prepare('SELECT * FROM context_system_profiles WHERE profile_id = ?')
+      .get(id) as unknown as SystemProfileRow | undefined;
+    if (!row) return null;
+    const record = mapSystemProfile(row);
+    this.validateSystemProfileLineage(record.profile, record.createdAt);
+    return record;
+  }
+
+  getSystemProfileHead(
+    targetWorldId: WorldId,
+    activationEpoch: number,
+  ): SystemProfileHead | null {
+    const normalizedWorldId = worldId(targetWorldId);
+    const normalizedEpoch = generation('activationEpoch', activationEpoch);
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM context_system_profile_advances
+         WHERE world_id = ? AND activation_epoch = ?
+         ORDER BY revision ASC`,
+      )
+      .all(normalizedWorldId, normalizedEpoch) as unknown as SystemProfileAdvanceRow[];
+    if (rows.length === 0) return null;
+    let previous: SystemProfileHead | null = null;
+    for (const row of rows) {
+      const head = mapSystemProfileHead(row);
+      const profile = this.getSystemProfile(head.profileId);
+      if (
+        !profile ||
+        profile.profile.worldId !== head.worldId ||
+        profile.profile.activationEpoch !== head.activationEpoch ||
+        profile.createdAt > head.advancedAt
+      ) {
+        throw new Error('stored system profile head target is invalid');
+      }
+      if (
+        head.revision !== (previous?.revision ?? 0) + 1 ||
+        head.predecessorProfileId !== (previous?.profileId ?? null)
+      ) {
+        throw new Error('stored system profile head predecessor is invalid');
+      }
+      if (previous && head.advancedAt < previous.advancedAt) {
+        throw new Error('stored system profile head chronology is invalid');
+      }
+      previous = head;
+    }
+    return previous;
+  }
+
+  advanceSystemProfileHead(input: {
+    worldId: WorldId;
+    expectedRevision: number;
+    expectedProfileId: SystemProfileId | null;
+    profileId: SystemProfileId;
+    advancedAt: number;
+  }): SystemProfileHead {
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new StaleActivationStateError(activation.epoch);
+      }
+      const expectedRevision = generation(
+        'expectedRevision',
+        input.expectedRevision,
+      );
+      const targetWorldId = worldId(input.worldId);
+      const current = this.getSystemProfileHead(
+        targetWorldId,
+        activation.epoch,
+      );
+      if (
+        (current?.revision ?? 0) !== expectedRevision ||
+        (current?.profileId ?? null) !== input.expectedProfileId
+      ) {
+        throw new StaleSystemProfileHeadError(expectedRevision);
+      }
+      const target = this.getSystemProfile(input.profileId);
+      if (
+        !target ||
+        target.profile.worldId !== targetWorldId ||
+        target.profile.activationEpoch !== activation.epoch
+      ) {
+        throw new Error('system profile head target is invalid');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_system_profile_advances(
+             world_id, activation_epoch, revision,
+             predecessor_profile_id, profile_id, advanced_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          targetWorldId,
+          activation.epoch,
+          expectedRevision + 1,
+          current?.profileId ?? null,
+          target.profileId,
+          timestamp('advancedAt', input.advancedAt),
+        );
+      return this.getSystemProfileHead(targetWorldId, activation.epoch)!;
+    });
   }
 
   private validateLocalBranchRequestEventOrder(
