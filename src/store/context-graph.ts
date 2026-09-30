@@ -157,6 +157,31 @@ export interface WorldEventRecord {
   readonly recordedAt: number;
 }
 
+export type DarkIngressWakeClass = 'text_user_turn';
+
+export interface DarkIngressGenerationRecord {
+  readonly queueGeneration: number;
+  readonly firstAdmissibleSequence: number;
+  readonly activationEpoch: number;
+}
+
+export interface DarkIngressAdmissionRecord {
+  readonly eventId: EventId;
+  readonly worldId: WorldId;
+  readonly sourceSequence: number;
+  readonly activationEpoch: number;
+  readonly queueGeneration: number;
+  readonly wakeClass: DarkIngressWakeClass;
+  readonly messageRendererGeneration: number;
+  readonly admittedAt: number;
+}
+
+export interface DarkInboundAdmissionReceipt {
+  readonly generation: DarkIngressGenerationRecord;
+  readonly event: WorldEventRecord;
+  readonly admission: DarkIngressAdmissionRecord;
+}
+
 export interface ProjectedUserMessage {
   readonly role: 'user';
   readonly content: string;
@@ -981,6 +1006,23 @@ interface WorldEventRow {
   recorded_at: number;
 }
 
+interface DarkIngressGenerationRow {
+  queue_generation: number;
+  first_admissible_sequence: number;
+  activation_epoch: number;
+}
+
+interface DarkIngressAdmissionRow {
+  event_id: string;
+  world_id: string;
+  source_sequence: number;
+  activation_epoch: number;
+  queue_generation: number;
+  wake_class: string;
+  message_renderer_generation: number;
+  admitted_at: number;
+}
+
 interface EventMessageProjectionRow {
   projection_id: string;
   source_event_id: string;
@@ -1109,6 +1151,61 @@ function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
     payloadHash: row.payload_hash,
     occurredAt: row.occurred_at,
     recordedAt: row.recorded_at,
+  };
+}
+
+function mapDarkIngressGeneration(
+  row: DarkIngressGenerationRow,
+): DarkIngressGenerationRecord {
+  const queueGeneration = generation(
+    'queueGeneration',
+    row.queue_generation,
+  );
+  const firstAdmissibleSequence = generation(
+    'firstAdmissibleSequence',
+    row.first_admissible_sequence,
+  );
+  if (queueGeneration < 1 || firstAdmissibleSequence < 1) {
+    throw new Error('stored dark ingress generation is invalid');
+  }
+  return {
+    queueGeneration,
+    firstAdmissibleSequence,
+    activationEpoch: generation('activationEpoch', row.activation_epoch),
+  };
+}
+
+function mapDarkIngressAdmission(
+  row: DarkIngressAdmissionRow,
+): DarkIngressAdmissionRecord {
+  if (row.wake_class !== 'text_user_turn') {
+    throw new Error(`stored dark ingress admission is invalid: ${row.event_id}`);
+  }
+  const sourceSequence = generation('sourceSequence', row.source_sequence);
+  const queueGeneration = generation(
+    'queueGeneration',
+    row.queue_generation,
+  );
+  const messageRendererGeneration = generation(
+    'messageRendererGeneration',
+    row.message_renderer_generation,
+  );
+  if (
+    sourceSequence < 1 ||
+    queueGeneration < 1 ||
+    messageRendererGeneration < 1
+  ) {
+    throw new Error(`stored dark ingress admission is invalid: ${row.event_id}`);
+  }
+  return {
+    eventId: eventId(row.event_id),
+    worldId: worldId(row.world_id),
+    sourceSequence,
+    activationEpoch: generation('activationEpoch', row.activation_epoch),
+    queueGeneration,
+    wakeClass: row.wake_class,
+    messageRendererGeneration,
+    admittedAt: timestamp('admittedAt', row.admitted_at),
   };
 }
 
@@ -1359,6 +1456,171 @@ export class ContextGraphStore {
       .prepare('SELECT * FROM context_world_events WHERE event_id = ?')
       .get(id) as unknown as WorldEventRow | undefined;
     return row ? mapWorldEvent(row) : null;
+  }
+
+  getDarkIngressGeneration(
+    queueGeneration: number,
+  ): DarkIngressGenerationRecord | null {
+    const id = generation('queueGeneration', queueGeneration);
+    if (id < 1) throw new Error('queueGeneration must be positive');
+    const row = this.database
+      .prepare(
+        `SELECT queue_generation, first_admissible_sequence, activation_epoch
+         FROM context_dark_ingress_generations WHERE queue_generation = ?`,
+      )
+      .get(id) as DarkIngressGenerationRow | undefined;
+    return row ? mapDarkIngressGeneration(row) : null;
+  }
+
+  getDarkIngressAdmission(id: EventId): DarkIngressAdmissionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT event_id, world_id, source_sequence, activation_epoch,
+                queue_generation, wake_class, message_renderer_generation,
+                admitted_at
+         FROM context_dark_ingress_admissions WHERE event_id = ?`,
+      )
+      .get(id) as DarkIngressAdmissionRow | undefined;
+    return row ? mapDarkIngressAdmission(row) : null;
+  }
+
+  admitDarkInboundEvent(input: {
+    expectedActivationEpoch: number;
+    queueGeneration: number;
+    wakeClass: DarkIngressWakeClass;
+    messageRendererGeneration: number;
+    event: {
+      eventId: EventId;
+      worldId: WorldId;
+      kind: string;
+      payload: unknown;
+      occurredAt: number;
+      recordedAt: number;
+    };
+    admittedAt: number;
+  }): DarkInboundAdmissionReceipt {
+    const expectedActivationEpoch = generation(
+      'expectedActivationEpoch',
+      input.expectedActivationEpoch,
+    );
+    const queueGeneration = generation(
+      'queueGeneration',
+      input.queueGeneration,
+    );
+    const messageRendererGeneration = generation(
+      'messageRendererGeneration',
+      input.messageRendererGeneration,
+    );
+    if (queueGeneration < 1) {
+      throw new Error('queueGeneration must be positive');
+    }
+    if (messageRendererGeneration < 1) {
+      throw new Error('messageRendererGeneration must be positive');
+    }
+    if (input.wakeClass !== 'text_user_turn') {
+      throw new Error('unsupported dark ingress wake class');
+    }
+    const occurredAt = timestamp('occurredAt', input.event.occurredAt);
+    const recordedAt = timestamp('recordedAt', input.event.recordedAt);
+    const admittedAt = timestamp('admittedAt', input.admittedAt);
+    const payloadJson = serialize(input.event.payload);
+    const payloadHash = hashContextBytes(payloadJson);
+
+    return transaction(this.database, () => {
+      const existingEvent = this.getWorldEvent(input.event.eventId);
+      const existingAdmission = this.getDarkIngressAdmission(
+        input.event.eventId,
+      );
+      if (existingEvent || existingAdmission) {
+        if (
+          !existingEvent ||
+          !existingAdmission ||
+          existingEvent.worldId !== input.event.worldId ||
+          existingEvent.kind !== input.event.kind ||
+          existingEvent.payloadJson !== payloadJson ||
+          existingEvent.payloadHash !== payloadHash ||
+          existingEvent.occurredAt !== occurredAt ||
+          existingEvent.recordedAt !== recordedAt ||
+          existingAdmission.worldId !== input.event.worldId ||
+          existingAdmission.sourceSequence !== existingEvent.sequence ||
+          existingAdmission.activationEpoch !== expectedActivationEpoch ||
+          existingAdmission.queueGeneration !== queueGeneration ||
+          existingAdmission.wakeClass !== input.wakeClass ||
+          existingAdmission.messageRendererGeneration !==
+            messageRendererGeneration ||
+          existingAdmission.admittedAt !== admittedAt
+        ) {
+          throw new Error(
+            `context dark ingress admission conflict: ${input.event.eventId}`,
+          );
+        }
+        const existingGeneration = this.getDarkIngressGeneration(
+          queueGeneration,
+        );
+        if (
+          !existingGeneration ||
+          existingGeneration.activationEpoch !== expectedActivationEpoch ||
+          existingEvent.sequence < existingGeneration.firstAdmissibleSequence
+        ) {
+          throw new Error(
+            `context dark ingress generation conflict: ${queueGeneration}`,
+          );
+        }
+        return {
+          generation: existingGeneration,
+          event: existingEvent,
+          admission: existingAdmission,
+        };
+      }
+
+      const activation = this.getActivationState();
+      if (
+        activation.mode !== 'dark' ||
+        activation.epoch !== expectedActivationEpoch
+      ) {
+        throw new StaleActivationStateError(expectedActivationEpoch);
+      }
+      const queue = this.getDarkIngressGeneration(queueGeneration);
+      if (!queue || queue.activationEpoch !== expectedActivationEpoch) {
+        throw new Error(
+          `context dark ingress generation is unavailable: ${queueGeneration}`,
+        );
+      }
+      const event = this.appendWorldEvent({
+        eventId: input.event.eventId,
+        worldId: input.event.worldId,
+        kind: input.event.kind,
+        payload: input.event.payload,
+        occurredAt,
+        recordedAt,
+      });
+      if (event.sequence < queue.firstAdmissibleSequence) {
+        throw new Error('context dark ingress event predates its generation');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_ingress_admissions(
+             event_id, world_id, source_sequence, activation_epoch,
+             queue_generation, wake_class, message_renderer_generation,
+             admitted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          event.eventId,
+          event.worldId,
+          event.sequence,
+          expectedActivationEpoch,
+          queueGeneration,
+          input.wakeClass,
+          messageRendererGeneration,
+          admittedAt,
+        );
+      const admission = this.getDarkIngressAdmission(event.eventId);
+      if (!admission) {
+        throw new Error('context dark ingress admission was not persisted');
+      }
+      return { generation: queue, event, admission };
+    });
   }
 
   createEventMessageProjection(input: {

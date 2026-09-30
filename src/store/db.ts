@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 34;
+const SCHEMA_VERSION = 35;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -1918,6 +1918,110 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_local_branch_request_messages_no_delete
           BEFORE DELETE ON context_local_branch_request_messages BEGIN
             SELECT RAISE(ABORT, 'context local branch request message edges are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0035-context-dark-ingress-admissions',
+      sql: `
+        CREATE TABLE context_dark_ingress_generations (
+          queue_generation          INTEGER PRIMARY KEY
+            CHECK (typeof(queue_generation) = 'integer' AND queue_generation >= 1),
+          first_admissible_sequence INTEGER NOT NULL UNIQUE
+            CHECK (typeof(first_admissible_sequence) = 'integer' AND first_admissible_sequence >= 1),
+          activation_epoch          INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          UNIQUE (queue_generation, activation_epoch)
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_dark_ingress_generations_insert_guard
+          BEFORE INSERT ON context_dark_ingress_generations
+          WHEN NOT (
+            NEW.queue_generation = COALESCE(
+              (SELECT MAX(queue_generation) + 1 FROM context_dark_ingress_generations),
+              1
+            )
+            AND NEW.first_admissible_sequence =
+              COALESCE((SELECT MAX(sequence) FROM context_world_events), 0) + 1
+            AND EXISTS (
+              SELECT 1 FROM context_graph_activation
+              WHERE singleton = 1
+                AND mode = 'dark'
+                AND epoch = NEW.activation_epoch
+            )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress generation lineage is invalid');
+          END;
+        INSERT INTO context_dark_ingress_generations(
+          queue_generation, first_admissible_sequence, activation_epoch
+        )
+        SELECT
+          1,
+          COALESCE((SELECT MAX(sequence) FROM context_world_events), 0) + 1,
+          epoch
+        FROM context_graph_activation
+        WHERE singleton = 1;
+        CREATE TRIGGER context_dark_ingress_generations_no_update
+          BEFORE UPDATE ON context_dark_ingress_generations BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress generations are immutable');
+          END;
+        CREATE TRIGGER context_dark_ingress_generations_no_delete
+          BEFORE DELETE ON context_dark_ingress_generations BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress generations are immutable');
+          END;
+
+        CREATE TABLE context_dark_ingress_admissions (
+          event_id                    TEXT PRIMARY KEY
+            CHECK (length(event_id) BETWEEN 1 AND 128),
+          world_id                    TEXT NOT NULL
+            CHECK (length(world_id) BETWEEN 1 AND 256),
+          source_sequence             INTEGER NOT NULL UNIQUE
+            CHECK (typeof(source_sequence) = 'integer' AND source_sequence >= 1),
+          activation_epoch            INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          queue_generation            INTEGER NOT NULL
+            CHECK (typeof(queue_generation) = 'integer' AND queue_generation >= 1),
+          wake_class                  TEXT NOT NULL CHECK (wake_class = 'text_user_turn'),
+          message_renderer_generation INTEGER NOT NULL
+            CHECK (typeof(message_renderer_generation) = 'integer' AND message_renderer_generation >= 1),
+          admitted_at                 INTEGER NOT NULL
+            CHECK (typeof(admitted_at) = 'integer' AND admitted_at >= 0),
+          UNIQUE (event_id, world_id),
+          FOREIGN KEY (event_id, world_id)
+            REFERENCES context_world_events(event_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (queue_generation, activation_epoch)
+            REFERENCES context_dark_ingress_generations(queue_generation, activation_epoch)
+            ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_dark_ingress_admissions_lineage_guard
+          BEFORE INSERT ON context_dark_ingress_admissions
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_world_events AS events
+            JOIN context_dark_ingress_generations AS generations
+              ON generations.queue_generation = NEW.queue_generation
+             AND generations.activation_epoch = NEW.activation_epoch
+            JOIN context_graph_activation AS activation
+              ON activation.singleton = 1
+            WHERE events.event_id = NEW.event_id
+              AND events.world_id = NEW.world_id
+              AND events.sequence = NEW.source_sequence
+              AND events.event_kind GLOB 'inbound:*'
+              AND events.sequence >= generations.first_admissible_sequence
+              AND activation.mode = 'dark'
+              AND activation.epoch = NEW.activation_epoch
+              AND NEW.admitted_at >= events.recorded_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress admission lineage is invalid');
+          END;
+        CREATE TRIGGER context_dark_ingress_admissions_no_update
+          BEFORE UPDATE ON context_dark_ingress_admissions BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress admissions are immutable');
+          END;
+        CREATE TRIGGER context_dark_ingress_admissions_no_delete
+          BEFORE DELETE ON context_dark_ingress_admissions BEGIN
+            SELECT RAISE(ABORT, 'context dark ingress admissions are immutable');
           END;
       `,
     },

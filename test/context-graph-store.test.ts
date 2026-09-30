@@ -2670,3 +2670,274 @@ test('dark local branch assembly rejects incomplete or substituted projection li
     closeFixture(value);
   }
 });
+
+test('dark ingress admission atomically records only a new exact inbound event', () => {
+  const value = fixture();
+  try {
+    const input = {
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      wakeClass: 'text_user_turn' as const,
+      messageRendererGeneration: 7,
+      event: {
+        eventId: eventId('event:dark-ingress-exact'),
+        worldId: worldId('world:signal:dark-ingress'),
+        kind: 'inbound:signal',
+        payload: { text: 'DARK_INGRESS_PRIVATE_CANARY' },
+        occurredAt: 10,
+        recordedAt: 11,
+      },
+      admittedAt: 12,
+    };
+    const receipt = value.store.admitDarkInboundEvent(input);
+    assert.deepEqual(receipt.generation, {
+      queueGeneration: 1,
+      firstAdmissibleSequence: 1,
+      activationEpoch: 0,
+    });
+    assert.equal(receipt.event.sequence, 1);
+    assert.deepEqual(receipt.admission, {
+      eventId: input.event.eventId,
+      worldId: input.event.worldId,
+      sourceSequence: 1,
+      activationEpoch: 0,
+      queueGeneration: 1,
+      wakeClass: 'text_user_turn',
+      messageRendererGeneration: 7,
+      admittedAt: 12,
+    });
+    assert.deepEqual(value.store.admitDarkInboundEvent(input), receipt);
+
+    const admissionRow = value.database
+      .prepare('SELECT * FROM context_dark_ingress_admissions')
+      .get() as Record<string, unknown>;
+    assert.equal(
+      JSON.stringify(admissionRow).includes('DARK_INGRESS_PRIVATE_CANARY'),
+      false,
+    );
+    assert.equal(
+      receipt.event.payloadJson.includes('DARK_INGRESS_PRIVATE_CANARY'),
+      true,
+    );
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          ...input,
+          admittedAt: 13,
+        }),
+      /dark ingress admission conflict/,
+    );
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          ...input,
+          event: { ...input.event, payload: { text: 'changed' } },
+        }),
+      /dark ingress admission conflict/,
+    );
+
+    const unadmitted = value.store.appendWorldEvent({
+      eventId: eventId('event:dark-ingress-unadmitted'),
+      worldId: input.event.worldId,
+      kind: 'inbound:signal',
+      payload: { text: 'UNADMITTED_CANARY' },
+      occurredAt: 20,
+      recordedAt: 20,
+    });
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          ...input,
+          event: {
+            eventId: unadmitted.eventId,
+            worldId: unadmitted.worldId,
+            kind: unadmitted.kind,
+            payload: { text: 'UNADMITTED_CANARY' },
+            occurredAt: unadmitted.occurredAt,
+            recordedAt: unadmitted.recordedAt,
+          },
+          admittedAt: 20,
+        }),
+      /dark ingress admission conflict/,
+    );
+    assert.equal(tableCount(value.database, 'context_dark_ingress_admissions'), 1);
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_effects',
+      'context_continuation_advances',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark ingress admission rolls its event back after a late database rejection', () => {
+  const value = fixture();
+  try {
+    value.database.exec(`
+      CREATE TRIGGER test_dark_ingress_late_rejection
+      BEFORE INSERT ON context_dark_ingress_admissions
+      WHEN NEW.event_id = 'event:dark-ingress-rollback'
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic late admission rejection');
+      END;
+    `);
+    const rejectedId = eventId('event:dark-ingress-rollback');
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          expectedActivationEpoch: 0,
+          queueGeneration: 1,
+          wakeClass: 'text_user_turn',
+          messageRendererGeneration: 1,
+          event: {
+            eventId: rejectedId,
+            worldId: worldId('world:discord:rollback'),
+            kind: 'inbound:discord',
+            payload: { text: 'ROLLBACK_CANARY' },
+            occurredAt: 30,
+            recordedAt: 30,
+          },
+          admittedAt: 30,
+        }),
+      /synthetic late admission rejection/,
+    );
+    assert.equal(value.store.getWorldEvent(rejectedId), null);
+    assert.equal(value.store.getDarkIngressAdmission(rejectedId), null);
+    assert.equal(tableCount(value.database, 'context_world_events'), 0);
+    assert.equal(tableCount(value.database, 'context_dark_ingress_admissions'), 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark ingress admission fails closed on stale state and immutable lineage', () => {
+  const value = fixture();
+  try {
+    const staleId = eventId('event:dark-ingress-stale');
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          expectedActivationEpoch: 1,
+          queueGeneration: 1,
+          wakeClass: 'text_user_turn',
+          messageRendererGeneration: 1,
+          event: {
+            eventId: staleId,
+            worldId: worldId('world:signal:stale'),
+            kind: 'inbound:signal',
+            payload: { text: 'STALE_CANARY' },
+            occurredAt: 40,
+            recordedAt: 40,
+          },
+          admittedAt: 40,
+        }),
+      /context graph activation is not dark at epoch 1/,
+    );
+    assert.equal(value.store.getWorldEvent(staleId), null);
+
+    const rejectedDerivedId = eventId('event:dark-ingress-api-derived');
+    assert.throws(
+      () =>
+        value.store.admitDarkInboundEvent({
+          expectedActivationEpoch: 0,
+          queueGeneration: 1,
+          wakeClass: 'text_user_turn',
+          messageRendererGeneration: 1,
+          event: {
+            eventId: rejectedDerivedId,
+            worldId: worldId('world:signal:api-derived'),
+            kind: 'derived:capsule',
+            payload: { text: 'API_DERIVED_CANARY' },
+            occurredAt: 45,
+            recordedAt: 45,
+          },
+          admittedAt: 45,
+        }),
+      /context dark ingress admission lineage is invalid/,
+    );
+    assert.equal(value.store.getWorldEvent(rejectedDerivedId), null);
+    assert.equal(value.store.getDarkIngressAdmission(rejectedDerivedId), null);
+
+    const derived = value.store.appendWorldEvent({
+      eventId: eventId('event:dark-ingress-derived'),
+      worldId: worldId('world:signal:derived'),
+      kind: 'derived:capsule',
+      payload: { text: 'DERIVED_CANARY' },
+      occurredAt: 50,
+      recordedAt: 50,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_dark_ingress_admissions(
+               event_id, world_id, source_sequence, activation_epoch,
+               queue_generation, wake_class, message_renderer_generation,
+               admitted_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            derived.eventId,
+            derived.worldId,
+            derived.sequence,
+            0,
+            1,
+            'text_user_turn',
+            1,
+            50,
+          ),
+      /context dark ingress admission lineage is invalid/,
+    );
+
+    const admitted = value.store.admitDarkInboundEvent({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      wakeClass: 'text_user_turn',
+      messageRendererGeneration: 1,
+      event: {
+        eventId: eventId('event:dark-ingress-immutable'),
+        worldId: worldId('world:signal:immutable'),
+        kind: 'inbound:signal',
+        payload: { text: 'IMMUTABLE_CANARY' },
+        occurredAt: 60,
+        recordedAt: 60,
+      },
+      admittedAt: 60,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'UPDATE context_dark_ingress_admissions SET admitted_at = ? WHERE event_id = ?',
+          )
+          .run(61, admitted.event.eventId),
+      /context dark ingress admissions are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'DELETE FROM context_dark_ingress_admissions WHERE event_id = ?',
+          )
+          .run(admitted.event.eventId),
+      /context dark ingress admissions are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'UPDATE context_dark_ingress_generations SET activation_epoch = 2 WHERE queue_generation = 1',
+          )
+          .run(),
+      /context dark ingress generations are immutable/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});

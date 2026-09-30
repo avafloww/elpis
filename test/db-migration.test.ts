@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    34,
+    35,
   );
   assert.deepEqual(
     (
@@ -201,6 +201,7 @@ test('current migration prefix preserves fleet history and creates resident stat
       { component: 'core', name: '0032-context-event-message-projections' },
       { component: 'core', name: '0033-context-system-layer-projections' },
       { component: 'core', name: '0034-context-local-branch-request-views' },
+      { component: 'core', name: '0035-context-dark-ingress-admissions' },
     ],
   );
   db.close();
@@ -211,6 +212,8 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
   const db = openDatabase(dir);
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TABLE context_dark_ingress_admissions;
+    DROP TABLE context_dark_ingress_generations;
     DROP TABLE context_local_branch_request_messages;
     DROP TABLE context_local_branch_request_system_layers;
     DROP TABLE context_local_branch_request_views;
@@ -244,7 +247,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -433,7 +436,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    34,
+    35,
   );
   assert.deepEqual(
     (
@@ -465,6 +468,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0032-context-event-message-projections',
       '0033-context-system-layer-projections',
       '0034-context-local-branch-request-views',
+      '0035-context-dark-ingress-admissions',
     ],
   );
   runMigrations(db);
@@ -496,7 +500,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    21,
+    22,
   );
   db.close();
 });
@@ -536,7 +540,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 34);
+  assert.equal(version, 35);
   assert.equal(
     (
       reopened
@@ -568,6 +572,8 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
   db.exec(`
     DROP TRIGGER context_branches_coordinated_return_guard;
     DROP TRIGGER context_continuation_head_advance_guard;
+    DROP TABLE context_dark_ingress_admissions;
+    DROP TABLE context_dark_ingress_generations;
     DROP TABLE context_local_branch_request_messages;
     DROP TABLE context_local_branch_request_system_layers;
     DROP TABLE context_local_branch_request_views;
@@ -582,7 +588,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP INDEX context_branches_single_running_idx;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,
@@ -609,6 +615,118 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
         .get() as { n: number }
     ).n,
     0,
+  );
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('migration v34→v35 establishes an immutable no-backfill ingress watermark', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.prepare(
+    `INSERT INTO context_world_events(
+       event_id, world_id, event_kind, payload_json, payload_hash,
+       occurred_at, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    'event:before-dark-ingress-generation',
+    'world:signal:before-generation',
+    'inbound:signal',
+    '{}',
+    '0'.repeat(64),
+    1,
+    1,
+  );
+  const ledgerTriggers = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='elpis_migrations' ORDER BY name",
+    )
+    .all() as { name: string; sql: string }[];
+  for (const trigger of ledgerTriggers) {
+    db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
+  }
+  db.exec(`
+    DROP TABLE context_dark_ingress_admissions;
+    DROP TABLE context_dark_ingress_generations;
+    DELETE FROM elpis_migrations
+      WHERE component = 'core' AND name = '0035-context-dark-ingress-admissions';
+    PRAGMA user_version = 34;
+  `);
+  for (const trigger of ledgerTriggers) db.exec(trigger.sql);
+
+  runMigrations(db);
+  assert.deepEqual(
+    {
+      ...(db
+        .prepare(
+          `SELECT queue_generation, first_admissible_sequence, activation_epoch
+           FROM context_dark_ingress_generations`,
+        )
+        .get() as Record<string, number>),
+    },
+    {
+      queue_generation: 1,
+      first_admissible_sequence: 2,
+      activation_epoch: 0,
+    },
+  );
+  const insertAdmission = db.prepare(
+    `INSERT INTO context_dark_ingress_admissions(
+       event_id, world_id, source_sequence, activation_epoch,
+       queue_generation, wake_class, message_renderer_generation,
+       admitted_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  assert.throws(
+    () =>
+      insertAdmission.run(
+        'event:before-dark-ingress-generation',
+        'world:signal:before-generation',
+        1,
+        0,
+        1,
+        'text_user_turn',
+        1,
+        1,
+      ),
+    /context dark ingress admission lineage is invalid/,
+  );
+  db.prepare(
+    `INSERT INTO context_world_events(
+       event_id, world_id, event_kind, payload_json, payload_hash,
+       occurred_at, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    'event:after-dark-ingress-generation',
+    'world:signal:after-generation',
+    'inbound:signal',
+    '{}',
+    '1'.repeat(64),
+    2,
+    2,
+  );
+  insertAdmission.run(
+    'event:after-dark-ingress-generation',
+    'world:signal:after-generation',
+    2,
+    0,
+    1,
+    'text_user_turn',
+    1,
+    2,
+  );
+  assert.equal(
+    (
+      db
+        .prepare('SELECT count(*) AS n FROM context_dark_ingress_admissions')
+        .get() as { n: number }
+    ).n,
+    1,
+  );
+  assert.equal(
+    (db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    35,
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
