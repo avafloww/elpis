@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 36;
+const SCHEMA_VERSION = 37;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -2415,8 +2415,88 @@ export function runMigrations(db: DatabaseSync): void {
           END;
       `,
     },
+    {
+      name: '0037-context-system-layer-approvals',
+      sql: `
+        CREATE TABLE context_system_layer_approvals (
+          approval_id         TEXT PRIMARY KEY CHECK (length(approval_id) BETWEEN 1 AND 128),
+          layer_id            TEXT NOT NULL,
+          approval_role       TEXT NOT NULL CHECK (approval_role IN ('scoped_runtime_contract','identity','integrated_self','world_policy')),
+          basis_kind          TEXT NOT NULL CHECK (basis_kind IN ('authored_scoped_contract','soul_snapshot','accepted_self_delta','routing_policy')),
+          basis_ref           TEXT NOT NULL CHECK (length(basis_ref) BETWEEN 1 AND 512),
+          basis_hash          TEXT NOT NULL CHECK (length(basis_hash) = 64 AND basis_hash NOT GLOB '*[^0-9a-f]*'),
+          approval_generation INTEGER NOT NULL CHECK (typeof(approval_generation) = 'integer' AND approval_generation >= 1),
+          approved_at         INTEGER NOT NULL CHECK (typeof(approved_at) = 'integer' AND approved_at >= 0),
+          UNIQUE (layer_id, approval_generation),
+          FOREIGN KEY (layer_id)
+            REFERENCES context_system_layer_projections(layer_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE INDEX context_system_layer_approvals_role_idx
+          ON context_system_layer_approvals(approval_role, approval_generation, layer_id);
+        CREATE TRIGGER context_system_layer_approvals_conflict_guard
+          BEFORE INSERT ON context_system_layer_approvals
+          WHEN EXISTS (
+            SELECT 1 FROM context_system_layer_approvals
+            WHERE approval_id = NEW.approval_id
+               OR (layer_id = NEW.layer_id AND approval_generation = NEW.approval_generation)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system layer approval identity already exists');
+          END;
+        CREATE TRIGGER context_system_layer_approvals_lineage_guard
+          BEFORE INSERT ON context_system_layer_approvals
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_system_layer_projections AS layers
+            WHERE layers.layer_id = NEW.layer_id
+              AND layers.source_hash = NEW.basis_hash
+              AND (
+                (
+                  NEW.approval_role = 'scoped_runtime_contract'
+                  AND NEW.basis_kind = 'authored_scoped_contract'
+                  AND layers.layer_kind = 'runtime_contract'
+                  AND layers.visibility = 'global_contract'
+                  AND layers.world_id IS NULL
+                )
+                OR (
+                  NEW.approval_role = 'identity'
+                  AND NEW.basis_kind = 'soul_snapshot'
+                  AND layers.layer_kind = 'identity'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                )
+                OR (
+                  NEW.approval_role = 'integrated_self'
+                  AND NEW.basis_kind = 'accepted_self_delta'
+                  AND layers.layer_kind = 'integrated_self'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                )
+                OR (
+                  NEW.approval_role = 'world_policy'
+                  AND NEW.basis_kind = 'routing_policy'
+                  AND layers.layer_kind = 'world_policy'
+                  AND layers.visibility = 'world'
+                  AND layers.world_id IS NOT NULL
+                )
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system layer approval lineage is invalid');
+          END;
+        CREATE TRIGGER context_system_layer_approvals_no_update
+          BEFORE UPDATE ON context_system_layer_approvals BEGIN
+            SELECT RAISE(ABORT, 'context system layer approvals are immutable');
+          END;
+        CREATE TRIGGER context_system_layer_approvals_no_delete
+          BEFORE DELETE ON context_system_layer_approvals BEGIN
+            SELECT RAISE(ABORT, 'context system layer approvals are immutable');
+          END;
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+
 }
 
 /** Open (creating if needed) elpis.db under dataDirectory, set WAL, migrate.

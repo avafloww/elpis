@@ -55,13 +55,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 36, 'user_version bumped to 36');
+  assert.equal(v1, 37, 'user_version bumped to 37');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 36);
+  assert.equal(v2, 37);
   db.close();
 });
 
@@ -96,11 +96,12 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.ok(tables.includes('worker_mailbox_messages'));
   assert.ok(tables.includes('worker_workspace_artifacts'));
   assert.ok(tables.includes('context_system_layer_projections'));
+  assert.ok(tables.includes('context_system_layer_approvals'));
   runMigrations(db); // second run: no throw
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    36,
+    37,
   );
   db.close();
 });
@@ -186,7 +187,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 36, 'user_version upgraded to 36');
+  assert.equal(finalVersion, 37, 'user_version upgraded to 37');
 
   // Assert fleet tables exist
   const tableNames = (
@@ -224,4 +225,217 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   );
 
   upgradedDb.close();
+});
+
+test('system layer approvals require exact scoped lineage and remain immutable', () => {
+  const db = openDatabase(tmpDir());
+  const insertLayer = db.prepare(`
+    INSERT INTO context_system_layer_projections(
+      layer_id, layer_kind, visibility, world_id, renderer_generation,
+      policy_generation, source_kind, source_hash, content_text,
+      content_hash, content_bytes, created_at
+    ) VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, 100)
+  `);
+  const insert = (
+    id: string,
+    kind: string,
+    visibility: string,
+    worldId: string | null,
+    sourceKind: string,
+    hash: string,
+  ) => {
+    const content = `content:${id}`;
+    insertLayer.run(
+      id,
+      kind,
+      visibility,
+      worldId,
+      sourceKind,
+      hash,
+      content,
+      hash,
+      Buffer.byteLength(content),
+    );
+  };
+  const contractHash = 'a'.repeat(64);
+  const identityHash = 'b'.repeat(64);
+  const policyHash = 'c'.repeat(64);
+  const candidateHash = 'd'.repeat(64);
+  const legacyHash = 'e'.repeat(64);
+  insert(
+    'layer:contract',
+    'runtime_contract',
+    'global_contract',
+    null,
+    'scoped_contract',
+    contractHash,
+  );
+  insert(
+    'layer:identity',
+    'identity',
+    'integrated_self',
+    null,
+    'soul',
+    identityHash,
+  );
+  insert(
+    'layer:policy',
+    'world_policy',
+    'world',
+    'world:test-a',
+    'routing',
+    policyHash,
+  );
+  insert(
+    'layer:candidate',
+    'identity',
+    'integrated_self_candidate',
+    null,
+    'soul',
+    candidateHash,
+  );
+  insert(
+    'layer:legacy',
+    'runtime_contract',
+    'legacy_mixed',
+    null,
+    'legacy_prompt',
+    legacyHash,
+  );
+
+  const approve = db.prepare(`
+    INSERT INTO context_system_layer_approvals(
+      approval_id, layer_id, approval_role, basis_kind, basis_ref,
+      basis_hash, approval_generation, approved_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, 200)
+  `);
+  approve.run(
+    'approval:contract',
+    'layer:contract',
+    'scoped_runtime_contract',
+    'authored_scoped_contract',
+    'fixture:contract',
+    contractHash,
+  );
+  approve.run(
+    'approval:identity',
+    'layer:identity',
+    'identity',
+    'soul_snapshot',
+    'fixture:soul',
+    identityHash,
+  );
+  approve.run(
+    'approval:policy',
+    'layer:policy',
+    'world_policy',
+    'routing_policy',
+    'fixture:routing',
+    policyHash,
+  );
+
+  assert.throws(() =>
+    approve.run(
+      'approval:candidate',
+      'layer:candidate',
+      'identity',
+      'soul_snapshot',
+      'fixture:candidate',
+      candidateHash,
+    ),
+  );
+  assert.throws(() =>
+    approve.run(
+      'approval:legacy',
+      'layer:legacy',
+      'scoped_runtime_contract',
+      'authored_scoped_contract',
+      'fixture:legacy',
+      legacyHash,
+    ),
+  );
+  assert.throws(() =>
+    approve.run(
+      'approval:wrong-role',
+      'layer:identity',
+      'integrated_self',
+      'accepted_self_delta',
+      'fixture:wrong-role',
+      identityHash,
+    ),
+  );
+  assert.throws(() =>
+    approve.run(
+      'approval:wrong-hash',
+      'layer:policy',
+      'world_policy',
+      'routing_policy',
+      'fixture:wrong-hash',
+      'f'.repeat(64),
+    ),
+  );
+  const replaceApproval = db.prepare(`
+    INSERT OR REPLACE INTO context_system_layer_approvals(
+      approval_id, layer_id, approval_role, basis_kind, basis_ref,
+      basis_hash, approval_generation, approved_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+  `);
+  assert.throws(() =>
+    replaceApproval.run(
+      'approval:identity',
+      'layer:identity',
+      'identity',
+      'soul_snapshot',
+      'fixture:changed',
+      identityHash,
+      300,
+    ),
+  );
+  assert.throws(() =>
+    replaceApproval.run(
+      'approval:identity-alias',
+      'layer:identity',
+      'identity',
+      'soul_snapshot',
+      'fixture:alias',
+      identityHash,
+      300,
+    ),
+  );
+  assert.deepEqual(
+    {
+      ...(db
+        .prepare(
+          "SELECT approval_id, basis_ref, approved_at FROM context_system_layer_approvals WHERE layer_id = 'layer:identity'",
+        )
+        .get() as Record<string, unknown>),
+    },
+    {
+      approval_id: 'approval:identity',
+      basis_ref: 'fixture:soul',
+      approved_at: 200,
+    },
+  );
+  assert.equal(
+    (
+      db.prepare('SELECT COUNT(*) AS count FROM context_system_layer_approvals')
+        .get() as { count: number }
+    ).count,
+    3,
+  );
+  assert.throws(() =>
+    db
+      .prepare(
+        "UPDATE context_system_layer_approvals SET basis_ref = 'changed' WHERE approval_id = 'approval:identity'",
+      )
+      .run(),
+  );
+  assert.throws(() =>
+    db
+      .prepare(
+        "DELETE FROM context_system_layer_approvals WHERE approval_id = 'approval:identity'",
+      )
+      .run(),
+  );
+  db.close();
 });
