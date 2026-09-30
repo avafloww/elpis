@@ -21,14 +21,27 @@ import { transform } from './transform.js';
 import { preview, capLines } from './preview.js';
 import { parseFailureHints } from './parse-hints.js';
 import { isContextResourceInterrupt } from '../context-resources.js';
+import { bindResidentRunHandle } from '../kernel/resident-run-scope.js';
+import type { ResidentRunScopeHandle } from '../kernel/resident-run-provenance.js';
 import type {
   RunResult,
   SandboxDeps,
   SandboxLateProcessError,
 } from '../types.js';
 
+export interface SandboxResidentRunLifecycle {
+  readonly handle: ResidentRunScopeHandle;
+  detach(): void;
+  settled(): void;
+}
+
+export interface SandboxRunOptions {
+  runId?: string;
+  residentRun?: SandboxResidentRunLifecycle;
+}
+
 export interface Sandbox {
-  run(code: string, owner?: { runId?: string }): Promise<RunResult>;
+  run(code: string, options?: SandboxRunOptions): Promise<RunResult>;
 }
 
 /** `import()` inside the vm context has no dynamic-import callback wired up
@@ -130,7 +143,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
   // globals object IS the sandbox global
   const ctx = vm.createContext(globals);
 
-  function run(code: string, owner?: { runId?: string }): Promise<RunResult> {
+  function run(code: string, options?: SandboxRunOptions): Promise<RunResult> {
     // Per-run scope: the run's own log buffer + live child-pid set,
     // carried through every await AND every post-detach continuation via
     // AsyncLocalStorage. No global buffer swap → reentrant, and a detached run's
@@ -147,13 +160,16 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
         ? { outboundScope: deps.captureOutboundScope() }
         : {}),
     };
-    return runScope.run(scope, () => runInScope(code, scope, owner));
+    if (options?.residentRun) {
+      bindResidentRunHandle(scope, options.residentRun.handle);
+    }
+    return runScope.run(scope, () => runInScope(code, scope, options));
   }
 
   async function runInScope(
     code: string,
     scope: RunScope,
-    owner?: { runId?: string },
+    options?: SandboxRunOptions,
   ): Promise<RunResult> {
     const runLogbuf = scope.logbuf;
     // A no-op run (empty string, whitespace, or comments only) executes
@@ -165,6 +181,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       .replace(/\/\/[^\n]*/g, '')
       .trim();
     if (substance === '') {
+      options?.residentRun?.settled();
       return {
         ok: true,
         preview:
@@ -183,6 +200,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
     // valid in async functions") rather than the cause (a stray `as` cast that
     // acorn flagged exactly).
     if (!parsed) {
+      options?.residentRun?.settled();
       // Frame lines come from transformResult.code — the (possibly heredoc-
       // expanded) source acorn actually parsed, so line:col line up even when
       // a heredoc shifted positions. Identical to `code` when no heredocs.
@@ -232,7 +250,7 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
           deps.onLateProcessError!({
             kind: event.kind,
             error: event.error,
-            ...(owner?.runId ? { runId: owner.runId } : {}),
+            ...(options?.runId ? { runId: options.runId } : {}),
           })
       : undefined;
     const processErrorTrap = createRunProcessErrorTrap(scope, lateReporter);
@@ -263,9 +281,19 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       try {
         const raced = await Promise.race([guardedPromise, deadlinePromise]);
         if (raced === DETACH_SENTINEL) {
+          // Detach before publishing the result or future. AsyncLocalStorage
+          // continuations retain the same handle, whose verifier state is now
+          // non-active even if they run before SandboxManager resumes.
+          options?.residentRun?.detach();
+          detached = true;
+          if (options?.residentRun) {
+            guardedPromise.then(
+              () => options.residentRun!.settled(),
+              () => options.residentRun!.settled(),
+            );
+          }
           // Detach: the run's promise is still pending. Register it as a future
           // so bg.list shows it and the agent can bg.get(id) / bg.cancel(id).
-          detached = true;
           //: one history, so no origin routing — the settle notice enqueues
           // into the single stream (B3).
           if (deps.bg) {
@@ -314,12 +342,14 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
           }
         } else {
           value = raced;
+          options?.residentRun?.settled();
         }
       } finally {
         clearDeadline();
       }
     } catch (err) {
       if (!guardedPromise) processErrorTrap.fail();
+      options?.residentRun?.settled();
       return {
         ok: false,
         failureKind: isContextResourceInterrupt(err) ? 'context' : 'runtime',

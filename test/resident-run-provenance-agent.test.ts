@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   RUN_TOOL,
   toApiMessage,
@@ -86,6 +87,7 @@ function recordingIssuer(
       base.commit(prepared);
     },
     issue(prepared, callIndex) {
+      events.push(`issue-${callIndex}`);
       return base.issue(prepared, callIndex);
     },
   };
@@ -127,8 +129,15 @@ test('Agent persists a forensic batch before committing and executing tools', as
           events,
         ),
         sandbox: {
-          async run() {
+          async run(request) {
             events.push('sandbox');
+            assert.ok(request.residentRunToken);
+            const handle = authority.verifier.accept(request.residentRunToken);
+            assert.equal(
+              authority.verifier.resolveActive(handle).toolName,
+              'run',
+            );
+            authority.verifier.close(handle);
             runCount += 1;
             if (runCount === 2) ranTwice.resolve();
             return { ok: true, preview: 'ok' };
@@ -147,10 +156,12 @@ test('Agent persists a forensic batch before committing and executing tools', as
     const prepare = events.indexOf('prepare');
     const append = events.indexOf('append-assistant');
     const commit = events.indexOf('commit');
+    const issue = events.indexOf('issue-0');
     const sandbox = events.indexOf('sandbox');
     assert.ok(prepare >= 0 && prepare < append);
     assert.ok(append < commit);
-    assert.ok(commit < sandbox);
+    assert.ok(commit < issue);
+    assert.ok(issue < sandbox);
 
     const loaded = loadMostRecentMain(transcriptRoot);
     const assistant = loaded?.messages.find(
@@ -230,6 +241,121 @@ test('Agent rejects an oversized provenance batch without crashing or executing 
         message.content.includes('No tool calls in this batch were executed'),
       ),
     );
+  } finally {
+    built.agent.stop();
+    built.cleanup();
+  }
+});
+
+test('Agent issues tokens only for parsed run ordinals in a committed batch', async () => {
+  const authority = createResidentRunAuthority();
+  const events: string[] = [];
+  const snapshots: Array<{
+    callIndex: number;
+    toolName: string;
+    argumentsSha256: string;
+  }> = [];
+  const ranThree = Promise.withResolvers<void>();
+  const multi: CompleteResult = {
+    message: {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'think-0',
+          type: 'function',
+          function: {
+            name: 'think',
+            arguments: JSON.stringify({ thoughts: 'check' }),
+          },
+        },
+        {
+          id: 'run-1',
+          type: 'function',
+          function: {
+            name: 'run',
+            arguments: JSON.stringify({ code: '1', detail: 'first run' }),
+          },
+        },
+        {
+          id: 'unknown-2',
+          type: 'function',
+          function: { name: 'unknown', arguments: '{}' },
+        },
+        {
+          id: 'run-3',
+          type: 'function',
+          function: {
+            name: 'run',
+            arguments: JSON.stringify({ code: '3', detail: 'second run' }),
+          },
+        },
+        {
+          id: 'run-invalid-4',
+          type: 'function',
+          function: {
+            name: 'run',
+            arguments: JSON.stringify({ detail: 'invalid run' }),
+          },
+        },
+      ],
+    },
+    stripped: false,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+  const built = buildTestAgent({
+    llm: scriptedLLM([multi, EMPTY_WAKE]),
+    agentDeps: {
+      residentRunIssuer: recordingIssuer(authority.issuer, events),
+      sandbox: {
+        async run(request) {
+          events.push('sandbox');
+          assert.ok(request.residentRunToken);
+          const handle = authority.verifier.accept(request.residentRunToken);
+          const snapshot = authority.verifier.resolveActive(handle);
+          snapshots.push({
+            callIndex: snapshot.callIndex,
+            toolName: snapshot.toolName,
+            argumentsSha256: snapshot.argumentsSha256,
+          });
+          authority.verifier.close(handle);
+          if (snapshots.length === 3) ranThree.resolve();
+          return { ok: true, preview: 'ok' };
+        },
+      },
+    },
+  });
+  try {
+    void built.agent.loop();
+    built.agent.enqueue(inbound());
+    await ranThree.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    built.agent.stop();
+
+    assert.deepEqual(
+      snapshots.map((snapshot) => snapshot.callIndex),
+      [1, 3, 0],
+    );
+    assert.deepEqual(
+      snapshots.slice(0, 2).map((snapshot) => snapshot.toolName),
+      ['run', 'run'],
+    );
+    assert.equal(
+      snapshots[0]?.argumentsSha256,
+      createHash('sha256')
+        .update(multi.message.tool_calls?.[1]?.function.arguments ?? '', 'utf8')
+        .digest('hex'),
+    );
+    assert.equal(
+      snapshots[1]?.argumentsSha256,
+      createHash('sha256')
+        .update(multi.message.tool_calls?.[3]?.function.arguments ?? '', 'utf8')
+        .digest('hex'),
+    );
+    assert.equal(events.filter((event) => event === 'issue-4').length, 0);
+    const firstCommit = events.indexOf('commit');
+    assert.ok(firstCommit >= 0 && firstCommit < events.indexOf('issue-1'));
+    assert.ok(events.indexOf('issue-1') < events.indexOf('sandbox'));
   } finally {
     built.agent.stop();
     built.cleanup();

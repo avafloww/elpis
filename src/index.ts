@@ -357,9 +357,10 @@ export async function createElpisRuntime(
       store: gatewayResidentStore,
       fetch: adapters.gatewayLlmFetch ?? ((input, init) => fetch(input, init)),
     });
-    contextGraphShadow = (config.contextGraph?.shadowEnabled ?? false)
-      ? new ContextGraphShadowRecorder(contextGraphStore)
-      : undefined;
+    contextGraphShadow =
+      (config.contextGraph?.shadowEnabled ?? false)
+        ? new ContextGraphShadowRecorder(contextGraphStore)
+        : undefined;
     modules = resolveBuiltinModules(config, profile);
     if (modules.isActive('motor') && !llmRoleConfigured(config, 'motor')) {
       throw new Error(
@@ -711,12 +712,14 @@ export async function createElpisRuntime(
     moderate: (channelId: string, reason?: string) =>
       agent.moderateChannel(channelId, 'mute', 'self', reason),
   };
+  const residentRunAuthority = createResidentRunAuthority();
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
     registry: sandboxRegistry,
     logger: config.logger,
     create: adapters.createSandbox ?? createSandbox,
+    residentRunVerifier: residentRunAuthority.verifier,
   });
 
   llms = createLlmRoleClients(config, {
@@ -816,7 +819,6 @@ export async function createElpisRuntime(
     log: (line) => config.logger.info(line),
   });
   const transcript = createTranscriptStore(sessionsRoot);
-  const residentRunAuthority = createResidentRunAuthority();
   // Restart-resume: continue appending to the file that primed the history rather
   // than minting a fresh one (which would strand this session's new messages in a
   // separate file and lose the loaded context on the next restart).

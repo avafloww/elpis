@@ -710,8 +710,8 @@ export interface AgentDeps {
       history?: ChatMessage[],
     ): Promise<WakeAdvice>;
   };
-  /** Process-local authority issuer for forensic resident tool-batch commits.
-   * No token reaches the sandbox until a later, separately reviewed stage. */
+  /** Process-local issuer for forensic resident tool-batch commits and exact
+   * single-use run-call tokens. Tokens reach only SandboxManager host code. */
   residentRunIssuer?: ResidentRunIssuer;
   memory: Memory;
   /** Dependency-aware external cortex. Optional so focused Agent tests and
@@ -3077,10 +3077,17 @@ export class Agent {
             );
             for (const ln of summarizeCode(parsed.code).split('\n'))
               this.logger.info('  ', ln);
+            const residentRunToken = residentToolBatch
+              ? this.deps.residentRunIssuer!.issue(
+                  residentToolBatch.prepared,
+                  callIndex,
+                )
+              : undefined;
             const toolStart = Date.now();
             result = await this.sandbox.run({
               code: parsed.code,
               ...(parsed.sandbox ? { sandbox: parsed.sandbox } : {}),
+              ...(residentRunToken ? { residentRunToken } : {}),
             });
             this.logger.info(
               '[agent] tool result | duration=',

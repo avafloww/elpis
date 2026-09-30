@@ -109,6 +109,12 @@ Every resident sandbox run captures one opaque outbound origin before executing:
 
 `elpis.bg.start(cmd)` launches a detached, restart-durable job. Jobs remember their origin room, emit periodic still-running wakes, and emit one terminal wake with status and log tail. Long JavaScript promises that cross the async deadline become process-local futures and cannot survive a harness restart.
 
+## Resident run provenance
+
+A live assistant `run` call may carry a process-local single-use provenance token from the already appended and committed assistant tool batch into `SandboxManager`. The manager accepts the token before any sandbox work, binds only an opaque handle to the invocation's fresh `RunScope`, and closes it on completion or failure. If the async deadline wins, the handle becomes detached before the future or detached result is published, then closes when the underlying promise settles. Direct operator, worker, and test calls without a token retain their existing behavior; a present invalid token fails closed rather than becoming an unprovenanced run.
+
+This harness-internal handle is not an `elpis.*` capability and grants no action. Because `node:vm` is not a security boundary, this is not a confidentiality claim about internal module inspection; the opaque handle remains unusable without the private verifier. A later capability would still need to resolve it as active at its exact authority seam. Persistent contexts receive a fresh scope per invocation and cannot inherit an earlier handle; restart cannot recover one from transcript metadata.
+
 ## Browser and desktop state
 
 Browser profiles, screenshots, Xauthority, motor traces, and desktop runtime state live under the private data directory. They must never be committed with source.

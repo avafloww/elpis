@@ -20,6 +20,11 @@ import { makeConfig } from './helpers.js';
 import type { SandboxDeps } from '../src/types.js';
 import type { StandaloneCompleteResult } from '../src/llm/llm.js';
 import { ContextResources } from '../src/context-resources.js';
+import {
+  createResidentRunAuthority,
+  type ResidentRunVerifier,
+} from '../src/kernel/resident-run-provenance.js';
+import { residentRunHandleForScope } from '../src/kernel/resident-run-scope.js';
 
 function fixture(
   opts: {
@@ -27,6 +32,7 @@ function fixture(
     classify?: SandboxDeps['completeStandalone'];
     coldStart?: boolean;
     retirementGraceMs?: number;
+    residentRunVerifier?: ResidentRunVerifier;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -98,6 +104,7 @@ function fixture(
     logger: noopLogger,
     now,
     coldStart: opts.coldStart,
+    residentRunVerifier: opts.residentRunVerifier,
   });
   return {
     dir,
@@ -125,6 +132,17 @@ function completion(content: string): StandaloneCompleteResult {
     content,
     usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
+}
+
+function committedRunToken(
+  authority: ReturnType<typeof createResidentRunAuthority>,
+  toolName = 'run',
+) {
+  const batch = authority.issuer.prepare([
+    { toolName, arguments: '{"code":"test"}' },
+  ]);
+  authority.issuer.commit(batch.prepared);
+  return authority.issuer.issue(batch.prepared, 0);
 }
 
 test('omitted selector creates a fresh core-only ephemeral sandbox every run', async () => {
@@ -716,17 +734,33 @@ test('active and detached runs finalize immediately when they settle after the h
   detached.close();
 });
 
-test('cancelling a detached future releases ownership by resetting its generation', async () => {
-  const f = fixture({ deadlineMs: 20 });
+test('cancelling a detached future closes provenance and resets its generation', async () => {
+  const authority = createResidentRunAuthority();
+  let accepted: ReturnType<ResidentRunVerifier['accept']> | undefined;
+  const verifier: ResidentRunVerifier = {
+    accept(token) {
+      accepted = authority.verifier.accept(token);
+      return accepted;
+    },
+    resolveActive: (handle) => authority.verifier.resolveActive(handle),
+    lifecycle: (handle) => authority.verifier.lifecycle(handle),
+    detach: (handle) => authority.verifier.detach(handle),
+    close: (handle) => authority.verifier.close(handle),
+  };
+  const f = fixture({ deadlineMs: 20, residentRunVerifier: verifier });
   const item = f.mind.create({ title: 'cancel future' });
   const registration = f.manager.ensurePersistent(item.id);
   const detached = await f.manager.run({
     sandbox: registration.id,
     code: 'await new Promise(resolve => setTimeout(() => resolve(7), 500))',
+    residentRunToken: committedRunToken(authority),
   });
   assert.equal(detached.detached, true);
   assert.ok(detached.bgId);
+  assert.ok(accepted);
+  assert.equal(authority.verifier.lifecycle(accepted!), 'detached');
   assert.equal(f.bg.cancel(detached.bgId!).ok, true);
+  assert.equal(authority.verifier.lifecycle(accepted!), 'closed');
   const reset = f.registry.get(registration.id);
   assert.equal(reset.lifecycle, 'ready');
   assert.equal(reset.generation, 2);
@@ -758,7 +792,19 @@ test('classifier hard-timeout is advisory even when the provider ignores AbortSi
   f.close();
 });
 
-test('persistent detach without bg registry fails visibly and resets generation', async () => {
+test('persistent detach without bg registry fails visibly and closes provenance', async () => {
+  const authority = createResidentRunAuthority();
+  let accepted: ReturnType<ResidentRunVerifier['accept']> | undefined;
+  const verifier: ResidentRunVerifier = {
+    accept(token) {
+      accepted = authority.verifier.accept(token);
+      return accepted;
+    },
+    resolveActive: (handle) => authority.verifier.resolveActive(handle),
+    lifecycle: (handle) => authority.verifier.lifecycle(handle),
+    detach: (handle) => authority.verifier.detach(handle),
+    close: (handle) => authority.verifier.close(handle),
+  };
   const f = fixture({ deadlineMs: 15, coldStart: false });
   const item = f.mind.create({ title: 'missing future registry' });
   const registration = f.manager.ensurePersistent(item.id);
@@ -768,16 +814,20 @@ test('persistent detach without bg registry fails visibly and resets generation'
     registry: f.registry,
     logger: noopLogger,
     coldStart: false,
+    residentRunVerifier: verifier,
   });
   const result = await manager.run({
     sandbox: registration.id,
     code: 'await new Promise(resolve => setTimeout(resolve, 60))',
+    residentRunToken: committedRunToken(authority),
   });
   assert.equal(result.ok, false);
   assert.equal(result.detached, false);
   assert.equal(result.failureKind, 'runtime');
   assert.match(result.error ?? '', /without a background-future registry/);
   assert.equal(f.registry.get(registration.id).generation, 2);
+  assert.ok(accepted);
+  assert.equal(authority.verifier.lifecycle(accepted!), 'closed');
   manager.dispose();
   await new Promise((resolve) => setTimeout(resolve, 70));
   f.close();
@@ -805,4 +855,211 @@ test('wake advice runs through the manager classifier seam with bounded turn sta
   assert.match(userPayload, /"turnKind":"autonomous"/);
   assert.match(userPayload, /"inProgress":\[\]/);
   f.close();
+});
+
+test('resident run tokens reject invalid presence, wrong authority, wrong tool, and replay before execution', async () => {
+  const authority = createResidentRunAuthority();
+  const accepted: ReturnType<ResidentRunVerifier['accept']>[] = [];
+  const verifier: ResidentRunVerifier = {
+    accept(token) {
+      const handle = authority.verifier.accept(token);
+      accepted.push(handle);
+      return handle;
+    },
+    resolveActive: (handle) => authority.verifier.resolveActive(handle),
+    lifecycle: (handle) => authority.verifier.lifecycle(handle),
+    detach: (handle) => authority.verifier.detach(handle),
+    close: (handle) => authority.verifier.close(handle),
+  };
+  const f = fixture({ residentRunVerifier: verifier });
+  let appends = 0;
+  f.deps.memory!.append = () => {
+    appends++;
+  };
+  try {
+    const undefinedResult = await f.manager.run({
+      code: `elpis.memory.append('undefined')`,
+      residentRunToken: undefined,
+    } as any);
+    assert.equal(undefinedResult.ok, false);
+
+    const other = createResidentRunAuthority();
+    const crossResult = await f.manager.run({
+      code: `elpis.memory.append('cross')`,
+      residentRunToken: committedRunToken(other),
+    });
+    assert.equal(crossResult.ok, false);
+
+    const forgedResult = await f.manager.run({
+      code: `elpis.memory.append('forged')`,
+      residentRunToken: Object.freeze({}) as any,
+    });
+    assert.equal(forgedResult.ok, false);
+
+    const wrongResult = await f.manager.run({
+      code: `elpis.memory.append('wrong')`,
+      residentRunToken: committedRunToken(authority, 'think'),
+    });
+    assert.equal(wrongResult.ok, false);
+    assert.match(wrongResult.error ?? '', /not run/);
+    assert.equal(authority.verifier.lifecycle(accepted.at(-1)!), 'closed');
+
+    const token = committedRunToken(authority);
+    const valid = await f.manager.run({
+      code: `elpis.memory.append('valid')`,
+      residentRunToken: token,
+    });
+    assert.equal(valid.ok, true);
+    assert.equal(appends, 1);
+    assert.equal(authority.verifier.lifecycle(accepted.at(-1)!), 'closed');
+
+    const replay = await f.manager.run({
+      code: `elpis.memory.append('replay')`,
+      residentRunToken: token,
+    });
+    assert.equal(replay.ok, false);
+    assert.match(replay.error ?? '', /already accepted/);
+    assert.equal(appends, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test('persistent invocations bind fresh resident handles without inheritance', async () => {
+  const authority = createResidentRunAuthority();
+  const f = fixture({ residentRunVerifier: authority.verifier });
+  const seen: Array<ReturnType<typeof residentRunHandleForScope>> = [];
+  const snapshots: Array<{ batchId: string; callIndex: number }> = [];
+  f.deps.memory!.read = () => {
+    const scope = runScope.getStore();
+    const handle = scope ? residentRunHandleForScope(scope) : undefined;
+    seen.push(handle);
+    if (handle) {
+      const snapshot = authority.verifier.resolveActive(handle);
+      snapshots.push({
+        batchId: snapshot.batchId,
+        callIndex: snapshot.callIndex,
+      });
+    }
+    return '';
+  };
+  try {
+    const item = f.mind.create({ title: 'resident provenance scopes' });
+    const first = await f.manager.run({
+      sandbox: item.id,
+      code: 'elpis.memory.read()',
+      residentRunToken: committedRunToken(authority),
+    });
+    const second = await f.manager.run({
+      sandbox: item.id,
+      code: 'elpis.memory.read()',
+      residentRunToken: committedRunToken(authority),
+    });
+    const direct = await f.manager.run({
+      sandbox: item.id,
+      code: 'elpis.memory.read()',
+    });
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(direct.ok, true);
+    assert.equal(seen.length, 3);
+    assert.ok(seen[0]);
+    assert.ok(seen[1]);
+    assert.notEqual(seen[0], seen[1]);
+    assert.equal(seen[2], undefined);
+    assert.notEqual(snapshots[0]?.batchId, snapshots[1]?.batchId);
+    assert.equal(authority.verifier.lifecycle(seen[0]!), 'closed');
+    assert.equal(authority.verifier.lifecycle(seen[1]!), 'closed');
+  } finally {
+    f.close();
+  }
+});
+
+test('resident provenance closes on preparse and manager disposal', async () => {
+  const authority = createResidentRunAuthority();
+  const accepted: ReturnType<ResidentRunVerifier['accept']>[] = [];
+  const verifier: ResidentRunVerifier = {
+    accept(token) {
+      const handle = authority.verifier.accept(token);
+      accepted.push(handle);
+      return handle;
+    },
+    resolveActive: (handle) => authority.verifier.resolveActive(handle),
+    lifecycle: (handle) => authority.verifier.lifecycle(handle),
+    detach: (handle) => authority.verifier.detach(handle),
+    close: (handle) => authority.verifier.close(handle),
+  };
+  const f = fixture({
+    deadlineMs: 5_000,
+    residentRunVerifier: verifier,
+  });
+  const started = Promise.withResolvers<void>();
+  f.deps.memory!.read = () => {
+    started.resolve();
+    return '';
+  };
+  try {
+    const preparse = await f.manager.run({
+      sandbox: 'unused',
+      code: 'const =',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(preparse.failureKind, 'preparse');
+    assert.equal(authority.verifier.lifecycle(accepted[0]!), 'closed');
+
+    const pending = f.manager.run({
+      code: `elpis.memory.read(); await elpis.sleep(50); 1`,
+      residentRunToken: committedRunToken(authority),
+    });
+    await started.promise;
+    assert.equal(authority.verifier.lifecycle(accepted[1]!), 'active');
+    f.manager.dispose();
+    assert.equal(authority.verifier.lifecycle(accepted[1]!), 'closed');
+    await pending;
+  } finally {
+    f.close();
+  }
+});
+
+test('resident provenance detaches at the real deadline and closes on settlement', async () => {
+  const authority = createResidentRunAuthority();
+  let accepted: ReturnType<ResidentRunVerifier['accept']> | undefined;
+  const verifier: ResidentRunVerifier = {
+    accept(token) {
+      accepted = authority.verifier.accept(token);
+      return accepted;
+    },
+    resolveActive: (handle) => authority.verifier.resolveActive(handle),
+    lifecycle: (handle) => authority.verifier.lifecycle(handle),
+    detach: (handle) => authority.verifier.detach(handle),
+    close: (handle) => authority.verifier.close(handle),
+  };
+  const f = fixture({ deadlineMs: 15, residentRunVerifier: verifier });
+  const continued = Promise.withResolvers<void>();
+  let continuationLifecycle = '';
+  f.deps.memory!.read = () => {
+    const scope = runScope.getStore();
+    const handle = scope ? residentRunHandleForScope(scope) : undefined;
+    continuationLifecycle = handle
+      ? authority.verifier.lifecycle(handle)
+      : 'missing';
+    continued.resolve();
+    return '';
+  };
+  try {
+    const result = await f.manager.run({
+      code: `await elpis.sleep(60); elpis.memory.read(); 7`,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(result.detached, true);
+    assert.ok(accepted);
+    assert.equal(authority.verifier.lifecycle(accepted!), 'detached');
+    await continued.promise;
+    assert.equal(continuationLifecycle, 'detached');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(authority.verifier.lifecycle(accepted!), 'closed');
+  } finally {
+    f.close();
+  }
 });

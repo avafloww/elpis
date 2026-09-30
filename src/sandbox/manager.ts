@@ -6,7 +6,16 @@ import type {
   SandboxExecutionMetadata,
 } from '../types.js';
 import type { MindId } from '../store/mind-id.js';
-import { createSandbox, type Sandbox } from './index.js';
+import {
+  createSandbox,
+  type Sandbox,
+  type SandboxResidentRunLifecycle,
+} from './index.js';
+import type {
+  ResidentRunScopeHandle,
+  ResidentRunToken,
+  ResidentRunVerifier,
+} from '../kernel/resident-run-provenance.js';
 import { transform } from './transform.js';
 import type { SandboxRegistration, SandboxRegistry } from './registry.js';
 import {
@@ -23,6 +32,7 @@ const CLASSIFIER_TIMEOUT_MS = 3_000;
 export interface ManagedRunRequest {
   code: string;
   sandbox?: string;
+  residentRunToken?: ResidentRunToken;
 }
 
 export interface SandboxManagerOptions {
@@ -34,6 +44,7 @@ export interface SandboxManagerOptions {
   coldStart?: boolean;
   classifierTimeoutMs?: number;
   wakeAdvisorTimeoutMs?: number;
+  residentRunVerifier?: ResidentRunVerifier;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -57,6 +68,56 @@ function hasSubstance(code: string): boolean {
       .replace(/\/\/[^\n]*/g, '')
       .trim() !== ''
   );
+}
+
+class ResidentRunLease {
+  readonly binding: SandboxResidentRunLifecycle;
+  private state: 'active' | 'detached' | 'closed' = 'active';
+
+  constructor(
+    private readonly verifier: ResidentRunVerifier,
+    readonly handle: ResidentRunScopeHandle,
+    private readonly onClose: () => void,
+  ) {
+    this.binding = Object.freeze({
+      handle,
+      detach: () => this.detach(),
+      settled: () => this.close(),
+    });
+  }
+
+  get lifecycle(): 'active' | 'detached' | 'closed' {
+    return this.state;
+  }
+
+  observeSandboxResult(result: RunResult): void {
+    if (result.detached) {
+      if (this.state === 'active') this.detach();
+      return;
+    }
+    this.close();
+  }
+
+  finishManagerRequest(): void {
+    if (this.state === 'active') this.close();
+  }
+
+  close(): void {
+    if (this.state === 'closed') return;
+    this.verifier.close(this.handle);
+    this.state = 'closed';
+    this.onClose();
+  }
+
+  private detach(): void {
+    if (this.state !== 'active') {
+      throw new Error(
+        `resident run provenance: cannot detach ${this.state} manager lease`,
+      );
+    }
+    this.verifier.detach(this.handle);
+    this.state = 'detached';
+  }
 }
 
 function mindState(
@@ -84,6 +145,9 @@ export class SandboxManager {
   private readonly now: () => number;
   private readonly classifierTimeoutMs: number;
   private readonly wakeAdvisorTimeoutMs: number;
+  private readonly residentRunVerifier?: ResidentRunVerifier;
+  private readonly residentRunLeases = new Set<ResidentRunLease>();
+  private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
   private readonly detached = new Map<string, DetachedOwner>();
   private readonly earlySettlements = new Map<string, FutureSettlement>();
@@ -99,8 +163,14 @@ export class SandboxManager {
       options.classifierTimeoutMs ?? CLASSIFIER_TIMEOUT_MS;
     this.wakeAdvisorTimeoutMs =
       options.wakeAdvisorTimeoutMs ?? WAKE_ADVISOR_TIMEOUT_MS;
+    this.residentRunVerifier = options.residentRunVerifier;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
+        const residentRun = this.residentDetachedLeases.get(id);
+        if (residentRun) {
+          this.residentDetachedLeases.delete(id);
+          residentRun.close();
+        }
         if (this.detached.has(id)) this.settleDetached(id, true);
       }) ?? (() => {});
     if (options.coldStart !== false) {
@@ -205,28 +275,95 @@ export class SandboxManager {
 
   dispose(): void {
     this.stopFutureTerminal();
+    for (const lease of [...this.residentRunLeases]) lease.close();
+    this.residentDetachedLeases.clear();
     this.contexts.clear();
     this.detached.clear();
     this.earlySettlements.clear();
   }
 
   async run(request: ManagedRunRequest): Promise<RunResult> {
+    let residentRun: ResidentRunLease | undefined;
     try {
-      this.collectGarbage();
       if (!request || typeof request.code !== 'string')
         throw new Error('sandbox manager: run requires string code');
+      residentRun = this.acceptResidentRun(request);
+      this.collectGarbage();
       if (request.sandbox === undefined)
-        return await this.runEphemeral(request.code);
-      return await this.runPersistent(request.sandbox, request.code);
+        return await this.runEphemeral(request.code, residentRun);
+      return await this.runPersistent(
+        request.sandbox,
+        request.code,
+        residentRun,
+      );
     } catch (error) {
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    } finally {
+      residentRun?.finishManagerRequest();
     }
   }
 
-  private async runEphemeral(code: string): Promise<RunResult> {
+  private acceptResidentRun(
+    request: ManagedRunRequest,
+  ): ResidentRunLease | undefined {
+    if (!Object.hasOwn(request, 'residentRunToken')) return undefined;
+    if (!this.residentRunVerifier)
+      throw new Error(
+        'sandbox manager: resident run token supplied without a verifier',
+      );
+    const handle = this.residentRunVerifier.accept(request.residentRunToken!);
+    try {
+      const snapshot = this.residentRunVerifier.resolveActive(handle);
+      if (snapshot.toolName !== 'run') {
+        throw new Error(
+          `sandbox manager: resident run token is for ${snapshot.toolName}, not run`,
+        );
+      }
+    } catch (error) {
+      this.residentRunVerifier.close(handle);
+      throw error;
+    }
+    let lease!: ResidentRunLease;
+    lease = new ResidentRunLease(this.residentRunVerifier, handle, () =>
+      this.releaseResidentRunLease(lease),
+    );
+    this.residentRunLeases.add(lease);
+    return lease;
+  }
+
+  private releaseResidentRunLease(lease: ResidentRunLease): void {
+    this.residentRunLeases.delete(lease);
+    for (const [id, detached] of this.residentDetachedLeases) {
+      if (detached === lease) this.residentDetachedLeases.delete(id);
+    }
+  }
+
+  private trackResidentRunDetach(
+    result: RunResult,
+    lease: ResidentRunLease | undefined,
+  ): void {
+    if (
+      !lease ||
+      lease.lifecycle !== 'detached' ||
+      !result.detached ||
+      !result.bgId
+    )
+      return;
+    const existing = this.residentDetachedLeases.get(result.bgId);
+    if (existing && existing !== lease)
+      throw new Error(
+        `sandbox manager: background future ${result.bgId} already owns resident provenance`,
+      );
+    this.residentDetachedLeases.set(result.bgId, lease);
+  }
+
+  private async runEphemeral(
+    code: string,
+    residentRun?: ResidentRunLease,
+  ): Promise<RunResult> {
     const classification = hasSubstance(code)
       ? this.classify(code)
       : Promise.resolve(false);
@@ -236,7 +373,12 @@ export class SandboxManager {
         mindDefaultId: undefined,
       }),
     );
-    const result = await sandbox.run(code);
+    const result = await sandbox.run(
+      code,
+      residentRun ? { residentRun: residentRun.binding } : undefined,
+    );
+    residentRun?.observeSandboxResult(result);
+    this.trackResidentRunDetach(result, residentRun);
     const remind = await classification;
     result.execution = {
       kind: 'ephemeral',
@@ -249,6 +391,7 @@ export class SandboxManager {
   private async runPersistent(
     selector: string,
     code: string,
+    residentRun?: ResidentRunLease,
   ): Promise<RunResult> {
     if (typeof selector !== 'string' || !selector.trim())
       throw new Error(
@@ -322,7 +465,10 @@ export class SandboxManager {
     try {
       result = await this.context(alias, run.sandbox).run(code, {
         runId: run.runId,
+        ...(residentRun ? { residentRun: residentRun.binding } : {}),
       });
+      residentRun?.observeSandboxResult(result);
+      this.trackResidentRunDetach(result, residentRun);
     } catch (error) {
       const reset = this.registry.failRunAndReset(alias, run.runId);
       this.contexts.delete(alias);
@@ -348,6 +494,7 @@ export class SandboxManager {
         result.error =
           'persistent sandbox detached without a background-future registry; generation reset';
         delete result.note;
+        residentRun?.close();
       } else {
         this.registry.detachRun(alias, run.runId);
         execution.lifecycle = 'detached';
