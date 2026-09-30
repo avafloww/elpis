@@ -15,6 +15,7 @@ import {
   parseTranscriptFile,
 } from '../src/store/sessions.js';
 import type { ChatMessage } from '../src/llm/llm.js';
+import { createResidentRunAuthority } from '../src/kernel/resident-run-provenance.js';
 
 function tmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'harness-sess-'));
@@ -110,6 +111,56 @@ test('sessions: round-trips tool_calls and tool_call_id', () => {
   const t = loaded!.messages[1];
   assert.equal(t.role, 'tool');
   assert.equal(t.tool_call_id, 'tc1');
+});
+
+test('sessions: restores only exact resident tool-batch forensic metadata', () => {
+  const root = tmpRoot();
+  const store = createTranscriptStore(root);
+  const calls = [{ toolName: 'run', arguments: '{"code":"1+1"}' }];
+  const authority = createResidentRunAuthority({
+    randomId: () => '00000000-0000-4000-8000-000000000001',
+  });
+  const record = authority.issuer.prepare(calls).record;
+  const message: ChatMessage = {
+    role: 'assistant',
+    content: '',
+    tool_calls: [
+      {
+        id: 'tc-batch',
+        type: 'function',
+        function: { name: calls[0].toolName, arguments: calls[0].arguments },
+      },
+    ],
+    residentToolBatch: record,
+  };
+  store.append('ch1', message);
+  const loaded = loadMostRecentForChannel(root, 'ch1');
+  assert.deepEqual(loaded?.messages[0].residentToolBatch, record);
+
+  const malformed = path.join(root, 'malformed.jsonl');
+  fs.writeFileSync(
+    malformed,
+    [
+      JSON.stringify({
+        ...message,
+        tool_calls: [
+          {
+            id: 'tc-batch',
+            type: 'function',
+            function: { name: 'run', arguments: '{ "code": "1+1" }' },
+          },
+        ],
+      }),
+      JSON.stringify({ ...message, role: 'user' }),
+      JSON.stringify({
+        ...message,
+        residentToolBatch: { ...record, extra: true },
+      }),
+    ].join('\n'),
+  );
+  const rejected = parseTranscriptFile(malformed);
+  assert.equal(rejected.length, 3);
+  assert.ok(rejected.every((entry) => entry.residentToolBatch === undefined));
 });
 
 test('sessions: round-trips bounded context resource descriptors', () => {

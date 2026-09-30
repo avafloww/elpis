@@ -163,6 +163,10 @@ export interface ChatMessage {
     type: 'function';
     function: { name: string; arguments: string };
   }>;
+  /** Harness-only forensic commitment for one live resident assistant tool batch.
+   * Persisted and strictly restored, never sent to a provider, and never itself
+   * recoverable as process-local run authority after restart. */
+  residentToolBatch?: import('../kernel/resident-run-provenance.js').RecordedResidentToolBatchV1;
   tool_call_id?: string;
   /** Harness-created context-graph lineage. These fields are persisted and used
    * to materialize a scoped provider view; provider translators never expose

@@ -151,6 +151,10 @@ import {
 import { spawnText } from './lib/proc.js';
 import { sniffImageMediaType } from './lib/image.js';
 import { applyKernelTurn } from './kernel/turn.js';
+import type {
+  PreparedResidentToolBatchResult,
+  ResidentRunIssuer,
+} from './kernel/resident-run-provenance.js';
 import { custodyWatchFrames } from './console/watch-custody.js';
 import {
   worldIdForInbound,
@@ -706,6 +710,9 @@ export interface AgentDeps {
       history?: ChatMessage[],
     ): Promise<WakeAdvice>;
   };
+  /** Process-local authority issuer for forensic resident tool-batch commits.
+   * No token reaches the sandbox until a later, separately reviewed stage. */
+  residentRunIssuer?: ResidentRunIssuer;
   memory: Memory;
   /** Dependency-aware external cortex. Optional so focused Agent tests and
    * embedders can omit it; production always wires the canonical service. */
@@ -2950,9 +2957,29 @@ export class Agent {
       if (forceThinkForRequest) this.externalThinkForcedThisTurn = true;
 
       let yieldedByWake = false;
-      const header = eligibleSpeechHeader(resp);
       const headerOutcome: { receipt?: ChatMessage } = {};
       const calls = resp.message.tool_calls ?? [];
+      let residentToolBatch: PreparedResidentToolBatchResult | undefined;
+      let residentToolBatchError: string | undefined;
+      if (calls.length > 0 && this.deps.residentRunIssuer) {
+        try {
+          residentToolBatch = this.deps.residentRunIssuer.prepare(
+            calls.map((call) => ({
+              toolName: call.function.name,
+              arguments: call.function.arguments,
+            })),
+          );
+          resp.message.residentToolBatch = residentToolBatch.record;
+        } catch (error) {
+          residentToolBatchError =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            '[agent] resident tool batch rejected before dispatch | error=',
+            redactSecrets(residentToolBatchError, this.secretRegistry),
+          );
+        }
+      }
+      const header = eligibleSpeechHeader(resp);
 
       const invalidSkillBatch =
         calls.some((call) => call.function.name === 'skill') &&
@@ -2966,6 +2993,12 @@ export class Agent {
           if (callEpoch !== this.epoch) {
             this.deps.contextResources?.discardPending();
             return { content: '[tool result discarded: context was cleared]' };
+          }
+          if (residentToolBatchError) {
+            return {
+              content:
+                '[tool batch rejected: invalid resident provenance batch. No tool calls in this batch were executed.]',
+            };
           }
           if (invalidSkillBatch) {
             return {
@@ -3223,6 +3256,9 @@ export class Agent {
         {
           appendAssistant: async (assistant) => {
             this.pushMessage(assistant, this.turnChannel);
+            if (residentToolBatch) {
+              this.deps.residentRunIssuer!.commit(residentToolBatch.prepared);
+            }
             if (!header || callEpoch !== this.epoch || this.stopped) return;
             try {
               const target = this.resolveChannelRef(header.target);

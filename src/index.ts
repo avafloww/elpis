@@ -42,6 +42,7 @@ import { createDensityModel } from './llm/density.js';
 import { createCompactor, type SummaryInputBudget } from './llm/compactor.js';
 import { resolveCompactionRoleBudget } from './llm/compaction-role.js';
 import { createSecretRegistry } from './lib/secrets.js';
+import { createResidentRunAuthority } from './kernel/resident-run-provenance.js';
 import { ContextResources } from './context-resources.js';
 import { MotorSkills } from './motor-skills.js';
 import {
@@ -815,6 +816,7 @@ export async function createElpisRuntime(
     log: (line) => config.logger.info(line),
   });
   const transcript = createTranscriptStore(sessionsRoot);
+  const residentRunAuthority = createResidentRunAuthority();
   // Restart-resume: continue appending to the file that primed the history rather
   // than minting a fresh one (which would strand this session's new messages in a
   // separate file and lose the loaded context on the next restart).
@@ -826,6 +828,7 @@ export async function createElpisRuntime(
     config,
     secretRegistry,
     sandbox: sandboxManager,
+    residentRunIssuer: residentRunAuthority.issuer,
     memory,
     mind,
     contextResources,

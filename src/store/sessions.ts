@@ -36,6 +36,7 @@ import { parseRunMessageMetadata } from '../sandbox/metadata.js';
 import { isBranchId, isEventId, isWorldId } from '../context-graph.js';
 import type { ContextResourceDescriptor } from '../context-resources.js';
 import { normalizeVoiceDelivery } from '../voice/receipt.js';
+import { parseRecordedResidentToolBatch } from '../kernel/resident-run-provenance.js';
 
 /** Reserved transcript id for the single monocontext stream. */
 export const MAIN_TRANSCRIPT_ID = 'main';
@@ -442,6 +443,16 @@ function parseChatMessage(
       });
     }
     if (tool_calls.length > 0) msg.tool_calls = tool_calls;
+  }
+  if (role === 'assistant' && msg.tool_calls) {
+    const residentToolBatch = parseRecordedResidentToolBatch(
+      obj.residentToolBatch,
+      msg.tool_calls.map((call) => ({
+        toolName: call.function.name,
+        arguments: call.function.arguments,
+      })),
+    );
+    if (residentToolBatch) msg.residentToolBatch = residentToolBatch;
   }
   const tcid = obj.tool_call_id;
   if (typeof tcid === 'string') msg.tool_call_id = tcid;
