@@ -8,7 +8,7 @@ import type {
   EventMessageProjectionId,
   LocalBranchRequestViewRecord,
   ManifestRecord,
-  SystemLayerProjectionId,
+  SystemProfileRequestViewBindingRecord,
   WorldId,
 } from '../store/context-graph.js';
 
@@ -19,7 +19,6 @@ export interface AssembleDarkLocalBranchInput {
   readonly worldId: WorldId;
   readonly branchId: BranchId;
   readonly messageProjectionIds: readonly EventMessageProjectionId[];
-  readonly systemLayerProjectionIds: readonly SystemLayerProjectionId[];
   readonly assembledAt: number;
 }
 
@@ -30,7 +29,6 @@ export interface AssembleNextDarkPendingBranchInput {
   readonly queueGeneration: number;
   readonly maxEvents: number;
   readonly branchId: BranchId;
-  readonly systemLayerProjectionIds: readonly SystemLayerProjectionId[];
   readonly assembledAt: number;
 }
 
@@ -39,6 +37,7 @@ export interface AssembledDarkLocalBranch {
   readonly start: BranchStartRecord;
   readonly manifest: ManifestRecord;
   readonly requestView: LocalBranchRequestViewRecord;
+  readonly profileBinding: SystemProfileRequestViewBindingRecord;
   readonly request: MaterializedLocalBranchRequest;
 }
 
@@ -55,7 +54,6 @@ export function assembleNextDarkPendingBranch(
     queueGeneration: input.queueGeneration,
     maxEvents: input.maxEvents,
     branchId: input.branchId,
-    systemLayerProjectionIds: input.systemLayerProjectionIds,
     assembledAt: input.assembledAt,
   });
 }
@@ -73,7 +71,6 @@ export function assembleDarkLocalBranch(
     worldId: input.worldId,
     branchId: input.branchId,
     messageProjectionIds: input.messageProjectionIds,
-    systemLayerProjectionIds: input.systemLayerProjectionIds,
     assembledAt: input.assembledAt,
   });
 }

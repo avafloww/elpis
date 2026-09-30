@@ -1,0 +1,5 @@
+# Dark assemblers derive selected system profiles
+
+Dark direct and pending branch assembly no longer accepts caller-selected system-layer projection IDs. Under the existing immediate transaction, each assembler now requires the current per-world system-profile head, derives its exact approved layer order, creates the non-runnable request view and schema-40 binding receipt, and returns the binding ID with the provider-neutral candidate. Pending assembly inserts its attempt receipt only after the binding exists.
+
+Missing profile state fails before branch reservation. Candidate, view, binding, or attempt failure rolls back the coordinator reservation and every assembly row. Schema 41 refuses an existing unbound pending attempt, requires an exact request-view/world/activation binding before future attempt insertion, and makes typed attempt rereads fail closed on missing provenance. The change adds no bootstrap data, Agent/runtime caller, provider dispatch, tools, effects, activation, continuation advance, or live ingress wiring.

@@ -546,6 +546,7 @@ export interface DarkLocalBranchAssemblyRecord {
   readonly start: BranchStartRecord;
   readonly manifest: ManifestRecord;
   readonly requestView: LocalBranchRequestViewRecord;
+  readonly profileBinding: SystemProfileRequestViewBindingRecord;
   readonly request: MaterializedLocalBranchRequest;
 }
 
@@ -2176,7 +2177,21 @@ export class ContextGraphStore {
          FROM context_dark_pending_branch_attempts WHERE branch_id = ?`,
       )
       .get(id) as unknown as DarkPendingBranchAttemptRow | undefined;
-    return row ? mapDarkPendingBranchAttempt(row) : null;
+    if (!row) return null;
+    const attempt = mapDarkPendingBranchAttempt(row);
+    const binding = this.getSystemProfileRequestViewBindingForView(
+      attempt.requestViewId,
+    );
+    if (
+      !binding ||
+      binding.binding.worldId !== attempt.worldId ||
+      binding.binding.activationEpoch !== attempt.activationEpoch
+    ) {
+      throw new Error(
+        `stored context dark pending branch attempt lacks profile binding: ${id}`,
+      );
+    }
+    return attempt;
   }
 
   getDarkPendingBranchAbandonment(
@@ -3116,7 +3131,17 @@ export class ContextGraphStore {
     expectedProfileHeadRevision: number;
     boundAt: number;
   }): SystemProfileRequestViewBindingRecord {
-    return transaction(this.database, () => {
+    return transaction(this.database, () =>
+      this.createSystemProfileRequestViewBindingInTransaction(input),
+    );
+  }
+
+  private createSystemProfileRequestViewBindingInTransaction(input: {
+    requestViewId: LocalBranchRequestViewId;
+    expectedProfileId: SystemProfileId;
+    expectedProfileHeadRevision: number;
+    boundAt: number;
+  }): SystemProfileRequestViewBindingRecord {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
         throw new StaleActivationStateError(activation.epoch);
@@ -3242,7 +3267,6 @@ export class ContextGraphStore {
           binding.boundAt,
         );
       return this.getSystemProfileRequestViewBinding(bindingId)!;
-    });
   }
 
   getSystemProfileRequestViewBinding(
@@ -4095,7 +4119,6 @@ export class ContextGraphStore {
     worldId: WorldId;
     branchId: BranchId;
     messageProjectionIds: readonly EventMessageProjectionId[];
-    systemLayerProjectionIds: readonly SystemLayerProjectionId[];
     assembledAt: number;
   }): DarkLocalBranchAssemblyRecord {
     const expectedActivationEpoch = generation(
@@ -4123,7 +4146,6 @@ export class ContextGraphStore {
     queueGeneration: number;
     maxEvents: number;
     branchId: BranchId;
-    systemLayerProjectionIds: readonly SystemLayerProjectionId[];
     assembledAt: number;
   }): DarkPendingBranchAssemblyResult {
     const expectedActivationEpoch = generation(
@@ -4166,7 +4188,6 @@ export class ContextGraphStore {
           messageProjectionIds: inspection.items.map(
             (item) => item.projectionId,
           ),
-          systemLayerProjectionIds: input.systemLayerProjectionIds,
           assembledAt,
         },
         expectedActivationEpoch,
@@ -4210,7 +4231,6 @@ export class ContextGraphStore {
       worldId: WorldId;
       branchId: BranchId;
       messageProjectionIds: readonly EventMessageProjectionId[];
-      systemLayerProjectionIds: readonly SystemLayerProjectionId[];
       assembledAt: number;
     },
     expectedActivationEpoch: number,
@@ -4224,6 +4244,21 @@ export class ContextGraphStore {
     ) {
       throw new StaleActivationStateError(expectedActivationEpoch);
     }
+
+    const profileHead = this.getSystemProfileHead(
+      input.worldId,
+      expectedActivationEpoch,
+    );
+    if (!profileHead) {
+      throw new Error(`current system profile head not found: ${input.worldId}`);
+    }
+    const systemProfile = this.getSystemProfile(profileHead.profileId);
+    if (!systemProfile) {
+      throw new Error('current system profile is missing');
+    }
+    const systemLayerProjectionIds = this.systemProfileLayerIds(
+      systemProfile.profile,
+    );
 
     const messageProjectionIds = [...input.messageProjectionIds];
     if (
@@ -4270,7 +4305,6 @@ export class ContextGraphStore {
     }
     const messageRendererGeneration = messageProjections[0]!.rendererGeneration;
 
-    const systemLayerProjectionIds = [...input.systemLayerProjectionIds];
     if (
       systemLayerProjectionIds.length < 1 ||
       systemLayerProjectionIds.length > 64 ||
@@ -4372,11 +4406,19 @@ export class ContextGraphStore {
         })),
       ],
     });
+    const profileBinding =
+      this.createSystemProfileRequestViewBindingInTransaction({
+        requestViewId: requestView.requestViewId,
+        expectedProfileId: profileHead.profileId,
+        expectedProfileHeadRevision: profileHead.revision,
+        boundAt: assembledAt,
+      });
     return {
       branch: opened.branch,
       start: opened.start,
       manifest,
       requestView,
+      profileBinding,
       request,
     };
   }

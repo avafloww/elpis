@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 40;
+const SCHEMA_VERSION = 41;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3048,6 +3048,44 @@ export function runMigrations(db: DatabaseSync): void {
             SELECT RAISE(ABORT, 'bound request view manifest shares are sealed');
           END;
       `,
+    },
+    {
+      name: '0041-context-dark-pending-profile-binding',
+      checksum:
+        '02385ab83b5466ef499ec0c5d05ac187dda8c70c81809f201039f337d0d0edc6',
+      up: (database) => {
+        const invalid = database
+          .prepare(
+            `SELECT attempts.branch_id
+             FROM context_dark_pending_branch_attempts AS attempts
+             LEFT JOIN context_system_profile_request_view_bindings AS bindings
+               ON bindings.request_view_id = attempts.request_view_id
+              AND bindings.world_id = attempts.world_id
+              AND bindings.activation_epoch = attempts.activation_epoch
+             WHERE bindings.binding_id IS NULL
+             LIMIT 1`,
+          )
+          .get() as { branch_id?: string } | undefined;
+        if (invalid) {
+          throw new Error(
+            'existing context dark pending branch attempt lacks profile binding',
+          );
+        }
+        database.exec(`
+          CREATE TRIGGER context_dark_pending_branch_attempts_profile_binding_guard
+            BEFORE INSERT ON context_dark_pending_branch_attempts
+            WHEN NOT EXISTS (
+              SELECT 1
+              FROM context_system_profile_request_view_bindings
+              WHERE request_view_id = NEW.request_view_id
+                AND world_id = NEW.world_id
+                AND activation_epoch = NEW.activation_epoch
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'context dark pending branch attempt lacks profile binding');
+            END;
+        `);
+      },
     },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);

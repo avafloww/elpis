@@ -282,7 +282,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0037-context-system-layer-approvals',
           '0038-context-system-layer-approval-sources',
           '0039-context-system-profiles',
-          '0040-context-system-profile-request-view-bindings'
+          '0040-context-system-profile-request-view-bindings',
+          '0041-context-dark-pending-profile-binding'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

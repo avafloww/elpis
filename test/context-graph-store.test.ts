@@ -16,7 +16,7 @@ import {
   materializeSystemProjection,
   materializeWorldConversation,
 } from '../src/context/view.js';
-import { openDatabase } from '../src/store/db.js';
+import { openDatabase, runMigrations } from '../src/store/db.js';
 import {
   ContextGraphStore,
   LegacyImportConflictError,
@@ -2154,7 +2154,6 @@ function createDarkAssemblyInputs(
   prefix: string,
 ): {
   messageProjectionIds: ReturnType<typeof eventMessageProjectionId>[];
-  systemLayerProjectionIds: ReturnType<typeof systemLayerProjectionId>[];
 } {
   const events = ['one', 'two'].map((suffix, index) =>
     value.store.appendWorldEvent({
@@ -2188,25 +2187,38 @@ function createDarkAssemblyInputs(
     kind: 'runtime_contract' | 'identity' | 'world_policy';
     visibility: 'global_contract' | 'integrated_self' | 'world';
     layerWorld: ReturnType<typeof worldId> | null;
+    sourceKind: 'authored_scoped_contract' | 'soul_snapshot' | 'routing_policy';
+    role: 'scoped_runtime_contract' | 'identity' | 'world_policy';
     content: string;
     createdAt: number;
-  }) =>
-    value.store.createSystemLayerProjection({
+  }) => {
+    const projection = value.store.createSystemLayerProjection({
       kind: input.kind,
       visibility: input.visibility,
       worldId: input.layerWorld,
       rendererGeneration: 4,
       policyGeneration: 3,
-      sourceKind: 'synthetic_fixture',
+      sourceKind: input.sourceKind,
       sourceHash: hashContextBytes(prefix + ':' + input.kind),
       content: input.content,
       createdAt: input.createdAt,
     });
+    const approval = value.store.approveSystemLayer({
+      layerId: projection.layerId,
+      role: input.role,
+      basisRef: 'fixture:' + prefix + ':' + input.kind,
+      approvalGeneration: 1,
+      approvedAt: 23,
+    });
+    return { approval };
+  };
   const layers = [
     layer({
       kind: 'runtime_contract',
       visibility: 'global_contract',
       layerWorld: null,
+      sourceKind: 'authored_scoped_contract',
+      role: 'scoped_runtime_contract',
       content: 'DARK_CONTRACT',
       createdAt: 20,
     }),
@@ -2214,6 +2226,8 @@ function createDarkAssemblyInputs(
       kind: 'identity',
       visibility: 'integrated_self',
       layerWorld: null,
+      sourceKind: 'soul_snapshot',
+      role: 'identity',
       content: '\nASTER_IDENTITY',
       createdAt: 21,
     }),
@@ -2221,15 +2235,30 @@ function createDarkAssemblyInputs(
       kind: 'world_policy',
       visibility: 'world',
       layerWorld: world,
+      sourceKind: 'routing_policy',
+      role: 'world_policy',
       content: '\n' + prefix.toUpperCase() + '_POLICY_CANARY',
       createdAt: 22,
     }),
   ];
+  const profile = value.store.createSystemProfile({
+    worldId: world,
+    scopedRuntimeContractApprovalId: layers[0]!.approval.approvalId,
+    identityApprovalId: layers[1]!.approval.approvalId,
+    worldPolicyApprovalId: layers[2]!.approval.approvalId,
+    createdAt: 24,
+  });
+  value.store.advanceSystemProfileHead({
+    worldId: world,
+    expectedRevision: 0,
+    expectedProfileId: null,
+    profileId: profile.profileId,
+    advancedAt: 25,
+  });
   return {
     messageProjectionIds: projections.map(
       (projection) => projection.projectionId,
     ),
-    systemLayerProjectionIds: layers.map((layerRecord) => layerRecord.layerId),
   };
 }
 
@@ -2257,7 +2286,6 @@ test('dark local branch assembly atomically reserves only one world and remains 
       worldId: worldB,
       branchId: branchId('branch:dark-assembly-b'),
       messageProjectionIds: b.messageProjectionIds,
-      systemLayerProjectionIds: b.systemLayerProjectionIds,
       assembledAt: 30,
     });
 
@@ -2299,6 +2327,14 @@ test('dark local branch assembly atomically reserves only one world and remains 
     assert.equal(
       tableCount(value.database, 'context_local_branch_request_views'),
       1,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_system_profile_request_view_bindings'),
+      1,
+    );
+    assert.equal(
+      assembled.profileBinding.binding.requestViewId,
+      assembled.requestView.requestViewId,
     );
     assert.deepEqual(value.store.getRootCoordinatorState(), {
       activeBranchId: assembled.branch.branchId,
@@ -2425,7 +2461,6 @@ test('dark local branch assembly rolls back candidate materialization failure', 
           messageProjectionIds: projections.map(
             (projection) => projection.projectionId,
           ),
-          systemLayerProjectionIds: input.systemLayerProjectionIds,
           assembledAt: 60,
         }),
       /candidate exceeds byte limit/,
@@ -2443,6 +2478,100 @@ test('dark local branch assembly rolls back candidate materialization failure', 
     }
     assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
     assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly requires a selected profile before any write', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-profile-missing');
+    const source = value.store.appendWorldEvent({
+      eventId: eventId('event:assembly-profile-missing'),
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: 'PROFILE_REQUIRED_CANARY' },
+      occurredAt: 1,
+      recordedAt: 1,
+    });
+    const projection = value.store.createEventMessageProjection({
+      sourceEventId: source.eventId,
+      sourceSequence: source.sequence,
+      worldId: world,
+      rendererGeneration: 7,
+      message: { role: 'user', content: 'PROFILE_REQUIRED_CANARY' },
+      createdAt: 2,
+    });
+    assert.throws(
+      () =>
+        assembleDarkLocalBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          worldId: world,
+          branchId: branchId('branch:assembly-profile-missing'),
+          messageProjectionIds: [projection.projectionId],
+          assembledAt: 30,
+        }),
+      /current system profile head not found/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_system_profile_request_view_bindings',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly rolls back a late profile-binding failure', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-binding-rollback');
+    const input = createDarkAssemblyInputs(
+      value,
+      world,
+      'assembly-binding-rollback',
+    );
+    value.database.exec(
+      [
+        'CREATE TEMP TRIGGER force_dark_binding_failure',
+        'BEFORE INSERT ON context_system_profile_request_view_bindings',
+        'BEGIN',
+        "SELECT RAISE(ABORT, 'forced binding failure');",
+        'END;',
+      ].join('\n'),
+    );
+    assert.throws(
+      () =>
+        assembleDarkLocalBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          worldId: world,
+          branchId: branchId('branch:assembly-binding-rollback'),
+          messageProjectionIds: input.messageProjectionIds,
+          assembledAt: 30,
+        }),
+      /forced binding failure/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_system_profile_request_view_bindings',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
   } finally {
     closeFixture(value);
   }
@@ -2573,7 +2702,6 @@ test('dark local branch assembly rejects incomplete or substituted projection li
         worldId: world,
         branchId: branchId('branch:assembly-invalid-lineage'),
         messageProjectionIds,
-        systemLayerProjectionIds: input.systemLayerProjectionIds,
         assembledAt: 50,
       });
 
@@ -2608,52 +2736,6 @@ test('dark local branch assembly rejects incomplete or substituted projection li
           wrongGeneration.projectionId,
         ]),
       /renderer generation is inconsistent/,
-    );
-    const wrongSystemGeneration = value.store.createSystemLayerProjection({
-      kind: 'world_policy',
-      visibility: 'world',
-      worldId: world,
-      rendererGeneration: 5,
-      policyGeneration: 3,
-      sourceKind: 'synthetic_fixture',
-      sourceHash: hashContextBytes('wrong-system-generation'),
-      content: 'WRONG_SYSTEM_GENERATION_CANARY',
-      createdAt: 42,
-    });
-    const assembleWithSystem = (
-      systemLayerProjectionIds: typeof input.systemLayerProjectionIds,
-    ) =>
-      assembleDarkLocalBranch({
-        store: value.store,
-        expectedActivationEpoch: 0,
-        expectedHeadRevision: 0,
-        worldId: world,
-        branchId: branchId('branch:assembly-invalid-system'),
-        messageProjectionIds: input.messageProjectionIds,
-        systemLayerProjectionIds,
-        assembledAt: 50,
-      });
-    assert.throws(
-      () =>
-        assembleWithSystem([
-          input.systemLayerProjectionIds[0]!,
-          input.systemLayerProjectionIds[0]!,
-        ]),
-      /system layer references are invalid/,
-    );
-    assert.throws(
-      () =>
-        assembleWithSystem([systemLayerProjectionId('system-layer:missing')]),
-      /system layer is missing/,
-    );
-    assert.throws(
-      () =>
-        assembleWithSystem([
-          input.systemLayerProjectionIds[0]!,
-          input.systemLayerProjectionIds[1]!,
-          wrongSystemGeneration.layerId,
-        ]),
-      /system layer generations are inconsistent/,
     );
     assert.equal(tableCount(value.database, 'context_branches'), 0);
 
@@ -3388,11 +3470,7 @@ function createPendingAssemblyInputs(
   prefix: string,
 ) {
   const world = worldId('world:signal:' + prefix);
-  const systemLayerProjectionIds = createDarkAssemblyInputs(
-    value,
-    world,
-    prefix + '-system',
-  ).systemLayerProjectionIds;
+  createDarkAssemblyInputs(value, world, prefix + '-system');
   const pending = [1, 2, 3].map((number) =>
     admitPendingFixture(value, {
       id: 'event:' + prefix + '-' + number,
@@ -3402,7 +3480,7 @@ function createPendingAssemblyInputs(
       time: 30 + number,
     }),
   );
-  return { world, systemLayerProjectionIds, pending };
+  return { world, pending };
 }
 
 function createPendingAttemptFixture(
@@ -3420,7 +3498,6 @@ function createPendingAttemptFixture(
     messageProjectionIds: selected.map(
       (index) => input.pending[index]!.projection!.projectionId,
     ),
-    systemLayerProjectionIds: input.systemLayerProjectionIds,
     assembledAt: 40,
   });
   return { ...input, assembled };
@@ -3462,6 +3539,115 @@ function insertDarkPendingAttempt(
     );
 }
 
+test('dark pending attempts require profile bindings at insert and typed reread', () => {
+  const insertValue = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      insertValue,
+      'pending-binding-insert',
+      [0, 1, 2],
+    );
+    insertValue.database.exec(
+      'DROP TRIGGER context_system_profile_request_view_bindings_no_delete',
+    );
+    insertValue.database
+      .prepare(
+        'DELETE FROM context_system_profile_request_view_bindings WHERE request_view_id = ?',
+      )
+      .run(pending.assembled.requestView.requestViewId);
+    assert.throws(
+      () =>
+        insertDarkPendingAttempt(insertValue.database, {
+          ...pending,
+          maxEvents: 3,
+        }),
+      /context dark pending branch attempt lacks profile binding/,
+    );
+    assert.equal(
+      tableCount(insertValue.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(insertValue);
+  }
+
+  const readValue = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      readValue,
+      'pending-binding-reread',
+      [0, 1, 2],
+    );
+    insertDarkPendingAttempt(readValue.database, { ...pending, maxEvents: 3 });
+    readValue.database.exec(
+      'DROP TRIGGER context_system_profile_request_view_bindings_no_delete',
+    );
+    readValue.database
+      .prepare(
+        'DELETE FROM context_system_profile_request_view_bindings WHERE request_view_id = ?',
+      )
+      .run(pending.assembled.requestView.requestViewId);
+    assert.throws(
+      () =>
+        readValue.store.getDarkPendingBranchAttempt(
+          pending.assembled.branch.branchId,
+        ),
+      /stored context dark pending branch attempt lacks profile binding/,
+    );
+  } finally {
+    closeFixture(readValue);
+  }
+});
+
+test('schema41 refuses an existing unbound dark pending attempt', () => {
+  const value = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      value,
+      'pending-binding-migration',
+      [0, 1, 2],
+    );
+    insertDarkPendingAttempt(value.database, { ...pending, maxEvents: 3 });
+    value.database.exec(`
+      DROP TRIGGER context_system_profile_request_view_bindings_no_delete;
+      DELETE FROM context_system_profile_request_view_bindings
+        WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
+      DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER elpis_migrations_no_delete;
+      DELETE FROM elpis_migrations
+        WHERE component = 'core'
+          AND name = '0041-context-dark-pending-profile-binding';
+      PRAGMA user_version = 40;
+    `);
+    assert.throws(
+      () => runMigrations(value.database),
+      /existing context dark pending branch attempt lacks profile binding/,
+    );
+    assert.equal(
+      (
+        value.database.prepare('PRAGMA user_version').get() as {
+          user_version: number;
+        }
+      ).user_version,
+      40,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            `SELECT count(*) AS count FROM elpis_migrations
+             WHERE component = 'core'
+               AND name = '0041-context-dark-pending-profile-binding'`,
+          )
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('dark pending attempt receipts bind one non-runnable branch and require abandonment before crash', () => {
   const value = fixture();
   try {
@@ -3501,7 +3687,7 @@ test('dark pending attempt receipts bind one non-runnable branch and require aba
             pending.world,
             3,
           ),
-      /context dark pending branch manifest events are sealed/,
+      /bound request view manifest events are sealed/,
     );
     assert.throws(
       () =>
@@ -3517,7 +3703,7 @@ test('dark pending attempt receipts bind one non-runnable branch and require aba
             pending.world,
             3,
           ),
-      /context dark pending branch request messages are sealed/,
+      /bound request view messages are sealed/,
     );
     const extraLayer = value.store.createSystemLayerProjection({
       kind: 'world_policy',
@@ -3544,7 +3730,7 @@ test('dark pending attempt receipts bind one non-runnable branch and require aba
             pending.world,
             3,
           ),
-      /context dark pending branch system layers are sealed/,
+      /bound request view system layers are sealed/,
     );
 
     assert.throws(
@@ -3809,7 +3995,6 @@ test('atomic dark pending assembly commits one bounded attempt and recovery make
       queueGeneration: 1,
       maxEvents: 2,
       branchId: branchId('branch:pending-atomic-first'),
-      systemLayerProjectionIds: input.systemLayerProjectionIds,
       assembledAt: 40,
     });
     assert.equal(first.status, 'assembled');
@@ -3887,7 +4072,6 @@ test('atomic dark pending assembly commits one bounded attempt and recovery make
       queueGeneration: 1,
       maxEvents: 2,
       branchId: branchId('branch:pending-atomic-retry'),
-      systemLayerProjectionIds: input.systemLayerProjectionIds,
       assembledAt: 42,
     });
     assert.equal(retry.status, 'assembled');
@@ -3986,6 +4170,50 @@ test('atomic dark pending assembly stops at the first world boundary', () => {
   }
 });
 
+test('atomic dark pending assembly requires a selected profile before reserving', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:pending-profile-missing');
+    admitPendingFixture(value, {
+      id: 'event:pending-profile-missing',
+      world,
+      rendererGeneration: 7,
+      content: 'PENDING_PROFILE_REQUIRED_CANARY',
+      time: 10,
+    });
+    assert.throws(
+      () =>
+        assembleNextDarkPendingBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          queueGeneration: 1,
+          maxEvents: 4,
+          branchId: branchId('branch:pending-profile-missing'),
+          assembledAt: 20,
+        }),
+      /current system profile head not found/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_system_profile_request_view_bindings',
+      'context_dark_pending_branch_attempts',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      1,
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('atomic dark pending assembly returns blockers without reserving a branch', () => {
   const empty = fixture();
   try {
@@ -3997,7 +4225,6 @@ test('atomic dark pending assembly returns blockers without reserving a branch',
         queueGeneration: 1,
         maxEvents: 4,
         branchId: branchId('branch:pending-empty'),
-        systemLayerProjectionIds: [],
         assembledAt: 1,
       }),
       { status: 'empty' },
@@ -4028,7 +4255,6 @@ test('atomic dark pending assembly returns blockers without reserving a branch',
       queueGeneration: 1,
       maxEvents: 4,
       branchId: branchId('branch:pending-unavailable'),
-      systemLayerProjectionIds: [],
       assembledAt: 11,
     });
     assert.equal(blocked.status, 'blocked');
@@ -4056,7 +4282,6 @@ test('atomic dark pending assembly returns blockers without reserving a branch',
           queueGeneration: 1,
           maxEvents: 2,
           branchId: branchId('branch:pending-stale'),
-          systemLayerProjectionIds: input.systemLayerProjectionIds,
           assembledAt: 40,
         }),
       StaleContinuationHeadError,
@@ -4092,7 +4317,6 @@ test('atomic dark pending assembly rolls back when the attempt receipt fails', (
           queueGeneration: 1,
           maxEvents: 2,
           branchId: branchId('branch:pending-attempt-chronology'),
-          systemLayerProjectionIds: input.systemLayerProjectionIds,
           assembledAt: 30,
         }),
       /context dark pending branch attempt lineage is invalid/,
@@ -4125,7 +4349,6 @@ test('atomic dark pending assembly rolls back when the attempt receipt fails', (
           queueGeneration: 1,
           maxEvents: 2,
           branchId: branchId('branch:pending-attempt-failure'),
-          systemLayerProjectionIds: input.systemLayerProjectionIds,
           assembledAt: 40,
         }),
       /forced pending attempt failure/,
@@ -4691,19 +4914,9 @@ test('profile bindings seal one exact historical request view', () => {
       worldId: world,
       branchId: branchId('branch:bound-profile'),
       messageProjectionIds: [message.projectionId],
-      systemLayerProjectionIds: [
-        contract.layer.layerId,
-        identityA.layer.layerId,
-        policy.layer.layerId,
-      ],
       assembledAt: 40,
     });
-    const binding = value.store.createSystemProfileRequestViewBinding({
-      requestViewId: assembly.requestView.requestViewId,
-      expectedProfileId: profileA.profileId,
-      expectedProfileHeadRevision: 1,
-      boundAt: 41,
-    });
+    const binding = assembly.profileBinding;
     assert.match(binding.bindingId, /^profile-view-binding:[0-9a-f]{64}$/);
     assert.equal(binding.binding.requestViewHash, assembly.requestView.viewHash);
     assert.equal(binding.binding.profileHash, profileA.profileHash);
@@ -4728,7 +4941,7 @@ test('profile bindings seal one exact historical request view', () => {
         requestViewId: assembly.requestView.requestViewId,
         expectedProfileId: profileA.profileId,
         expectedProfileHeadRevision: 1,
-        boundAt: 41,
+        boundAt: 40,
       }),
       binding,
     );
@@ -4737,7 +4950,7 @@ test('profile bindings seal one exact historical request view', () => {
         requestViewId: assembly.requestView.requestViewId,
         expectedProfileId: profileA.profileId,
         expectedProfileHeadRevision: 1,
-        boundAt: 42,
+        boundAt: 41,
       }),
       /binding identity conflict/,
     );
@@ -4895,7 +5108,7 @@ test('profile bindings seal one exact historical request view', () => {
         requestViewId: assembly.requestView.requestViewId,
         expectedProfileId: profileA.profileId,
         expectedProfileHeadRevision: 1,
-        boundAt: 41,
+        boundAt: 40,
       }),
       binding,
     );
@@ -4925,7 +5138,6 @@ test('pending recovery rolls abandonment back when crash cannot proceed', () => 
       queueGeneration: 1,
       maxEvents: 2,
       branchId: branchId('branch:pending-recovery-failure'),
-      systemLayerProjectionIds: input.systemLayerProjectionIds,
       assembledAt: 40,
     });
     assert.equal(assembled.status, 'assembled');
