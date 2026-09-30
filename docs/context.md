@@ -30,6 +30,8 @@ Schema v35 adds an inert dark-ingress admission substrate. Migration creates an 
 
 The store can also inspect the globally earliest admitted frontier without mutating it. Inspection reads only admission and projection identity metadata, requires the exact dark activation epoch and queue generation, and returns at most one contiguous same-world, same-renderer prefix. A missing exact projection blocks the frontier rather than allowing later work to pass; world, renderer, generation, and caller limits are explicit stop reasons. It never reads or returns event payloads, rendered message bytes, or hashes, and it does not claim, consume, reserve, assemble, call a provider, or issue an effect. No runtime path calls the inspector yet.
 
+Schema v36 adds dormant, content-free pending-branch attempt and abandonment receipts. A future attempt must bind one active dark coordinated branch and its non-runnable, share-free request view to the globally earliest maximal admitted prefix for one world, renderer, activation epoch, and queue generation. The database rejects skipped admissions, projection substitution, stale root lineage, overlapping live attempts, effects, capsules, and yielded attempt branches. Recovery may crash an attempt branch only after an immutable abandonment receipt; the admissions remain pending because no consumption state exists. No store writer or runtime path creates these rows yet, so this migration does not claim work, assemble from the queue, change recovery, call a provider, or advance the continuation head.
+
 ## Message layers
 
 A request can contain:

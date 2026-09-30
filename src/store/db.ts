@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 35;
+const SCHEMA_VERSION = 36;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -2022,6 +2022,396 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_dark_ingress_admissions_no_delete
           BEFORE DELETE ON context_dark_ingress_admissions BEGIN
             SELECT RAISE(ABORT, 'context dark ingress admissions are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0036-context-dark-pending-branch-attempts',
+      sql: `
+        CREATE TABLE context_dark_pending_branch_attempts (
+          branch_id             TEXT PRIMARY KEY CHECK (length(branch_id) BETWEEN 1 AND 128),
+          world_id              TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 256),
+          request_view_id       TEXT NOT NULL UNIQUE CHECK (length(request_view_id) BETWEEN 1 AND 128),
+          activation_epoch      INTEGER NOT NULL CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          queue_generation      INTEGER NOT NULL CHECK (typeof(queue_generation) = 'integer' AND queue_generation >= 1),
+          max_events            INTEGER NOT NULL CHECK (typeof(max_events) = 'integer' AND max_events BETWEEN 1 AND 1024),
+          selected_count        INTEGER NOT NULL CHECK (typeof(selected_count) = 'integer' AND selected_count BETWEEN 1 AND max_events),
+          first_source_sequence INTEGER NOT NULL CHECK (typeof(first_source_sequence) = 'integer' AND first_source_sequence >= 1),
+          last_source_sequence  INTEGER NOT NULL CHECK (typeof(last_source_sequence) = 'integer' AND last_source_sequence >= first_source_sequence),
+          assembled_at          INTEGER NOT NULL CHECK (typeof(assembled_at) = 'integer' AND assembled_at >= 0),
+          UNIQUE (branch_id, world_id),
+          UNIQUE (request_view_id, world_id),
+          FOREIGN KEY (branch_id, world_id)
+            REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id)
+            REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (queue_generation, activation_epoch)
+            REFERENCES context_dark_ingress_generations(queue_generation, activation_epoch) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TABLE context_dark_pending_branch_abandonments (
+          branch_id    TEXT PRIMARY KEY CHECK (length(branch_id) BETWEEN 1 AND 128),
+          abandoned_at INTEGER NOT NULL CHECK (typeof(abandoned_at) = 'integer' AND abandoned_at >= 0),
+          reason       TEXT NOT NULL CHECK (reason = 'coordinator_recovery'),
+          FOREIGN KEY (branch_id)
+            REFERENCES context_dark_pending_branch_attempts(branch_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_dark_pending_branch_attempts_lineage_guard
+          BEFORE INSERT ON context_dark_pending_branch_attempts
+          WHEN NOT (
+            EXISTS (
+              SELECT 1
+              FROM context_branches AS branches
+              JOIN context_branch_starts AS starts
+                ON starts.branch_id = branches.branch_id
+               AND starts.world_id = branches.world_id
+              JOIN context_local_branch_request_views AS views
+                ON views.branch_id = branches.branch_id
+               AND views.world_id = branches.world_id
+              JOIN context_manifests AS manifests
+                ON manifests.manifest_id = views.manifest_id
+               AND manifests.world_id = views.world_id
+              JOIN context_root_coordinator AS coordinator
+                ON coordinator.singleton = 1
+              JOIN context_continuation_head AS head
+                ON head.singleton = 1
+              JOIN context_graph_activation AS activation
+                ON activation.singleton = 1
+              WHERE branches.branch_id = NEW.branch_id
+                AND branches.world_id = NEW.world_id
+                AND branches.status = 'running'
+                AND views.request_view_id = NEW.request_view_id
+                AND views.tool_mode = 'none'
+                AND views.runnable = 0
+                AND views.message_projection_count = NEW.selected_count
+                AND manifests.branch_id = NEW.branch_id
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_manifest_shares
+                  WHERE manifest_id = manifests.manifest_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_effects
+                  WHERE branch_id = NEW.branch_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_capsules
+                  WHERE branch_id = NEW.branch_id
+                )
+                AND coordinator.active_branch_id = NEW.branch_id
+                AND coordinator.active_world_id = NEW.world_id
+                AND coordinator.base_revision = starts.base_revision
+                AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                AND head.revision = starts.base_revision
+                AND head.branch_id IS starts.predecessor_branch_id
+                AND head.world_id IS starts.predecessor_world_id
+                AND activation.mode = 'dark'
+                AND activation.epoch = NEW.activation_epoch
+                AND branches.started_at = NEW.assembled_at
+                AND starts.started_at = NEW.assembled_at
+                AND manifests.created_at = NEW.assembled_at
+                AND views.created_at = NEW.assembled_at
+            )
+            AND (
+              SELECT COUNT(*)
+              FROM context_local_branch_request_messages
+              WHERE request_view_id = NEW.request_view_id
+            ) = NEW.selected_count
+            AND (
+              SELECT COUNT(*)
+              FROM context_local_branch_request_system_layers
+              WHERE request_view_id = NEW.request_view_id
+            ) = (
+              SELECT system_layer_count
+              FROM context_local_branch_request_views
+              WHERE request_view_id = NEW.request_view_id
+            )
+            AND (
+              SELECT COUNT(*)
+              FROM context_manifest_events
+              WHERE manifest_id = (
+                SELECT manifest_id
+                FROM context_local_branch_request_views
+                WHERE request_view_id = NEW.request_view_id
+              )
+            ) = NEW.selected_count
+            AND COALESCE(
+              (
+                SELECT MAX(admissions.admitted_at)
+                FROM context_local_branch_request_messages AS request_messages
+                JOIN context_event_message_projections AS projections
+                  ON projections.projection_id = request_messages.projection_id
+                 AND projections.world_id = request_messages.world_id
+                JOIN context_dark_ingress_admissions AS admissions
+                  ON admissions.event_id = projections.source_event_id
+                 AND admissions.world_id = projections.world_id
+                WHERE request_messages.request_view_id = NEW.request_view_id
+              ),
+              NEW.assembled_at + 1
+            ) <= NEW.assembled_at
+            AND COALESCE(
+              (
+                SELECT MAX(projections.created_at)
+                FROM context_local_branch_request_messages AS request_messages
+                JOIN context_event_message_projections AS projections
+                  ON projections.projection_id = request_messages.projection_id
+                 AND projections.world_id = request_messages.world_id
+                WHERE request_messages.request_view_id = NEW.request_view_id
+              ),
+              NEW.assembled_at + 1
+            ) <= NEW.assembled_at
+            AND COALESCE(
+              (
+                SELECT MAX(layers.created_at)
+                FROM context_local_branch_request_system_layers AS request_layers
+                JOIN context_system_layer_projections AS layers
+                  ON layers.layer_id = request_layers.layer_id
+                WHERE request_layers.request_view_id = NEW.request_view_id
+              ),
+              NEW.assembled_at + 1
+            ) <= NEW.assembled_at
+            AND (
+              SELECT MIN(ordinal)
+              FROM context_local_branch_request_messages
+              WHERE request_view_id = NEW.request_view_id
+            ) = 0
+            AND (
+              SELECT MAX(ordinal)
+              FROM context_local_branch_request_messages
+              WHERE request_view_id = NEW.request_view_id
+            ) = NEW.selected_count - 1
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_local_branch_request_messages AS request_messages
+              JOIN context_event_message_projections AS projections
+                ON projections.projection_id = request_messages.projection_id
+               AND projections.world_id = request_messages.world_id
+              LEFT JOIN context_dark_ingress_admissions AS admissions
+                ON admissions.event_id = projections.source_event_id
+               AND admissions.world_id = projections.world_id
+               AND admissions.activation_epoch = NEW.activation_epoch
+               AND admissions.queue_generation = NEW.queue_generation
+               AND admissions.message_renderer_generation = projections.renderer_generation
+              WHERE request_messages.request_view_id = NEW.request_view_id
+                AND admissions.event_id IS NULL
+            )
+            AND (
+              SELECT MIN(admissions.source_sequence)
+              FROM context_local_branch_request_messages AS request_messages
+              JOIN context_event_message_projections AS projections
+                ON projections.projection_id = request_messages.projection_id
+               AND projections.world_id = request_messages.world_id
+              JOIN context_dark_ingress_admissions AS admissions
+                ON admissions.event_id = projections.source_event_id
+               AND admissions.world_id = projections.world_id
+              WHERE request_messages.request_view_id = NEW.request_view_id
+            ) = NEW.first_source_sequence
+            AND (
+              SELECT MAX(admissions.source_sequence)
+              FROM context_local_branch_request_messages AS request_messages
+              JOIN context_event_message_projections AS projections
+                ON projections.projection_id = request_messages.projection_id
+               AND projections.world_id = request_messages.world_id
+              JOIN context_dark_ingress_admissions AS admissions
+                ON admissions.event_id = projections.source_event_id
+               AND admissions.world_id = projections.world_id
+              WHERE request_messages.request_view_id = NEW.request_view_id
+            ) = NEW.last_source_sequence
+            AND NEW.first_source_sequence = (
+              SELECT MIN(source_sequence) FROM context_dark_ingress_admissions
+            )
+            AND (
+              SELECT COUNT(*) FROM context_dark_ingress_admissions
+              WHERE source_sequence BETWEEN NEW.first_source_sequence AND NEW.last_source_sequence
+            ) = NEW.selected_count
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_local_branch_request_messages AS request_messages
+              JOIN context_event_message_projections AS projections
+                ON projections.projection_id = request_messages.projection_id
+               AND projections.world_id = request_messages.world_id
+              JOIN context_dark_ingress_admissions AS admissions
+                ON admissions.event_id = projections.source_event_id
+               AND admissions.world_id = projections.world_id
+              WHERE request_messages.request_view_id = NEW.request_view_id
+                AND request_messages.ordinal != (
+                  SELECT COUNT(*) - 1
+                  FROM context_dark_ingress_admissions AS prior
+                  WHERE prior.source_sequence BETWEEN NEW.first_source_sequence AND admissions.source_sequence
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_dark_pending_branch_attempts AS active_attempts
+              LEFT JOIN context_dark_pending_branch_abandonments AS abandonments
+                ON abandonments.branch_id = active_attempts.branch_id
+              WHERE abandonments.branch_id IS NULL
+                AND active_attempts.first_source_sequence <= NEW.last_source_sequence
+                AND active_attempts.last_source_sequence >= NEW.first_source_sequence
+            )
+            AND NOT (
+              NEW.selected_count < NEW.max_events
+              AND EXISTS (
+                SELECT 1
+                FROM context_dark_ingress_admissions AS next_admission
+                JOIN context_local_branch_request_views AS views
+                  ON views.request_view_id = NEW.request_view_id
+                JOIN context_event_message_projections AS projections
+                  ON projections.source_event_id = next_admission.event_id
+                 AND projections.world_id = next_admission.world_id
+                 AND projections.renderer_generation = next_admission.message_renderer_generation
+                WHERE next_admission.source_sequence = (
+                  SELECT MIN(source_sequence)
+                  FROM context_dark_ingress_admissions
+                  WHERE source_sequence > NEW.last_source_sequence
+                )
+                  AND next_admission.world_id = NEW.world_id
+                  AND next_admission.activation_epoch = NEW.activation_epoch
+                  AND next_admission.queue_generation = NEW.queue_generation
+                  AND next_admission.message_renderer_generation = views.message_renderer_generation
+              )
+            )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch attempt lineage is invalid');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_attempts_no_update
+          BEFORE UPDATE ON context_dark_pending_branch_attempts BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch attempts are immutable');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_attempts_no_delete
+          BEFORE DELETE ON context_dark_pending_branch_attempts BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch attempts are immutable');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_request_messages_sealed
+          BEFORE INSERT ON context_local_branch_request_messages
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE request_view_id = NEW.request_view_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch request messages are sealed');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_system_layers_sealed
+          BEFORE INSERT ON context_local_branch_request_system_layers
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE request_view_id = NEW.request_view_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch system layers are sealed');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_manifest_events_sealed
+          BEFORE INSERT ON context_manifest_events
+          WHEN EXISTS (
+            SELECT 1
+            FROM context_dark_pending_branch_attempts AS attempts
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = attempts.request_view_id
+             AND views.world_id = attempts.world_id
+            WHERE views.manifest_id = NEW.manifest_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch manifest events are sealed');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_manifest_shares_sealed
+          BEFORE INSERT ON context_manifest_shares
+          WHEN EXISTS (
+            SELECT 1
+            FROM context_dark_pending_branch_attempts AS attempts
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = attempts.request_view_id
+             AND views.world_id = attempts.world_id
+            WHERE views.manifest_id = NEW.manifest_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch manifest shares are sealed');
+          END;
+
+        CREATE TRIGGER context_dark_pending_branch_abandonments_lineage_guard
+          BEFORE INSERT ON context_dark_pending_branch_abandonments
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_dark_pending_branch_attempts AS attempts
+            JOIN context_branches AS branches
+              ON branches.branch_id = attempts.branch_id
+             AND branches.world_id = attempts.world_id
+            JOIN context_branch_starts AS starts
+              ON starts.branch_id = branches.branch_id
+             AND starts.world_id = branches.world_id
+            JOIN context_root_coordinator AS coordinator
+              ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head
+              ON head.singleton = 1
+            WHERE attempts.branch_id = NEW.branch_id
+              AND branches.status = 'running'
+              AND coordinator.active_branch_id = attempts.branch_id
+              AND coordinator.active_world_id = attempts.world_id
+              AND coordinator.base_revision = starts.base_revision
+              AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+              AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+              AND head.revision = starts.base_revision
+              AND head.branch_id IS starts.predecessor_branch_id
+              AND head.world_id IS starts.predecessor_world_id
+              AND NEW.abandoned_at >= attempts.assembled_at
+              AND NOT EXISTS (
+                SELECT 1 FROM context_effects
+                WHERE branch_id = attempts.branch_id
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch abandonment lineage is invalid');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_abandonments_no_update
+          BEFORE UPDATE ON context_dark_pending_branch_abandonments BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch abandonments are immutable');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_abandonments_no_delete
+          BEFORE DELETE ON context_dark_pending_branch_abandonments BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch abandonments are immutable');
+          END;
+
+        CREATE TRIGGER context_dark_pending_branch_effect_guard
+          BEFORE INSERT ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch cannot issue effects');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_capsule_guard
+          BEFORE INSERT ON context_capsules
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = OLD.branch_id
+          )
+            AND NOT (
+              OLD.status = 'running'
+              AND NEW.status = 'crashed'
+              AND NEW.ended_at IS NOT NULL
+              AND NEW.ended_at >= (
+                SELECT abandoned_at
+                FROM context_dark_pending_branch_abandonments
+                WHERE branch_id = OLD.branch_id
+              )
+              AND EXISTS (
+                SELECT 1 FROM context_dark_pending_branch_abandonments
+                WHERE branch_id = OLD.branch_id
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
           END;
       `,
     },

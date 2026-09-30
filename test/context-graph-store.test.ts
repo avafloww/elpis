@@ -3377,3 +3377,407 @@ test('dark pending inspection returns only the contiguous same-world renderable 
     closeFixture(unavailable);
   }
 });
+
+function createPendingAttemptFixture(
+  value: ReturnType<typeof fixture>,
+  prefix: string,
+  selected: readonly number[],
+) {
+  const world = worldId('world:signal:' + prefix);
+  const systemLayerProjectionIds = createDarkAssemblyInputs(
+    value,
+    world,
+    prefix + '-system',
+  ).systemLayerProjectionIds;
+  const pending = [1, 2, 3].map((number) =>
+    admitPendingFixture(value, {
+      id: 'event:' + prefix + '-' + number,
+      world,
+      rendererGeneration: 7,
+      content: prefix.toUpperCase() + '_' + number + '_PRIVATE_CANARY',
+      time: 30 + number,
+    }),
+  );
+  const assembled = assembleDarkLocalBranch({
+    store: value.store,
+    expectedActivationEpoch: 0,
+    expectedHeadRevision: 0,
+    worldId: world,
+    branchId: branchId('branch:' + prefix),
+    messageProjectionIds: selected.map(
+      (index) => pending[index]!.projection!.projectionId,
+    ),
+    systemLayerProjectionIds,
+    assembledAt: 40,
+  });
+  return { world, pending, assembled };
+}
+
+function insertDarkPendingAttempt(
+  database: DatabaseSync,
+  input: ReturnType<typeof createPendingAttemptFixture> & {
+    maxEvents: number;
+  },
+): void {
+  const selected = input.assembled.requestView.view.messageProjectionIds;
+  const selectedAdmissions = selected.map((projectionId) => {
+    const projection = input.pending.find(
+      (item) => item.projection?.projectionId === projectionId,
+    );
+    assert.ok(projection);
+    return projection.receipt.admission;
+  });
+  database
+    .prepare(
+      `INSERT INTO context_dark_pending_branch_attempts(
+         branch_id, world_id, request_view_id, activation_epoch,
+         queue_generation, max_events, selected_count,
+         first_source_sequence, last_source_sequence, assembled_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.assembled.branch.branchId,
+      input.world,
+      input.assembled.requestView.requestViewId,
+      0,
+      1,
+      input.maxEvents,
+      selectedAdmissions.length,
+      selectedAdmissions[0]!.sourceSequence,
+      selectedAdmissions[selectedAdmissions.length - 1]!.sourceSequence,
+      40,
+    );
+}
+
+test('dark pending attempt receipts bind one non-runnable branch and require abandonment before crash', () => {
+  const value = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      value,
+      'pending-attempt-lifecycle',
+      [0, 1, 2],
+    );
+    insertDarkPendingAttempt(value.database, { ...pending, maxEvents: 3 });
+    assert.equal(
+      tableCount(value.database, 'context_dark_pending_branch_attempts'),
+      1,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_dark_pending_branch_abandonments'),
+      0,
+    );
+
+    const fourth = admitPendingFixture(value, {
+      id: 'event:pending-attempt-lifecycle-4',
+      world: pending.world,
+      rendererGeneration: 7,
+      content: 'PENDING_ATTEMPT_LIFECYCLE_4_PRIVATE_CANARY',
+      time: 41,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_manifest_events(
+               manifest_id, event_id, world_id, ordinal
+             ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(
+            pending.assembled.manifest.manifestId,
+            fourth.receipt.event.eventId,
+            pending.world,
+            3,
+          ),
+      /context dark pending branch manifest events are sealed/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_local_branch_request_messages(
+               request_view_id, projection_id, world_id, ordinal
+             ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(
+            pending.assembled.requestView.requestViewId,
+            fourth.projection!.projectionId,
+            pending.world,
+            3,
+          ),
+      /context dark pending branch request messages are sealed/,
+    );
+    const extraLayer = value.store.createSystemLayerProjection({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: pending.world,
+      rendererGeneration: 4,
+      policyGeneration: 3,
+      sourceKind: 'synthetic_fixture',
+      sourceHash: hashContextBytes('pending-attempt-extra-layer'),
+      content: 'PENDING_ATTEMPT_EXTRA_POLICY',
+      createdAt: 41,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_local_branch_request_system_layers(
+               request_view_id, layer_id, world_id, ordinal
+             ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(
+            pending.assembled.requestView.requestViewId,
+            extraLayer.layerId,
+            pending.world,
+            3,
+          ),
+      /context dark pending branch system layers are sealed/,
+    );
+
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_effects(
+               effect_id, branch_id, world_id, destination_world_id,
+               effect_kind, authority_epoch, payload_json, payload_hash,
+               idempotency_key, status, prepared_at, resolved_at,
+               observation_json
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, NULL, NULL)`,
+          )
+          .run(
+            'effect:pending-attempt',
+            pending.assembled.branch.branchId,
+            pending.world,
+            pending.world,
+            'send',
+            pending.assembled.branch.authorityEpoch,
+            '{}',
+            hashContextBytes('{}'),
+            'pending-attempt-effect',
+            41,
+          ),
+      /context dark pending branch cannot issue effects/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_branches
+             SET status = 'yielded', ended_at = 41
+             WHERE branch_id = ?`,
+          )
+          .run(pending.assembled.branch.branchId),
+      /invalid context dark pending branch transition/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_branches
+             SET status = 'crashed', ended_at = 41
+             WHERE branch_id = ?`,
+          )
+          .run(pending.assembled.branch.branchId),
+      /invalid context dark pending branch transition/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_dark_pending_branch_abandonments(
+               branch_id, abandoned_at, reason
+             ) VALUES (?, ?, 'coordinator_recovery')`,
+          )
+          .run(pending.assembled.branch.branchId, 39),
+      /context dark pending branch abandonment lineage is invalid/,
+    );
+
+    value.database
+      .prepare(
+        `INSERT INTO context_dark_pending_branch_abandonments(
+           branch_id, abandoned_at, reason
+         ) VALUES (?, ?, 'coordinator_recovery')`,
+      )
+      .run(pending.assembled.branch.branchId, 41);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_branches
+             SET status = 'crashed', ended_at = 40
+             WHERE branch_id = ?`,
+          )
+          .run(pending.assembled.branch.branchId),
+      /invalid context dark pending branch transition/,
+    );
+    value.database
+      .prepare(
+        `UPDATE context_branches
+         SET status = 'crashed', ended_at = 41
+         WHERE branch_id = ?`,
+      )
+      .run(pending.assembled.branch.branchId);
+    assert.equal(
+      value.store.getBranch(pending.assembled.branch.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(tableCount(value.database, 'context_effects'), 0);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_dark_pending_branch_attempts
+             SET max_events = 4 WHERE branch_id = ?`,
+          )
+          .run(pending.assembled.branch.branchId),
+      /context dark pending branch attempts are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `DELETE FROM context_dark_pending_branch_abandonments
+             WHERE branch_id = ?`,
+          )
+          .run(pending.assembled.branch.branchId),
+      /context dark pending branch abandonments are immutable/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark pending attempt receipts reject branches with inherited effects or capsules', () => {
+  const withEffect = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      withEffect,
+      'pending-attempt-inherited-effect',
+      [0, 1, 2],
+    );
+    withEffect.database
+      .prepare(
+        `INSERT INTO context_effects(
+           effect_id, branch_id, world_id, destination_world_id,
+           effect_kind, authority_epoch, payload_json, payload_hash,
+           idempotency_key, status, prepared_at, resolved_at,
+           observation_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, NULL, NULL)`,
+      )
+      .run(
+        'effect:pending-attempt-inherited',
+        pending.assembled.branch.branchId,
+        pending.world,
+        pending.world,
+        'send',
+        pending.assembled.branch.authorityEpoch,
+        '{}',
+        hashContextBytes('{}'),
+        'pending-attempt-inherited-effect',
+        41,
+      );
+    assert.throws(
+      () =>
+        insertDarkPendingAttempt(withEffect.database, {
+          ...pending,
+          maxEvents: 3,
+        }),
+      /context dark pending branch attempt lineage is invalid/,
+    );
+    assert.equal(
+      tableCount(withEffect.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(withEffect);
+  }
+
+  const withCapsule = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      withCapsule,
+      'pending-attempt-inherited-capsule',
+      [0, 1, 2],
+    );
+    withCapsule.store.createCapsule({
+      capsuleId: capsuleId('capsule:pending-attempt-inherited'),
+      branchId: pending.assembled.branch.branchId,
+      worldId: pending.world,
+      kind: 'private',
+      viewManifestHash: pending.assembled.manifest.hash,
+      sourceRootHash: hashContextBytes('pending-attempt-root'),
+      policyGeneration: pending.assembled.manifest.policyGeneration,
+      content: { forbidden: 'pre-existing capsule' },
+      createdAt: 41,
+    });
+    assert.throws(
+      () =>
+        insertDarkPendingAttempt(withCapsule.database, {
+          ...pending,
+          maxEvents: 3,
+        }),
+      /context dark pending branch attempt lineage is invalid/,
+    );
+    assert.equal(
+      tableCount(withCapsule.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(withCapsule);
+  }
+});
+
+test('dark pending attempt receipts reject skipped and non-maximal admitted prefixes', () => {
+  const nonMaximal = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      nonMaximal,
+      'pending-attempt-nonmaximal',
+      [0, 1],
+    );
+    assert.throws(
+      () =>
+        insertDarkPendingAttempt(nonMaximal.database, {
+          ...pending,
+          maxEvents: 3,
+        }),
+      /context dark pending branch attempt lineage is invalid/,
+    );
+    insertDarkPendingAttempt(nonMaximal.database, {
+      ...pending,
+      maxEvents: 2,
+    });
+    assert.equal(
+      tableCount(nonMaximal.database, 'context_dark_pending_branch_attempts'),
+      1,
+    );
+  } finally {
+    closeFixture(nonMaximal);
+  }
+
+  const skipped = fixture();
+  try {
+    const pending = createPendingAttemptFixture(
+      skipped,
+      'pending-attempt-skipped',
+      [0, 2],
+    );
+    assert.throws(
+      () =>
+        insertDarkPendingAttempt(skipped.database, {
+          ...pending,
+          maxEvents: 2,
+        }),
+      /context dark pending branch attempt lineage is invalid/,
+    );
+    assert.equal(
+      tableCount(skipped.database, 'context_dark_pending_branch_attempts'),
+      0,
+    );
+  } finally {
+    closeFixture(skipped);
+  }
+});
