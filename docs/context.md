@@ -42,6 +42,8 @@ Schema v41 makes that binding a durable prerequisite for every new dark pending-
 
 Schema v42 seeds one immutable, content-addressed scoped runtime-contract artifact whose bytes are newly authored for graph branches rather than extracted from the legacy mixed prompt. The contract is world-scoped, explicit-share-only, and tool-free; it states that prompt text grants no send or effect authority and does not import legacy memory, focus, people records, dynamic cards, or host capabilities. Its migration checksum is bound to the exact artifact identity, and a typed reader rejects missing or changed bytes. The artifact is source evidence only: it creates no system-layer projection, approval, authorization, profile, world head, branch, provider request, effect authority, activation, or runtime caller.
 
+A strict prompt-facing SOUL snapshot reader is a later authorization prerequisite, not an authorization action. It opens one non-symlink regular file descriptor, bounds and validates one stable UTF-8 source read, reuses `parseSoul()` to derive the exact unwrapped prompt body, and returns separate source-file and body hashes and byte lengths plus a parser generation. Missing, changing, oversized, invalid, or empty-body sources fail closed. No runtime path or sandbox capability calls this reader yet; it writes no record and grants no profile, provider, tool, effect, activation, or identity authority.
+
 ## Message layers
 
 A request can contain:

@@ -14,6 +14,7 @@
 // comes from parseFrontmatter so scalar handling (quotes) stays one
 // convention.
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { parseFrontmatter } from '../lib/frontmatter.js';
 
@@ -40,6 +41,8 @@ function looksLikeFrontmatter(inner: string): boolean {
 
 export const RESIDENT_REANCHOR_MAX_WORDS = 10;
 export const RESIDENT_REANCHOR_MAX_BYTES = 120;
+export const SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION = 1;
+export const SOUL_PROMPT_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
 
 function residentReanchor(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -73,6 +76,99 @@ export function parseSoul(raw: string): SoulParts {
     reanchor: residentReanchor(frontmatter['reanchor']),
     body,
   };
+}
+
+export interface PromptFacingSoulSnapshot {
+  parserGeneration: number;
+  sourceFileHash: string;
+  sourceFileBytes: number;
+  body: string;
+  bodyHash: string;
+  bodyBytes: number;
+}
+
+function sha256(value: Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** Read one strict prompt-facing SOUL snapshot for later resident authorization.
+ * This derives source evidence only; it does not create or grant authority. */
+export function readPromptFacingSoulSnapshot(
+  soulPath: string,
+): PromptFacingSoulSnapshot {
+  const noFollow = fs.constants.O_NOFOLLOW;
+  const nonBlock = fs.constants.O_NONBLOCK;
+  if (typeof noFollow !== 'number' || typeof nonBlock !== 'number')
+    throw new Error(
+      'prompt-facing SOUL snapshot unavailable: strict file-open flags are unsupported',
+    );
+  let fd: number;
+  try {
+    fd = fs.openSync(soulPath, fs.constants.O_RDONLY | noFollow | nonBlock);
+  } catch (error) {
+    throw new Error(
+      `prompt-facing SOUL snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    const before = fs.fstatSync(fd, { bigint: true });
+    if (!before.isFile())
+      throw new Error('prompt-facing SOUL snapshot must be a regular file');
+    if (before.size > BigInt(SOUL_PROMPT_SNAPSHOT_MAX_BYTES))
+      throw new Error('prompt-facing SOUL snapshot exceeds the byte limit');
+
+    const bytes = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = fs.readSync(
+        fd,
+        bytes,
+        offset,
+        bytes.length - offset,
+        offset,
+      );
+      if (read === 0)
+        throw new Error('prompt-facing SOUL snapshot changed while reading');
+      offset += read;
+    }
+    const extra = Buffer.alloc(1);
+    if (fs.readSync(fd, extra, 0, 1, offset) !== 0)
+      throw new Error('prompt-facing SOUL snapshot changed while reading');
+
+    const after = fs.fstatSync(fd, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs
+    ) {
+      throw new Error('prompt-facing SOUL snapshot changed while reading');
+    }
+
+    let raw: string;
+    try {
+      raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        bytes,
+      );
+    } catch {
+      throw new Error('prompt-facing SOUL snapshot is not valid UTF-8');
+    }
+    const body = parseSoul(raw).body;
+    if (!body.trim())
+      throw new Error('prompt-facing SOUL snapshot body is empty');
+    const bodyBuffer = Buffer.from(body, 'utf8');
+    return Object.freeze({
+      parserGeneration: SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION,
+      sourceFileHash: sha256(bytes),
+      sourceFileBytes: bytes.length,
+      body,
+      bodyHash: sha256(bodyBuffer),
+      bodyBytes: bodyBuffer.length,
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** Read the agent's name off SOUL.md's frontmatter; DEFAULT_AGENT_NAME when
