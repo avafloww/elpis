@@ -1,0 +1,7 @@
+# Atomic dark local branch assembly
+
+A new graph-only assembler rehearses one complete local branch reservation while context-graph activation remains dark. From exact stored message and branch-visible system projections, it derives the source events, renderer and policy generations, same-world parent, fresh authority epoch, canonical share-free manifest, and non-runnable request-view identity. The caller cannot provide a shadow plan, manifest, authority epoch, or arbitrary event lineage.
+
+The running branch, immutable branch-start receipt, root-coordinator reservation, manifest edges, and request-view edges now commit in one immediate SQLite transaction. A stale activation epoch or continuation head, active branch, foreign or malformed lineage, generation mismatch, unsupported system scope, late insertion failure, or bounded candidate-construction failure leaves no partial branch state. Candidate serialization and hashing happen before commit under an 8 MiB limit, so the public assembler cannot throw afterward while silently leaving the coordinator occupied. Existing interrupted-branch recovery marks a committed rehearsal crashed with zero uncertain effects when none were issued, leaves the continuation head unchanged, and preserves the historical request view.
+
+This is dark orchestration infrastructure only. It does not call a provider, attach tools, issue effects, advance continuity, change activation, or alter Agent, queues, compaction, caching, sends, or the legacy monocontext request.

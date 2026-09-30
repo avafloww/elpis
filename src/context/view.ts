@@ -1,6 +1,9 @@
 import type { ChatMessage } from '../llm/llm.js';
 import {
-  hashContextBytes,
+  buildMaterializedLocalBranchRequest,
+  type MaterializedLocalBranchRequest,
+} from './candidate.js';
+import {
   type ContextGraphStore,
   type EventMessageProjectionId,
   type LocalBranchRequestViewId,
@@ -139,17 +142,7 @@ export function materializeWorldConversation(input: {
   });
 }
 
-export interface MaterializedLocalBranchRequest {
-  readonly requestViewId: LocalBranchRequestViewId;
-  readonly messages: readonly ChatMessage[];
-  readonly candidateJson: string;
-  readonly candidateHash: string;
-  readonly candidateBytes: number;
-  readonly executionMode: 'dark';
-  readonly scope: 'local-only';
-  readonly runnable: false;
-  readonly toolMode: 'none';
-}
+export type { MaterializedLocalBranchRequest } from './candidate.js';
 
 export function materializeLocalBranchRequest(input: {
   store: ContextGraphStore;
@@ -179,20 +172,8 @@ export function materializeLocalBranchRequest(input: {
       content: message.content,
     })),
   ];
-  const candidateJson = JSON.stringify({
-    schemaVersion: 1,
-    surface: 'provider-neutral-messages',
-    messages,
-  });
-  return {
+  return buildMaterializedLocalBranchRequest({
     requestViewId: record.requestViewId,
     messages,
-    candidateJson,
-    candidateHash: hashContextBytes(candidateJson),
-    candidateBytes: Buffer.byteLength(candidateJson),
-    executionMode: 'dark',
-    scope: 'local-only',
-    runnable: false,
-    toolMode: 'none',
-  };
+  });
 }

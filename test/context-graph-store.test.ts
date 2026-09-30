@@ -5,6 +5,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
+import { assembleDarkLocalBranch } from '../src/context/root.js';
+import { MAX_LOCAL_BRANCH_REQUEST_CANDIDATE_BYTES } from '../src/context/candidate.js';
 import {
   materializeLocalBranchRequest,
   materializeSystemProjection,
@@ -19,6 +21,7 @@ import {
   capsuleId,
   effectId,
   eventId,
+  eventMessageProjectionId,
   hashContextBytes,
   legacyImportReceiptId,
   manifestId,
@@ -75,7 +78,10 @@ test('world message projections materialize only exact ordered local text', () =
         sourceSequence: index + 1,
         worldId: event.world,
         rendererGeneration: 1,
-        message: { role: 'user', content: `<incoming>${event.text}</incoming>` },
+        message: {
+          role: 'user',
+          content: `<incoming>${event.text}</incoming>`,
+        },
         createdAt: index + 10,
       }),
     );
@@ -233,7 +239,9 @@ test('world message projections materialize only exact ordered local text', () =
         .run(),
     );
     assert.throws(() =>
-      value.database.prepare('DELETE FROM context_event_message_projections').run(),
+      value.database
+        .prepare('DELETE FROM context_event_message_projections')
+        .run(),
     );
   } finally {
     closeFixture(value);
@@ -427,10 +435,7 @@ test('system layers materialize only explicit branch-visible scope', () => {
       occurredAt: 8,
       recordedAt: 8,
     });
-    const planFor = (
-      layerId: typeof contract.layerId,
-      blockers: string[],
-    ) => ({
+    const planFor = (layerId: typeof contract.layerId, blockers: string[]) => ({
       schemaVersion: 3,
       worldId: worldA,
       wakeEventId: wake.eventId,
@@ -526,9 +531,13 @@ test('system layers materialize only explicit branch-visible scope', () => {
         .run(),
     );
     assert.throws(() =>
-      value.database.prepare('DELETE FROM context_system_layer_projections').run(),
+      value.database
+        .prepare('DELETE FROM context_system_layer_projections')
+        .run(),
     );
-    value.database.exec('DROP TRIGGER context_system_layer_projections_no_update');
+    value.database.exec(
+      'DROP TRIGGER context_system_layer_projections_no_update',
+    );
     value.database
       .prepare(
         'UPDATE context_system_layer_projections SET content_text = ? WHERE layer_id = ?',
@@ -1650,7 +1659,10 @@ test('local branch request views bind one coordinated world without lifecycle ef
       sourceSequence: eventA.sequence,
       worldId: worldA,
       rendererGeneration: 1,
-      message: { role: 'user', content: '<incoming>A_PRIVATE_CANARY</incoming>' },
+      message: {
+        role: 'user',
+        content: '<incoming>A_PRIVATE_CANARY</incoming>',
+      },
       createdAt: 4,
     });
     const projectionB1 = value.store.createEventMessageProjection({
@@ -1754,7 +1766,10 @@ test('local branch request views bind one coordinated world without lifecycle ef
         identity.layerId,
         policyB.layerId,
       ],
-      messageProjectionIds: [projectionB1.projectionId, projectionB2.projectionId],
+      messageProjectionIds: [
+        projectionB1.projectionId,
+        projectionB2.projectionId,
+      ],
       createdAt: 13,
     };
     assert.throws(
@@ -1792,7 +1807,10 @@ test('local branch request views bind one coordinated world without lifecycle ef
       () =>
         value.store.createLocalBranchRequestView({
           ...base,
-          messageProjectionIds: [projectionB1.projectionId, projectionA.projectionId],
+          messageProjectionIds: [
+            projectionB1.projectionId,
+            projectionA.projectionId,
+          ],
         }),
       /message lineage is invalid/,
     );
@@ -1821,12 +1839,18 @@ test('local branch request views bind one coordinated world without lifecycle ef
       { role: 'user', content: '<incoming>B_ONE_CANARY</incoming>' },
       { role: 'user', content: '<incoming>B_TWO_CANARY</incoming>' },
     ]);
-    assert.equal(materialized.candidateHash, hashContextBytes(materialized.candidateJson));
+    assert.equal(
+      materialized.candidateHash,
+      hashContextBytes(materialized.candidateJson),
+    );
     assert.equal(
       materialized.candidateBytes,
       Buffer.byteLength(materialized.candidateJson),
     );
-    assert.equal(materialized.candidateJson.includes('A_PRIVATE_CANARY'), false);
+    assert.equal(
+      materialized.candidateJson.includes('A_PRIVATE_CANARY'),
+      false,
+    );
     assert.equal(materialized.candidateJson.includes('A_POLICY_CANARY'), false);
     assert.deepEqual(
       {
@@ -2042,7 +2066,9 @@ test('local branch request views reject non-monotonic manifest event order', () 
       /manifest event order is invalid/,
     );
     const row = value.database
-      .prepare('SELECT count(*) AS count FROM context_local_branch_request_views')
+      .prepare(
+        'SELECT count(*) AS count FROM context_local_branch_request_views',
+      )
       .get() as { count: number };
     assert.equal(row.count, 0);
   } finally {
@@ -2112,6 +2138,534 @@ test('manifest rereads reject canonical authority drift from the branch', () => 
         }),
       /stored context manifest identity is invalid/,
     );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+function createDarkAssemblyInputs(
+  value: ReturnType<typeof fixture>,
+  world: ReturnType<typeof worldId>,
+  prefix: string,
+): {
+  messageProjectionIds: ReturnType<typeof eventMessageProjectionId>[];
+  systemLayerProjectionIds: ReturnType<typeof systemLayerProjectionId>[];
+} {
+  const events = ['one', 'two'].map((suffix, index) =>
+    value.store.appendWorldEvent({
+      eventId: eventId('event:' + prefix + '-' + suffix),
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: prefix + '-' + suffix },
+      occurredAt: index + 1,
+      recordedAt: index + 1,
+    }),
+  );
+  const projections = events.map((event, index) =>
+    value.store.createEventMessageProjection({
+      sourceEventId: event.eventId,
+      sourceSequence: event.sequence,
+      worldId: world,
+      rendererGeneration: 7,
+      message: {
+        role: 'user',
+        content:
+          '<incoming>' +
+          prefix.toUpperCase() +
+          '_' +
+          (index + 1) +
+          '_CANARY</incoming>',
+      },
+      createdAt: index + 10,
+    }),
+  );
+  const layer = (input: {
+    kind: 'runtime_contract' | 'identity' | 'world_policy';
+    visibility: 'global_contract' | 'integrated_self' | 'world';
+    layerWorld: ReturnType<typeof worldId> | null;
+    content: string;
+    createdAt: number;
+  }) =>
+    value.store.createSystemLayerProjection({
+      kind: input.kind,
+      visibility: input.visibility,
+      worldId: input.layerWorld,
+      rendererGeneration: 4,
+      policyGeneration: 3,
+      sourceKind: 'synthetic_fixture',
+      sourceHash: hashContextBytes(prefix + ':' + input.kind),
+      content: input.content,
+      createdAt: input.createdAt,
+    });
+  const layers = [
+    layer({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      layerWorld: null,
+      content: 'DARK_CONTRACT',
+      createdAt: 20,
+    }),
+    layer({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      layerWorld: null,
+      content: '\nASTER_IDENTITY',
+      createdAt: 21,
+    }),
+    layer({
+      kind: 'world_policy',
+      visibility: 'world',
+      layerWorld: world,
+      content: '\n' + prefix.toUpperCase() + '_POLICY_CANARY',
+      createdAt: 22,
+    }),
+  ];
+  return {
+    messageProjectionIds: projections.map(
+      (projection) => projection.projectionId,
+    ),
+    systemLayerProjectionIds: layers.map((layerRecord) => layerRecord.layerId),
+  };
+}
+
+function tableCount(database: DatabaseSync, table: string): number {
+  const row = database
+    .prepare('SELECT count(*) AS count FROM ' + table)
+    .get() as { count: number };
+  return row.count;
+}
+
+test('dark local branch assembly atomically reserves only one world and remains non-runnable', () => {
+  const value = fixture();
+  try {
+    const worldA = worldId('world:signal:assembly-a');
+    const worldB = worldId('world:signal:assembly-b');
+    const a = createDarkAssemblyInputs(value, worldA, 'assembly-a');
+    const b = createDarkAssemblyInputs(value, worldB, 'assembly-b');
+    const activationBefore = value.store.getActivationState();
+    const headBefore = value.store.getContinuationHead();
+
+    const assembled = assembleDarkLocalBranch({
+      store: value.store,
+      expectedActivationEpoch: activationBefore.epoch,
+      expectedHeadRevision: headBefore.revision,
+      worldId: worldB,
+      branchId: branchId('branch:dark-assembly-b'),
+      messageProjectionIds: b.messageProjectionIds,
+      systemLayerProjectionIds: b.systemLayerProjectionIds,
+      assembledAt: 30,
+    });
+
+    assert.equal(assembled.branch.worldId, worldB);
+    assert.equal(assembled.branch.status, 'running');
+    assert.equal(assembled.branch.authorityEpoch, 1);
+    assert.equal(assembled.start.baseRevision, 0);
+    assert.match(assembled.manifest.manifestId, /^manifest:[0-9a-f]{64}$/);
+    assert.equal(assembled.manifest.projectionGeneration, 7);
+    assert.equal(assembled.manifest.policyGeneration, 3);
+    assert.deepEqual(JSON.parse(assembled.manifest.json).sharedEventIds, []);
+    assert.equal(assembled.requestView.view.runnable, false);
+    assert.equal(assembled.requestView.view.toolMode, 'none');
+    assert.deepEqual(assembled.request.messages, [
+      {
+        role: 'system',
+        content: 'DARK_CONTRACT\nASTER_IDENTITY\nASSEMBLY-B_POLICY_CANARY',
+      },
+      { role: 'user', content: '<incoming>ASSEMBLY-B_1_CANARY</incoming>' },
+      { role: 'user', content: '<incoming>ASSEMBLY-B_2_CANARY</incoming>' },
+    ]);
+    assert.equal(
+      assembled.request.candidateJson.includes('ASSEMBLY-A_1_CANARY'),
+      false,
+    );
+    assert.equal(
+      assembled.request.candidateJson.includes('ASSEMBLY-A_POLICY_CANARY'),
+      false,
+    );
+    assert.equal(
+      assembled.request.candidateHash,
+      hashContextBytes(assembled.request.candidateJson),
+    );
+    assert.equal(a.messageProjectionIds.length, 2);
+
+    assert.equal(tableCount(value.database, 'context_branches'), 1);
+    assert.equal(tableCount(value.database, 'context_branch_starts'), 1);
+    assert.equal(tableCount(value.database, 'context_manifests'), 1);
+    assert.equal(
+      tableCount(value.database, 'context_local_branch_request_views'),
+      1,
+    );
+    assert.deepEqual(value.store.getRootCoordinatorState(), {
+      activeBranchId: assembled.branch.branchId,
+      activeWorldId: worldB,
+      baseRevision: 0,
+      predecessorBranchId: null,
+      predecessorWorldId: null,
+      updatedAt: 30,
+    });
+    assert.deepEqual(value.store.getContinuationHead(), headBefore);
+    assert.deepEqual(value.store.getActivationState(), activationBefore);
+    for (const table of [
+      'context_capsules',
+      'context_effects',
+      'context_continuation_advances',
+      'context_shadow_projection_plans',
+      'context_shadow_request_observations',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+
+    const recovered = value.store.recoverCoordinatedBranch(31);
+    assert.equal(recovered?.uncertainEffects, 0);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      value.store.getBranch(assembled.branch.branchId)?.status,
+      'crashed',
+    );
+    assert.deepEqual(
+      materializeLocalBranchRequest({
+        store: value.store,
+        requestViewId: assembled.requestView.requestViewId,
+      }),
+      assembled.request,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly rolls back a late request-view failure', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-rollback');
+    const input = createDarkAssemblyInputs(value, world, 'assembly-rollback');
+    value.database.exec(
+      [
+        'CREATE TEMP TRIGGER force_dark_assembly_late_failure',
+        'BEFORE INSERT ON context_local_branch_request_views',
+        'BEGIN',
+        "SELECT RAISE(ABORT, 'forced late assembly failure');",
+        'END;',
+      ].join('\n'),
+    );
+    assert.throws(
+      () =>
+        assembleDarkLocalBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          worldId: world,
+          branchId: branchId('branch:assembly-rollback'),
+          ...input,
+          assembledAt: 30,
+        }),
+      /forced late assembly failure/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_manifest_events',
+      'context_local_branch_request_views',
+      'context_local_branch_request_system_layers',
+      'context_local_branch_request_messages',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly rolls back candidate materialization failure', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-candidate-rollback');
+    const input = createDarkAssemblyInputs(
+      value,
+      world,
+      'assembly-candidate-rollback',
+    );
+    const content = 'x'.repeat(
+      Math.floor(MAX_LOCAL_BRANCH_REQUEST_CANDIDATE_BYTES / 2) + 1,
+    );
+    const projections = ['one', 'two'].map((suffix, index) => {
+      const event = value.store.appendWorldEvent({
+        eventId: eventId('event:assembly-candidate-' + suffix),
+        worldId: world,
+        kind: 'inbound:signal',
+        payload: { text: suffix },
+        occurredAt: index + 40,
+        recordedAt: index + 40,
+      });
+      return value.store.createEventMessageProjection({
+        sourceEventId: event.eventId,
+        sourceSequence: event.sequence,
+        worldId: world,
+        rendererGeneration: 7,
+        message: { role: 'user', content },
+        createdAt: index + 50,
+      });
+    });
+    assert.throws(
+      () =>
+        assembleDarkLocalBranch({
+          store: value.store,
+          expectedActivationEpoch: 0,
+          expectedHeadRevision: 0,
+          worldId: world,
+          branchId: branchId('branch:assembly-candidate-rollback'),
+          messageProjectionIds: projections.map(
+            (projection) => projection.projectionId,
+          ),
+          systemLayerProjectionIds: input.systemLayerProjectionIds,
+          assembledAt: 60,
+        }),
+      /candidate exceeds byte limit/,
+    );
+    for (const table of [
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_manifest_events',
+      'context_local_branch_request_views',
+      'context_local_branch_request_system_layers',
+      'context_local_branch_request_messages',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly rejects stale root state and an active branch', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-stale');
+    const input = createDarkAssemblyInputs(value, world, 'assembly-stale');
+    const assemble = (
+      overrides: Partial<Parameters<typeof assembleDarkLocalBranch>[0]>,
+    ) =>
+      assembleDarkLocalBranch({
+        store: value.store,
+        expectedActivationEpoch: 0,
+        expectedHeadRevision: 0,
+        worldId: world,
+        branchId: branchId('branch:assembly-stale'),
+        ...input,
+        assembledAt: 30,
+        ...overrides,
+      });
+    assert.throws(
+      () => assemble({ expectedActivationEpoch: 1 }),
+      /activation is not dark at epoch 1/,
+    );
+    assert.throws(
+      () => assemble({ expectedHeadRevision: 1 }),
+      StaleContinuationHeadError,
+    );
+    assert.equal(tableCount(value.database, 'context_branches'), 0);
+
+    value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:already-active'),
+      worldId: world,
+      expectedRevision: 0,
+      authorityEpoch: 8,
+      startedAt: 31,
+    });
+    assert.throws(
+      () => assemble({ branchId: branchId('branch:blocked-by-active') }),
+      /context branch already active/,
+    );
+    assert.equal(tableCount(value.database, 'context_branches'), 1);
+    assert.equal(
+      value.store.getRootCoordinatorState().activeBranchId,
+      branchId('branch:already-active'),
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly derives same-world parent and fresh authority', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-parent');
+    const input = createDarkAssemblyInputs(value, world, 'assembly-parent');
+    const previousBranchId = branchId('branch:assembly-parent-history');
+    value.store.createBranch({
+      branchId: previousBranchId,
+      worldId: world,
+      authorityEpoch: 8,
+      startedAt: 1,
+    });
+    value.store.finishBranch(previousBranchId, 'yielded', 2);
+    value.store.advanceContinuationHead({
+      expectedRevision: 0,
+      branchId: previousBranchId,
+      updatedAt: 3,
+    });
+
+    const assembled = assembleDarkLocalBranch({
+      store: value.store,
+      expectedActivationEpoch: 0,
+      expectedHeadRevision: 1,
+      worldId: world,
+      branchId: branchId('branch:assembly-parent-current'),
+      ...input,
+      assembledAt: 30,
+    });
+    assert.equal(assembled.branch.parentBranchId, previousBranchId);
+    assert.equal(assembled.branch.authorityEpoch, 9);
+    assert.equal(assembled.start.predecessorBranchId, previousBranchId);
+    assert.equal(assembled.start.predecessorWorldId, world);
+    assert.equal(assembled.start.baseRevision, 1);
+    assert.equal(value.store.getContinuationHead().revision, 1);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark local branch assembly rejects incomplete or substituted projection lineage', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:assembly-lineage');
+    const foreignWorld = worldId('world:signal:assembly-foreign');
+    const input = createDarkAssemblyInputs(value, world, 'assembly-lineage');
+    const foreign = createDarkAssemblyInputs(
+      value,
+      foreignWorld,
+      'assembly-foreign',
+    );
+    const extraEvent = value.store.appendWorldEvent({
+      eventId: eventId('event:assembly-other-generation'),
+      worldId: world,
+      kind: 'inbound:signal',
+      payload: { text: 'other generation' },
+      occurredAt: 40,
+      recordedAt: 40,
+    });
+    const wrongGeneration = value.store.createEventMessageProjection({
+      sourceEventId: extraEvent.eventId,
+      sourceSequence: extraEvent.sequence,
+      worldId: world,
+      rendererGeneration: 8,
+      message: { role: 'user', content: 'OTHER_GENERATION_CANARY' },
+      createdAt: 41,
+    });
+    const assemble = (
+      messageProjectionIds: typeof input.messageProjectionIds,
+    ) =>
+      assembleDarkLocalBranch({
+        store: value.store,
+        expectedActivationEpoch: 0,
+        expectedHeadRevision: 0,
+        worldId: world,
+        branchId: branchId('branch:assembly-invalid-lineage'),
+        messageProjectionIds,
+        systemLayerProjectionIds: input.systemLayerProjectionIds,
+        assembledAt: 50,
+      });
+
+    assert.throws(
+      () => assemble([]),
+      /requires unique local message projections/,
+    );
+    assert.throws(
+      () =>
+        assemble([
+          input.messageProjectionIds[0]!,
+          input.messageProjectionIds[0]!,
+        ]),
+      /requires unique local message projections/,
+    );
+    assert.throws(
+      () => assemble([eventMessageProjectionId('event-message:missing')]),
+      /projection is missing/,
+    );
+    assert.throws(
+      () => assemble([foreign.messageProjectionIds[0]!]),
+      /message lineage is invalid/,
+    );
+    assert.throws(
+      () => assemble([...input.messageProjectionIds].reverse()),
+      /manifest event order is invalid/,
+    );
+    assert.throws(
+      () =>
+        assemble([
+          input.messageProjectionIds[0]!,
+          wrongGeneration.projectionId,
+        ]),
+      /renderer generation is inconsistent/,
+    );
+    const wrongSystemGeneration = value.store.createSystemLayerProjection({
+      kind: 'world_policy',
+      visibility: 'world',
+      worldId: world,
+      rendererGeneration: 5,
+      policyGeneration: 3,
+      sourceKind: 'synthetic_fixture',
+      sourceHash: hashContextBytes('wrong-system-generation'),
+      content: 'WRONG_SYSTEM_GENERATION_CANARY',
+      createdAt: 42,
+    });
+    const assembleWithSystem = (
+      systemLayerProjectionIds: typeof input.systemLayerProjectionIds,
+    ) =>
+      assembleDarkLocalBranch({
+        store: value.store,
+        expectedActivationEpoch: 0,
+        expectedHeadRevision: 0,
+        worldId: world,
+        branchId: branchId('branch:assembly-invalid-system'),
+        messageProjectionIds: input.messageProjectionIds,
+        systemLayerProjectionIds,
+        assembledAt: 50,
+      });
+    assert.throws(
+      () =>
+        assembleWithSystem([
+          input.systemLayerProjectionIds[0]!,
+          input.systemLayerProjectionIds[0]!,
+        ]),
+      /system layer references are invalid/,
+    );
+    assert.throws(
+      () =>
+        assembleWithSystem([systemLayerProjectionId('system-layer:missing')]),
+      /system layer is missing/,
+    );
+    assert.throws(
+      () =>
+        assembleWithSystem([
+          input.systemLayerProjectionIds[0]!,
+          input.systemLayerProjectionIds[1]!,
+          wrongSystemGeneration.layerId,
+        ]),
+      /system layer generations are inconsistent/,
+    );
+    assert.equal(tableCount(value.database, 'context_branches'), 0);
+
+    const firstProjection = value.store.getEventMessageProjection(
+      input.messageProjectionIds[0]!,
+    )!;
+    value.database.exec('DROP TRIGGER context_world_events_no_update');
+    value.database
+      .prepare(
+        'UPDATE context_world_events SET event_kind = ? WHERE event_id = ?',
+      )
+      .run('derived:capsule', firstProjection.sourceEventId);
+    assert.throws(
+      () => assemble(input.messageProjectionIds),
+      /stored event message projection has invalid source/,
+    );
+    assert.equal(tableCount(value.database, 'context_branches'), 0);
   } finally {
     closeFixture(value);
   }
