@@ -1212,10 +1212,7 @@ function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
 function mapDarkIngressGeneration(
   row: DarkIngressGenerationRow,
 ): DarkIngressGenerationRecord {
-  const queueGeneration = generation(
-    'queueGeneration',
-    row.queue_generation,
-  );
+  const queueGeneration = generation('queueGeneration', row.queue_generation);
   const firstAdmissibleSequence = generation(
     'firstAdmissibleSequence',
     row.first_admissible_sequence,
@@ -1234,13 +1231,12 @@ function mapDarkIngressAdmission(
   row: DarkIngressAdmissionRow,
 ): DarkIngressAdmissionRecord {
   if (row.wake_class !== 'text_user_turn') {
-    throw new Error(`stored dark ingress admission is invalid: ${row.event_id}`);
+    throw new Error(
+      `stored dark ingress admission is invalid: ${row.event_id}`,
+    );
   }
   const sourceSequence = generation('sourceSequence', row.source_sequence);
-  const queueGeneration = generation(
-    'queueGeneration',
-    row.queue_generation,
-  );
+  const queueGeneration = generation('queueGeneration', row.queue_generation);
   const messageRendererGeneration = generation(
     'messageRendererGeneration',
     row.message_renderer_generation,
@@ -1250,7 +1246,9 @@ function mapDarkIngressAdmission(
     queueGeneration < 1 ||
     messageRendererGeneration < 1
   ) {
-    throw new Error(`stored dark ingress admission is invalid: ${row.event_id}`);
+    throw new Error(
+      `stored dark ingress admission is invalid: ${row.event_id}`,
+    );
   }
   return {
     eventId: eventId(row.event_id),
@@ -1679,8 +1677,7 @@ export class ContextGraphStore {
         break;
       }
       if (
-        admission.messageRendererGeneration !==
-        first.messageRendererGeneration
+        admission.messageRendererGeneration !== first.messageRendererGeneration
       ) {
         stopReason = 'renderer_boundary';
         break;
@@ -1775,9 +1772,8 @@ export class ContextGraphStore {
             `context dark ingress admission conflict: ${input.event.eventId}`,
           );
         }
-        const existingGeneration = this.getDarkIngressGeneration(
-          queueGeneration,
-        );
+        const existingGeneration =
+          this.getDarkIngressGeneration(queueGeneration);
         if (
           !existingGeneration ||
           existingGeneration.activationEpoch !== expectedActivationEpoch ||
@@ -2858,177 +2854,192 @@ export class ContextGraphStore {
       input.expectedHeadRevision,
     );
     const assembledAt = timestamp('assembledAt', input.assembledAt);
-    return transaction(this.database, () => {
-      const activation = this.getActivationState();
-      if (
-        activation.mode !== 'dark' ||
-        activation.epoch !== expectedActivationEpoch
-      ) {
-        throw new StaleActivationStateError(expectedActivationEpoch);
-      }
+    return transaction(this.database, () =>
+      this.assembleDarkLocalBranchRecordsInTransaction(
+        input,
+        expectedActivationEpoch,
+        expectedHeadRevision,
+        assembledAt,
+      ),
+    );
+  }
 
-      const messageProjectionIds = [...input.messageProjectionIds];
-      if (
-        messageProjectionIds.length < 1 ||
-        messageProjectionIds.length > 4096 ||
-        new Set(messageProjectionIds).size !== messageProjectionIds.length
-      ) {
-        throw new Error(
-          'dark local branch assembly requires unique local message projections',
-        );
-      }
-      const messageProjections = messageProjectionIds.map((projectionId) => {
-        const projection = this.getEventMessageProjection(projectionId);
-        if (!projection) {
-          throw new Error(
-            'dark local branch message projection is missing: ' + projectionId,
-          );
-        }
-        return projection;
-      });
-      const localEvents = messageProjections.map((projection) => {
-        const source = this.getWorldEvent(projection.sourceEventId);
-        if (
-          !source ||
-          source.worldId !== input.worldId ||
-          projection.worldId !== input.worldId ||
-          !source.kind.startsWith('inbound:')
-        ) {
-          throw new Error(
-            'dark local branch message lineage is invalid: ' +
-              projection.projectionId,
-          );
-        }
-        return source;
-      });
-      this.validateLocalBranchRequestEventOrder(localEvents);
-      const messageRendererGenerations = new Set(
-        messageProjections.map((projection) => projection.rendererGeneration),
-      );
-      if (messageRendererGenerations.size !== 1) {
-        throw new Error(
-          'dark local branch message renderer generation is inconsistent',
-        );
-      }
-      const messageRendererGeneration =
-        messageProjections[0]!.rendererGeneration;
+  private assembleDarkLocalBranchRecordsInTransaction(
+    input: {
+      expectedActivationEpoch: number;
+      expectedHeadRevision: number;
+      worldId: WorldId;
+      branchId: BranchId;
+      messageProjectionIds: readonly EventMessageProjectionId[];
+      systemLayerProjectionIds: readonly SystemLayerProjectionId[];
+      assembledAt: number;
+    },
+    expectedActivationEpoch: number,
+    expectedHeadRevision: number,
+    assembledAt: number,
+  ): DarkLocalBranchAssemblyRecord {
+    const activation = this.getActivationState();
+    if (
+      activation.mode !== 'dark' ||
+      activation.epoch !== expectedActivationEpoch
+    ) {
+      throw new StaleActivationStateError(expectedActivationEpoch);
+    }
 
-      const systemLayerProjectionIds = [...input.systemLayerProjectionIds];
-      if (
-        systemLayerProjectionIds.length < 1 ||
-        systemLayerProjectionIds.length > 64 ||
-        new Set(systemLayerProjectionIds).size !==
-          systemLayerProjectionIds.length
-      ) {
+    const messageProjectionIds = [...input.messageProjectionIds];
+    if (
+      messageProjectionIds.length < 1 ||
+      messageProjectionIds.length > 4096 ||
+      new Set(messageProjectionIds).size !== messageProjectionIds.length
+    ) {
+      throw new Error(
+        'dark local branch assembly requires unique local message projections',
+      );
+    }
+    const messageProjections = messageProjectionIds.map((projectionId) => {
+      const projection = this.getEventMessageProjection(projectionId);
+      if (!projection) {
         throw new Error(
-          'dark local branch system layer references are invalid',
+          'dark local branch message projection is missing: ' + projectionId,
         );
       }
-      const systemLayers = systemLayerProjectionIds.map((layerId) => {
-        const layer = this.getSystemLayerProjection(layerId);
-        if (!layer) {
-          throw new Error(
-            'dark local branch system layer is missing: ' + layerId,
-          );
-        }
-        return layer;
-      });
-      const systemRendererGenerations = new Set(
-        systemLayers.map((layer) => layer.rendererGeneration),
-      );
-      const policyGenerations = new Set(
-        systemLayers.map((layer) => layer.policyGeneration),
-      );
-      if (
-        systemRendererGenerations.size !== 1 ||
-        policyGenerations.size !== 1
-      ) {
-        throw new Error(
-          'dark local branch system layer generations are inconsistent',
-        );
-      }
-      const systemRendererGeneration = systemLayers[0]!.rendererGeneration;
-      const policyGeneration = systemLayers[0]!.policyGeneration;
-      this.validateLocalBranchRequestSystemLayers({
-        worldId: input.worldId,
-        rendererGeneration: systemRendererGeneration,
-        policyGeneration,
-        layerIds: systemLayerProjectionIds,
-      });
-
-      const authorityRow = this.database
-        .prepare(
-          'SELECT COALESCE(MAX(authority_epoch), 0) AS maximum FROM context_branches',
-        )
-        .get() as { maximum: number };
-      if (
-        !Number.isSafeInteger(authorityRow.maximum) ||
-        authorityRow.maximum < 0 ||
-        authorityRow.maximum >= Number.MAX_SAFE_INTEGER
-      ) {
-        throw new Error('dark local branch authority state is invalid');
-      }
-      const authorityEpoch = authorityRow.maximum + 1;
-      const opened = this.beginCoordinatedBranchInTransaction({
-        branchId: input.branchId,
-        worldId: input.worldId,
-        expectedRevision: expectedHeadRevision,
-        authorityEpoch,
-        startedAt: assembledAt,
-      });
-      const viewManifest = createViewManifest({
-        branchId: opened.branch.branchId,
-        worldId: opened.branch.worldId,
-        parentBranchId: opened.branch.parentBranchId,
-        authorityEpoch: opened.branch.authorityEpoch,
-        eventIds: localEvents.map((event) => event.eventId),
-        sharedEventIds: [],
-        policyGeneration,
-      });
-      const canonicalManifestId = manifestId('manifest:' + viewManifest.hash);
-      const manifest = this.createManifestInTransaction({
-        manifestId: canonicalManifestId,
-        branchId: opened.branch.branchId,
-        worldId: opened.branch.worldId,
-        manifest: viewManifest,
-        projectionGeneration: messageRendererGeneration,
-        shareGrantIds: [],
-        createdAt: assembledAt,
-      });
-      const requestView = this.createLocalBranchRequestViewInTransaction({
-        branchId: opened.branch.branchId,
-        worldId: opened.branch.worldId,
-        manifestId: manifest.manifestId,
-        systemRendererGeneration,
-        systemLayerProjectionIds,
-        messageProjectionIds,
-        createdAt: assembledAt,
-      });
-      assertLocalBranchRequestContentFits([
-        ...systemLayers.map((layer) => layer.content),
-        ...messageProjections.map((projection) => projection.message.content),
-      ]);
-      const request = buildMaterializedLocalBranchRequest({
-        requestViewId: requestView.requestViewId,
-        messages: [
-          {
-            role: 'system',
-            content: systemLayers.map((layer) => layer.content).join(''),
-          },
-          ...messageProjections.map((projection) => ({
-            role: projection.message.role,
-            content: projection.message.content,
-          })),
-        ],
-      });
-      return {
-        branch: opened.branch,
-        start: opened.start,
-        manifest,
-        requestView,
-        request,
-      };
+      return projection;
     });
+    const localEvents = messageProjections.map((projection) => {
+      const source = this.getWorldEvent(projection.sourceEventId);
+      if (
+        !source ||
+        source.worldId !== input.worldId ||
+        projection.worldId !== input.worldId ||
+        !source.kind.startsWith('inbound:')
+      ) {
+        throw new Error(
+          'dark local branch message lineage is invalid: ' +
+            projection.projectionId,
+        );
+      }
+      return source;
+    });
+    this.validateLocalBranchRequestEventOrder(localEvents);
+    const messageRendererGenerations = new Set(
+      messageProjections.map((projection) => projection.rendererGeneration),
+    );
+    if (messageRendererGenerations.size !== 1) {
+      throw new Error(
+        'dark local branch message renderer generation is inconsistent',
+      );
+    }
+    const messageRendererGeneration = messageProjections[0]!.rendererGeneration;
+
+    const systemLayerProjectionIds = [...input.systemLayerProjectionIds];
+    if (
+      systemLayerProjectionIds.length < 1 ||
+      systemLayerProjectionIds.length > 64 ||
+      new Set(systemLayerProjectionIds).size !== systemLayerProjectionIds.length
+    ) {
+      throw new Error('dark local branch system layer references are invalid');
+    }
+    const systemLayers = systemLayerProjectionIds.map((layerId) => {
+      const layer = this.getSystemLayerProjection(layerId);
+      if (!layer) {
+        throw new Error(
+          'dark local branch system layer is missing: ' + layerId,
+        );
+      }
+      return layer;
+    });
+    const systemRendererGenerations = new Set(
+      systemLayers.map((layer) => layer.rendererGeneration),
+    );
+    const policyGenerations = new Set(
+      systemLayers.map((layer) => layer.policyGeneration),
+    );
+    if (systemRendererGenerations.size !== 1 || policyGenerations.size !== 1) {
+      throw new Error(
+        'dark local branch system layer generations are inconsistent',
+      );
+    }
+    const systemRendererGeneration = systemLayers[0]!.rendererGeneration;
+    const policyGeneration = systemLayers[0]!.policyGeneration;
+    this.validateLocalBranchRequestSystemLayers({
+      worldId: input.worldId,
+      rendererGeneration: systemRendererGeneration,
+      policyGeneration,
+      layerIds: systemLayerProjectionIds,
+    });
+
+    const authorityRow = this.database
+      .prepare(
+        'SELECT COALESCE(MAX(authority_epoch), 0) AS maximum FROM context_branches',
+      )
+      .get() as { maximum: number };
+    if (
+      !Number.isSafeInteger(authorityRow.maximum) ||
+      authorityRow.maximum < 0 ||
+      authorityRow.maximum >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error('dark local branch authority state is invalid');
+    }
+    const authorityEpoch = authorityRow.maximum + 1;
+    const opened = this.beginCoordinatedBranchInTransaction({
+      branchId: input.branchId,
+      worldId: input.worldId,
+      expectedRevision: expectedHeadRevision,
+      authorityEpoch,
+      startedAt: assembledAt,
+    });
+    const viewManifest = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: opened.branch.worldId,
+      parentBranchId: opened.branch.parentBranchId,
+      authorityEpoch: opened.branch.authorityEpoch,
+      eventIds: localEvents.map((event) => event.eventId),
+      sharedEventIds: [],
+      policyGeneration,
+    });
+    const canonicalManifestId = manifestId('manifest:' + viewManifest.hash);
+    const manifest = this.createManifestInTransaction({
+      manifestId: canonicalManifestId,
+      branchId: opened.branch.branchId,
+      worldId: opened.branch.worldId,
+      manifest: viewManifest,
+      projectionGeneration: messageRendererGeneration,
+      shareGrantIds: [],
+      createdAt: assembledAt,
+    });
+    const requestView = this.createLocalBranchRequestViewInTransaction({
+      branchId: opened.branch.branchId,
+      worldId: opened.branch.worldId,
+      manifestId: manifest.manifestId,
+      systemRendererGeneration,
+      systemLayerProjectionIds,
+      messageProjectionIds,
+      createdAt: assembledAt,
+    });
+    assertLocalBranchRequestContentFits([
+      ...systemLayers.map((layer) => layer.content),
+      ...messageProjections.map((projection) => projection.message.content),
+    ]);
+    const request = buildMaterializedLocalBranchRequest({
+      requestViewId: requestView.requestViewId,
+      messages: [
+        {
+          role: 'system',
+          content: systemLayers.map((layer) => layer.content).join(''),
+        },
+        ...messageProjections.map((projection) => ({
+          role: projection.message.role,
+          content: projection.message.content,
+        })),
+      ],
+    });
+    return {
+      branch: opened.branch,
+      start: opened.start,
+      manifest,
+      requestView,
+      request,
+    };
   }
 
   beginCoordinatedBranch(input: {
