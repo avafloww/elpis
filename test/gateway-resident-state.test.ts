@@ -264,6 +264,10 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
     ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_completed_at;
     ALTER TABLE worker_sessions DROP COLUMN runtime_cleanup_error;
     DROP TRIGGER gateway_resident_state_rotation_proposal_guard;
+    DROP TRIGGER context_scoped_runtime_contract_artifacts_identity_conflict;
+    DROP TRIGGER context_scoped_runtime_contract_artifacts_no_delete;
+    DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
+    DROP TABLE context_scoped_runtime_contract_artifacts;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component='core'
@@ -283,7 +287,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0038-context-system-layer-approval-sources',
           '0039-context-system-profiles',
           '0040-context-system-profile-request-view-bindings',
-          '0041-context-dark-pending-profile-binding'
+          '0041-context-dark-pending-profile-binding',
+          '0042-context-scoped-runtime-contract-artifact'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

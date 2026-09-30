@@ -10,6 +10,10 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
+import {
+  SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1,
+  SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
+} from '../context/scoped-system.js';
 import { runComponentMigrations } from './migrations.js';
 import {
   migrateMindIds,
@@ -25,7 +29,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 41;
+const SCHEMA_VERSION = 42;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3085,6 +3089,68 @@ export function runMigrations(db: DatabaseSync): void {
               SELECT RAISE(ABORT, 'context dark pending branch attempt lacks profile binding');
             END;
         `);
+      },
+    },
+    {
+      name: '0042-context-scoped-runtime-contract-artifact',
+      checksum: SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
+      up: (database) => {
+        const artifact = SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1;
+        database.exec(`
+          CREATE TABLE context_scoped_runtime_contract_artifacts (
+            artifact_id                 TEXT PRIMARY KEY,
+            schema_version              INTEGER NOT NULL UNIQUE CHECK (schema_version >= 1),
+            system_renderer_generation  INTEGER NOT NULL CHECK (system_renderer_generation >= 1),
+            policy_generation           INTEGER NOT NULL CHECK (policy_generation >= 1),
+            source_kind                 TEXT NOT NULL CHECK (source_kind = 'authored_scoped_contract'),
+            source_hash                 TEXT NOT NULL CHECK (length(source_hash) = 64),
+            content_text                TEXT NOT NULL,
+            content_hash                TEXT NOT NULL CHECK (length(content_hash) = 64),
+            content_bytes               INTEGER NOT NULL CHECK (content_bytes >= 0),
+            introduced_by_migration     TEXT NOT NULL UNIQUE
+          );
+          CREATE TRIGGER context_scoped_runtime_contract_artifacts_no_update
+            BEFORE UPDATE ON context_scoped_runtime_contract_artifacts
+            BEGIN
+              SELECT RAISE(ABORT, 'scoped runtime contract artifacts are immutable');
+            END;
+          CREATE TRIGGER context_scoped_runtime_contract_artifacts_no_delete
+            BEFORE DELETE ON context_scoped_runtime_contract_artifacts
+            BEGIN
+              SELECT RAISE(ABORT, 'scoped runtime contract artifacts are immutable');
+            END;
+          CREATE TRIGGER context_scoped_runtime_contract_artifacts_identity_conflict
+            BEFORE INSERT ON context_scoped_runtime_contract_artifacts
+            WHEN EXISTS (
+              SELECT 1 FROM context_scoped_runtime_contract_artifacts
+              WHERE artifact_id = NEW.artifact_id
+                 OR schema_version = NEW.schema_version
+                 OR introduced_by_migration = NEW.introduced_by_migration
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'scoped runtime contract artifact identity conflict');
+            END;
+        `);
+        database
+          .prepare(
+            `INSERT INTO context_scoped_runtime_contract_artifacts(
+               artifact_id, schema_version, system_renderer_generation,
+               policy_generation, source_kind, source_hash, content_text,
+               content_hash, content_bytes, introduced_by_migration
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            artifact.artifactId,
+            artifact.schemaVersion,
+            artifact.systemRendererGeneration,
+            artifact.policyGeneration,
+            artifact.sourceKind,
+            artifact.sourceHash,
+            artifact.content,
+            artifact.contentHash,
+            artifact.contentBytes,
+            artifact.introducedByMigration,
+          );
       },
     },
   ]);

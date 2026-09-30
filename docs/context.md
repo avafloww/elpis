@@ -40,6 +40,8 @@ Schema v40 adds an inert immutable companion receipt that binds one existing dar
 
 Schema v41 makes that binding a durable prerequisite for every new dark pending-attempt receipt. Migration refuses an existing attempt whose request view, world, and activation epoch lack an exact binding instead of grandfathering ambiguous provenance. A database insert guard enforces the same tuple for future attempts, and typed rereads fail closed if persisted state is later corrupted. This adds no runtime caller, runnable request, provider dispatch, effect authority, activation, or continuation change.
 
+Schema v42 seeds one immutable, content-addressed scoped runtime-contract artifact whose bytes are newly authored for graph branches rather than extracted from the legacy mixed prompt. The contract is world-scoped, explicit-share-only, and tool-free; it states that prompt text grants no send or effect authority and does not import legacy memory, focus, people records, dynamic cards, or host capabilities. Its migration checksum is bound to the exact artifact identity, and a typed reader rejects missing or changed bytes. The artifact is source evidence only: it creates no system-layer projection, approval, authorization, profile, world head, branch, provider request, effect authority, activation, or runtime caller.
+
 ## Message layers
 
 A request can contain:

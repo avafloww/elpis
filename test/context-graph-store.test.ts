@@ -5,6 +5,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createViewManifest } from '../src/context-graph.js';
+import { SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1 } from '../src/context/scoped-system.js';
+import { buildPromptProjection } from '../src/llm/prompt.js';
 import {
   assembleDarkLocalBranch,
   assembleNextDarkPendingBranch,
@@ -56,6 +58,121 @@ function closeFixture(value: {
   value.database.close();
   fs.rmSync(value.directory, { recursive: true, force: true });
 }
+
+test('scoped runtime contract artifact is exact, independent from legacy prompt inputs, and immutable', () => {
+  const value = fixture();
+  try {
+    const artifact = value.store.getScopedRuntimeContractArtifact();
+    assert.deepEqual(artifact, SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1);
+    const legacy = buildPromptProjection({
+      soul: 'SOUL_PROMOTION_CANARY',
+      memory: 'MEMORY_PROMOTION_CANARY',
+      now: 'NOW_PROMOTION_CANARY',
+      harnessRoot: '/example/harness',
+      dataDirectory: '/example/data',
+    });
+    for (const canary of [
+      'SOUL_PROMOTION_CANARY',
+      'MEMORY_PROMOTION_CANARY',
+      'NOW_PROMOTION_CANARY',
+    ]) {
+      assert.ok(legacy.content.includes(canary));
+      assert.ok(!artifact.content.includes(canary));
+    }
+    const lifecycleBefore = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_world_events) AS events,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_dark_pending_branch_attempts) AS attempts`,
+      )
+      .get();
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_scoped_runtime_contract_artifacts
+             SET content_text = 'changed' WHERE artifact_id = ?`,
+          )
+          .run(artifact.artifactId),
+      /scoped runtime contract artifacts are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'DELETE FROM context_scoped_runtime_contract_artifacts WHERE artifact_id = ?',
+          )
+          .run(artifact.artifactId),
+      /scoped runtime contract artifacts are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT OR REPLACE INTO context_scoped_runtime_contract_artifacts(
+               artifact_id, schema_version, system_renderer_generation,
+               policy_generation, source_kind, source_hash, content_text,
+               content_hash, content_bytes, introduced_by_migration
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            artifact.artifactId,
+            artifact.schemaVersion,
+            artifact.systemRendererGeneration,
+            artifact.policyGeneration,
+            artifact.sourceKind,
+            artifact.sourceHash,
+            artifact.content,
+            artifact.contentHash,
+            artifact.contentBytes,
+            artifact.introducedByMigration,
+          ),
+      /scoped runtime contract artifact identity conflict/,
+    );
+    assert.deepEqual(value.store.getScopedRuntimeContractArtifact(), artifact);
+    assert.deepEqual(
+      value.database
+        .prepare(
+          `SELECT
+             (SELECT count(*) FROM context_world_events) AS events,
+             (SELECT count(*) FROM context_branches) AS branches,
+             (SELECT count(*) FROM context_system_layer_projections) AS layers,
+             (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+             (SELECT count(*) FROM context_system_profiles) AS profiles,
+             (SELECT count(*) FROM context_dark_pending_branch_attempts) AS attempts`,
+        )
+        .get(),
+      lifecycleBefore,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('scoped runtime contract reader rejects stored byte drift', () => {
+  const value = fixture();
+  try {
+    value.database.exec(
+      'DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update',
+    );
+    value.database
+      .prepare(
+        `UPDATE context_scoped_runtime_contract_artifacts
+         SET content_text = content_text || 'drift'`,
+      )
+      .run();
+    assert.throws(
+      () => value.store.getScopedRuntimeContractArtifact(),
+      /scoped runtime contract artifact is missing or invalid/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
 
 test('world message projections materialize only exact ordered local text', () => {
   const value = fixture();
@@ -3613,10 +3730,17 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_scoped_runtime_contract_artifacts_identity_conflict;
+      DROP TRIGGER context_scoped_runtime_contract_artifacts_no_delete;
+      DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
+      DROP TABLE context_scoped_runtime_contract_artifacts;
       DROP TRIGGER elpis_migrations_no_delete;
       DELETE FROM elpis_migrations
         WHERE component = 'core'
-          AND name = '0041-context-dark-pending-profile-binding';
+          AND name IN (
+            '0041-context-dark-pending-profile-binding',
+            '0042-context-scoped-runtime-contract-artifact'
+          );
       PRAGMA user_version = 40;
     `);
     assert.throws(

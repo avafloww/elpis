@@ -13,6 +13,10 @@ import {
   type ViewManifest,
 } from '../context-graph.js';
 import {
+  SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1,
+  type ScopedRuntimeContractArtifactV1,
+} from '../context/scoped-system.js';
+import {
   assertLocalBranchRequestContentFits,
   buildMaterializedLocalBranchRequest,
   type MaterializedLocalBranchRequest,
@@ -1470,6 +1474,19 @@ interface EventMessageProjectionRow {
   created_at: number;
 }
 
+interface ScopedRuntimeContractArtifactRow {
+  artifact_id: string;
+  schema_version: number;
+  system_renderer_generation: number;
+  policy_generation: number;
+  source_kind: string;
+  source_hash: string;
+  content_text: string;
+  content_hash: string;
+  content_bytes: number;
+  introduced_by_migration: string;
+}
+
 interface SystemLayerProjectionRow {
   layer_id: string;
   layer_kind: string;
@@ -2086,6 +2103,32 @@ function mapEffect(row: EffectRow): EffectRecord {
  */
 export class ContextGraphStore {
   constructor(private readonly database: DatabaseSync) {}
+
+  getScopedRuntimeContractArtifact(): ScopedRuntimeContractArtifactV1 {
+    const expected = SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1;
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_scoped_runtime_contract_artifacts WHERE artifact_id = ?',
+      )
+      .get(expected.artifactId) as
+      | ScopedRuntimeContractArtifactRow
+      | undefined;
+    if (
+      !row ||
+      row.schema_version !== expected.schemaVersion ||
+      row.system_renderer_generation !== expected.systemRendererGeneration ||
+      row.policy_generation !== expected.policyGeneration ||
+      row.source_kind !== expected.sourceKind ||
+      row.source_hash !== expected.sourceHash ||
+      row.content_text !== expected.content ||
+      row.content_hash !== expected.contentHash ||
+      row.content_bytes !== expected.contentBytes ||
+      row.introduced_by_migration !== expected.introducedByMigration
+    ) {
+      throw new Error('scoped runtime contract artifact is missing or invalid');
+    }
+    return expected;
+  }
 
   appendWorldEvent(input: {
     eventId: EventId;
