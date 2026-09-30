@@ -182,6 +182,54 @@ export interface DarkInboundAdmissionReceipt {
   readonly admission: DarkIngressAdmissionRecord;
 }
 
+export interface DarkPendingInspectionItem {
+  readonly eventId: EventId;
+  readonly sourceSequence: number;
+  readonly projectionId: EventMessageProjectionId;
+}
+
+export type DarkPendingInspection =
+  | { readonly status: 'empty' }
+  | {
+      readonly status: 'blocked';
+      readonly reason: 'activation_mismatch';
+      readonly expectedActivationEpoch: number;
+      readonly actualMode: ContextGraphMode;
+      readonly actualActivationEpoch: number;
+    }
+  | {
+      readonly status: 'blocked';
+      readonly reason: 'generation_mismatch';
+      readonly eventId: EventId;
+      readonly worldId: WorldId;
+      readonly sourceSequence: number;
+      readonly expectedActivationEpoch: number;
+      readonly actualActivationEpoch: number;
+      readonly expectedQueueGeneration: number;
+      readonly actualQueueGeneration: number;
+    }
+  | {
+      readonly status: 'blocked';
+      readonly reason: 'projection_unavailable';
+      readonly eventId: EventId;
+      readonly worldId: WorldId;
+      readonly sourceSequence: number;
+      readonly messageRendererGeneration: number;
+    }
+  | {
+      readonly status: 'ready';
+      readonly worldId: WorldId;
+      readonly messageRendererGeneration: number;
+      readonly items: readonly DarkPendingInspectionItem[];
+      readonly stopReason:
+        | 'end'
+        | 'limit'
+        | 'world_boundary'
+        | 'renderer_boundary'
+        | 'generation_boundary'
+        | 'projection_unavailable';
+    };
+
 export interface ProjectedUserMessage {
   readonly role: 'user';
   readonly content: string;
@@ -1023,6 +1071,13 @@ interface DarkIngressAdmissionRow {
   admitted_at: number;
 }
 
+interface DarkPendingInspectionRow extends DarkIngressAdmissionRow {
+  projection_id: string | null;
+  projection_source_event_id: string | null;
+  projection_world_id: string | null;
+  projection_renderer_generation: number | null;
+}
+
 interface EventMessageProjectionRow {
   projection_id: string;
   source_event_id: string;
@@ -1482,6 +1537,172 @@ export class ContextGraphStore {
       )
       .get(id) as DarkIngressAdmissionRow | undefined;
     return row ? mapDarkIngressAdmission(row) : null;
+  }
+
+  inspectNextDarkPendingBatch(input: {
+    expectedActivationEpoch: number;
+    queueGeneration: number;
+    maxEvents: number;
+  }): DarkPendingInspection {
+    const expectedActivationEpoch = generation(
+      'expectedActivationEpoch',
+      input.expectedActivationEpoch,
+    );
+    const queueGeneration = generation(
+      'queueGeneration',
+      input.queueGeneration,
+    );
+    const maxEvents = generation('maxEvents', input.maxEvents);
+    if (queueGeneration < 1) {
+      throw new Error('queueGeneration must be positive');
+    }
+    if (maxEvents < 1 || maxEvents > 1_024) {
+      throw new Error('maxEvents must be between 1 and 1024');
+    }
+
+    const activation = this.getActivationState();
+    if (
+      activation.mode !== 'dark' ||
+      activation.epoch !== expectedActivationEpoch
+    ) {
+      return {
+        status: 'blocked',
+        reason: 'activation_mismatch',
+        expectedActivationEpoch,
+        actualMode: activation.mode,
+        actualActivationEpoch: activation.epoch,
+      };
+    }
+
+    const rows = this.database
+      .prepare(
+        `SELECT
+           a.event_id,
+           a.world_id,
+           a.source_sequence,
+           a.activation_epoch,
+           a.queue_generation,
+           a.wake_class,
+           a.message_renderer_generation,
+           a.admitted_at,
+           p.projection_id,
+           p.source_event_id AS projection_source_event_id,
+           p.world_id AS projection_world_id,
+           p.renderer_generation AS projection_renderer_generation
+         FROM context_dark_ingress_admissions AS a
+         LEFT JOIN context_event_message_projections AS p
+           ON p.source_event_id = a.event_id
+          AND p.renderer_generation = a.message_renderer_generation
+         ORDER BY a.source_sequence ASC
+         LIMIT ?`,
+      )
+      .all(maxEvents + 1) as unknown as DarkPendingInspectionRow[];
+    if (rows.length === 0) return { status: 'empty' };
+
+    const first = mapDarkIngressAdmission(rows[0]!);
+    if (
+      first.activationEpoch !== expectedActivationEpoch ||
+      first.queueGeneration !== queueGeneration
+    ) {
+      return {
+        status: 'blocked',
+        reason: 'generation_mismatch',
+        eventId: first.eventId,
+        worldId: first.worldId,
+        sourceSequence: first.sourceSequence,
+        expectedActivationEpoch,
+        actualActivationEpoch: first.activationEpoch,
+        expectedQueueGeneration: queueGeneration,
+        actualQueueGeneration: first.queueGeneration,
+      };
+    }
+
+    const projectionIdFor = (
+      row: DarkPendingInspectionRow,
+      admission: DarkIngressAdmissionRecord,
+    ): EventMessageProjectionId | null => {
+      if (
+        row.projection_id === null &&
+        row.projection_source_event_id === null &&
+        row.projection_world_id === null &&
+        row.projection_renderer_generation === null
+      ) {
+        return null;
+      }
+      if (
+        row.projection_id === null ||
+        row.projection_source_event_id !== admission.eventId ||
+        row.projection_world_id !== admission.worldId ||
+        row.projection_renderer_generation !==
+          admission.messageRendererGeneration
+      ) {
+        throw new Error(
+          `stored dark ingress projection metadata is invalid: ${admission.eventId}`,
+        );
+      }
+      return eventMessageProjectionId(row.projection_id);
+    };
+
+    const firstProjectionId = projectionIdFor(rows[0]!, first);
+    if (!firstProjectionId) {
+      return {
+        status: 'blocked',
+        reason: 'projection_unavailable',
+        eventId: first.eventId,
+        worldId: first.worldId,
+        sourceSequence: first.sourceSequence,
+        messageRendererGeneration: first.messageRendererGeneration,
+      };
+    }
+
+    const items: DarkPendingInspectionItem[] = [];
+    let stopReason: Extract<
+      DarkPendingInspection,
+      { status: 'ready' }
+    >['stopReason'] = 'end';
+    for (let index = 0; index < rows.length; index += 1) {
+      if (index === maxEvents) {
+        stopReason = 'limit';
+        break;
+      }
+      const row = rows[index]!;
+      const admission = mapDarkIngressAdmission(row);
+      if (
+        admission.activationEpoch !== expectedActivationEpoch ||
+        admission.queueGeneration !== queueGeneration
+      ) {
+        stopReason = 'generation_boundary';
+        break;
+      }
+      if (admission.worldId !== first.worldId) {
+        stopReason = 'world_boundary';
+        break;
+      }
+      if (
+        admission.messageRendererGeneration !==
+        first.messageRendererGeneration
+      ) {
+        stopReason = 'renderer_boundary';
+        break;
+      }
+      const projectionId = projectionIdFor(row, admission);
+      if (!projectionId) {
+        stopReason = 'projection_unavailable';
+        break;
+      }
+      items.push({
+        eventId: admission.eventId,
+        sourceSequence: admission.sourceSequence,
+        projectionId,
+      });
+    }
+    return {
+      status: 'ready',
+      worldId: first.worldId,
+      messageRendererGeneration: first.messageRendererGeneration,
+      items,
+      stopReason,
+    };
   }
 
   admitDarkInboundEvent(input: {

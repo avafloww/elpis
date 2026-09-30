@@ -28,6 +28,8 @@ The dark local branch assembler rehearses the complete reservation boundary with
 
 Schema v35 adds an inert dark-ingress admission substrate. Migration creates an immutable queue-generation watermark at the first event sequence that did not exist before v35, so older graph events cannot silently become pending work. The store can atomically append one new immutable inbound event and a content-free admission bound to its exact world, source sequence, dark activation epoch, queue generation, wake class, renderer generation, and timestamp. Exact retries return the existing record; conflicting retries, retroactive admission of an existing event, stale activation, non-inbound sources, or late admission failure reject without leaving a new event behind. No runtime ingress, queue selector, Agent loop, branch assembler, provider, effect, or completion path calls this API yet.
 
+The store can also inspect the globally earliest admitted frontier without mutating it. Inspection reads only admission and projection identity metadata, requires the exact dark activation epoch and queue generation, and returns at most one contiguous same-world, same-renderer prefix. A missing exact projection blocks the frontier rather than allowing later work to pass; world, renderer, generation, and caller limits are explicit stop reasons. It never reads or returns event payloads, rendered message bytes, or hashes, and it does not claim, consume, reserve, assemble, call a provider, or issue an effect. No runtime path calls the inspector yet.
+
 ## Message layers
 
 A request can contain:

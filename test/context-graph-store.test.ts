@@ -2941,3 +2941,439 @@ test('dark ingress admission fails closed on stale state and immutable lineage',
     closeFixture(value);
   }
 });
+
+function admitPendingFixture(
+  value: ReturnType<typeof fixture>,
+  input: {
+    id: string;
+    world: string;
+    rendererGeneration: number;
+    queueGeneration?: number;
+    content: string;
+    time: number;
+    project?: boolean;
+    projectionRendererGeneration?: number;
+  },
+) {
+  const receipt = value.store.admitDarkInboundEvent({
+    expectedActivationEpoch: 0,
+    queueGeneration: input.queueGeneration ?? 1,
+    wakeClass: 'text_user_turn',
+    messageRendererGeneration: input.rendererGeneration,
+    event: {
+      eventId: eventId(input.id),
+      worldId: worldId(input.world),
+      kind: 'inbound:signal',
+      payload: { text: input.content },
+      occurredAt: input.time,
+      recordedAt: input.time,
+    },
+    admittedAt: input.time,
+  });
+  const projection =
+    input.project === false
+      ? null
+      : value.store.createEventMessageProjection({
+          sourceEventId: receipt.event.eventId,
+          sourceSequence: receipt.event.sequence,
+          worldId: receipt.event.worldId,
+          rendererGeneration:
+            input.projectionRendererGeneration ?? input.rendererGeneration,
+          message: {
+            role: 'user',
+            content: `<incoming>${input.content}</incoming>`,
+          },
+          createdAt: input.time,
+        });
+  return { receipt, projection };
+}
+
+test('dark pending inspection is bounded, read-only, and activation-gated', () => {
+  const value = fixture();
+  try {
+    const tables = [
+      'context_world_events',
+      'context_dark_ingress_admissions',
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_effects',
+      'context_continuation_advances',
+    ];
+    const before = Object.fromEntries(
+      tables.map((table) => [table, tableCount(value.database, table)]),
+    );
+    const activation = value.store.getActivationState();
+    const coordinator = value.store.getRootCoordinatorState();
+    const head = value.store.getContinuationHead();
+
+    assert.deepEqual(
+      value.store.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: 0,
+        queueGeneration: 1,
+        maxEvents: 4,
+      }),
+      { status: 'empty' },
+    );
+    assert.deepEqual(
+      value.store.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: 1,
+        queueGeneration: 1,
+        maxEvents: 4,
+      }),
+      {
+        status: 'blocked',
+        reason: 'activation_mismatch',
+        expectedActivationEpoch: 1,
+        actualMode: 'dark',
+        actualActivationEpoch: 0,
+      },
+    );
+    assert.throws(
+      () =>
+        value.store.inspectNextDarkPendingBatch({
+          expectedActivationEpoch: 0,
+          queueGeneration: 0,
+          maxEvents: 1,
+        }),
+      /queueGeneration must be positive/,
+    );
+    for (const maxEvents of [0, 1_025]) {
+      assert.throws(
+        () =>
+          value.store.inspectNextDarkPendingBatch({
+            expectedActivationEpoch: 0,
+            queueGeneration: 1,
+            maxEvents,
+          }),
+        /maxEvents must be between 1 and 1024/,
+      );
+    }
+    assert.deepEqual(
+      Object.fromEntries(
+        tables.map((table) => [table, tableCount(value.database, table)]),
+      ),
+      before,
+    );
+    assert.deepEqual(value.store.getActivationState(), activation);
+    assert.deepEqual(value.store.getRootCoordinatorState(), coordinator);
+    assert.deepEqual(value.store.getContinuationHead(), head);
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('dark pending inspection never skips an unrenderable frontier', () => {
+  const value = fixture();
+  try {
+    const first = admitPendingFixture(value, {
+      id: 'event:pending-frontier-a',
+      world: 'world:signal:pending-a',
+      rendererGeneration: 7,
+      content: 'FRONTIER_A_PRIVATE_CANARY',
+      time: 10,
+      project: false,
+    });
+    admitPendingFixture(value, {
+      id: 'event:pending-later-b',
+      world: 'world:signal:pending-b',
+      rendererGeneration: 7,
+      content: 'LATER_B_PRIVATE_CANARY',
+      time: 11,
+    });
+    const tables = [
+      'context_world_events',
+      'context_dark_ingress_admissions',
+      'context_event_message_projections',
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_effects',
+      'context_continuation_advances',
+    ];
+    const countsBefore = Object.fromEntries(
+      tables.map((table) => [table, tableCount(value.database, table)]),
+    );
+    const activationBefore = value.store.getActivationState();
+    const coordinatorBefore = value.store.getRootCoordinatorState();
+    const headBefore = value.store.getContinuationHead();
+    const blocked = value.store.inspectNextDarkPendingBatch({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+    });
+    assert.deepEqual(blocked, {
+      status: 'blocked',
+      reason: 'projection_unavailable',
+      eventId: first.receipt.event.eventId,
+      worldId: first.receipt.event.worldId,
+      sourceSequence: first.receipt.event.sequence,
+      messageRendererGeneration: 7,
+    });
+    assert.equal(JSON.stringify(blocked).includes('FRONTIER_A_PRIVATE_CANARY'), false);
+    assert.equal(JSON.stringify(blocked).includes('LATER_B_PRIVATE_CANARY'), false);
+    assert.deepEqual(
+      value.store.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: 0,
+        queueGeneration: 2,
+        maxEvents: 8,
+      }),
+      {
+        status: 'blocked',
+        reason: 'generation_mismatch',
+        eventId: first.receipt.event.eventId,
+        worldId: first.receipt.event.worldId,
+        sourceSequence: first.receipt.event.sequence,
+        expectedActivationEpoch: 0,
+        actualActivationEpoch: 0,
+        expectedQueueGeneration: 2,
+        actualQueueGeneration: 1,
+      },
+    );
+    assert.deepEqual(
+      Object.fromEntries(
+        tables.map((table) => [table, tableCount(value.database, table)]),
+      ),
+      countsBefore,
+    );
+    assert.deepEqual(value.store.getActivationState(), activationBefore);
+    assert.deepEqual(value.store.getRootCoordinatorState(), coordinatorBefore);
+    assert.deepEqual(value.store.getContinuationHead(), headBefore);
+  } finally {
+    closeFixture(value);
+  }
+
+  const wrongRenderer = fixture();
+  try {
+    const first = admitPendingFixture(wrongRenderer, {
+      id: 'event:pending-wrong-renderer',
+      world: 'world:signal:pending-wrong-renderer',
+      rendererGeneration: 4,
+      projectionRendererGeneration: 5,
+      content: 'WRONG_RENDERER_PRIVATE_CANARY',
+      time: 20,
+    });
+    assert.deepEqual(
+      wrongRenderer.store.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: 0,
+        queueGeneration: 1,
+        maxEvents: 8,
+      }),
+      {
+        status: 'blocked',
+        reason: 'projection_unavailable',
+        eventId: first.receipt.event.eventId,
+        worldId: first.receipt.event.worldId,
+        sourceSequence: first.receipt.event.sequence,
+        messageRendererGeneration: 4,
+      },
+    );
+  } finally {
+    closeFixture(wrongRenderer);
+  }
+});
+
+test('dark pending inspection returns only the contiguous same-world renderable prefix', () => {
+  const crossWorld = fixture();
+  try {
+    const a1 = admitPendingFixture(crossWorld, {
+      id: 'event:pending-a1',
+      world: 'world:signal:pending-prefix-a',
+      rendererGeneration: 3,
+      content: 'PREFIX_A1_PRIVATE_CANARY',
+      time: 30,
+    });
+    const a2 = admitPendingFixture(crossWorld, {
+      id: 'event:pending-a2',
+      world: 'world:signal:pending-prefix-a',
+      rendererGeneration: 3,
+      content: 'PREFIX_A2_PRIVATE_CANARY',
+      time: 31,
+    });
+    const b1 = admitPendingFixture(crossWorld, {
+      id: 'event:pending-b1',
+      world: 'world:signal:pending-prefix-b',
+      rendererGeneration: 3,
+      content: 'PREFIX_B1_PRIVATE_CANARY',
+      time: 32,
+    });
+    const a3 = admitPendingFixture(crossWorld, {
+      id: 'event:pending-a3',
+      world: 'world:signal:pending-prefix-a',
+      rendererGeneration: 3,
+      content: 'PREFIX_A3_PRIVATE_CANARY',
+      time: 33,
+    });
+    const ready = crossWorld.store.inspectNextDarkPendingBatch({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+    });
+    assert.deepEqual(ready, {
+      status: 'ready',
+      worldId: a1.receipt.event.worldId,
+      messageRendererGeneration: 3,
+      items: [
+        {
+          eventId: a1.receipt.event.eventId,
+          sourceSequence: a1.receipt.event.sequence,
+          projectionId: a1.projection!.projectionId,
+        },
+        {
+          eventId: a2.receipt.event.eventId,
+          sourceSequence: a2.receipt.event.sequence,
+          projectionId: a2.projection!.projectionId,
+        },
+      ],
+      stopReason: 'world_boundary',
+    });
+    assert.deepEqual(
+      crossWorld.store.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: 0,
+        queueGeneration: 1,
+        maxEvents: 1,
+      }),
+      {
+        status: 'ready',
+        worldId: a1.receipt.event.worldId,
+        messageRendererGeneration: 3,
+        items: [
+          {
+            eventId: a1.receipt.event.eventId,
+            sourceSequence: a1.receipt.event.sequence,
+            projectionId: a1.projection!.projectionId,
+          },
+        ],
+        stopReason: 'limit',
+      },
+    );
+    const serialized = JSON.stringify(ready);
+    for (const canary of [
+      'PREFIX_A1_PRIVATE_CANARY',
+      'PREFIX_A2_PRIVATE_CANARY',
+      'PREFIX_B1_PRIVATE_CANARY',
+      'PREFIX_A3_PRIVATE_CANARY',
+    ]) {
+      assert.equal(serialized.includes(canary), false);
+    }
+    assert.equal(serialized.includes(a1.receipt.event.eventId), true);
+    assert.equal(serialized.includes(a2.projection!.projectionId), true);
+    assert.equal(serialized.includes(b1.receipt.event.eventId), false);
+    assert.equal(serialized.includes(b1.projection!.projectionId), false);
+    assert.equal(serialized.includes(a3.receipt.event.eventId), false);
+    assert.equal(serialized.includes(a3.projection!.projectionId), false);
+  } finally {
+    closeFixture(crossWorld);
+  }
+
+  const rendererBoundary = fixture();
+  try {
+    admitPendingFixture(rendererBoundary, {
+      id: 'event:pending-renderer-1',
+      world: 'world:signal:pending-renderer',
+      rendererGeneration: 1,
+      content: 'RENDERER_ONE_PRIVATE_CANARY',
+      time: 40,
+    });
+    admitPendingFixture(rendererBoundary, {
+      id: 'event:pending-renderer-2',
+      world: 'world:signal:pending-renderer',
+      rendererGeneration: 2,
+      content: 'RENDERER_TWO_PRIVATE_CANARY',
+      time: 41,
+    });
+    const ready = rendererBoundary.store.inspectNextDarkPendingBatch({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+    });
+    assert.equal(ready.status, 'ready');
+    if (ready.status === 'ready') {
+      assert.equal(ready.items.length, 1);
+      assert.equal(ready.stopReason, 'renderer_boundary');
+    }
+  } finally {
+    closeFixture(rendererBoundary);
+  }
+
+  const generationBoundary = fixture();
+  try {
+    const first = admitPendingFixture(generationBoundary, {
+      id: 'event:pending-generation-1',
+      world: 'world:signal:pending-generation',
+      rendererGeneration: 2,
+      content: 'GENERATION_ONE_PRIVATE_CANARY',
+      time: 45,
+    });
+    generationBoundary.database
+      .prepare(
+        `INSERT INTO context_dark_ingress_generations(
+           queue_generation, first_admissible_sequence, activation_epoch
+         ) VALUES (?, ?, ?)`,
+      )
+      .run(2, 2, 0);
+    const second = admitPendingFixture(generationBoundary, {
+      id: 'event:pending-generation-2',
+      world: 'world:signal:pending-generation',
+      rendererGeneration: 2,
+      queueGeneration: 2,
+      content: 'GENERATION_TWO_PRIVATE_CANARY',
+      time: 46,
+    });
+    const secondId = second.receipt.event.eventId;
+    const ready = generationBoundary.store.inspectNextDarkPendingBatch({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+    });
+    assert.deepEqual(ready, {
+      status: 'ready',
+      worldId: first.receipt.event.worldId,
+      messageRendererGeneration: 2,
+      items: [
+        {
+          eventId: first.receipt.event.eventId,
+          sourceSequence: first.receipt.event.sequence,
+          projectionId: first.projection!.projectionId,
+        },
+      ],
+      stopReason: 'generation_boundary',
+    });
+    assert.equal(JSON.stringify(ready).includes(secondId), false);
+  } finally {
+    closeFixture(generationBoundary);
+  }
+
+  const unavailable = fixture();
+  try {
+    admitPendingFixture(unavailable, {
+      id: 'event:pending-projected',
+      world: 'world:signal:pending-unavailable',
+      rendererGeneration: 6,
+      content: 'PROJECTED_PRIVATE_CANARY',
+      time: 50,
+    });
+    admitPendingFixture(unavailable, {
+      id: 'event:pending-unprojected',
+      world: 'world:signal:pending-unavailable',
+      rendererGeneration: 6,
+      content: 'UNPROJECTED_PRIVATE_CANARY',
+      time: 51,
+      project: false,
+    });
+    const ready = unavailable.store.inspectNextDarkPendingBatch({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      maxEvents: 8,
+    });
+    assert.equal(ready.status, 'ready');
+    if (ready.status === 'ready') {
+      assert.equal(ready.items.length, 1);
+      assert.equal(ready.stopReason, 'projection_unavailable');
+    }
+  } finally {
+    closeFixture(unavailable);
+  }
+});
