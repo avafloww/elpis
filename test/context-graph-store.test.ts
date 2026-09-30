@@ -31,6 +31,7 @@ import {
   shareGrantId,
   shadowProjectionPlanId,
   shadowRequestObservationId,
+  systemLayerApprovalId,
   systemLayerProjectionId,
   worldId,
 } from '../src/store/context-graph.js';
@@ -4141,6 +4142,158 @@ test('atomic dark pending assembly rolls back when the attempt receipt fails', (
     assert.equal(
       tableCount(value.database, 'context_dark_ingress_admissions'),
       3,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('system layer approvals derive provenance and reject unsafe layers', () => {
+  const value = fixture();
+  try {
+    const world = worldId('world:signal:approval-fixture');
+    const createLayer = (input: {
+      kind: 'runtime_contract' | 'identity' | 'integrated_self' | 'world_policy' | 'legacy_memory';
+      visibility: 'global_contract' | 'integrated_self' | 'integrated_self_candidate' | 'world' | 'legacy_mixed';
+      worldId: ReturnType<typeof worldId> | null;
+      source: string;
+      sourceKind: string;
+    }) =>
+      value.store.createSystemLayerProjection({
+        kind: input.kind,
+        visibility: input.visibility,
+        worldId: input.worldId,
+        rendererGeneration: 1,
+        policyGeneration: 1,
+        sourceKind: input.sourceKind,
+        sourceHash: hashContextBytes(input.source),
+        content: `content:${input.source}`,
+        createdAt: 10,
+      });
+    const specs = [
+      {
+        layer: createLayer({ kind: 'runtime_contract', visibility: 'global_contract', worldId: null, source: 'approval-contract', sourceKind: 'authored_scoped_contract' }),
+        role: 'scoped_runtime_contract' as const,
+        basisRef: 'fixture:contract:v1',
+        basisKind: 'authored_scoped_contract',
+      },
+      {
+        layer: createLayer({ kind: 'identity', visibility: 'integrated_self', worldId: null, source: 'approval-identity', sourceKind: 'soul_snapshot' }),
+        role: 'identity' as const,
+        basisRef: 'fixture:identity:v1',
+        basisKind: 'soul_snapshot',
+      },
+      {
+        layer: createLayer({ kind: 'integrated_self', visibility: 'integrated_self', worldId: null, source: 'approval-self-delta', sourceKind: 'accepted_self_delta' }),
+        role: 'integrated_self' as const,
+        basisRef: 'fixture:self-delta:v1',
+        basisKind: 'accepted_self_delta',
+      },
+      {
+        layer: createLayer({ kind: 'world_policy', visibility: 'world', worldId: world, source: 'approval-policy', sourceKind: 'routing_policy' }),
+        role: 'world_policy' as const,
+        basisRef: 'fixture:routing-policy:v1',
+        basisKind: 'routing_policy',
+      },
+    ];
+    const approvals = specs.map((spec, index) =>
+      value.store.approveSystemLayer({
+        layerId: spec.layer.layerId,
+        role: spec.role,
+        basisRef: spec.basisRef,
+        approvalGeneration: 1,
+        approvedAt: 20 + index,
+      }),
+    );
+    approvals.forEach((approval, index) => {
+      assert.match(approval.approvalId, /^system-layer-approval:[0-9a-f]{64}$/);
+      assert.equal(approval.basisKind, specs[index].basisKind);
+      assert.equal(approval.basisHash, specs[index].layer.sourceHash);
+      assert.deepEqual(value.store.getSystemLayerApproval(approval.approvalId), approval);
+    });
+    assert.deepEqual(
+      value.store.approveSystemLayer({
+        layerId: specs[1].layer.layerId,
+        role: 'identity',
+        basisRef: specs[1].basisRef,
+        approvalGeneration: 1,
+        approvedAt: 21,
+      }),
+      approvals[1],
+    );
+    assert.throws(
+      () => value.store.approveSystemLayer({
+        layerId: specs[1].layer.layerId,
+        role: 'identity',
+        basisRef: 'fixture:identity:changed',
+        approvalGeneration: 1,
+        approvedAt: 21,
+      }),
+      /system layer approval identity conflict/,
+    );
+    assert.throws(
+      () => value.store.approveSystemLayer({
+        layerId: specs[1].layer.layerId,
+        role: 'identity',
+        basisRef: specs[1].basisRef,
+        approvalGeneration: 1,
+        approvedAt: 99,
+      }),
+      /system layer approval identity conflict/,
+    );
+    const unsafe = [
+      createLayer({ kind: 'identity', visibility: 'integrated_self_candidate', worldId: null, source: 'approval-candidate', sourceKind: 'soul_snapshot' }),
+      createLayer({ kind: 'legacy_memory', visibility: 'legacy_mixed', worldId: null, source: 'approval-legacy', sourceKind: 'authored_scoped_contract' }),
+    ];
+    for (const layer of unsafe) {
+      assert.throws(
+        () => value.store.approveSystemLayer({
+          layerId: layer.layerId,
+          role: 'identity',
+          basisRef: 'fixture:unsafe',
+          approvalGeneration: 1,
+          approvedAt: 30,
+        }),
+        /system layer approval role does not match layer scope/,
+      );
+    }
+    const wrongSource = createLayer({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      source: 'approval-wrong-source',
+      sourceKind: 'synthetic_fixture',
+    });
+    assert.throws(
+      () => value.store.approveSystemLayer({
+        layerId: wrongSource.layerId,
+        role: 'identity',
+        basisRef: 'fixture:wrong-source',
+        approvalGeneration: 1,
+        approvedAt: 30,
+      }),
+      /system layer approval role does not match layer scope/,
+    );
+    const corruptLayer = createLayer({ kind: 'runtime_contract', visibility: 'global_contract', worldId: null, source: 'approval-corrupt', sourceKind: 'authored_scoped_contract' });
+    const corruptId = systemLayerApprovalId(`system-layer-approval:${'f'.repeat(64)}`);
+    value.database.prepare(
+      `INSERT INTO context_system_layer_approvals(
+         approval_id, layer_id, approval_role, basis_kind, basis_ref,
+         basis_hash, approval_generation, approved_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      corruptId,
+      corruptLayer.layerId,
+      'scoped_runtime_contract',
+      'authored_scoped_contract',
+      'fixture:corrupt',
+      corruptLayer.sourceHash,
+      1,
+      31,
+    );
+    assert.throws(
+      () => value.store.getSystemLayerApproval(corruptId),
+      /stored system layer approval is invalid/,
     );
   } finally {
     closeFixture(value);

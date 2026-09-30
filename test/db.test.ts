@@ -55,13 +55,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 37, 'user_version bumped to 37');
+  assert.equal(v1, 38, 'user_version bumped to 38');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 37);
+  assert.equal(v2, 38);
   db.close();
 });
 
@@ -101,7 +101,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    37,
+    38,
   );
   db.close();
 });
@@ -187,7 +187,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 37, 'user_version upgraded to 37');
+  assert.equal(finalVersion, 38, 'user_version upgraded to 38');
 
   // Assert fleet tables exist
   const tableNames = (
@@ -262,12 +262,13 @@ test('system layer approvals require exact scoped lineage and remain immutable',
   const policyHash = 'c'.repeat(64);
   const candidateHash = 'd'.repeat(64);
   const legacyHash = 'e'.repeat(64);
+  const wrongSourceHash = 'f'.repeat(64);
   insert(
     'layer:contract',
     'runtime_contract',
     'global_contract',
     null,
-    'scoped_contract',
+    'authored_scoped_contract',
     contractHash,
   );
   insert(
@@ -275,7 +276,7 @@ test('system layer approvals require exact scoped lineage and remain immutable',
     'identity',
     'integrated_self',
     null,
-    'soul',
+    'soul_snapshot',
     identityHash,
   );
   insert(
@@ -283,7 +284,7 @@ test('system layer approvals require exact scoped lineage and remain immutable',
     'world_policy',
     'world',
     'world:test-a',
-    'routing',
+    'routing_policy',
     policyHash,
   );
   insert(
@@ -291,7 +292,7 @@ test('system layer approvals require exact scoped lineage and remain immutable',
     'identity',
     'integrated_self_candidate',
     null,
-    'soul',
+    'soul_snapshot',
     candidateHash,
   );
   insert(
@@ -299,8 +300,16 @@ test('system layer approvals require exact scoped lineage and remain immutable',
     'runtime_contract',
     'legacy_mixed',
     null,
-    'legacy_prompt',
+    'authored_scoped_contract',
     legacyHash,
+  );
+  insert(
+    'layer:wrong-source',
+    'identity',
+    'integrated_self',
+    null,
+    'synthetic_fixture',
+    wrongSourceHash,
   );
 
   const approve = db.prepare(`
@@ -362,6 +371,16 @@ test('system layer approvals require exact scoped lineage and remain immutable',
       'accepted_self_delta',
       'fixture:wrong-role',
       identityHash,
+    ),
+  );
+  assert.throws(() =>
+    approve.run(
+      'approval:wrong-source',
+      'layer:wrong-source',
+      'identity',
+      'soul_snapshot',
+      'fixture:wrong-source',
+      wrongSourceHash,
     ),
   );
   assert.throws(() =>

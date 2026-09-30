@@ -25,7 +25,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 37;
+const SCHEMA_VERSION = 38;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -2494,8 +2494,109 @@ export function runMigrations(db: DatabaseSync): void {
           END;
       `,
     },
+    {
+      name: '0038-context-system-layer-approval-sources',
+      sql: `
+        CREATE TABLE context_system_layer_approval_source_guard (
+          valid INTEGER NOT NULL CHECK (valid = 1)
+        );
+        INSERT INTO context_system_layer_approval_source_guard(valid)
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1
+          FROM context_system_layer_approvals AS approvals
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM context_system_layer_projections AS layers
+            WHERE layers.layer_id = approvals.layer_id
+              AND layers.source_hash = approvals.basis_hash
+              AND (
+                (
+                  approvals.approval_role = 'scoped_runtime_contract'
+                  AND approvals.basis_kind = 'authored_scoped_contract'
+                  AND layers.layer_kind = 'runtime_contract'
+                  AND layers.visibility = 'global_contract'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'authored_scoped_contract'
+                )
+                OR (
+                  approvals.approval_role = 'identity'
+                  AND approvals.basis_kind = 'soul_snapshot'
+                  AND layers.layer_kind = 'identity'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'soul_snapshot'
+                )
+                OR (
+                  approvals.approval_role = 'integrated_self'
+                  AND approvals.basis_kind = 'accepted_self_delta'
+                  AND layers.layer_kind = 'integrated_self'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'accepted_self_delta'
+                )
+                OR (
+                  approvals.approval_role = 'world_policy'
+                  AND approvals.basis_kind = 'routing_policy'
+                  AND layers.layer_kind = 'world_policy'
+                  AND layers.visibility = 'world'
+                  AND layers.world_id IS NOT NULL
+                  AND layers.source_kind = 'routing_policy'
+                )
+              )
+          )
+        ) THEN 1 ELSE 0 END;
+        DROP TABLE context_system_layer_approval_source_guard;
+        DROP TRIGGER context_system_layer_approvals_lineage_guard;
+        CREATE TRIGGER context_system_layer_approvals_lineage_guard
+          BEFORE INSERT ON context_system_layer_approvals
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_system_layer_projections AS layers
+            WHERE layers.layer_id = NEW.layer_id
+              AND layers.source_hash = NEW.basis_hash
+              AND (
+                (
+                  NEW.approval_role = 'scoped_runtime_contract'
+                  AND NEW.basis_kind = 'authored_scoped_contract'
+                  AND layers.layer_kind = 'runtime_contract'
+                  AND layers.visibility = 'global_contract'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'authored_scoped_contract'
+                )
+                OR (
+                  NEW.approval_role = 'identity'
+                  AND NEW.basis_kind = 'soul_snapshot'
+                  AND layers.layer_kind = 'identity'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'soul_snapshot'
+                )
+                OR (
+                  NEW.approval_role = 'integrated_self'
+                  AND NEW.basis_kind = 'accepted_self_delta'
+                  AND layers.layer_kind = 'integrated_self'
+                  AND layers.visibility = 'integrated_self'
+                  AND layers.world_id IS NULL
+                  AND layers.source_kind = 'accepted_self_delta'
+                )
+                OR (
+                  NEW.approval_role = 'world_policy'
+                  AND NEW.basis_kind = 'routing_policy'
+                  AND layers.layer_kind = 'world_policy'
+                  AND layers.visibility = 'world'
+                  AND layers.world_id IS NOT NULL
+                  AND layers.source_kind = 'routing_policy'
+                )
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system layer approval lineage is invalid');
+          END;
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+
 
 }
 

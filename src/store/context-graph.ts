@@ -32,6 +32,7 @@ export type LegacyImportReceiptId = ContextId<'LegacyImportReceiptId'>;
 export type EffectId = ContextId<'EffectId'>;
 export type EventMessageProjectionId = ContextId<'EventMessageProjectionId'>;
 export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
+export type SystemLayerApprovalId = ContextId<'SystemLayerApprovalId'>;
 export type LocalBranchRequestViewId = ContextId<'LocalBranchRequestViewId'>;
 export type ShadowProjectionPlanId = ContextId<'ShadowProjectionPlanId'>;
 export type ShadowRequestObservationId =
@@ -100,6 +101,14 @@ export const systemLayerProjectionId = (
     'systemLayerProjectionId',
     value,
     'system-layer:',
+  );
+export const systemLayerApprovalId = (
+  value: string,
+): SystemLayerApprovalId =>
+  branded<'SystemLayerApprovalId'>(
+    'systemLayerApprovalId',
+    value,
+    'system-layer-approval:',
   );
 export const localBranchRequestViewId = (
   value: string,
@@ -286,6 +295,28 @@ export interface SystemLayerProjectionRecord {
   readonly contentHash: string;
   readonly contentBytes: number;
   readonly createdAt: number;
+}
+
+export type SystemLayerApprovalRole =
+  | 'scoped_runtime_contract'
+  | 'identity'
+  | 'integrated_self'
+  | 'world_policy';
+export type SystemLayerApprovalBasisKind =
+  | 'authored_scoped_contract'
+  | 'soul_snapshot'
+  | 'accepted_self_delta'
+  | 'routing_policy';
+
+export interface SystemLayerApprovalRecord {
+  readonly approvalId: SystemLayerApprovalId;
+  readonly layerId: SystemLayerProjectionId;
+  readonly role: SystemLayerApprovalRole;
+  readonly basisKind: SystemLayerApprovalBasisKind;
+  readonly basisRef: string;
+  readonly basisHash: string;
+  readonly approvalGeneration: number;
+  readonly approvedAt: number;
 }
 
 export interface LocalBranchRequestViewV1 {
@@ -685,6 +716,109 @@ function systemLayerSourceKind(value: unknown): string {
     throw new Error('system layer source kind is invalid');
   }
   return value;
+}
+
+const SYSTEM_LAYER_APPROVAL_RULES: Readonly<
+  Record<
+    SystemLayerApprovalRole,
+    {
+      readonly basisKind: SystemLayerApprovalBasisKind;
+      readonly kind: SystemLayerKind;
+      readonly visibility: SystemLayerVisibility;
+      readonly worldScoped: boolean;
+      readonly sourceKind: string;
+    }
+  >
+> = Object.freeze({
+  scoped_runtime_contract: Object.freeze({
+    basisKind: 'authored_scoped_contract',
+    kind: 'runtime_contract',
+    visibility: 'global_contract',
+    worldScoped: false,
+    sourceKind: 'authored_scoped_contract',
+  }),
+  identity: Object.freeze({
+    basisKind: 'soul_snapshot',
+    kind: 'identity',
+    visibility: 'integrated_self',
+    worldScoped: false,
+    sourceKind: 'soul_snapshot',
+  }),
+  integrated_self: Object.freeze({
+    basisKind: 'accepted_self_delta',
+    kind: 'integrated_self',
+    visibility: 'integrated_self',
+    worldScoped: false,
+    sourceKind: 'accepted_self_delta',
+  }),
+  world_policy: Object.freeze({
+    basisKind: 'routing_policy',
+    kind: 'world_policy',
+    visibility: 'world',
+    worldScoped: true,
+    sourceKind: 'routing_policy',
+  }),
+});
+
+function systemLayerApprovalRole(value: unknown): SystemLayerApprovalRole {
+  if (
+    typeof value !== 'string' ||
+    !Object.hasOwn(SYSTEM_LAYER_APPROVAL_RULES, value)
+  ) {
+    throw new Error('system layer approval role is invalid');
+  }
+  return value as SystemLayerApprovalRole;
+}
+
+function systemLayerApprovalBasisKind(
+  value: unknown,
+): SystemLayerApprovalBasisKind {
+  if (
+    typeof value !== 'string' ||
+    !Object.values(SYSTEM_LAYER_APPROVAL_RULES).some(
+      (rule) => rule.basisKind === value,
+    )
+  ) {
+    throw new Error('system layer approval basis kind is invalid');
+  }
+  return value as SystemLayerApprovalBasisKind;
+}
+
+function systemLayerApprovalBasisRef(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > 512 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error('system layer approval basis ref is invalid');
+  }
+  return value;
+}
+
+function systemLayerApprovalMatches(
+  layer: SystemLayerProjectionRecord,
+  role: SystemLayerApprovalRole,
+): boolean {
+  const rule = SYSTEM_LAYER_APPROVAL_RULES[role];
+  return (
+    layer.kind === rule.kind &&
+    layer.visibility === rule.visibility &&
+    (layer.worldId !== null) === rule.worldScoped &&
+    layer.sourceKind === rule.sourceKind
+  );
+}
+
+function systemLayerApprovalIdentity(input: {
+  layerId: SystemLayerProjectionId;
+  role: SystemLayerApprovalRole;
+  basisKind: SystemLayerApprovalBasisKind;
+  basisRef: string;
+  basisHash: string;
+  approvalGeneration: number;
+}): SystemLayerApprovalId {
+  const hash = hashContextBytes(serialize({ schemaVersion: 1, ...input }));
+  return systemLayerApprovalId(`system-layer-approval:${hash}`);
 }
 
 function systemLayerIdentity(input: {
@@ -1149,6 +1283,17 @@ interface SystemLayerProjectionRow {
   created_at: number;
 }
 
+interface SystemLayerApprovalRow {
+  approval_id: string;
+  layer_id: string;
+  approval_role: string;
+  basis_kind: string;
+  basis_ref: string;
+  basis_hash: string;
+  approval_generation: number;
+  approved_at: number;
+}
+
 interface LocalBranchRequestViewRow {
   request_view_id: string;
   branch_id: string;
@@ -1468,6 +1613,50 @@ function mapSystemLayerProjection(
     contentHash,
     contentBytes,
     createdAt: timestamp('createdAt', row.created_at),
+  };
+}
+
+function mapSystemLayerApproval(
+  row: SystemLayerApprovalRow,
+  layer: SystemLayerProjectionRecord,
+): SystemLayerApprovalRecord {
+  const role = systemLayerApprovalRole(row.approval_role);
+  const basisKind = systemLayerApprovalBasisKind(row.basis_kind);
+  const basisRef = systemLayerApprovalBasisRef(row.basis_ref);
+  const basisHash = sha256('basisHash', row.basis_hash);
+  const approvalGeneration = generation(
+    'approvalGeneration',
+    row.approval_generation,
+  );
+  const approvalId = systemLayerApprovalId(row.approval_id);
+  if (
+    approvalGeneration < 1 ||
+    row.layer_id !== layer.layerId ||
+    !systemLayerApprovalMatches(layer, role) ||
+    basisKind !== SYSTEM_LAYER_APPROVAL_RULES[role].basisKind ||
+    basisHash !== layer.sourceHash ||
+    systemLayerApprovalIdentity({
+      layerId: layer.layerId,
+      role,
+      basisKind,
+      basisRef,
+      basisHash,
+      approvalGeneration,
+    }) !== approvalId
+  ) {
+    throw new Error(
+      `stored system layer approval is invalid: ${row.approval_id}`,
+    );
+  }
+  return {
+    approvalId,
+    layerId: layer.layerId,
+    role,
+    basisKind,
+    basisRef,
+    basisHash,
+    approvalGeneration,
+    approvedAt: timestamp('approvedAt', row.approved_at),
   };
 }
 
@@ -2187,6 +2376,108 @@ export class ContextGraphStore {
       )
       .get(id) as unknown as SystemLayerProjectionRow | undefined;
     return row ? mapSystemLayerProjection(row) : null;
+  }
+
+  approveSystemLayer(input: {
+    layerId: SystemLayerProjectionId;
+    role: SystemLayerApprovalRole;
+    basisRef: string;
+    approvalGeneration: number;
+    approvedAt: number;
+  }): SystemLayerApprovalRecord {
+    const layer = this.getSystemLayerProjection(input.layerId);
+    if (!layer) {
+      throw new Error(`system layer projection not found: ${input.layerId}`);
+    }
+    const role = systemLayerApprovalRole(input.role);
+    if (!systemLayerApprovalMatches(layer, role)) {
+      throw new Error('system layer approval role does not match layer scope');
+    }
+    const basisKind = SYSTEM_LAYER_APPROVAL_RULES[role].basisKind;
+    const basisRef = systemLayerApprovalBasisRef(input.basisRef);
+    const approvalGeneration = generation(
+      'approvalGeneration',
+      input.approvalGeneration,
+    );
+    if (approvalGeneration < 1) {
+      throw new Error('system layer approval generation is invalid');
+    }
+    const basisHash = layer.sourceHash;
+    const approvalId = systemLayerApprovalIdentity({
+      layerId: layer.layerId,
+      role,
+      basisKind,
+      basisRef,
+      basisHash,
+      approvalGeneration,
+    });
+    const collision = this.database
+      .prepare(
+        `SELECT approval_id FROM context_system_layer_approvals
+         WHERE approval_id = ? OR (layer_id = ? AND approval_generation = ?)`,
+      )
+      .get(
+        approvalId,
+        layer.layerId,
+        approvalGeneration,
+      ) as unknown as { approval_id: string } | undefined;
+    if (collision) {
+      const existing = this.getSystemLayerApproval(
+        systemLayerApprovalId(collision.approval_id),
+      );
+      if (
+        !existing ||
+        existing.approvalId !== approvalId ||
+        existing.layerId !== layer.layerId ||
+        existing.role !== role ||
+        existing.basisKind !== basisKind ||
+        existing.basisRef !== basisRef ||
+        existing.basisHash !== basisHash ||
+        existing.approvalGeneration !== approvalGeneration ||
+        existing.approvedAt !== timestamp('approvedAt', input.approvedAt)
+      ) {
+        throw new Error(
+          `system layer approval identity conflict: ${collision.approval_id}`,
+        );
+      }
+      return existing;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_system_layer_approvals(
+           approval_id, layer_id, approval_role, basis_kind, basis_ref,
+           basis_hash, approval_generation, approved_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        approvalId,
+        layer.layerId,
+        role,
+        basisKind,
+        basisRef,
+        basisHash,
+        approvalGeneration,
+        timestamp('approvedAt', input.approvedAt),
+      );
+    return this.getSystemLayerApproval(approvalId)!;
+  }
+
+  getSystemLayerApproval(
+    id: SystemLayerApprovalId,
+  ): SystemLayerApprovalRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_system_layer_approvals WHERE approval_id = ?',
+      )
+      .get(id) as unknown as SystemLayerApprovalRow | undefined;
+    if (!row) return null;
+    const layer = this.getSystemLayerProjection(
+      systemLayerProjectionId(row.layer_id),
+    );
+    if (!layer) {
+      throw new Error(`stored system layer approval has no layer: ${row.approval_id}`);
+    }
+    return mapSystemLayerApproval(row, layer);
   }
 
   private validateLocalBranchRequestEventOrder(
