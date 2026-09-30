@@ -14,8 +14,17 @@ import {
 } from '../context-graph.js';
 import {
   SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1,
+  SCOPED_RUNTIME_CONTRACT_MIGRATION,
+  SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
   type ScopedRuntimeContractArtifactV1,
 } from '../context/scoped-system.js';
+import type { ResidentToolCallSnapshotV1 } from '../kernel/resident-run-provenance.js';
+import {
+  parseSoul,
+  SOUL_PROMPT_SNAPSHOT_MAX_BYTES,
+  SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION,
+  type PromptFacingSoulSnapshot,
+} from './soul.js';
 import {
   assertLocalBranchRequestContentFits,
   buildMaterializedLocalBranchRequest,
@@ -606,6 +615,44 @@ export interface ContextGraphActivation {
   readonly updatedAt: number;
 }
 
+export interface ResidentSoulSourceSnapshotV1 {
+  readonly snapshotId: string;
+  readonly schemaVersion: 1;
+  readonly parserGeneration: number;
+  readonly sourceFile: string;
+  readonly sourceFileHash: string;
+  readonly sourceFileBytes: number;
+  readonly body: string;
+  readonly bodyHash: string;
+  readonly bodyBytes: number;
+  readonly capturedAt: number;
+}
+
+export interface ResidentSourceInspectionCandidateV1 {
+  readonly candidateId: string;
+  readonly schemaVersion: 1;
+  readonly scopeKind: 'private_integrated_self_candidate';
+  readonly executionContext: 'legacy_monocontext_resident';
+  readonly activationEpoch: number;
+  readonly contractArtifactId: string;
+  readonly contractMigrationChecksum: string;
+  readonly contractContentHash: string;
+  readonly contractContentBytes: number;
+  readonly soulSnapshotId: string;
+  readonly inspectBatchId: string;
+  readonly inspectBatchSha256: string;
+  readonly inspectCallIndex: number;
+  readonly inspectCallCount: number;
+  readonly inspectToolName: 'run';
+  readonly inspectArgumentsSha256: string;
+  readonly observedAt: number;
+}
+
+export interface ResidentSourceInspectionCaptureV1 {
+  readonly soul: ResidentSoulSourceSnapshotV1;
+  readonly candidate: ResidentSourceInspectionCandidateV1;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -669,6 +716,51 @@ function serialize(value: unknown): string {
 
 export function hashContextBytes(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function residentSoulSnapshotId(input: {
+  parserGeneration: number;
+  sourceFileHash: string;
+  sourceFileBytes: number;
+  bodyHash: string;
+  bodyBytes: number;
+}): string {
+  return `resident-soul-snapshot:${hashContextBytes(
+    serialize({
+      schemaVersion: 1,
+      parserGeneration: input.parserGeneration,
+      sourceFileHash: input.sourceFileHash,
+      sourceFileBytes: input.sourceFileBytes,
+      bodyHash: input.bodyHash,
+      bodyBytes: input.bodyBytes,
+    }),
+  )}`;
+}
+
+function residentSourceCandidateId(input: {
+  activationEpoch: number;
+  soulSnapshotId: string;
+  provenance: ResidentToolCallSnapshotV1;
+}): string {
+  return `resident-source-candidate:${hashContextBytes(
+    serialize({
+      schemaVersion: 1,
+      scopeKind: 'private_integrated_self_candidate',
+      executionContext: 'legacy_monocontext_resident',
+      activationEpoch: input.activationEpoch,
+      contractArtifactId: SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId,
+      contractMigrationChecksum: SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
+      contractContentHash: SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentHash,
+      contractContentBytes: SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentBytes,
+      soulSnapshotId: input.soulSnapshotId,
+      inspectBatchId: input.provenance.batchId,
+      inspectBatchSha256: input.provenance.batchSha256,
+      inspectCallIndex: input.provenance.callIndex,
+      inspectCallCount: input.provenance.callCount,
+      inspectToolName: input.provenance.toolName,
+      inspectArgumentsSha256: input.provenance.argumentsSha256,
+    }),
+  )}`;
 }
 
 function sha256(label: string, value: string): string {
@@ -1474,6 +1566,39 @@ interface EventMessageProjectionRow {
   created_at: number;
 }
 
+interface ResidentSoulSourceSnapshotRow {
+  snapshot_id: string;
+  schema_version: number;
+  parser_generation: number;
+  source_file_blob: Uint8Array;
+  source_file_hash: string;
+  source_file_bytes: number;
+  body_blob: Uint8Array;
+  body_hash: string;
+  body_bytes: number;
+  captured_at: number;
+}
+
+interface ResidentSourceInspectionCandidateRow {
+  candidate_id: string;
+  schema_version: number;
+  scope_kind: string;
+  execution_context: string;
+  activation_epoch: number;
+  contract_artifact_id: string;
+  contract_migration_checksum: string;
+  contract_content_hash: string;
+  contract_content_bytes: number;
+  soul_snapshot_id: string;
+  inspect_batch_id: string;
+  inspect_batch_sha256: string;
+  inspect_call_index: number;
+  inspect_call_count: number;
+  inspect_tool_name: string;
+  inspect_arguments_sha256: string;
+  observed_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -2094,6 +2219,216 @@ function mapEffect(row: EffectRow): EffectRecord {
   };
 }
 
+function decodeResidentSourceBytes(bytes: Buffer, label: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch {
+    throw new Error(`stored resident ${label} is not valid UTF-8`);
+  }
+}
+
+function hashBuffer(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function normalizeResidentSoulSnapshot(input: {
+  snapshotId?: string;
+  schemaVersion?: number;
+  parserGeneration: number;
+  sourceFile: string;
+  sourceFileHash: string;
+  sourceFileBytes: number;
+  body: string;
+  bodyHash: string;
+  bodyBytes: number;
+  capturedAt: number;
+}): ResidentSoulSourceSnapshotV1 {
+  const parserGeneration = generation(
+    'resident soul parserGeneration',
+    input.parserGeneration,
+  );
+  if (parserGeneration !== SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION) {
+    throw new Error('resident soul parserGeneration is unsupported');
+  }
+  const sourceBytes = Buffer.from(input.sourceFile, 'utf8');
+  const bodyBytes = Buffer.from(input.body, 'utf8');
+  if (
+    sourceBytes.length > SOUL_PROMPT_SNAPSHOT_MAX_BYTES ||
+    bodyBytes.length > SOUL_PROMPT_SNAPSHOT_MAX_BYTES
+  ) {
+    throw new Error('resident SOUL source snapshot exceeds the byte limit');
+  }
+  const sourceFileHash = sha256(
+    'resident soul sourceFileHash',
+    input.sourceFileHash,
+  );
+  const bodyHash = sha256('resident soul bodyHash', input.bodyHash);
+  if (
+    input.sourceFileBytes !== sourceBytes.length ||
+    input.bodyBytes !== bodyBytes.length ||
+    hashBuffer(sourceBytes) !== sourceFileHash ||
+    hashBuffer(bodyBytes) !== bodyHash ||
+    parseSoul(input.sourceFile).body !== input.body ||
+    !input.body.trim()
+  ) {
+    throw new Error('resident SOUL source snapshot is inconsistent');
+  }
+  const snapshotId = residentSoulSnapshotId({
+    parserGeneration,
+    sourceFileHash,
+    sourceFileBytes: sourceBytes.length,
+    bodyHash,
+    bodyBytes: bodyBytes.length,
+  });
+  if (input.snapshotId !== undefined && input.snapshotId !== snapshotId)
+    throw new Error('resident SOUL source snapshot identity is invalid');
+  if (input.schemaVersion !== undefined && input.schemaVersion !== 1)
+    throw new Error('resident SOUL source snapshot schema is unsupported');
+  return Object.freeze({
+    snapshotId,
+    schemaVersion: 1,
+    parserGeneration,
+    sourceFile: input.sourceFile,
+    sourceFileHash,
+    sourceFileBytes: sourceBytes.length,
+    body: input.body,
+    bodyHash,
+    bodyBytes: bodyBytes.length,
+    capturedAt: timestamp('resident soul capturedAt', input.capturedAt),
+  });
+}
+
+function mapResidentSoulSnapshot(
+  row: ResidentSoulSourceSnapshotRow,
+): ResidentSoulSourceSnapshotV1 {
+  const sourceBytes = Buffer.from(row.source_file_blob);
+  const bodyBytes = Buffer.from(row.body_blob);
+  return normalizeResidentSoulSnapshot({
+    snapshotId: row.snapshot_id,
+    schemaVersion: row.schema_version,
+    parserGeneration: row.parser_generation,
+    sourceFile: decodeResidentSourceBytes(sourceBytes, 'SOUL source file'),
+    sourceFileHash: row.source_file_hash,
+    sourceFileBytes: row.source_file_bytes,
+    body: decodeResidentSourceBytes(bodyBytes, 'SOUL prompt body'),
+    bodyHash: row.body_hash,
+    bodyBytes: row.body_bytes,
+    capturedAt: row.captured_at,
+  });
+}
+
+function sameResidentSoulSource(
+  left: ResidentSoulSourceSnapshotV1,
+  right: ResidentSoulSourceSnapshotV1,
+): boolean {
+  return (
+    left.snapshotId === right.snapshotId &&
+    left.parserGeneration === right.parserGeneration &&
+    left.sourceFile === right.sourceFile &&
+    left.sourceFileHash === right.sourceFileHash &&
+    left.sourceFileBytes === right.sourceFileBytes &&
+    left.body === right.body &&
+    left.bodyHash === right.bodyHash &&
+    left.bodyBytes === right.bodyBytes
+  );
+}
+
+function normalizeResidentInspectionProvenance(
+  input: ResidentToolCallSnapshotV1,
+): ResidentToolCallSnapshotV1 {
+  if (
+    input.version !== 1 ||
+    typeof input.batchId !== 'string' ||
+    !/^resident-tool-batch:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      input.batchId,
+    ) ||
+    !Number.isSafeInteger(input.callIndex) ||
+    !Number.isSafeInteger(input.callCount) ||
+    input.callIndex < 0 ||
+    input.callCount < 1 ||
+    input.callCount > 64 ||
+    input.callIndex >= input.callCount ||
+    input.toolName !== 'run'
+  ) {
+    throw new Error('resident source inspection provenance is invalid');
+  }
+  return Object.freeze({
+    version: 1,
+    batchId: input.batchId,
+    batchSha256: sha256('resident inspection batchSha256', input.batchSha256),
+    callIndex: input.callIndex,
+    callCount: input.callCount,
+    toolName: 'run',
+    argumentsSha256: sha256(
+      'resident inspection argumentsSha256',
+      input.argumentsSha256,
+    ),
+  });
+}
+
+function mapResidentInspectionCandidate(
+  row: ResidentSourceInspectionCandidateRow,
+): ResidentSourceInspectionCandidateV1 {
+  if (
+    row.schema_version !== 1 ||
+    row.scope_kind !== 'private_integrated_self_candidate' ||
+    row.execution_context !== 'legacy_monocontext_resident' ||
+    row.contract_artifact_id !==
+      SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId ||
+    row.contract_migration_checksum !==
+      SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM ||
+    row.contract_content_hash !==
+      SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentHash ||
+    row.contract_content_bytes !==
+      SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentBytes
+  ) {
+    throw new Error('stored resident source inspection candidate is invalid');
+  }
+  const provenance = normalizeResidentInspectionProvenance({
+    version: 1,
+    batchId: row.inspect_batch_id,
+    batchSha256: row.inspect_batch_sha256,
+    callIndex: row.inspect_call_index,
+    callCount: row.inspect_call_count,
+    toolName: row.inspect_tool_name,
+    argumentsSha256: row.inspect_arguments_sha256,
+  });
+  const activationEpoch = generation(
+    'resident inspection activationEpoch',
+    row.activation_epoch,
+  );
+  const candidateId = residentSourceCandidateId({
+    activationEpoch,
+    soulSnapshotId: row.soul_snapshot_id,
+    provenance,
+  });
+  if (row.candidate_id !== candidateId)
+    throw new Error(
+      'stored resident source inspection candidate identity is invalid',
+    );
+  return Object.freeze({
+    candidateId,
+    schemaVersion: 1,
+    scopeKind: 'private_integrated_self_candidate',
+    executionContext: 'legacy_monocontext_resident',
+    activationEpoch,
+    contractArtifactId: row.contract_artifact_id,
+    contractMigrationChecksum: row.contract_migration_checksum,
+    contractContentHash: row.contract_content_hash,
+    contractContentBytes: row.contract_content_bytes,
+    soulSnapshotId: row.soul_snapshot_id,
+    inspectBatchId: provenance.batchId,
+    inspectBatchSha256: provenance.batchSha256,
+    inspectCallIndex: provenance.callIndex,
+    inspectCallCount: provenance.callCount,
+    inspectToolName: 'run',
+    inspectArgumentsSha256: provenance.argumentsSha256,
+    observedAt: timestamp('resident inspection observedAt', row.observed_at),
+  });
+}
+
 /**
  * Durable, dark-mode persistence for the scoped context graph.
  *
@@ -2128,6 +2463,178 @@ export class ContextGraphStore {
       throw new Error('scoped runtime contract artifact is missing or invalid');
     }
     return expected;
+  }
+
+  getResidentSoulSourceSnapshot(
+    snapshotId: string,
+  ): ResidentSoulSourceSnapshotV1 | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_resident_soul_source_snapshots WHERE snapshot_id = ?',
+      )
+      .get(snapshotId) as ResidentSoulSourceSnapshotRow | undefined;
+    return row ? mapResidentSoulSnapshot(row) : null;
+  }
+
+  getResidentSourceInspectionCandidate(
+    candidateId: string,
+  ): ResidentSourceInspectionCaptureV1 | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_resident_source_inspection_candidates WHERE candidate_id = ?',
+      )
+      .get(candidateId) as ResidentSourceInspectionCandidateRow | undefined;
+    if (!row) return null;
+    this.getScopedRuntimeContractArtifact();
+    const receipt = this.database
+      .prepare(
+        `SELECT checksum FROM elpis_migrations
+         WHERE component = 'core' AND name = ?`,
+      )
+      .get(SCOPED_RUNTIME_CONTRACT_MIGRATION) as
+      { checksum: string } | undefined;
+    if (receipt?.checksum !== SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM) {
+      throw new Error('scoped runtime contract migration receipt is invalid');
+    }
+    const candidate = mapResidentInspectionCandidate(row);
+    const soul = this.getResidentSoulSourceSnapshot(candidate.soulSnapshotId);
+    if (!soul || soul.capturedAt > candidate.observedAt) {
+      throw new Error(
+        'stored resident source inspection candidate has invalid SOUL lineage',
+      );
+    }
+    return Object.freeze({ soul, candidate });
+  }
+
+  createResidentSourceInspectionCandidate(input: {
+    soul: PromptFacingSoulSnapshot;
+    provenance: ResidentToolCallSnapshotV1;
+    observedAt: number;
+  }): ResidentSourceInspectionCaptureV1 {
+    const observedAt = timestamp(
+      'resident inspection observedAt',
+      input.observedAt,
+    );
+    const soul = normalizeResidentSoulSnapshot({
+      parserGeneration: input.soul.parserGeneration,
+      sourceFile: input.soul.sourceFile,
+      sourceFileHash: input.soul.sourceFileHash,
+      sourceFileBytes: input.soul.sourceFileBytes,
+      body: input.soul.body,
+      bodyHash: input.soul.bodyHash,
+      bodyBytes: input.soul.bodyBytes,
+      capturedAt: observedAt,
+    });
+    const provenance = normalizeResidentInspectionProvenance(input.provenance);
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('resident source inspection requires dark graph mode');
+      }
+      this.getScopedRuntimeContractArtifact();
+      const migration = this.database
+        .prepare(
+          `SELECT checksum FROM elpis_migrations
+           WHERE component = 'core' AND name = ?`,
+        )
+        .get(SCOPED_RUNTIME_CONTRACT_MIGRATION) as
+        { checksum: string } | undefined;
+      if (migration?.checksum !== SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM) {
+        throw new Error('scoped runtime contract migration receipt is invalid');
+      }
+
+      const candidateId = residentSourceCandidateId({
+        activationEpoch: activation.epoch,
+        soulSnapshotId: soul.snapshotId,
+        provenance,
+      });
+      const prior = this.database
+        .prepare(
+          `SELECT candidate_id
+           FROM context_resident_source_inspection_candidates
+           WHERE inspect_batch_id = ? AND inspect_call_index = ?`,
+        )
+        .get(provenance.batchId, provenance.callIndex) as
+        { candidate_id: string } | undefined;
+      if (prior) {
+        if (prior.candidate_id !== candidateId) {
+          throw new Error(
+            'resident source inspection call already captured different sources',
+          );
+        }
+        const existing = this.getResidentSourceInspectionCandidate(candidateId);
+        if (!existing)
+          throw new Error('resident source inspection candidate disappeared');
+        if (!sameResidentSoulSource(existing.soul, soul)) {
+          throw new Error(
+            'resident source inspection call already captured different sources',
+          );
+        }
+        return existing;
+      }
+
+      const storedSoul = this.getResidentSoulSourceSnapshot(soul.snapshotId);
+      if (storedSoul) {
+        if (!sameResidentSoulSource(storedSoul, soul)) {
+          throw new Error('resident SOUL source snapshot identity conflict');
+        }
+      } else {
+        this.database
+          .prepare(
+            `INSERT INTO context_resident_soul_source_snapshots(
+               snapshot_id, schema_version, parser_generation,
+               source_file_blob, source_file_hash, source_file_bytes,
+               body_blob, body_hash, body_bytes, captured_at
+             ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            soul.snapshotId,
+            soul.parserGeneration,
+            Buffer.from(soul.sourceFile, 'utf8'),
+            soul.sourceFileHash,
+            soul.sourceFileBytes,
+            Buffer.from(soul.body, 'utf8'),
+            soul.bodyHash,
+            soul.bodyBytes,
+            soul.capturedAt,
+          );
+      }
+
+      this.database
+        .prepare(
+          `INSERT INTO context_resident_source_inspection_candidates(
+             candidate_id, schema_version, scope_kind, execution_context,
+             activation_epoch, contract_artifact_id,
+             contract_migration_checksum, contract_content_hash,
+             contract_content_bytes, soul_snapshot_id, inspect_batch_id,
+             inspect_batch_sha256, inspect_call_index, inspect_call_count,
+             inspect_tool_name, inspect_arguments_sha256, observed_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          candidateId,
+          'private_integrated_self_candidate',
+          'legacy_monocontext_resident',
+          activation.epoch,
+          SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId,
+          SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
+          SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentHash,
+          SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentBytes,
+          soul.snapshotId,
+          provenance.batchId,
+          provenance.batchSha256,
+          provenance.callIndex,
+          provenance.callCount,
+          provenance.toolName,
+          provenance.argumentsSha256,
+          observedAt,
+        );
+      const created = this.getResidentSourceInspectionCandidate(candidateId);
+      if (!created)
+        throw new Error('resident source inspection candidate was not stored');
+      return created;
+    });
   }
 
   appendWorldEvent(input: {

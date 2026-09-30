@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
 import {
   SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1,
+  SCOPED_RUNTIME_CONTRACT_MIGRATION,
   SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
 } from '../context/scoped-system.js';
 import { runComponentMigrations } from './migrations.js';
@@ -29,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 42;
+const SCHEMA_VERSION = 43;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3153,9 +3154,166 @@ export function runMigrations(db: DatabaseSync): void {
           );
       },
     },
+    {
+      name: '0043-context-resident-source-inspection-candidates',
+      sql: `
+        CREATE TABLE context_resident_soul_source_snapshots (
+          snapshot_id       TEXT PRIMARY KEY
+            CHECK (length(snapshot_id) = 87
+              AND snapshot_id GLOB 'resident-soul-snapshot:*'
+              AND substr(snapshot_id, 24) NOT GLOB '*[^0-9a-f]*'),
+          schema_version    INTEGER NOT NULL CHECK (schema_version = 1),
+          parser_generation INTEGER NOT NULL
+            CHECK (typeof(parser_generation) = 'integer' AND parser_generation = 1),
+          source_file_blob  BLOB NOT NULL CHECK (typeof(source_file_blob) = 'blob'),
+          source_file_hash  TEXT NOT NULL
+            CHECK (length(source_file_hash) = 64 AND source_file_hash NOT GLOB '*[^0-9a-f]*'),
+          source_file_bytes INTEGER NOT NULL
+            CHECK (typeof(source_file_bytes) = 'integer' AND source_file_bytes >= 0
+              AND length(source_file_blob) = source_file_bytes),
+          body_blob         BLOB NOT NULL CHECK (typeof(body_blob) = 'blob'),
+          body_hash         TEXT NOT NULL
+            CHECK (length(body_hash) = 64 AND body_hash NOT GLOB '*[^0-9a-f]*'),
+          body_bytes        INTEGER NOT NULL
+            CHECK (typeof(body_bytes) = 'integer' AND body_bytes >= 0
+              AND length(body_blob) = body_bytes),
+          captured_at       INTEGER NOT NULL
+            CHECK (typeof(captured_at) = 'integer' AND captured_at >= 0),
+          UNIQUE (
+            parser_generation, source_file_hash, source_file_bytes,
+            body_hash, body_bytes
+          )
+        ) WITHOUT ROWID;
+
+        CREATE TABLE context_resident_source_inspection_candidates (
+          candidate_id               TEXT PRIMARY KEY
+            CHECK (length(candidate_id) = 90
+              AND candidate_id GLOB 'resident-source-candidate:*'
+              AND substr(candidate_id, 27) NOT GLOB '*[^0-9a-f]*'),
+          schema_version             INTEGER NOT NULL CHECK (schema_version = 1),
+          scope_kind                 TEXT NOT NULL
+            CHECK (scope_kind = 'private_integrated_self_candidate'),
+          execution_context          TEXT NOT NULL
+            CHECK (execution_context = 'legacy_monocontext_resident'),
+          activation_epoch           INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          contract_artifact_id       TEXT NOT NULL,
+          contract_migration_checksum TEXT NOT NULL
+            CHECK (length(contract_migration_checksum) = 64
+              AND contract_migration_checksum NOT GLOB '*[^0-9a-f]*'),
+          contract_content_hash      TEXT NOT NULL
+            CHECK (length(contract_content_hash) = 64
+              AND contract_content_hash NOT GLOB '*[^0-9a-f]*'),
+          contract_content_bytes     INTEGER NOT NULL
+            CHECK (typeof(contract_content_bytes) = 'integer' AND contract_content_bytes >= 0),
+          soul_snapshot_id           TEXT NOT NULL,
+          inspect_batch_id           TEXT NOT NULL
+            CHECK (length(inspect_batch_id) = 56
+              AND inspect_batch_id GLOB 'resident-tool-batch:*'),
+          inspect_batch_sha256       TEXT NOT NULL
+            CHECK (length(inspect_batch_sha256) = 64
+              AND inspect_batch_sha256 NOT GLOB '*[^0-9a-f]*'),
+          inspect_call_index         INTEGER NOT NULL
+            CHECK (typeof(inspect_call_index) = 'integer' AND inspect_call_index >= 0),
+          inspect_call_count         INTEGER NOT NULL
+            CHECK (typeof(inspect_call_count) = 'integer'
+              AND inspect_call_count >= 1 AND inspect_call_count <= 64
+              AND inspect_call_index < inspect_call_count),
+          inspect_tool_name          TEXT NOT NULL CHECK (inspect_tool_name = 'run'),
+          inspect_arguments_sha256   TEXT NOT NULL
+            CHECK (length(inspect_arguments_sha256) = 64
+              AND inspect_arguments_sha256 NOT GLOB '*[^0-9a-f]*'),
+          observed_at                INTEGER NOT NULL
+            CHECK (typeof(observed_at) = 'integer' AND observed_at >= 0),
+          UNIQUE (inspect_batch_id, inspect_call_index),
+          FOREIGN KEY (contract_artifact_id)
+            REFERENCES context_scoped_runtime_contract_artifacts(artifact_id) ON DELETE RESTRICT,
+          FOREIGN KEY (soul_snapshot_id)
+            REFERENCES context_resident_soul_source_snapshots(snapshot_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_resident_soul_source_snapshots_identity_conflict
+          BEFORE INSERT ON context_resident_soul_source_snapshots
+          WHEN EXISTS (
+            SELECT 1 FROM context_resident_soul_source_snapshots
+            WHERE snapshot_id = NEW.snapshot_id
+               OR (
+                 parser_generation = NEW.parser_generation
+                 AND source_file_hash = NEW.source_file_hash
+                 AND source_file_bytes = NEW.source_file_bytes
+                 AND body_hash = NEW.body_hash
+                 AND body_bytes = NEW.body_bytes
+               )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident SOUL source snapshot identity conflict');
+          END;
+        CREATE TRIGGER context_resident_soul_source_snapshots_no_update
+          BEFORE UPDATE ON context_resident_soul_source_snapshots BEGIN
+            SELECT RAISE(ABORT, 'resident SOUL source snapshots are immutable');
+          END;
+        CREATE TRIGGER context_resident_soul_source_snapshots_no_delete
+          BEFORE DELETE ON context_resident_soul_source_snapshots BEGIN
+            SELECT RAISE(ABORT, 'resident SOUL source snapshots are immutable');
+          END;
+
+        CREATE TRIGGER context_resident_source_inspection_candidates_identity_conflict
+          BEFORE INSERT ON context_resident_source_inspection_candidates
+          WHEN EXISTS (
+            SELECT 1 FROM context_resident_source_inspection_candidates
+            WHERE candidate_id = NEW.candidate_id
+               OR (
+                 inspect_batch_id = NEW.inspect_batch_id
+                 AND inspect_call_index = NEW.inspect_call_index
+               )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident source inspection candidate identity conflict');
+          END;
+        CREATE TRIGGER context_resident_source_inspection_candidates_lineage_guard
+          BEFORE INSERT ON context_resident_source_inspection_candidates
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_graph_activation
+            WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_scoped_runtime_contract_artifacts
+            WHERE artifact_id = NEW.contract_artifact_id
+              AND artifact_id = '${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId}'
+              AND content_hash = NEW.contract_content_hash
+              AND content_hash = '${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentHash}'
+              AND content_bytes = NEW.contract_content_bytes
+              AND content_bytes = ${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentBytes}
+              AND introduced_by_migration = '${SCOPED_RUNTIME_CONTRACT_MIGRATION}'
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM elpis_migrations
+            WHERE component = 'core'
+              AND name = '${SCOPED_RUNTIME_CONTRACT_MIGRATION}'
+              AND checksum = NEW.contract_migration_checksum
+              AND checksum = '${SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM}'
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_resident_soul_source_snapshots
+            WHERE snapshot_id = NEW.soul_snapshot_id
+              AND captured_at <= NEW.observed_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident source inspection candidate lineage is invalid');
+          END;
+        CREATE TRIGGER context_resident_source_inspection_candidates_no_update
+          BEFORE UPDATE ON context_resident_source_inspection_candidates BEGIN
+            SELECT RAISE(ABORT, 'resident source inspection candidates are immutable');
+          END;
+        CREATE TRIGGER context_resident_source_inspection_candidates_no_delete
+          BEFORE DELETE ON context_resident_source_inspection_candidates BEGIN
+            SELECT RAISE(ABORT, 'resident source inspection candidates are immutable');
+          END;
+      `,
+    },
   ]);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-
 }
 
 /** Open (creating if needed) elpis.db under dataDirectory, set WAL, migrate.

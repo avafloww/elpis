@@ -19,6 +19,7 @@ import {
   materializeWorldConversation,
 } from '../src/context/view.js';
 import { openDatabase, runMigrations } from '../src/store/db.js';
+import { readPromptFacingSoulSnapshot } from '../src/store/soul.js';
 import {
   ContextGraphStore,
   LegacyImportConflictError,
@@ -58,6 +59,276 @@ function closeFixture(value: {
   value.database.close();
   fs.rmSync(value.directory, { recursive: true, force: true });
 }
+
+function residentSoulSnapshot(directory: string, body = '# Synthetic soul\n') {
+  const soulPath = path.join(directory, 'synthetic-SOUL.md');
+  const sourceFile = `---\nname: Aster\n---\n\n${body}`;
+  fs.writeFileSync(soulPath, sourceFile);
+  return readPromptFacingSoulSnapshot(soulPath);
+}
+
+function residentRunProvenance(suffix: string, callIndex = 0, callCount = 1) {
+  return {
+    version: 1 as const,
+    batchId: `resident-tool-batch:00000000-0000-4000-8000-${suffix.padStart(12, '0')}`,
+    batchSha256: hashContextBytes(`batch-${suffix}`),
+    callIndex,
+    callCount,
+    toolName: 'run',
+    argumentsSha256: hashContextBytes(`arguments-${suffix}-${callIndex}`),
+  };
+}
+
+test('resident source inspection candidates preserve exact private sources and exact run provenance', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    assert.throws(
+      () =>
+        value.store.createResidentSourceInspectionCandidate({
+          soul: { ...soul, parserGeneration: 2 },
+          provenance: residentRunProvenance('9'),
+          observedAt: 50,
+        }),
+      /parserGeneration is unsupported/,
+    );
+    const first = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('1'),
+      observedAt: 100,
+    });
+    assert.equal(first.soul.sourceFile, soul.sourceFile);
+    assert.equal(first.soul.body, soul.body);
+    assert.match(
+      first.soul.snapshotId,
+      /^resident-soul-snapshot:[0-9a-f]{64}$/,
+    );
+    assert.match(
+      first.candidate.candidateId,
+      /^resident-source-candidate:[0-9a-f]{64}$/,
+    );
+    assert.equal(
+      first.candidate.inspectBatchId,
+      residentRunProvenance('1').batchId,
+    );
+    assert.equal(first.candidate.inspectToolName, 'run');
+    assert.equal(first.candidate.observedAt, 100);
+
+    const retry = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('1'),
+      observedAt: 150,
+    });
+    assert.deepEqual(retry, first);
+
+    const second = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('2'),
+      observedAt: 200,
+    });
+    assert.equal(second.soul.snapshotId, first.soul.snapshotId);
+    assert.notEqual(second.candidate.candidateId, first.candidate.candidateId);
+    assert.deepEqual(
+      value.store.getResidentSourceInspectionCandidate(
+        first.candidate.candidateId,
+      ),
+      first,
+    );
+
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_soul_source_snapshots) AS snapshots,
+           (SELECT count(*) FROM context_resident_source_inspection_candidates) AS candidates,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_effects) AS effects`,
+      )
+      .get() as Record<string, number>;
+    assert.deepEqual(
+      { ...counts },
+      {
+        snapshots: 1,
+        candidates: 2,
+        approvals: 0,
+        profiles: 0,
+        branches: 0,
+        effects: 0,
+      },
+    );
+
+    value.store.activate(0, 250);
+    assert.throws(
+      () =>
+        value.store.createResidentSourceInspectionCandidate({
+          soul,
+          provenance: residentRunProvenance('3'),
+          observedAt: 300,
+        }),
+      /requires dark graph mode/,
+    );
+    assert.ok(
+      value.store.getResidentSourceInspectionCandidate(
+        first.candidate.candidateId,
+      ),
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('one resident run ordinal cannot capture changed SOUL sources', () => {
+  const value = fixture();
+  try {
+    const provenance = residentRunProvenance('4');
+    value.store.createResidentSourceInspectionCandidate({
+      soul: residentSoulSnapshot(value.directory, '# First synthetic soul\n'),
+      provenance,
+      observedAt: 100,
+    });
+    assert.throws(
+      () =>
+        value.store.createResidentSourceInspectionCandidate({
+          soul: residentSoulSnapshot(
+            value.directory,
+            '# Changed synthetic soul\n',
+          ),
+          provenance,
+          observedAt: 200,
+        }),
+      /already captured different sources/,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_soul_source_snapshots) AS snapshots,
+           (SELECT count(*) FROM context_resident_source_inspection_candidates) AS candidates`,
+      )
+      .get();
+    assert.deepEqual({ ...counts }, { snapshots: 1, candidates: 1 });
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('resident source candidate writes roll back late failures and stored records fail closed', () => {
+  const value = fixture();
+  try {
+    value.database.exec(`
+      CREATE TRIGGER test_resident_candidate_late_failure
+        BEFORE INSERT ON context_resident_source_inspection_candidates
+        BEGIN
+          SELECT RAISE(ABORT, 'forced resident candidate failure');
+        END;
+    `);
+    assert.throws(
+      () =>
+        value.store.createResidentSourceInspectionCandidate({
+          soul: residentSoulSnapshot(value.directory),
+          provenance: residentRunProvenance('5'),
+          observedAt: 100,
+        }),
+      /forced resident candidate failure/,
+    );
+    const empty = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_soul_source_snapshots) AS snapshots,
+           (SELECT count(*) FROM context_resident_source_inspection_candidates) AS candidates`,
+      )
+      .get();
+    assert.deepEqual({ ...empty }, { snapshots: 0, candidates: 0 });
+
+    value.database.exec('DROP TRIGGER test_resident_candidate_late_failure');
+    const created = value.store.createResidentSourceInspectionCandidate({
+      soul: residentSoulSnapshot(value.directory),
+      provenance: residentRunProvenance('5'),
+      observedAt: 100,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_resident_source_inspection_candidates
+             SET observed_at = observed_at + 1 WHERE candidate_id = ?`,
+          )
+          .run(created.candidate.candidateId),
+      /resident source inspection candidates are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT OR REPLACE INTO context_resident_source_inspection_candidates
+             SELECT * FROM context_resident_source_inspection_candidates
+             WHERE candidate_id = ?`,
+          )
+          .run(created.candidate.candidateId),
+      /resident source inspection candidate identity conflict/,
+    );
+    const substituted = residentRunProvenance('6');
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_resident_source_inspection_candidates(
+               candidate_id, schema_version, scope_kind, execution_context,
+               activation_epoch, contract_artifact_id,
+               contract_migration_checksum, contract_content_hash,
+               contract_content_bytes, soul_snapshot_id, inspect_batch_id,
+               inspect_batch_sha256, inspect_call_index, inspect_call_count,
+               inspect_tool_name, inspect_arguments_sha256, observed_at
+             )
+             SELECT ?, schema_version, scope_kind, execution_context,
+               activation_epoch + 1, contract_artifact_id,
+               contract_migration_checksum, contract_content_hash,
+               contract_content_bytes, soul_snapshot_id, ?, ?, 0, 1,
+               'run', ?, observed_at
+             FROM context_resident_source_inspection_candidates
+             WHERE candidate_id = ?`,
+          )
+          .run(
+            `resident-source-candidate:${'f'.repeat(64)}`,
+            substituted.batchId,
+            substituted.batchSha256,
+            substituted.argumentsSha256,
+            created.candidate.candidateId,
+          ),
+      /resident source inspection candidate lineage is invalid/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `DELETE FROM context_resident_soul_source_snapshots
+             WHERE snapshot_id = ?`,
+          )
+          .run(created.soul.snapshotId),
+      /resident SOUL source snapshots are immutable/,
+    );
+
+    value.database.exec(
+      'DROP TRIGGER context_resident_soul_source_snapshots_no_update',
+    );
+    value.database
+      .prepare(
+        `UPDATE context_resident_soul_source_snapshots
+         SET source_file_blob = zeroblob(source_file_bytes)
+         WHERE snapshot_id = ?`,
+      )
+      .run(created.soul.snapshotId);
+    assert.throws(
+      () =>
+        value.store.getResidentSourceInspectionCandidate(
+          created.candidate.candidateId,
+        ),
+      /source snapshot is inconsistent/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
 
 test('scoped runtime contract artifact is exact, independent from legacy prompt inputs, and immutable', () => {
   const value = fixture();
@@ -3730,6 +4001,15 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_resident_source_inspection_candidates_identity_conflict;
+      DROP TRIGGER context_resident_source_inspection_candidates_lineage_guard;
+      DROP TRIGGER context_resident_source_inspection_candidates_no_update;
+      DROP TRIGGER context_resident_source_inspection_candidates_no_delete;
+      DROP TABLE context_resident_source_inspection_candidates;
+      DROP TRIGGER context_resident_soul_source_snapshots_identity_conflict;
+      DROP TRIGGER context_resident_soul_source_snapshots_no_update;
+      DROP TRIGGER context_resident_soul_source_snapshots_no_delete;
+      DROP TABLE context_resident_soul_source_snapshots;
       DROP TRIGGER context_scoped_runtime_contract_artifacts_identity_conflict;
       DROP TRIGGER context_scoped_runtime_contract_artifacts_no_delete;
       DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
@@ -3739,7 +4019,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
         WHERE component = 'core'
           AND name IN (
             '0041-context-dark-pending-profile-binding',
-            '0042-context-scoped-runtime-contract-artifact'
+            '0042-context-scoped-runtime-contract-artifact',
+            '0043-context-resident-source-inspection-candidates'
           );
       PRAGMA user_version = 40;
     `);

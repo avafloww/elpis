@@ -103,6 +103,7 @@ test('prompt-facing snapshot binds exact source bytes and parsed body bytes', ()
     snapshot.parserGeneration,
     SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION,
   );
+  assert.equal(snapshot.sourceFile, raw);
   assert.equal(snapshot.sourceFileBytes, Buffer.byteLength(raw));
   assert.equal(
     snapshot.sourceFileHash,
@@ -128,6 +129,7 @@ test('prompt-facing snapshot matches live prompt semantics for a UTF-8 BOM', () 
 
   const expectedBody = parseSoul(fs.readFileSync(soulPath, 'utf8')).body;
   const snapshot = readPromptFacingSoulSnapshot(soulPath);
+  assert.equal(snapshot.sourceFile, raw);
   assert.equal(snapshot.body, expectedBody);
   assert.equal(snapshot.body, raw);
   assert.ok(snapshot.body.startsWith('\uFEFF---'));

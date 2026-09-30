@@ -80,6 +80,8 @@ export function parseSoul(raw: string): SoulParts {
 
 export interface PromptFacingSoulSnapshot {
   parserGeneration: number;
+  /** Exact valid UTF-8 source bytes decoded without consuming a BOM. */
+  sourceFile: string;
   sourceFileHash: string;
   sourceFileBytes: number;
   body: string;
@@ -160,6 +162,7 @@ export function readPromptFacingSoulSnapshot(
     const bodyBuffer = Buffer.from(body, 'utf8');
     return Object.freeze({
       parserGeneration: SOUL_PROMPT_SNAPSHOT_PARSER_GENERATION,
+      sourceFile: raw,
       sourceFileHash: sha256(bytes),
       sourceFileBytes: bytes.length,
       body,
