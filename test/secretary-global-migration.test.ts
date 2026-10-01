@@ -19,6 +19,11 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers)
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
+    DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
+    DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
+    DROP TRIGGER context_dark_isolated_provider_bindings_no_delete;
+    DROP TABLE context_dark_isolated_provider_bindings;
     DROP TRIGGER context_resident_world_profile_bindings_identity_conflict;
     DROP TRIGGER context_resident_world_profile_bindings_lineage_guard;
     DROP TRIGGER context_resident_world_profile_bindings_no_update;
@@ -162,7 +167,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings','0047-context-dark-isolated-provider-bindings')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -222,7 +227,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    46,
+    47,
   );
   assert.equal(
     (

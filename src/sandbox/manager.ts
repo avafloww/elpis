@@ -65,6 +65,10 @@ export interface SandboxManagerOptions {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  residentIsolatedProviderBinder?: (
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -130,6 +134,12 @@ class ResidentRunLease {
           snapshot: ResidentToolCallSnapshotV1,
         ) => string)
       | undefined,
+    private readonly isolatedProviderBinder:
+      | ((
+          scope: ResidentCurrentWorldScopeV1,
+          snapshot: ResidentToolCallSnapshotV1,
+        ) => string)
+      | undefined,
     private readonly currentWorldScope: ResidentCurrentWorldScopeV1 | undefined,
     private readonly onClose: () => void,
   ) {
@@ -144,6 +154,8 @@ class ResidentRunLease {
         this.bindCurrentWorldProfile(derivationId),
       assembleCurrentWorldDarkRequest: () =>
         this.assembleCurrentWorldDarkRequest(),
+      bindCurrentWorldIsolatedProvider: () =>
+        this.bindCurrentWorldIsolatedProvider(),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -259,6 +271,30 @@ class ResidentRunLease {
     return result;
   }
 
+  bindCurrentWorldIsolatedProvider(): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `isolated provider binding: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.isolatedProviderBinder) {
+      throw new Error('isolated provider binding: binder is not configured');
+    }
+    if (!this.currentWorldScope) {
+      throw new Error(
+        'isolated provider binding: current run has no routed social ingress lineage',
+      );
+    }
+    const result = this.isolatedProviderBinder(this.currentWorldScope, snapshot);
+    if (typeof result !== 'string') {
+      throw new Error(
+        'isolated provider binding: binder returned a non-string result',
+      );
+    }
+    return result;
+  }
+
   observeSandboxResult(result: RunResult): void {
     if (result.detached) {
       if (this.state === 'active') this.detach();
@@ -335,6 +371,10 @@ export class SandboxManager {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentIsolatedProviderBinder?: (
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -359,6 +399,8 @@ export class SandboxManager {
       options.residentIdentitySystemDeriver;
     this.residentWorldProfileBinder = options.residentWorldProfileBinder;
     this.residentDarkRequestAssembler = options.residentDarkRequestAssembler;
+    this.residentIsolatedProviderBinder =
+      options.residentIsolatedProviderBinder;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -530,6 +572,7 @@ export class SandboxManager {
       this.residentIdentitySystemDeriver,
       this.residentWorldProfileBinder,
       this.residentDarkRequestAssembler,
+      this.residentIsolatedProviderBinder,
       snapshotResidentCurrentWorldScope(this.deps.inbound),
       () => this.releaseResidentRunLease(lease),
     );

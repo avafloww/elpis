@@ -25,6 +25,7 @@ import { bindResidentRunHandle } from '../kernel/resident-run-scope.js';
 import {
   bindResidentDarkRequestAssemblyAction,
   bindResidentIdentitySystemDerivationAction,
+  bindResidentIsolatedProviderBindingAction,
   bindResidentSourceAuthorizationAction,
   bindResidentSourceInspectionAction,
   bindResidentWorldProfileBindingAction,
@@ -45,6 +46,7 @@ export interface SandboxResidentRunLifecycle {
   deriveAuthorizedIdentityLayers(authorizationId: string): string;
   bindCurrentWorldProfile(derivationId: string): string;
   assembleCurrentWorldDarkRequest(): string;
+  bindCurrentWorldIsolatedProvider(): string;
   detach(): void;
   settled(): void;
 }
@@ -195,6 +197,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentDarkRequestAssemblyAction(
         scope,
         options.residentRun.assembleCurrentWorldDarkRequest,
+      );
+      bindResidentIsolatedProviderBindingAction(
+        scope,
+        options.residentRun.bindCurrentWorldIsolatedProvider,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

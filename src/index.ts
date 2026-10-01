@@ -114,6 +114,10 @@ import { createResidentSourceCandidateAuthorizer } from './context/resident-sour
 import { createResidentIdentitySystemDeriver } from './context/resident-identity-system-derivation.js';
 import { createResidentWorldProfileBinder } from './context/resident-world-profile-binding.js';
 import { createResidentDarkRequestAssembler } from './context/resident-dark-request-assembly.js';
+import {
+  createResidentIsolatedProviderBinder,
+  exactMainIsolatedProviderTarget,
+} from './context/resident-isolated-provider-binding.js';
 
 import {
   ContextGraphShadowRecorder,
@@ -747,6 +751,12 @@ export async function createElpisRuntime(
     previewMaxBytes: config.sandbox.previewMaxBytes,
     redactForOutput: (text) => redactSecrets(text, secretRegistry),
   });
+  const residentIsolatedProviderBinder = createResidentIsolatedProviderBinder({
+    store: contextGraphStore,
+    target: exactMainIsolatedProviderTarget(config),
+    previewMaxBytes: config.sandbox.previewMaxBytes,
+    redactForOutput: (text) => redactSecrets(text, secretRegistry),
+  });
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
@@ -759,6 +769,7 @@ export async function createElpisRuntime(
     residentIdentitySystemDeriver,
     residentWorldProfileBinder,
     residentDarkRequestAssembler,
+    residentIsolatedProviderBinder,
   });
 
   llms = createLlmRoleClients(config, {

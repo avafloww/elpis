@@ -54,6 +54,10 @@ function fixture(
       scope: ResidentCurrentWorldScopeV1,
       snapshot: ResidentToolCallSnapshotV1,
     ) => string;
+    residentIsolatedProviderBinder?: (
+      scope: ResidentCurrentWorldScopeV1,
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -131,6 +135,7 @@ function fixture(
     residentIdentitySystemDeriver: opts.residentIdentitySystemDeriver,
     residentWorldProfileBinder: opts.residentWorldProfileBinder,
     residentDarkRequestAssembler: opts.residentDarkRequestAssembler,
+    residentIsolatedProviderBinder: opts.residentIsolatedProviderBinder,
   });
   return {
     dir,
@@ -1274,6 +1279,65 @@ test('resident dark request assembly is zero-argument, active-run-only, and curr
     assert.equal(ambient.ok, false);
     assert.match(ambient.error ?? '', /no routed social ingress lineage/);
     assert.equal(assemblies.length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test('isolated provider binding is zero-argument, active-run-only, and current-world scoped', async () => {
+  const authority = createResidentRunAuthority();
+  const bindings: Array<{
+    scope: ResidentCurrentWorldScopeV1;
+    snapshot: ResidentToolCallSnapshotV1;
+  }> = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentIsolatedProviderBinder: (scope, snapshot) => {
+      bindings.push({ scope, snapshot });
+      return 'DARK ISOLATED PROVIDER BINDING RECORDED — NOT RUNNABLE';
+    },
+  });
+  try {
+    const code = 'elpis.context.bindCurrentWorldIsolatedProvider()';
+    const direct = await f.manager.run({ code });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+
+    const unrouted = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(unrouted.ok, false);
+    assert.match(unrouted.error ?? '', /no routed social ingress lineage/);
+    assert.equal(bindings.length, 0);
+
+    const routedScope = {
+      worldId: worldId('world:signal:provider-binding-current'),
+      eventId: eventId('event:provider-binding-current'),
+      sequence: 11,
+    };
+    f.deps.inbound = {
+      wakeClass: 'wake',
+      contextGraphLineage: routedScope,
+    } as SandboxDeps['inbound'];
+    const routed = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(routed.ok, true);
+    assert.match(routed.preview ?? '', /ISOLATED PROVIDER BINDING RECORDED/);
+    assert.equal(bindings.length, 1);
+    assert.deepEqual(bindings[0]?.scope, routedScope);
+    assert.notEqual(bindings[0]?.scope, routedScope);
+    assert.equal(bindings[0]?.snapshot.toolName, 'run');
+
+    const withArgument = await f.manager.run({
+      code: 'elpis.context.bindCurrentWorldIsolatedProvider("retarget")',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(withArgument.ok, false);
+    assert.match(withArgument.error ?? '', /no arguments are accepted/);
+    assert.equal(bindings.length, 1);
   } finally {
     f.close();
   }

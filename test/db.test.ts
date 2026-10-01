@@ -51,6 +51,10 @@ test('openDatabase creates elpis.db with the expected tables', () => {
     'context_resident_identity_system_derivations table',
   );
   assert.ok(
+    names.includes('context_dark_isolated_provider_bindings'),
+    'context_dark_isolated_provider_bindings table',
+  );
+  assert.ok(
     !names.includes('sandbox_aliases'),
     'legacy sandbox_aliases table removed',
   );
@@ -63,13 +67,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 46, 'user_version bumped to 46');
+  assert.equal(v1, 47, 'user_version bumped to 47');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 46);
+  assert.equal(v2, 47);
   db.close();
 });
 
@@ -109,7 +113,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    46,
+    47,
   );
   db.close();
 });
@@ -195,7 +199,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 46, 'user_version upgraded to 46');
+  assert.equal(finalVersion, 47, 'user_version upgraded to 47');
 
   // Assert fleet tables exist
   const tableNames = (

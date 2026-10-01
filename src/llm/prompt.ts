@@ -831,6 +831,10 @@ The bound profile remains dark and non-runnable. This action creates no branch, 
 
 Assembly is still dark observation, not execution. It performs no provider dispatch, tool/effect issuance, capsule creation, activation, or continuation advance. A successful assembly intentionally leaves one running dark branch for explicit recovery or later branch-lifecycle work; direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
 
+\`elpis.context.bindCurrentWorldIsolatedProvider()\` records one immutable dark binding between the exact current ingress's pending request candidate and the boot-resolved configured **main** provider target. It accepts no arguments and cannot be retargeted. The credential-free target includes the canonical model reference, provider-facing model, concrete API surface and endpoint, reasoning settings, tool-contract identity, any Gateway authority/target generation, and a deterministic isolated cache namespace. The receipt is fixed to \`execution_mode=dark\`, \`runnable=false\`, \`network_authority=none\`, and \`tool_mode=none\`; exact replay rereads the stored receipt, while changed lineage or target identity fails closed.
+
+Binding remains inert testimony. It performs no network dispatch, provider issuance, result write, tool call, effect, capsule, activation, configuration change, or continuation advance. Direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
+
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):
 \`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it. A Signal \`<reply-to source="signal-quote">\` is bounded sender-embedded context, not independently fetched proof of the original message.

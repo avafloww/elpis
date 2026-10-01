@@ -8,6 +8,7 @@ import {
   ContextGraphStore,
   eventId,
   hashContextBytes,
+  normalizeExactIsolatedProviderTarget,
   worldId,
 } from '../src/store/context-graph.js';
 import {
@@ -18,6 +19,11 @@ import { createResidentSourceCandidateAuthorizer } from '../src/context/resident
 import { createResidentIdentitySystemDeriver } from '../src/context/resident-identity-system-derivation.js';
 import { createResidentWorldProfileBinder } from '../src/context/resident-world-profile-binding.js';
 import { createResidentDarkRequestAssembler } from '../src/context/resident-dark-request-assembly.js';
+import {
+  createResidentIsolatedProviderBinder,
+  exactMainIsolatedProviderTarget,
+} from '../src/context/resident-isolated-provider-binding.js';
+import { makeConfig } from './helpers.js';
 import { preview } from '../src/sandbox/preview.js';
 
 function provenance(suffix: string) {
@@ -573,6 +579,88 @@ test('resident source inspection formatter rejects invalid budgets without a par
   }
 });
 
+test('isolated provider target resolver records the concrete credential-free main route', () => {
+  const config = makeConfig();
+  const target = exactMainIsolatedProviderTarget(config);
+  assert.equal(target.role, 'main');
+  assert.equal(target.targetRef, config.llm.registry.targets.main.ref);
+  assert.equal(target.providerType, 'openai-compatible');
+  assert.equal(target.model, 'stub');
+  assert.equal(target.apiSurface, 'responses');
+  assert.match(target.apiEndpoint, /\/responses$/);
+  assert.equal(target.reasoningEffort, 'high');
+  assert.equal(target.externalThinking, false);
+  assert.equal(target.gateway, null);
+  assert.equal(target.wireContractGeneration, 1);
+  assert.ok(target.toolContractVersion.length > 0);
+  assert.doesNotMatch(JSON.stringify(target), /apiKey|"stub":"stub"/);
+});
+
+test('isolated provider target normalization rejects contradictory Gateway identity', () => {
+  const target = {
+    schemaVersion: 1,
+    role: 'main',
+    targetRef: 'example/aster',
+    providerType: 'openai-compatible',
+    model: 'aster-1',
+    apiSurface: 'responses',
+    apiEndpoint: 'https://gateway.example.com/api/v1/resident/llm/request',
+    gateway: {
+      authority: 'https://gateway.example.com/',
+      modelRef: 'example/aster',
+      targetGeneration: `egt1.${Buffer.alloc(16).toString('base64url')}`,
+    },
+    reasoningEffort: null,
+    reasoningSummary: null,
+    reasoningContext: null,
+    externalThinking: false,
+    toolContractVersion: 'fixture-v1',
+    wireContractGeneration: 1,
+  } as const;
+  assert.deepEqual(normalizeExactIsolatedProviderTarget(target), target);
+  assert.throws(
+    () =>
+      normalizeExactIsolatedProviderTarget({
+        ...target,
+        gateway: { ...target.gateway, modelRef: 'example/other' },
+      }),
+    /Gateway target is not canonical/,
+  );
+  assert.throws(
+    () =>
+      normalizeExactIsolatedProviderTarget({
+        ...target,
+        gateway: { ...target.gateway, targetGeneration: 'egt1.invalid' },
+      }),
+    /Gateway target is not canonical/,
+  );
+  assert.throws(
+    () =>
+      normalizeExactIsolatedProviderTarget({
+        ...target,
+        gateway: { ...target.gateway, authority: 'https://other.example.com/' },
+      }),
+    /Gateway target is not canonical/,
+  );
+  assert.throws(
+    () =>
+      normalizeExactIsolatedProviderTarget({
+        ...target,
+        apiEndpoint:
+          'https://gateway.example.com/api/v1/resident/llm/request?token=fixture',
+      }),
+    /endpoint is not canonical/,
+  );
+  assert.throws(
+    () =>
+      normalizeExactIsolatedProviderTarget({
+        ...target,
+        apiEndpoint: 'https://gateway.example.com/arbitrary-path',
+      }),
+    /Gateway target is not canonical/,
+  );
+});
+
 test('resident dark request assembly presents the complete exact candidate', () => {
   const value = fixture('# Synthetic soul\n' + 'x'.repeat(11_000), 16_384);
   try {
@@ -642,22 +730,86 @@ test('resident dark request assembly presents the complete exact candidate', () 
       preview(result, 16_384),
       `string(${result.length} chars):\n${result}`,
     );
+    const currentScope = {
+      worldId: targetWorldId,
+      eventId: current.eventId,
+      sequence: current.sequence,
+    };
+    assert.equal(value.assemble(currentScope, provenance('44')), result);
+    const providerTarget = {
+      schemaVersion: 1,
+      role: 'main',
+      targetRef: 'example/aster',
+      providerType: 'openai-compatible',
+      model: 'aster-1',
+      apiSurface: 'responses',
+      apiEndpoint: 'https://api.example.com/v1/responses',
+      gateway: null,
+      reasoningEffort: 'medium',
+      reasoningSummary: null,
+      reasoningContext: null,
+      externalThinking: false,
+      toolContractVersion: 'fixture-v1',
+      wireContractGeneration: 1,
+    } as const;
+    const redactedBinder = createResidentIsolatedProviderBinder({
+      store: value.store,
+      target: providerTarget,
+      previewMaxBytes: 16_384,
+      redactForOutput: (text) => text.replace('aster-1', '[REDACTED]'),
+      now: () => 750,
+    });
+    assert.throws(
+      () => redactedBinder(currentScope, provenance('45')),
+      /secret redaction would alter it/,
+    );
     assert.equal(
-      value.assemble(
-        {
-          worldId: targetWorldId,
-          eventId: current.eventId,
-          sequence: current.sequence,
-        },
-        provenance('44'),
-      ),
-      result,
+      (
+        value.database
+          .prepare(
+            'SELECT count(*) AS n FROM context_dark_isolated_provider_bindings',
+          )
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+    let providerNow = 750;
+    const providerBinder = createResidentIsolatedProviderBinder({
+      store: value.store,
+      target: providerTarget,
+      previewMaxBytes: 16_384,
+      redactForOutput: (text) => text,
+      now: () => ++providerNow,
+    });
+    const providerResult = providerBinder(currentScope, provenance('45'));
+    assert.equal(providerBinder(currentScope, provenance('45')), providerResult);
+    assert.match(
+      providerResult,
+      /^DARK ISOLATED PROVIDER BINDING RECORDED — NOT RUNNABLE/m,
+    );
+    assert.match(providerResult, /"networkAuthority":"none"/);
+    assert.match(providerResult, /"runnable":false/);
+    assert.match(providerResult, /"apiSurface":"responses"/);
+    assert.match(providerResult, /did not dispatch a provider request/);
+    assert.equal(
+      preview(providerResult, 16_384),
+      `string(${providerResult.length} chars):\n${providerResult}`,
     );
     assert.equal(
       (
         value.database
           .prepare(
             'SELECT count(*) AS n FROM context_dark_pending_branch_attempts',
+          )
+          .get() as { n: number }
+      ).n,
+      1,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT count(*) AS n FROM context_dark_isolated_provider_bindings',
           )
           .get() as { n: number }
       ).n,

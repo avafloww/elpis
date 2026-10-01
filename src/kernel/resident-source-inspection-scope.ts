@@ -9,6 +9,7 @@ export type ResidentWorldProfileBindingAction = (
   derivationId: string,
 ) => string;
 export type ResidentDarkRequestAssemblyAction = () => string;
+export type ResidentIsolatedProviderBindingAction = () => string;
 
 const actions = new WeakMap<RunScope, ResidentSourceInspectionAction>();
 const authorizationActions = new WeakMap<
@@ -26,6 +27,10 @@ const worldProfileBindingActions = new WeakMap<
 const darkRequestAssemblyActions = new WeakMap<
   RunScope,
   ResidentDarkRequestAssemblyAction
+>();
+const isolatedProviderBindingActions = new WeakMap<
+  RunScope,
+  ResidentIsolatedProviderBindingAction
 >();
 
 export function bindResidentSourceInspectionAction(
@@ -105,4 +110,20 @@ export function residentDarkRequestAssemblyActionForScope(
   scope: RunScope,
 ): ResidentDarkRequestAssemblyAction | undefined {
   return darkRequestAssemblyActions.get(scope);
+}
+
+export function bindResidentIsolatedProviderBindingAction(
+  scope: RunScope,
+  action: ResidentIsolatedProviderBindingAction,
+): void {
+  if (isolatedProviderBindingActions.has(scope)) {
+    throw new Error('isolated provider binding: run scope is already bound');
+  }
+  isolatedProviderBindingActions.set(scope, action);
+}
+
+export function residentIsolatedProviderBindingActionForScope(
+  scope: RunScope,
+): ResidentIsolatedProviderBindingAction | undefined {
+  return isolatedProviderBindingActions.get(scope);
 }

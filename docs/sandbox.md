@@ -64,6 +64,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.context.deriveAuthorizedIdentityLayers(authorizationId)` for a later-batch atomic derivation of the worldless contract and identity layers plus typed approvals, still without any profile or runtime authority;
 - `elpis.context.bindCurrentWorldProfile(derivationId)` for a later live resident run to bind that derivation to the exact captured current social ingress as a dark, non-runnable profile/head plus immutable receipt; callers cannot supply world or event lineage;
 - `elpis.context.assembleCurrentWorldDarkRequest()` for a live resident run to atomically admit its exact captured social ingress and assemble a complete profile-bound, provider-neutral, non-runnable dark request candidate; it accepts no arguments, performs no provider/effect/continuation action, and leaves a recoverable running dark branch.
+- `elpis.context.bindCurrentWorldIsolatedProvider()` for a live resident run to bind that exact current dark request to the credential-free, concrete configured main target and an isolated cache namespace; it accepts no arguments and records only an inert non-runnable/no-network receipt.
 
 - `elpis.schedule`, including `.list()` and `.remove(ref)`.
 

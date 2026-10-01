@@ -1215,6 +1215,71 @@ test('resident current-world dark request admits and assembles atomically', () =
       record.assembly.request.candidateJson.includes('PROFILE_BINDING_CANARY'),
       false,
     );
+    const providerTarget = {
+      schemaVersion: 1,
+      role: 'main',
+      targetRef: 'example/aster',
+      providerType: 'openai-compatible',
+      model: 'aster-1',
+      apiSurface: 'responses',
+      apiEndpoint: 'https://api.example.com/v1/responses',
+      gateway: null,
+      reasoningEffort: null,
+      reasoningSummary: null,
+      reasoningContext: null,
+      externalThinking: false,
+      toolContractVersion: 'fixture-v1',
+      wireContractGeneration: 1,
+    } as const;
+    const providerInput = {
+      worldId: targetWorldId,
+      eventId: current.eventId,
+      sequence: current.sequence,
+      target: providerTarget,
+      provenance: residentRunProvenance('405'),
+      boundAt: 750,
+    };
+    assert.throws(
+      () =>
+        value.store.bindResidentDarkRequestToIsolatedProvider(
+          providerInput,
+          () => {
+            throw new Error('forced provider binding presentation failure');
+          },
+        ),
+      /forced provider binding presentation failure/,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_dark_isolated_provider_bindings'),
+      0,
+    );
+    const providerBinding =
+      value.store.bindResidentDarkRequestToIsolatedProvider(providerInput);
+    assert.equal(providerBinding.binding.networkAuthority, 'none');
+    assert.equal(providerBinding.binding.runnable, false);
+    assert.equal(providerBinding.binding.toolMode, 'none');
+    assert.equal(
+      providerBinding.binding.candidateHash,
+      record.assembly.request.candidateHash,
+    );
+    assert.equal(providerBinding.binding.target.apiSurface, 'responses');
+    assert.deepEqual(
+      value.store.bindResidentDarkRequestToIsolatedProvider({
+        ...providerInput,
+        boundAt: 699,
+      }),
+      providerBinding,
+    );
+    assert.throws(
+      () =>
+        value.store.bindResidentDarkRequestToIsolatedProvider({
+          ...providerInput,
+          target: { ...providerTarget, model: 'aster-2' },
+          provenance: residentRunProvenance('406'),
+          boundAt: 752,
+        }),
+      /already bound by a different call/,
+    );
     assert.equal(value.store.getContinuationHead().revision, 0);
     assert.equal(tableCount(value.database, 'context_effects'), 0);
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
@@ -1229,6 +1294,10 @@ test('resident current-world dark request admits and assembles atomically', () =
     );
     assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
     assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.deepEqual(
+      value.store.getDarkIsolatedProviderBinding(providerBinding.bindingId),
+      providerBinding,
+    );
   } finally {
     closeFixture(value);
   }
@@ -4968,6 +5037,11 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
+      DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
+      DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
+      DROP TRIGGER context_dark_isolated_provider_bindings_no_delete;
+      DROP TABLE context_dark_isolated_provider_bindings;
       DROP TRIGGER context_resident_world_profile_bindings_identity_conflict;
       DROP TRIGGER context_resident_world_profile_bindings_lineage_guard;
       DROP TRIGGER context_resident_world_profile_bindings_no_update;
@@ -5005,7 +5079,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0043-context-resident-source-inspection-candidates',
             '0044-context-resident-source-candidate-authorizations',
             '0045-context-resident-identity-system-derivations',
-            '0046-context-resident-world-profile-bindings'
+            '0046-context-resident-world-profile-bindings',
+            '0047-context-dark-isolated-provider-bindings'
           );
       PRAGMA user_version = 40;
     `);

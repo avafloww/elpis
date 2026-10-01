@@ -67,6 +67,7 @@ import { parseMindId } from '../store/mind.js';
 import {
   residentDarkRequestAssemblyActionForScope,
   residentIdentitySystemDerivationActionForScope,
+  residentIsolatedProviderBindingActionForScope,
   residentSourceAuthorizationActionForScope,
   residentSourceInspectionActionForScope,
   residentWorldProfileBindingActionForScope,
@@ -546,6 +547,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       }
       return assemble();
+    },
+    bindCurrentWorldIsolatedProvider: (...args: unknown[]) => {
+      if (args.length !== 0) {
+        throw new Error(
+          'elpis.context.bindCurrentWorldIsolatedProvider: no arguments are accepted',
+        );
+      }
+      const scope = runScope.getStore();
+      const bind =
+        scope && residentIsolatedProviderBindingActionForScope(scope);
+      if (!bind) {
+        throw new Error(
+          'elpis.context.bindCurrentWorldIsolatedProvider: unavailable without an active resident run',
+        );
+      }
+      return bind();
     },
   };
 

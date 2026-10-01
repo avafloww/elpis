@@ -214,6 +214,11 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
   // Reopening must interpret every legacy rotation as not yet proposed.
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
+    DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
+    DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
+    DROP TRIGGER context_dark_isolated_provider_bindings_no_delete;
+    DROP TABLE context_dark_isolated_provider_bindings;
     DROP TRIGGER context_resident_world_profile_bindings_identity_conflict;
     DROP TRIGGER context_resident_world_profile_bindings_lineage_guard;
     DROP TRIGGER context_resident_world_profile_bindings_no_update;
@@ -316,7 +321,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0043-context-resident-source-inspection-candidates',
           '0044-context-resident-source-candidate-authorizations',
           '0045-context-resident-identity-system-derivations',
-          '0046-context-resident-world-profile-bindings'
+          '0046-context-resident-world-profile-bindings',
+          '0047-context-dark-isolated-provider-bindings'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

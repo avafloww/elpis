@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { LLM_PROXY_PATHS } from '@elpis/gateway-protocol';
+
 import {
   isBranchId,
   isEventId,
@@ -50,6 +52,8 @@ export type ResidentIdentitySystemDerivationId =
   ContextId<'ResidentIdentitySystemDerivationId'>;
 export type ResidentWorldProfileBindingId =
   ContextId<'ResidentWorldProfileBindingId'>;
+export type DarkIsolatedProviderBindingId =
+  ContextId<'DarkIsolatedProviderBindingId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -145,6 +149,14 @@ export const residentWorldProfileBindingId = (
     'residentWorldProfileBindingId',
     value,
     'resident-world-profile-binding:',
+  );
+export const darkIsolatedProviderBindingId = (
+  value: string,
+): DarkIsolatedProviderBindingId =>
+  branded<'DarkIsolatedProviderBindingId'>(
+    'darkIsolatedProviderBindingId',
+    value,
+    'dark-isolated-provider-binding:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -748,6 +760,79 @@ export interface ResidentWorldProfileBindingV1 {
   readonly boundAt: number;
 }
 
+export interface ExactIsolatedProviderTargetV1 {
+  readonly schemaVersion: 1;
+  readonly role: 'main';
+  readonly targetRef: string;
+  readonly providerType:
+    | 'openai-compatible'
+    | 'anthropic-oauth'
+    | 'codex-oauth';
+  readonly model: string;
+  readonly apiSurface:
+    | 'responses'
+    | 'chat-completions'
+    | 'anthropic-messages'
+    | 'codex-responses';
+  readonly apiEndpoint: string;
+  readonly gateway: null | {
+    readonly authority: string;
+    readonly modelRef: string;
+    readonly targetGeneration: string;
+  };
+  readonly reasoningEffort: string | null;
+  readonly reasoningSummary: string | null;
+  readonly reasoningContext: string | null;
+  readonly externalThinking: boolean;
+  readonly toolContractVersion: string;
+  readonly wireContractGeneration: 1;
+}
+
+export interface DarkIsolatedProviderBindingV1 {
+  readonly schemaVersion: 1;
+  readonly executionMode: 'dark';
+  readonly runnable: false;
+  readonly networkAuthority: 'none';
+  readonly toolMode: 'none';
+  readonly historicalToolMessages: false;
+  readonly activationEpoch: number;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly authorityEpoch: number;
+  readonly residentProfileBindingId: ResidentWorldProfileBindingId;
+  readonly requestProfileBindingId: SystemProfileRequestViewBindingId;
+  readonly requestProfileBindingHash: string;
+  readonly profileId: SystemProfileId;
+  readonly profileHash: string;
+  readonly profileHeadRevision: number;
+  readonly manifestId: ManifestId;
+  readonly manifestHash: string;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly candidateHash: string;
+  readonly candidateBytes: number;
+  readonly target: ExactIsolatedProviderTargetV1;
+  readonly targetHash: string;
+  readonly laneKind: 'isolated-standalone';
+  readonly cacheNamespace: string;
+  readonly bindBatchId: string;
+  readonly bindBatchSha256: string;
+  readonly bindCallIndex: number;
+  readonly bindCallCount: number;
+  readonly bindToolName: 'run';
+  readonly bindArgumentsSha256: string;
+  readonly boundAt: number;
+}
+
+export interface DarkIsolatedProviderBindingRecord {
+  readonly bindingId: DarkIsolatedProviderBindingId;
+  readonly binding: DarkIsolatedProviderBindingV1;
+  readonly targetJson: string;
+  readonly targetHash: string;
+  readonly bindingJson: string;
+  readonly bindingHash: string;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -959,6 +1044,151 @@ function residentWorldProfileBindingIdentity(input: {
       }),
     )}`,
   );
+}
+
+function boundedProviderText(label: string, value: unknown, max: number): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > max ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
+export function normalizeExactIsolatedProviderTarget(
+  input: ExactIsolatedProviderTargetV1,
+): ExactIsolatedProviderTargetV1 {
+  if (
+    input.schemaVersion !== 1 ||
+    input.role !== 'main' ||
+    input.wireContractGeneration !== 1 ||
+    typeof input.externalThinking !== 'boolean'
+  ) {
+    throw new Error('isolated provider target contract is invalid');
+  }
+  const providerType = input.providerType;
+  const apiSurface = input.apiSurface;
+  if (
+    !(
+      (providerType === 'openai-compatible' &&
+        ['responses', 'chat-completions'].includes(apiSurface)) ||
+      (providerType === 'anthropic-oauth' && apiSurface === 'anthropic-messages') ||
+      (providerType === 'codex-oauth' && apiSurface === 'codex-responses')
+    )
+  ) {
+    throw new Error('isolated provider target surface is incompatible');
+  }
+  const targetRef = boundedProviderText('isolated provider targetRef', input.targetRef, 512);
+  if (!/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(targetRef)) {
+    throw new Error('isolated provider targetRef is not canonical');
+  }
+  const model = boundedProviderText('isolated provider model', input.model, 512);
+  const endpointText = boundedProviderText(
+    'isolated provider apiEndpoint',
+    input.apiEndpoint,
+    2048,
+  );
+  const endpoint = new URL(endpointText);
+  if (
+    !['http:', 'https:'].includes(endpoint.protocol) ||
+    endpoint.username !== '' ||
+    endpoint.password !== '' ||
+    endpoint.search !== '' ||
+    endpoint.hash !== '' ||
+    endpoint.href !== endpointText
+  ) {
+    throw new Error('isolated provider endpoint is not canonical');
+  }
+  const optional = (label: string, value: string | null): string | null =>
+    value === null ? null : boundedProviderText(label, value, 512);
+  let gateway: ExactIsolatedProviderTargetV1['gateway'] = null;
+  if (input.gateway !== null) {
+    const authority = boundedProviderText(
+      'isolated provider gateway authority',
+      input.gateway.authority,
+      2048,
+    );
+    const authorityUrl = new URL(authority);
+    const modelRef = boundedProviderText(
+      'isolated provider gateway modelRef',
+      input.gateway.modelRef,
+      512,
+    );
+    const targetGeneration = boundedProviderText(
+      'isolated provider gateway targetGeneration',
+      input.gateway.targetGeneration,
+      128,
+    );
+    const generationMatch = /^egt1\.([A-Za-z0-9_-]{22})$/.exec(targetGeneration);
+    const generationBytes = generationMatch
+      ? Buffer.from(generationMatch[1], 'base64url')
+      : null;
+    if (
+      authorityUrl.protocol !== 'https:' ||
+      authorityUrl.username !== '' ||
+      authorityUrl.password !== '' ||
+      authorityUrl.pathname !== '/' ||
+      authorityUrl.search !== '' ||
+      authorityUrl.hash !== '' ||
+      authorityUrl.href !== authorityUrl.origin + '/' ||
+      endpoint.href !== new URL(LLM_PROXY_PATHS.request, authority).href ||
+      modelRef !== targetRef ||
+      generationBytes === null ||
+      generationBytes.byteLength !== 16 ||
+      generationBytes.toString('base64url') !== generationMatch![1]
+    ) {
+      throw new Error('isolated provider Gateway target is not canonical');
+    }
+    gateway = Object.freeze({ authority, modelRef, targetGeneration });
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    role: 'main',
+    targetRef,
+    providerType,
+    model,
+    apiSurface,
+    apiEndpoint: endpointText,
+    gateway,
+    reasoningEffort: optional(
+      'isolated provider reasoningEffort',
+      input.reasoningEffort,
+    ),
+    reasoningSummary: optional(
+      'isolated provider reasoningSummary',
+      input.reasoningSummary,
+    ),
+    reasoningContext: optional(
+      'isolated provider reasoningContext',
+      input.reasoningContext,
+    ),
+    externalThinking: input.externalThinking,
+    toolContractVersion: boundedProviderText(
+      'isolated provider toolContractVersion',
+      input.toolContractVersion,
+      512,
+    ),
+    wireContractGeneration: 1,
+  });
+}
+
+function darkIsolatedProviderBindingIdentity(
+  bindingJson: string,
+): DarkIsolatedProviderBindingId {
+  return darkIsolatedProviderBindingId(
+    `dark-isolated-provider-binding:${hashContextBytes(bindingJson)}`,
+  );
+}
+
+function isolatedProviderCacheNamespace(input: {
+  manifestCacheNamespace: string;
+  requestViewHash: string;
+  targetHash: string;
+}): string {
+  return `context-dark:${hashContextBytes(serialize(input))}`;
 }
 
 function sha256(label: string, value: string): string {
@@ -1864,6 +2094,48 @@ interface ResidentWorldProfileBindingRow {
   bound_at: number;
 }
 
+interface DarkIsolatedProviderBindingRow {
+  binding_id: string;
+  schema_version: number;
+  execution_mode: string;
+  runnable: number;
+  network_authority: string;
+  tool_mode: string;
+  historical_tool_messages: number;
+  activation_epoch: number;
+  branch_id: string;
+  world_id: string;
+  authority_epoch: number;
+  resident_profile_binding_id: string;
+  request_profile_binding_id: string;
+  request_profile_binding_hash: string;
+  profile_id: string;
+  profile_hash: string;
+  profile_head_revision: number;
+  manifest_id: string;
+  manifest_hash: string;
+  request_view_id: string;
+  request_view_hash: string;
+  candidate_hash: string;
+  candidate_bytes: number;
+  target_provider_type: string;
+  target_model: string;
+  target_api_surface: string;
+  target_api_endpoint: string;
+  target_json: string;
+  target_hash: string;
+  cache_namespace: string;
+  bind_batch_id: string;
+  bind_batch_sha256: string;
+  bind_call_index: number;
+  bind_call_count: number;
+  bind_tool_name: string;
+  bind_arguments_sha256: string;
+  binding_json: string;
+  binding_hash: string;
+  bound_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -2700,6 +2972,23 @@ function normalizeResidentWorldProfileBindingProvenance(
   });
 }
 
+function normalizeDarkIsolatedProviderBindingProvenance(
+  input: ResidentToolCallSnapshotV1,
+): ResidentToolCallSnapshotV1 {
+  const provenance = normalizeResidentAuthorizationProvenance(input);
+  return Object.freeze({
+    ...provenance,
+    batchSha256: sha256(
+      'dark isolated provider binding batchSha256',
+      provenance.batchSha256,
+    ),
+    argumentsSha256: sha256(
+      'dark isolated provider binding argumentsSha256',
+      provenance.argumentsSha256,
+    ),
+  });
+}
+
 function mapResidentInspectionCandidate(
   row: ResidentSourceInspectionCandidateRow,
 ): ResidentSourceInspectionCandidateV1 {
@@ -3372,6 +3661,191 @@ export class ContextGraphStore {
       throw new Error('stored resident world profile binding head is invalid');
     }
     return receipt;
+  }
+
+  getDarkIsolatedProviderBinding(
+    id: DarkIsolatedProviderBindingId,
+  ): DarkIsolatedProviderBindingRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_dark_isolated_provider_bindings
+         WHERE binding_id = ?`,
+      )
+      .get(id) as DarkIsolatedProviderBindingRow | undefined;
+    if (!row) return null;
+    if (
+      row.schema_version !== 1 ||
+      row.execution_mode !== 'dark' ||
+      row.runnable !== 0 ||
+      row.network_authority !== 'none' ||
+      row.tool_mode !== 'none' ||
+      row.historical_tool_messages !== 0
+    ) {
+      throw new Error('stored dark isolated provider binding mode is invalid');
+    }
+    let parsedTarget: unknown;
+    try {
+      parsedTarget = JSON.parse(row.target_json);
+    } catch (error) {
+      throw new Error('stored dark isolated provider target is invalid', {
+        cause: error,
+      });
+    }
+    const target = normalizeExactIsolatedProviderTarget(
+      parsedTarget as ExactIsolatedProviderTargetV1,
+    );
+    const targetJson = serialize(target);
+    const targetHash = sha256('dark isolated provider targetHash', row.target_hash);
+    if (
+      row.target_json !== targetJson ||
+      hashContextBytes(targetJson) !== targetHash ||
+      row.target_provider_type !== target.providerType ||
+      row.target_model !== target.model ||
+      row.target_api_surface !== target.apiSurface ||
+      row.target_api_endpoint !== target.apiEndpoint
+    ) {
+      throw new Error('stored dark isolated provider target is invalid');
+    }
+    const provenance = normalizeDarkIsolatedProviderBindingProvenance({
+      version: 1,
+      batchId: row.bind_batch_id,
+      batchSha256: row.bind_batch_sha256,
+      callIndex: row.bind_call_index,
+      callCount: row.bind_call_count,
+      toolName: row.bind_tool_name,
+      argumentsSha256: row.bind_arguments_sha256,
+    });
+    const branch = this.getBranch(branchId(row.branch_id));
+    const attempt = this.getDarkPendingBranchAttempt(branchId(row.branch_id));
+    const requestView = this.getLocalBranchRequestView(
+      localBranchRequestViewId(row.request_view_id),
+    );
+    const requestBinding = this.getSystemProfileRequestViewBinding(
+      systemProfileRequestViewBindingId(row.request_profile_binding_id),
+    );
+    const residentBinding = this.getResidentWorldProfileBinding(
+      residentWorldProfileBindingId(row.resident_profile_binding_id),
+    );
+    if (!branch || !attempt || !requestView || !requestBinding || !residentBinding) {
+      throw new Error('stored dark isolated provider binding lineage is missing');
+    }
+    if (
+      attempt.branchId !== branch.branchId ||
+      attempt.worldId !== branch.worldId ||
+      attempt.requestViewId !== requestView.requestViewId ||
+      requestView.branchId !== branch.branchId ||
+      requestView.worldId !== branch.worldId ||
+      requestBinding.binding.requestViewId !== requestView.requestViewId ||
+      requestBinding.binding.requestViewHash !== requestView.viewHash ||
+      requestBinding.binding.worldId !== branch.worldId ||
+      requestBinding.binding.activationEpoch !== attempt.activationEpoch ||
+      residentBinding.worldId !== branch.worldId ||
+      residentBinding.activationEpoch !== attempt.activationEpoch ||
+      residentBinding.profileId !== requestBinding.binding.profileId ||
+      residentBinding.profileHash !== requestBinding.binding.profileHash ||
+      residentBinding.profileHeadRevision !==
+        requestBinding.binding.profileHeadRevision
+    ) {
+      throw new Error('stored dark isolated provider binding lineage is invalid');
+    }
+    const manifest = this.getManifestProjection(requestView.manifestId, {
+      requireActiveShares: true,
+    });
+    if (!manifest) {
+      throw new Error('stored dark isolated provider binding manifest is missing');
+    }
+    const request = this.materializeStoredLocalBranchRequest(requestView);
+    const cacheNamespace = isolatedProviderCacheNamespace({
+      manifestCacheNamespace: manifest.record.cacheNamespace,
+      requestViewHash: requestView.viewHash,
+      targetHash,
+    });
+    const activationEpoch = generation(
+      'dark isolated provider binding activationEpoch',
+      row.activation_epoch,
+    );
+    const authorityEpoch = generation(
+      'dark isolated provider binding authorityEpoch',
+      row.authority_epoch,
+    );
+    const profileHeadRevision = generation(
+      'dark isolated provider binding profileHeadRevision',
+      row.profile_head_revision,
+    );
+    const candidateBytes = generation(
+      'dark isolated provider binding candidateBytes',
+      row.candidate_bytes,
+    );
+    const boundAt = timestamp(
+      'dark isolated provider binding boundAt',
+      row.bound_at,
+    );
+    const binding: DarkIsolatedProviderBindingV1 = Object.freeze({
+      schemaVersion: 1,
+      executionMode: 'dark',
+      runnable: false,
+      networkAuthority: 'none',
+      toolMode: 'none',
+      historicalToolMessages: false,
+      activationEpoch,
+      branchId: branch.branchId,
+      worldId: branch.worldId,
+      authorityEpoch,
+      residentProfileBindingId: residentBinding.bindingId,
+      requestProfileBindingId: requestBinding.bindingId,
+      requestProfileBindingHash: requestBinding.bindingHash,
+      profileId: requestBinding.binding.profileId,
+      profileHash: requestBinding.binding.profileHash,
+      profileHeadRevision,
+      manifestId: manifest.record.manifestId,
+      manifestHash: manifest.record.hash,
+      requestViewId: requestView.requestViewId,
+      requestViewHash: requestView.viewHash,
+      candidateHash: request.candidateHash,
+      candidateBytes,
+      target,
+      targetHash,
+      laneKind: 'isolated-standalone',
+      cacheNamespace,
+      bindBatchId: provenance.batchId,
+      bindBatchSha256: provenance.batchSha256,
+      bindCallIndex: provenance.callIndex,
+      bindCallCount: provenance.callCount,
+      bindToolName: 'run',
+      bindArgumentsSha256: provenance.argumentsSha256,
+      boundAt,
+    });
+    const bindingJson = serialize(binding);
+    const bindingHash = sha256('dark isolated provider bindingHash', row.binding_hash);
+    if (
+      row.activation_epoch !== attempt.activationEpoch ||
+      row.world_id !== branch.worldId ||
+      row.authority_epoch !== branch.authorityEpoch ||
+      row.request_profile_binding_hash !== requestBinding.bindingHash ||
+      row.profile_id !== requestBinding.binding.profileId ||
+      row.profile_hash !== requestBinding.binding.profileHash ||
+      row.profile_head_revision !== requestBinding.binding.profileHeadRevision ||
+      row.manifest_id !== manifest.record.manifestId ||
+      row.manifest_hash !== manifest.record.hash ||
+      row.request_view_hash !== requestView.viewHash ||
+      row.candidate_hash !== request.candidateHash ||
+      row.candidate_bytes !== request.candidateBytes ||
+      row.cache_namespace !== cacheNamespace ||
+      boundAt < attempt.assembledAt ||
+      row.binding_json !== bindingJson ||
+      hashContextBytes(bindingJson) !== bindingHash ||
+      darkIsolatedProviderBindingIdentity(bindingJson) !== id
+    ) {
+      throw new Error('stored dark isolated provider binding is invalid');
+    }
+    return {
+      bindingId: id,
+      binding,
+      targetJson,
+      targetHash,
+      bindingJson,
+      bindingHash,
+    };
   }
 
   createResidentSourceInspectionCandidate(input: {
@@ -5908,6 +6382,31 @@ export class ContextGraphStore {
     return record;
   }
 
+  private materializeStoredLocalBranchRequest(
+    requestView: LocalBranchRequestViewRecord,
+  ): MaterializedLocalBranchRequest {
+    const systemLayers = requestView.view.systemLayerProjectionIds.map((id) => {
+      const layer = this.getSystemLayerProjection(id);
+      if (!layer) throw new Error(`local branch request system layer disappeared: ${id}`);
+      return layer;
+    });
+    const messages = requestView.view.messageProjectionIds.map((id) => {
+      const projection = this.getEventMessageProjection(id);
+      if (!projection) throw new Error(`local branch request message disappeared: ${id}`);
+      return projection.message;
+    });
+    return buildMaterializedLocalBranchRequest({
+      requestViewId: requestView.requestViewId,
+      messages: [
+        {
+          role: 'system',
+          content: systemLayers.map((layer) => layer.content).join(''),
+        },
+        ...messages,
+      ],
+    });
+  }
+
   private validateShadowMessageProjectionLineage(
     plan: unknown,
     planWorldId: WorldId,
@@ -6721,6 +7220,258 @@ export class ContextGraphStore {
         attempt,
         assembly,
       });
+    });
+  }
+
+  bindResidentDarkRequestToIsolatedProvider(input: {
+    worldId: WorldId;
+    eventId: EventId;
+    sequence: number;
+    target: ExactIsolatedProviderTargetV1;
+    provenance: ResidentToolCallSnapshotV1;
+    boundAt: number;
+  }): DarkIsolatedProviderBindingRecord;
+  bindResidentDarkRequestToIsolatedProvider<T>(
+    input: {
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      target: ExactIsolatedProviderTargetV1;
+      provenance: ResidentToolCallSnapshotV1;
+      boundAt: number;
+    },
+    finalize: (record: DarkIsolatedProviderBindingRecord) => T,
+  ): T;
+  bindResidentDarkRequestToIsolatedProvider<T>(
+    input: {
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      target: ExactIsolatedProviderTargetV1;
+      provenance: ResidentToolCallSnapshotV1;
+      boundAt: number;
+    },
+    finalize?: (record: DarkIsolatedProviderBindingRecord) => T,
+  ): DarkIsolatedProviderBindingRecord | T {
+    const targetWorldId = worldId(input.worldId);
+    const currentEventId = eventId(input.eventId);
+    const currentSequence = generation(
+      'dark isolated provider binding sequence',
+      input.sequence,
+    );
+    const target = normalizeExactIsolatedProviderTarget(input.target);
+    const provenance = normalizeDarkIsolatedProviderBindingProvenance(
+      input.provenance,
+    );
+    const boundAt = timestamp('dark isolated provider binding boundAt', input.boundAt);
+    const finish = (record: DarkIsolatedProviderBindingRecord) =>
+      finalize ? finalize(record) : record;
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('isolated provider binding requires dark graph mode');
+      }
+      const currentEvent = this.getWorldEvent(currentEventId);
+      if (
+        !currentEvent ||
+        currentEvent.worldId !== targetWorldId ||
+        currentEvent.sequence !== currentSequence ||
+        !['inbound:discord', 'inbound:signal'].includes(currentEvent.kind)
+      ) {
+        throw new Error('isolated provider binding requires exact current social ingress');
+      }
+      const coordinator = this.getRootCoordinatorState();
+      if (
+        coordinator.activeBranchId === null ||
+        coordinator.activeWorldId !== targetWorldId
+      ) {
+        throw new Error('isolated provider binding requires an active current-world branch');
+      }
+      const attempt = this.getDarkPendingBranchAttempt(coordinator.activeBranchId);
+      const admission = this.getDarkIngressAdmission(currentEventId);
+      if (
+        !attempt ||
+        !admission ||
+        attempt.worldId !== targetWorldId ||
+        attempt.activationEpoch !== activation.epoch ||
+        attempt.lastSourceSequence !== currentSequence ||
+        admission.worldId !== targetWorldId ||
+        admission.sourceSequence !== currentSequence
+      ) {
+        throw new Error('isolated provider binding pending attempt lineage is invalid');
+      }
+      const residentRow = this.database
+        .prepare(
+          `SELECT binding_id FROM context_resident_world_profile_bindings
+           WHERE activation_epoch = ? AND world_id = ?`,
+        )
+        .get(activation.epoch, targetWorldId) as
+        | { binding_id: string }
+        | undefined;
+      if (!residentRow) {
+        throw new Error('isolated provider binding requires a resident world profile');
+      }
+      const residentProfileBinding = this.getResidentWorldProfileBinding(
+        residentWorldProfileBindingId(residentRow.binding_id),
+      );
+      if (!residentProfileBinding) {
+        throw new Error('isolated provider binding resident profile disappeared');
+      }
+      const darkRequest = this.rereadResidentCurrentWorldDarkRequest({
+        worldId: targetWorldId,
+        currentEvent,
+        branchId: coordinator.activeBranchId,
+        maxEvents: attempt.maxEvents,
+        activationEpoch: activation.epoch,
+        queueGeneration: attempt.queueGeneration,
+        residentProfileBinding,
+        admission,
+      });
+      if (!darkRequest) {
+        throw new Error('isolated provider binding dark request disappeared');
+      }
+      const { branch, manifest, requestView, profileBinding, request } =
+        darkRequest.assembly;
+      const targetJson = serialize(target);
+      const targetHash = hashContextBytes(targetJson);
+      const cacheNamespace = isolatedProviderCacheNamespace({
+        manifestCacheNamespace: manifest.cacheNamespace,
+        requestViewHash: requestView.viewHash,
+        targetHash,
+      });
+      const priorCall = this.database
+        .prepare(
+          `SELECT binding_id FROM context_dark_isolated_provider_bindings
+           WHERE bind_batch_id = ? AND bind_call_index = ?`,
+        )
+        .get(provenance.batchId, provenance.callIndex) as
+        | { binding_id: string }
+        | undefined;
+      const replay = priorCall
+        ? this.getDarkIsolatedProviderBinding(
+            darkIsolatedProviderBindingId(priorCall.binding_id),
+          )
+        : null;
+      if (priorCall && !replay) {
+        throw new Error('isolated provider binding disappeared');
+      }
+      if (!replay && boundAt < attempt.assembledAt) {
+        throw new Error('isolated provider binding pending attempt lineage is invalid');
+      }
+      const receiptBoundAt = replay?.binding.boundAt ?? boundAt;
+      const binding: DarkIsolatedProviderBindingV1 = Object.freeze({
+        schemaVersion: 1,
+        executionMode: 'dark',
+        runnable: false,
+        networkAuthority: 'none',
+        toolMode: 'none',
+        historicalToolMessages: false,
+        activationEpoch: activation.epoch,
+        branchId: branch.branchId,
+        worldId: branch.worldId,
+        authorityEpoch: branch.authorityEpoch,
+        residentProfileBindingId: residentProfileBinding.bindingId,
+        requestProfileBindingId: profileBinding.bindingId,
+        requestProfileBindingHash: profileBinding.bindingHash,
+        profileId: profileBinding.binding.profileId,
+        profileHash: profileBinding.binding.profileHash,
+        profileHeadRevision: profileBinding.binding.profileHeadRevision,
+        manifestId: manifest.manifestId,
+        manifestHash: manifest.hash,
+        requestViewId: requestView.requestViewId,
+        requestViewHash: requestView.viewHash,
+        candidateHash: request.candidateHash,
+        candidateBytes: request.candidateBytes,
+        target,
+        targetHash,
+        laneKind: 'isolated-standalone',
+        cacheNamespace,
+        bindBatchId: provenance.batchId,
+        bindBatchSha256: provenance.batchSha256,
+        bindCallIndex: provenance.callIndex,
+        bindCallCount: provenance.callCount,
+        bindToolName: 'run',
+        bindArgumentsSha256: provenance.argumentsSha256,
+        boundAt: receiptBoundAt,
+      });
+      const bindingJson = serialize(binding);
+      const bindingHash = hashContextBytes(bindingJson);
+      const bindingId = darkIsolatedProviderBindingIdentity(bindingJson);
+      if (replay) {
+        if (priorCall!.binding_id !== bindingId) {
+          throw new Error('isolated provider binding call already bound different lineage');
+        }
+        return finish(replay);
+      }
+      const priorBranch = this.database
+        .prepare(
+          `SELECT binding_id FROM context_dark_isolated_provider_bindings
+           WHERE branch_id = ?`,
+        )
+        .get(branch.branchId) as { binding_id: string } | undefined;
+      if (priorBranch) {
+        throw new Error('isolated provider request was already bound by a different call');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_isolated_provider_bindings(
+             binding_id, schema_version, execution_mode, runnable,
+             network_authority, tool_mode, historical_tool_messages,
+             activation_epoch, branch_id, world_id, authority_epoch,
+             resident_profile_binding_id, request_profile_binding_id,
+             request_profile_binding_hash, profile_id, profile_hash,
+             profile_head_revision, manifest_id, manifest_hash,
+             request_view_id, request_view_hash, candidate_hash,
+             candidate_bytes, target_provider_type, target_model,
+             target_api_surface, target_api_endpoint, target_json, target_hash,
+             cache_namespace, bind_batch_id, bind_batch_sha256,
+             bind_call_index, bind_call_count, bind_tool_name,
+             bind_arguments_sha256, binding_json, binding_hash, bound_at
+           ) VALUES (
+             ?, 1, 'dark', 0, 'none', 'none', 0,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           )`,
+        )
+        .run(
+          bindingId,
+          activation.epoch,
+          branch.branchId,
+          branch.worldId,
+          branch.authorityEpoch,
+          residentProfileBinding.bindingId,
+          profileBinding.bindingId,
+          profileBinding.bindingHash,
+          profileBinding.binding.profileId,
+          profileBinding.binding.profileHash,
+          profileBinding.binding.profileHeadRevision,
+          manifest.manifestId,
+          manifest.hash,
+          requestView.requestViewId,
+          requestView.viewHash,
+          request.candidateHash,
+          request.candidateBytes,
+          target.providerType,
+          target.model,
+          target.apiSurface,
+          target.apiEndpoint,
+          targetJson,
+          targetHash,
+          cacheNamespace,
+          provenance.batchId,
+          provenance.batchSha256,
+          provenance.callIndex,
+          provenance.callCount,
+          provenance.toolName,
+          provenance.argumentsSha256,
+          bindingJson,
+          bindingHash,
+          boundAt,
+        );
+      const created = this.getDarkIsolatedProviderBinding(bindingId);
+      if (!created) throw new Error('isolated provider binding was not stored');
+      return finish(created);
     });
   }
 
