@@ -1285,6 +1285,10 @@ test('resident current-world dark request admits and assembles atomically', () =
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
     assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
     assert.equal(tableCount(value.database, 'context_shadow_request_observations'), 0);
+    assert.throws(
+      () => value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget),
+      /latest isolated provider binding is not recovered/,
+    );
 
     const recovered = value.store.recoverCoordinatedBranch(800);
     assert.equal(recovered?.branchId, record.assembly.branch.branchId);
@@ -1297,6 +1301,68 @@ test('resident current-world dark request admits and assembles atomically', () =
     assert.deepEqual(
       value.store.getDarkIsolatedProviderBinding(providerBinding.bindingId),
       providerBinding,
+    );
+    const verification =
+      value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget);
+    assert.equal(verification.verificationKind, 'latest_recovered_dark_isolated_provider_binding');
+    assert.equal(verification.bindingHash, providerBinding.bindingHash);
+    assert.equal(verification.targetHash, providerBinding.targetHash);
+    assert.equal(
+      verification.candidateHash,
+      providerBinding.binding.candidateHash,
+    );
+    assert.equal(verification.activationEpoch, 0);
+    assert.equal(verification.executionMode, 'dark');
+    assert.equal(verification.runnable, false);
+    assert.equal(verification.networkAuthority, 'none');
+    assert.equal(verification.toolMode, 'none');
+    assert.equal(verification.historicalToolMessages, false);
+    assert.equal(verification.branchStatus, 'crashed');
+    assert.equal(verification.abandonmentReason, 'coordinator_recovery');
+    assert.equal(verification.coordinatorReleased, true);
+    assert.equal(verification.uncertainEffects, 0);
+    assert.equal(verification.effectCount, 0);
+    assert.equal(verification.capsuleCount, 0);
+    assert.equal(verification.continuationAdvanceCount, 0);
+    assert.match(verification.recoveryHash, /^[0-9a-f]{64}$/);
+    assert.throws(
+      () =>
+        value.store.verifyLatestRecoveredIsolatedProviderBinding({
+          ...providerTarget,
+          model: 'aster-2',
+        }),
+      /target does not match/,
+    );
+
+    value.database.exec('PRAGMA query_only = ON');
+    try {
+      assert.deepEqual(
+        value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget),
+        verification,
+      );
+    } finally {
+      value.database.exec('PRAGMA query_only = OFF');
+    }
+
+    const latestSelector = value.store as unknown as {
+      latestDarkIsolatedProviderBindingId(): string | null;
+    };
+    assert.equal(
+      latestSelector.latestDarkIsolatedProviderBindingId(),
+      providerBinding.bindingId,
+    );
+    const syntheticLaterBindingId =
+      `dark-isolated-provider-binding:${'f'.repeat(64)}`;
+    value.database.exec('PRAGMA foreign_keys = OFF');
+    value.database
+      .prepare(
+        `INSERT INTO context_dark_isolated_provider_binding_order(binding_id)
+         VALUES (?)`,
+      )
+      .run(syntheticLaterBindingId);
+    assert.equal(
+      latestSelector.latestDarkIsolatedProviderBindingId(),
+      syntheticLaterBindingId,
     );
   } finally {
     closeFixture(value);
@@ -5037,6 +5103,10 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+      DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+      DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+      DROP TABLE context_dark_isolated_provider_binding_order;
       DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
       DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
       DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -5080,7 +5150,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0044-context-resident-source-candidate-authorizations',
             '0045-context-resident-identity-system-derivations',
             '0046-context-resident-world-profile-bindings',
-            '0047-context-dark-isolated-provider-bindings'
+            '0047-context-dark-isolated-provider-bindings',
+            '0048-context-dark-isolated-provider-binding-order'
           );
       PRAGMA user_version = 40;
     `);

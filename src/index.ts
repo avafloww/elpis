@@ -88,6 +88,7 @@ import { createEmoteRegistry } from './discord/emotes.js';
 import {
   CONSOLE_CHANNEL_ID,
   INTERNAL_CHANNEL_ID,
+  type ResidentRecoveredProviderVerificationTurnOrigin,
   type SandboxDeps,
   type SandboxLateProcessError,
 } from './types.js';
@@ -118,6 +119,7 @@ import {
   createResidentIsolatedProviderBinder,
   exactMainIsolatedProviderTarget,
 } from './context/resident-isolated-provider-binding.js';
+import { createResidentRecoveredProviderBindingVerifier } from './context/resident-isolated-provider-acceptance.js';
 
 import {
   ContextGraphShadowRecorder,
@@ -582,6 +584,9 @@ export async function createElpisRuntime(
       sandboxManager?.handleMindStateChange(id, status, archived),
   });
   const inboundRef: { current: InboundMessage | null } = { current: null };
+  const residentRecoveredProviderVerificationTurnOriginRef: {
+    current: ResidentRecoveredProviderVerificationTurnOrigin | null;
+  } = { current: null };
   let llm!: LLM;
   let llms!: LlmRoleClients;
   let llmToolRuntime: LlmToolRuntime | null = null;
@@ -751,12 +756,21 @@ export async function createElpisRuntime(
     previewMaxBytes: config.sandbox.previewMaxBytes,
     redactForOutput: (text) => redactSecrets(text, secretRegistry),
   });
+  const isolatedProviderTarget = exactMainIsolatedProviderTarget(config);
   const residentIsolatedProviderBinder = createResidentIsolatedProviderBinder({
     store: contextGraphStore,
-    target: exactMainIsolatedProviderTarget(config),
+    target: isolatedProviderTarget,
     previewMaxBytes: config.sandbox.previewMaxBytes,
     redactForOutput: (text) => redactSecrets(text, secretRegistry),
   });
+  const residentRecoveredProviderBindingVerifier =
+    createResidentRecoveredProviderBindingVerifier({
+      store: contextGraphStore,
+      target: isolatedProviderTarget,
+      buildIdentity,
+      previewMaxBytes: config.sandbox.previewMaxBytes,
+      redactForOutput: (text) => redactSecrets(text, secretRegistry),
+    });
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
@@ -770,6 +784,9 @@ export async function createElpisRuntime(
     residentWorldProfileBinder,
     residentDarkRequestAssembler,
     residentIsolatedProviderBinder,
+    residentRecoveredProviderBindingVerifier,
+    residentRecoveredProviderVerificationTurnOrigin: () =>
+      residentRecoveredProviderVerificationTurnOriginRef.current,
   });
 
   llms = createLlmRoleClients(config, {
@@ -892,6 +909,9 @@ export async function createElpisRuntime(
     workersAvailable: () => workerSupervisor !== undefined,
     setCurrentInbound: (msg: InboundMessage | null) => {
       inboundRef.current = msg;
+    },
+    setResidentRecoveredProviderVerificationTurnOrigin: (origin) => {
+      residentRecoveredProviderVerificationTurnOriginRef.current = origin;
     },
     llm,
     tracker,

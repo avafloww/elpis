@@ -18,7 +18,12 @@ import { MindService } from '../src/store/mind.js';
 import { eventId, worldId } from '../src/store/context-graph.js';
 import { noopLogger } from '../src/lib/log.js';
 import { makeConfig } from './helpers.js';
-import type { SandboxDeps } from '../src/types.js';
+import type {
+  OutboundEffectScope,
+  ResidentRecoveredProviderVerificationTurnOrigin,
+  SandboxDeps,
+} from '../src/types.js';
+
 import type { StandaloneCompleteResult } from '../src/llm/llm.js';
 import { ContextResources } from '../src/context-resources.js';
 import {
@@ -58,6 +63,13 @@ function fixture(
       scope: ResidentCurrentWorldScopeV1,
       snapshot: ResidentToolCallSnapshotV1,
     ) => string;
+    residentRecoveredProviderBindingVerifier?: (
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
+    residentRecoveredProviderVerificationTurnOrigin?: () =>
+      | ResidentRecoveredProviderVerificationTurnOrigin
+      | null;
+    captureOutboundScope?: () => OutboundEffectScope;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -122,6 +134,7 @@ function fixture(
     scheduler,
     bg,
     completeStandalone: opts.classify,
+    captureOutboundScope: opts.captureOutboundScope,
   } as unknown as SandboxDeps;
   const manager = createSandboxManager({
     deps,
@@ -136,6 +149,10 @@ function fixture(
     residentWorldProfileBinder: opts.residentWorldProfileBinder,
     residentDarkRequestAssembler: opts.residentDarkRequestAssembler,
     residentIsolatedProviderBinder: opts.residentIsolatedProviderBinder,
+    residentRecoveredProviderBindingVerifier:
+      opts.residentRecoveredProviderBindingVerifier,
+    residentRecoveredProviderVerificationTurnOrigin:
+      opts.residentRecoveredProviderVerificationTurnOrigin,
   });
   return {
     dir,
@@ -1338,6 +1355,99 @@ test('isolated provider binding is zero-argument, active-run-only, and current-w
     assert.equal(withArgument.ok, false);
     assert.match(withArgument.error ?? '', /no arguments are accepted/);
     assert.equal(bindings.length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test('recovered provider binding verification requires matching agent-issued turn origin', async () => {
+  const authority = createResidentRunAuthority();
+  const snapshots: ResidentToolCallSnapshotV1[] = [];
+  const acceptedTurnToken = {};
+  let outboundTurnToken: object | null = null;
+  let origin: ResidentRecoveredProviderVerificationTurnOrigin | null = null;
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentRecoveredProviderBindingVerifier: (snapshot) => {
+      snapshots.push(snapshot);
+      return 'RECOVERED ISOLATED PROVIDER BINDING VERIFIED — HISTORICAL READ ONLY';
+    },
+    residentRecoveredProviderVerificationTurnOrigin: () => origin,
+    captureOutboundScope: () => ({
+      kind: 'sandbox-run',
+      authorization: null,
+      turnToken: outboundTurnToken,
+      turnChannelId: null,
+    }),
+  });
+  try {
+    const code = 'elpis.context.verifyRecoveredIsolatedProviderBinding()';
+    const direct = await f.manager.run({ code });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+
+    f.deps.inbound = {
+      id: 'resume-123',
+      kind: 'harness',
+      channelId: 'internal',
+      channelName: 'harness',
+      author: 'harness',
+      authorId: 'harness',
+    } as SandboxDeps['inbound'];
+    const forgedEnvelope = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(forgedEnvelope.ok, false);
+    assert.match(
+      forgedEnvelope.error ?? '',
+      /trusted internal restart or heartbeat wake/,
+    );
+
+    origin = Object.freeze({
+      wake: 'restart-complete',
+      turnToken: acceptedTurnToken,
+    });
+    outboundTurnToken = {};
+    const wrongTurn = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(wrongTurn.ok, false);
+    assert.match(
+      wrongTurn.error ?? '',
+      /trusted internal restart or heartbeat wake/,
+    );
+    assert.equal(snapshots.length, 0);
+
+    outboundTurnToken = acceptedTurnToken;
+    const accepted = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(accepted.ok, true);
+    assert.match(accepted.preview ?? '', /HISTORICAL READ ONLY/);
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0]?.toolName, 'run');
+
+    origin = Object.freeze({
+      wake: 'heartbeat',
+      turnToken: acceptedTurnToken,
+    });
+    const heartbeat = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(heartbeat.ok, true);
+    assert.equal(snapshots.length, 2);
+
+    const withArgument = await f.manager.run({
+      code: 'elpis.context.verifyRecoveredIsolatedProviderBinding("retarget")',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(withArgument.ok, false);
+    assert.match(withArgument.error ?? '', /no arguments are accepted/);
+    assert.equal(snapshots.length, 2);
   } finally {
     f.close();
   }

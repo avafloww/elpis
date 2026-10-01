@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    47,
+    48,
   );
   assert.deepEqual(
     (
@@ -238,6 +238,10 @@ test('current migration prefix preserves fleet history and creates resident stat
         component: 'core',
         name: '0047-context-dark-isolated-provider-bindings',
       },
+      {
+        component: 'core',
+        name: '0048-context-dark-isolated-provider-binding-order',
+      },
     ],
   );
   db.close();
@@ -248,6 +252,10 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
   const db = openDatabase(dir);
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
     DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -333,7 +341,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -522,7 +530,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    47,
+    48,
   );
   assert.deepEqual(
     (
@@ -567,6 +575,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0045-context-resident-identity-system-derivations',
       '0046-context-resident-world-profile-bindings',
       '0047-context-dark-isolated-provider-bindings',
+      '0048-context-dark-isolated-provider-binding-order',
     ],
   );
   runMigrations(db);
@@ -598,7 +607,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    34,
+    35,
   );
   db.close();
 });
@@ -638,7 +647,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 47);
+  assert.equal(version, 48);
   assert.equal(
     (
       reopened
@@ -670,6 +679,10 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
   db.exec(`
     DROP TRIGGER context_branches_coordinated_return_guard;
     DROP TRIGGER context_continuation_head_advance_guard;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
     DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -736,7 +749,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,
@@ -810,6 +823,10 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
     'a'.repeat(64),
   );
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
     DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -839,7 +856,8 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
           '0044-context-resident-source-candidate-authorizations',
           '0045-context-resident-identity-system-derivations',
           '0046-context-resident-world-profile-bindings',
-          '0047-context-dark-isolated-provider-bindings'
+          '0047-context-dark-isolated-provider-bindings',
+          '0048-context-dark-isolated-provider-binding-order'
         );
     PRAGMA user_version = 37;
   `);
@@ -877,6 +895,10 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   }
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
     DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -921,7 +943,7 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
   );
   db.exec(`
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings');
+      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order');
     PRAGMA user_version = 38;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -972,6 +994,10 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   }
   db.exec(`
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
     DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
     DROP TRIGGER context_dark_isolated_provider_bindings_no_update;
@@ -1025,7 +1051,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings');
+      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order');
     PRAGMA user_version = 34;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1102,7 +1128,98 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
+    48,
+  );
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('migration v47→v48 rejects ambiguous historical binding order', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
+    DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
+    DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
+    DROP TABLE context_dark_isolated_provider_binding_order;
+    DROP TRIGGER context_dark_isolated_provider_bindings_conflict_guard;
+    DROP TRIGGER context_dark_isolated_provider_bindings_lineage_guard;
+  `);
+  const insert = db.prepare(`
+    INSERT INTO context_dark_isolated_provider_bindings(
+      binding_id, schema_version, execution_mode, runnable,
+      network_authority, tool_mode, historical_tool_messages,
+      activation_epoch, branch_id, world_id, authority_epoch,
+      resident_profile_binding_id, request_profile_binding_id,
+      request_profile_binding_hash, profile_id, profile_hash,
+      profile_head_revision, manifest_id, manifest_hash,
+      request_view_id, request_view_hash, candidate_hash, candidate_bytes,
+      target_provider_type, target_model, target_api_surface,
+      target_api_endpoint, target_json, target_hash, cache_namespace,
+      bind_batch_id, bind_batch_sha256, bind_call_index, bind_call_count,
+      bind_tool_name, bind_arguments_sha256, binding_json, binding_hash,
+      bound_at
+    ) VALUES (
+      ?, 1, 'dark', 0, 'none', 'none', 0,
+      0, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 1,
+      'openai-compatible', 'aster-1', 'responses',
+      'https://api.example.com/v1/responses', '{}', ?, ?,
+      ?, ?, 0, 1, 'run', ?, '{}', ?, ?
+    )
+  `);
+  const addBinding = (seed: 'a' | 'b', boundAt: number) => {
+    const hash = seed.repeat(64);
+    insert.run(
+      `dark-isolated-provider-binding:${hash}`,
+      `branch:${seed}`,
+      `world:signal:${seed}`,
+      `resident-profile-binding:${seed}`,
+      `request-profile-binding:${seed}`,
+      hash,
+      `system-profile:${seed}`,
+      hash,
+      `manifest:${seed}`,
+      hash,
+      `request-view:${seed}`,
+      hash,
+      hash,
+      hash,
+      `cache-namespace-${seed.repeat(16)}`,
+      `resident-tool-batch:${seed.repeat(36)}`,
+      hash,
+      hash,
+      hash,
+      boundAt,
+    );
+  };
+  addBinding('a', 200);
+  addBinding('b', 100);
+  db.exec(`
+    DROP TRIGGER elpis_migrations_no_delete;
+    DELETE FROM elpis_migrations
+      WHERE component = 'core'
+        AND name = '0048-context-dark-isolated-provider-binding-order';
+    PRAGMA user_version = 47;
+  `);
+  assert.throws(
+    () => runMigrations(db),
+    /pre-v48 isolated provider binding order is ambiguous/,
+  );
+  assert.equal(
+    (db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
     47,
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'context_dark_isolated_provider_binding_order'",
+        )
+        .get() as { n: number }
+    ).n,
+    0,
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });

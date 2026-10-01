@@ -85,6 +85,13 @@ export type OutboundSendAuthorizationIssuer = (
   isCurrent: () => boolean,
 ) => OutboundSendAuthorization;
 
+/** Process-local proof that the whole current turn was woken by one exact
+ * resident acceptance producer and drained no person-facing ingress. */
+export interface ResidentRecoveredProviderVerificationTurnOrigin {
+  readonly wake: 'restart-complete' | 'heartbeat';
+  readonly turnToken: object;
+}
+
 /** Opaque origin retained by one sandbox run, including detached continuations. */
 export type OutboundEffectScope = Readonly<
   {

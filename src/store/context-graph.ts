@@ -833,6 +833,30 @@ export interface DarkIsolatedProviderBindingRecord {
   readonly bindingHash: string;
 }
 
+export interface RecoveredIsolatedProviderBindingVerificationV1 {
+  readonly schemaVersion: 1;
+  readonly verificationKind: 'latest_recovered_dark_isolated_provider_binding';
+  readonly migrationName: '0048-context-dark-isolated-provider-binding-order';
+  readonly migrationChecksum: string;
+  readonly activationEpoch: number;
+  readonly bindingHash: string;
+  readonly targetHash: string;
+  readonly candidateHash: string;
+  readonly recoveryHash: string;
+  readonly executionMode: 'dark';
+  readonly runnable: false;
+  readonly networkAuthority: 'none';
+  readonly toolMode: 'none';
+  readonly historicalToolMessages: false;
+  readonly branchStatus: 'crashed';
+  readonly abandonmentReason: 'coordinator_recovery';
+  readonly coordinatorReleased: true;
+  readonly uncertainEffects: 0;
+  readonly effectCount: 0;
+  readonly capsuleCount: 0;
+  readonly continuationAdvanceCount: 0;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -1920,6 +1944,18 @@ function validateShadowProjectionPlan(
 
 function transaction<T>(database: DatabaseSync, body: () => T): T {
   database.exec('BEGIN IMMEDIATE');
+  try {
+    const result = body();
+    database.exec('COMMIT');
+    return result;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function readTransaction<T>(database: DatabaseSync, body: () => T): T {
+  database.exec('BEGIN');
   try {
     const result = body();
     database.exec('COMMIT');
@@ -3846,6 +3882,178 @@ export class ContextGraphStore {
       bindingJson,
       bindingHash,
     };
+  }
+
+  private latestDarkIsolatedProviderBindingId(): DarkIsolatedProviderBindingId | null {
+    const row = this.database
+      .prepare(
+        `SELECT binding_id FROM context_dark_isolated_provider_binding_order
+         ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get() as { binding_id: string } | undefined;
+    return row ? darkIsolatedProviderBindingId(row.binding_id) : null;
+  }
+
+  verifyLatestRecoveredIsolatedProviderBinding(
+    expectedTarget: ExactIsolatedProviderTargetV1,
+  ): RecoveredIsolatedProviderBindingVerificationV1 {
+    const normalizedTarget = normalizeExactIsolatedProviderTarget(expectedTarget);
+    const expectedTargetJson = serialize(normalizedTarget);
+    return readTransaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('isolated provider recovery verification requires dark mode');
+      }
+      const migrationName = '0048-context-dark-isolated-provider-binding-order' as const;
+      const migration = this.database
+        .prepare(
+          `SELECT checksum FROM elpis_migrations
+           WHERE component = 'core' AND name = ?`,
+        )
+        .get(migrationName) as { checksum: string } | undefined;
+      if (!migration) {
+        throw new Error('isolated provider binding migration receipt is missing');
+      }
+      const migrationChecksum = sha256(
+        'isolated provider binding migration checksum',
+        migration.checksum,
+      );
+      const latestBindingId = this.latestDarkIsolatedProviderBindingId();
+      if (!latestBindingId) {
+        throw new Error('no isolated provider binding exists');
+      }
+      const record = this.getDarkIsolatedProviderBinding(latestBindingId);
+      if (!record) {
+        throw new Error('latest isolated provider binding is missing');
+      }
+      if (record.targetJson !== expectedTargetJson) {
+        throw new Error(
+          'latest isolated provider binding target does not match the configured main target',
+        );
+      }
+      const branch = this.getBranch(record.binding.branchId);
+      const start = this.getBranchStart(record.binding.branchId);
+      const abandonment = this.getDarkPendingBranchAbandonment(
+        record.binding.branchId,
+      );
+      const recovery = this.database
+        .prepare(
+          `SELECT branch_id, world_id, base_revision, predecessor_branch_id,
+                  predecessor_world_id, uncertain_effects, recovered_at
+           FROM context_branch_recoveries WHERE branch_id = ?`,
+        )
+        .get(record.binding.branchId) as
+        | {
+            branch_id: string;
+            world_id: string;
+            base_revision: number;
+            predecessor_branch_id: string | null;
+            predecessor_world_id: string | null;
+            uncertain_effects: number;
+            recovered_at: number;
+          }
+        | undefined;
+      if (
+        !branch ||
+        !start ||
+        branch.status !== 'crashed' ||
+        !recovery ||
+        !abandonment
+      ) {
+        throw new Error('latest isolated provider binding is not recovered');
+      }
+      const uncertainEffects = generation(
+        'isolated provider recovery uncertainEffects',
+        recovery.uncertain_effects,
+      );
+      const recoveredAt = timestamp(
+        'isolated provider recovery recoveredAt',
+        recovery.recovered_at,
+      );
+      if (
+        recovery.branch_id !== branch.branchId ||
+        recovery.world_id !== branch.worldId ||
+        recovery.base_revision !== start.baseRevision ||
+        recovery.predecessor_branch_id !== start.predecessorBranchId ||
+        recovery.predecessor_world_id !== start.predecessorWorldId ||
+        branch.endedAt !== recoveredAt ||
+        abandonment.reason !== 'coordinator_recovery' ||
+        abandonment.abandonedAt !== recoveredAt ||
+        uncertainEffects !== 0
+      ) {
+        throw new Error('latest isolated provider binding recovery is invalid');
+      }
+      const coordinator = this.getRootCoordinatorState();
+      if (coordinator.activeBranchId !== null || coordinator.activeWorldId !== null) {
+        throw new Error('context root coordinator still owns a branch');
+      }
+      const count = (sql: string, ...params: string[]): number => {
+        const row = this.database.prepare(sql).get(...params) as { count: number };
+        return generation('isolated provider recovery count', row.count);
+      };
+      const effectCount = count(
+        'SELECT count(*) AS count FROM context_effects WHERE branch_id = ?',
+        branch.branchId,
+      );
+      const capsuleCount = count(
+        'SELECT count(*) AS count FROM context_capsules WHERE branch_id = ?',
+        branch.branchId,
+      );
+      const continuationAdvanceCount = count(
+        `SELECT count(*) AS count FROM context_continuation_advances
+         WHERE branch_id = ? OR predecessor_branch_id = ?`,
+        branch.branchId,
+        branch.branchId,
+      );
+      if (effectCount !== 0 || capsuleCount !== 0 || continuationAdvanceCount !== 0) {
+        throw new Error('latest isolated provider binding recovery has graph effects');
+      }
+      if (record.binding.activationEpoch !== activation.epoch) {
+        throw new Error('latest isolated provider binding activation epoch is stale');
+      }
+      const recoveryHash = hashContextBytes(
+        serialize({
+          branchId: branch.branchId,
+          worldId: branch.worldId,
+          authorityEpoch: branch.authorityEpoch,
+          startedAt: branch.startedAt,
+          endedAt: branch.endedAt,
+          baseRevision: start.baseRevision,
+          predecessorBranchId: start.predecessorBranchId,
+          predecessorWorldId: start.predecessorWorldId,
+          abandonmentReason: abandonment.reason,
+          abandonmentAt: abandonment.abandonedAt,
+          uncertainEffects,
+          coordinator,
+          effectCount,
+          capsuleCount,
+          continuationAdvanceCount,
+        }),
+      );
+      return Object.freeze({
+        schemaVersion: 1,
+        verificationKind: 'latest_recovered_dark_isolated_provider_binding',
+        migrationName,
+        migrationChecksum,
+        activationEpoch: activation.epoch,
+        bindingHash: record.bindingHash,
+        targetHash: record.targetHash,
+        candidateHash: record.binding.candidateHash,
+        recoveryHash,
+        executionMode: 'dark',
+        runnable: false,
+        networkAuthority: 'none',
+        toolMode: 'none',
+        historicalToolMessages: false,
+        branchStatus: 'crashed',
+        abandonmentReason: 'coordinator_recovery',
+        coordinatorReleased: true,
+        uncertainEffects: 0,
+        effectCount: 0,
+        capsuleCount: 0,
+        continuationAdvanceCount: 0,
+      });
+    });
   }
 
   createResidentSourceInspectionCandidate(input: {

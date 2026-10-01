@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 47;
+const SCHEMA_VERSION = 48;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3964,6 +3964,47 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_dark_isolated_provider_bindings_no_delete
           BEFORE DELETE ON context_dark_isolated_provider_bindings BEGIN
             SELECT RAISE(ABORT, 'dark isolated provider bindings are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0048-context-dark-isolated-provider-binding-order',
+      sql: `
+        CREATE TABLE context_dark_isolated_provider_binding_order (
+          sequence    INTEGER PRIMARY KEY AUTOINCREMENT
+            CHECK (typeof(sequence) = 'integer' AND sequence >= 1),
+          binding_id  TEXT NOT NULL UNIQUE,
+          FOREIGN KEY (binding_id)
+            REFERENCES context_dark_isolated_provider_bindings(binding_id) ON DELETE RESTRICT
+        );
+
+        CREATE TRIGGER context_dark_isolated_provider_binding_order_ambiguous_backfill
+          BEFORE INSERT ON context_dark_isolated_provider_binding_order
+          WHEN (SELECT count(*) FROM context_dark_isolated_provider_bindings) > 1
+            AND NOT EXISTS (SELECT 1 FROM context_dark_isolated_provider_binding_order)
+          BEGIN
+            SELECT RAISE(ABORT, 'pre-v48 isolated provider binding order is ambiguous');
+          END;
+
+        INSERT INTO context_dark_isolated_provider_binding_order(binding_id)
+          SELECT binding_id FROM context_dark_isolated_provider_bindings;
+
+        DROP TRIGGER context_dark_isolated_provider_binding_order_ambiguous_backfill;
+
+        CREATE TRIGGER context_dark_isolated_provider_bindings_append_order
+          AFTER INSERT ON context_dark_isolated_provider_bindings
+          BEGIN
+            INSERT INTO context_dark_isolated_provider_binding_order(binding_id)
+              VALUES (NEW.binding_id);
+          END;
+
+        CREATE TRIGGER context_dark_isolated_provider_binding_order_no_update
+          BEFORE UPDATE ON context_dark_isolated_provider_binding_order BEGIN
+            SELECT RAISE(ABORT, 'dark isolated provider binding order is immutable');
+          END;
+        CREATE TRIGGER context_dark_isolated_provider_binding_order_no_delete
+          BEFORE DELETE ON context_dark_isolated_provider_binding_order BEGIN
+            SELECT RAISE(ABORT, 'dark isolated provider binding order is immutable');
           END;
       `,
     },

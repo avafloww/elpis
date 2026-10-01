@@ -26,6 +26,7 @@ import {
   bindResidentDarkRequestAssemblyAction,
   bindResidentIdentitySystemDerivationAction,
   bindResidentIsolatedProviderBindingAction,
+  bindResidentRecoveredProviderBindingVerificationAction,
   bindResidentSourceAuthorizationAction,
   bindResidentSourceInspectionAction,
   bindResidentWorldProfileBindingAction,
@@ -47,6 +48,7 @@ export interface SandboxResidentRunLifecycle {
   bindCurrentWorldProfile(derivationId: string): string;
   assembleCurrentWorldDarkRequest(): string;
   bindCurrentWorldIsolatedProvider(): string;
+  verifyRecoveredIsolatedProviderBinding(): string;
   detach(): void;
   settled(): void;
 }
@@ -201,6 +203,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentIsolatedProviderBindingAction(
         scope,
         options.residentRun.bindCurrentWorldIsolatedProvider,
+      );
+      bindResidentRecoveredProviderBindingVerificationAction(
+        scope,
+        options.residentRun.verifyRecoveredIsolatedProviderBinding,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

@@ -835,6 +835,10 @@ Assembly is still dark observation, not execution. It performs no provider dispa
 
 Binding remains inert testimony. It performs no network dispatch, provider issuance, result write, tool call, effect, capsule, activation, configuration change, or continuation advance. Direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
 
+\`elpis.context.verifyRecoveredIsolatedProviderBinding()\` is a resident-owned, read-only deployment acceptance check for the newest historical isolated-provider binding. It accepts no arguments and is available only from a fresh live resident \`run\` carrying process-local origin proof from the exact restart-complete or heartbeat producer, with no person-facing ingress anywhere in that drained turn. Envelope text and fields cannot grant access. It strictly rematerializes the receipt, requires byte-exact agreement with the current boot-resolved main target, checks the schema-v48 monotonic-order migration receipt, dark activation, coordinator recovery, and zero branch effects/capsules/continuation advances, then returns only build facts, opaque hashes, and fixed flags.
+
+This verifier does not fabricate ingress, search backward for an older matching receipt, disclose room/message/request identifiers or candidate content, mutate graph state, or prove a fresh writer call. It performs no provider dispatch, network call, tool effect, capsule, activation, or continuation change; social, scheduler, watch, worker, direct, restored, inherited, detached, and closed runs cannot use it.
+
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):
 \`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it. A Signal \`<reply-to source="signal-quote">\` is bounded sender-embedded context, not independently fetched proof of the original message.

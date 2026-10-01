@@ -10,6 +10,7 @@ export type ResidentWorldProfileBindingAction = (
 ) => string;
 export type ResidentDarkRequestAssemblyAction = () => string;
 export type ResidentIsolatedProviderBindingAction = () => string;
+export type ResidentRecoveredProviderBindingVerificationAction = () => string;
 
 const actions = new WeakMap<RunScope, ResidentSourceInspectionAction>();
 const authorizationActions = new WeakMap<
@@ -31,6 +32,10 @@ const darkRequestAssemblyActions = new WeakMap<
 const isolatedProviderBindingActions = new WeakMap<
   RunScope,
   ResidentIsolatedProviderBindingAction
+>();
+const recoveredProviderBindingVerificationActions = new WeakMap<
+  RunScope,
+  ResidentRecoveredProviderBindingVerificationAction
 >();
 
 export function bindResidentSourceInspectionAction(
@@ -126,4 +131,22 @@ export function residentIsolatedProviderBindingActionForScope(
   scope: RunScope,
 ): ResidentIsolatedProviderBindingAction | undefined {
   return isolatedProviderBindingActions.get(scope);
+}
+
+export function bindResidentRecoveredProviderBindingVerificationAction(
+  scope: RunScope,
+  action: ResidentRecoveredProviderBindingVerificationAction,
+): void {
+  if (recoveredProviderBindingVerificationActions.has(scope)) {
+    throw new Error(
+      'recovered provider binding verification: run scope is already bound',
+    );
+  }
+  recoveredProviderBindingVerificationActions.set(scope, action);
+}
+
+export function residentRecoveredProviderBindingVerificationActionForScope(
+  scope: RunScope,
+): ResidentRecoveredProviderBindingVerificationAction | undefined {
+  return recoveredProviderBindingVerificationActions.get(scope);
 }

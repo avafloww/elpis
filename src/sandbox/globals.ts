@@ -68,6 +68,7 @@ import {
   residentDarkRequestAssemblyActionForScope,
   residentIdentitySystemDerivationActionForScope,
   residentIsolatedProviderBindingActionForScope,
+  residentRecoveredProviderBindingVerificationActionForScope,
   residentSourceAuthorizationActionForScope,
   residentSourceInspectionActionForScope,
   residentWorldProfileBindingActionForScope,
@@ -563,6 +564,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       }
       return bind();
+    },
+    verifyRecoveredIsolatedProviderBinding: (...args: unknown[]) => {
+      if (args.length !== 0) {
+        throw new Error(
+          'elpis.context.verifyRecoveredIsolatedProviderBinding: no arguments are accepted',
+        );
+      }
+      const scope = runScope.getStore();
+      const verify =
+        scope && residentRecoveredProviderBindingVerificationActionForScope(scope);
+      if (!verify) {
+        throw new Error(
+          'elpis.context.verifyRecoveredIsolatedProviderBinding: unavailable without an active resident run',
+        );
+      }
+      return verify();
     },
   };
 

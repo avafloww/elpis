@@ -23,6 +23,8 @@ import {
   createResidentIsolatedProviderBinder,
   exactMainIsolatedProviderTarget,
 } from '../src/context/resident-isolated-provider-binding.js';
+import { createResidentRecoveredProviderBindingVerifier } from '../src/context/resident-isolated-provider-acceptance.js';
+import { createBuildIdentity } from '../src/build-identity.js';
 import { makeConfig } from './helpers.js';
 import { preview } from '../src/sandbox/preview.js';
 
@@ -824,6 +826,62 @@ test('resident dark request assembly presents the complete exact candidate', () 
       0,
     );
     assert.equal(value.store.getContinuationHead().revision, 0);
+    value.store.recoverCoordinatedBranch(800);
+    const buildIdentity = createBuildIdentity({
+      version: '0.47.0',
+      revision: 'a'.repeat(40),
+      treeClean: true,
+      exactTag: 'v0.47.0',
+      source: 'environment',
+    });
+    const verifier = createResidentRecoveredProviderBindingVerifier({
+      store: value.store,
+      target: providerTarget,
+      buildIdentity,
+      previewMaxBytes: 16_384,
+      redactForOutput: (text) => text,
+    });
+    const verification = verifier(provenance('46'));
+    assert.match(
+      verification,
+      /^RECOVERED ISOLATED PROVIDER BINDING VERIFIED — HISTORICAL READ ONLY/m,
+    );
+    assert.match(verification, /"coordinatorReleased":true/);
+    assert.match(verification, /"effectCount":0/);
+    assert.match(verification, /"continuationAdvanceCount":0/);
+    assert.match(verification, /build_revision: a{40}/);
+    assert.doesNotMatch(verification, /EXACT_DARK_REQUEST_CANARY/);
+    assert.doesNotMatch(verification, /BINDING_ONLY_CANARY/);
+    assert.doesNotMatch(verification, /world:/);
+    assert.doesNotMatch(verification, /branch:/);
+    assert.doesNotMatch(verification, /aster-1/);
+    assert.doesNotMatch(verification, /api\.example\.com/);
+    assert.equal(
+      preview(verification, 16_384),
+      `string(${verification.length} chars):\n${verification}`,
+    );
+    const redactedVerifier = createResidentRecoveredProviderBindingVerifier({
+      store: value.store,
+      target: providerTarget,
+      buildIdentity,
+      previewMaxBytes: 16_384,
+      redactForOutput: (text) => text.replace('historical', '[REDACTED]'),
+    });
+    assert.throws(
+      () => redactedVerifier(provenance('47')),
+      /secret redaction would alter it/,
+    );
+    const boundedVerifier = createResidentRecoveredProviderBindingVerifier({
+      store: value.store,
+      target: providerTarget,
+      buildIdentity,
+      previewMaxBytes: 128,
+      redactForOutput: (text) => text,
+    });
+    assert.throws(
+      () => boundedVerifier(provenance('48')),
+      /preview budget cannot present/,
+    );
   } finally {
     value.close();
   }

@@ -778,6 +778,11 @@ export interface AgentDeps {
   onIdle?: () => void;
   /** Callback to publish the currently processed inbound message to the sandbox. */
   setCurrentInbound?: (msg: InboundMessage | null) => void;
+  /** Publishes process-local proof for an exact internal acceptance wake only
+   * after the whole drained turn is known to contain no person-facing input. */
+  setResidentRecoveredProviderVerificationTurnOrigin?: (
+    origin: import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin | null,
+  ) => void;
   /** Persistent id→name channel directory. Backs channel('name')
    * resolution and known-channel listing under (no live contexts). */
   channels?: ChannelDirectory;
@@ -943,6 +948,13 @@ export class Agent {
   private turnChannelId: string | null = null;
   /** Process-local identity shared by sandbox runs from exactly one Agent turn. */
   private outboundTurnToken: object | null = null;
+  private readonly residentRecoveredProviderVerificationWakeSources = new WeakMap<
+    InboundMessage,
+    import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake']
+  >();
+  private residentRecoveredProviderVerificationWake:
+    | import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake']
+    | null = null;
   /** Exact room and process-local transport proof for every addressed mentions-tier wake. */
   private mentionsTurnChannelId: string | null = null;
   private mentionsTurnToken: object | null = null;
@@ -1604,6 +1616,7 @@ export class Agent {
     this.enqueueInternal('heartbeat', 'heartbeat', '[heartbeat]', {
       id: 'heartbeat-' + Date.now(),
       author: 'agent',
+      residentRecoveredProviderVerificationWake: 'heartbeat',
     });
     this.logger.info('heartbeat enqueued');
   }
@@ -1869,6 +1882,8 @@ export class Agent {
       channelId?: string;
       sends?: NonNullable<ChatMessage['sends']>;
       originWorldId?: WorldId;
+      residentRecoveredProviderVerificationWake?:
+        import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake'];
     },
   ): void {
     const author = extras.author ?? 'harness';
@@ -1891,6 +1906,12 @@ export class Agent {
       ...(extras.sends ? { sends: extras.sends } : {}),
     };
     if (extras.sendScope) message.sendScope = extras.sendScope;
+    if (extras.residentRecoveredProviderVerificationWake) {
+      this.residentRecoveredProviderVerificationWakeSources.set(
+        message,
+        extras.residentRecoveredProviderVerificationWake,
+      );
+    }
     this.enqueue(message);
   }
 
@@ -2188,7 +2209,10 @@ export class Agent {
       'harness',
       'harness',
       `[restart complete] You restarted the harness${marker.reason ? ` (reason: ${marker.reason})` : ''} and are back online with your context restored. Verify the change works, then continue what you were doing — if you told someone you'd report back after deploying, do that now (elpis.channel(id) to reach the room).`,
-      { id: `resume-${Date.now()}` },
+      {
+        id: `resume-${Date.now()}`,
+        residentRecoveredProviderVerificationWake: 'restart-complete',
+      },
     );
     this.logger.info(
       '[agent] resume-after-restart delivered to the one history',
@@ -2321,6 +2345,8 @@ export class Agent {
     this.discordPersonInputTurn = false;
     this.directActionReply = null;
     this.outboundTurnToken = null;
+    this.residentRecoveredProviderVerificationWake = null;
+    this.deps.setResidentRecoveredProviderVerificationTurnOrigin?.(null);
     this.mentionsTurnChannelId = null;
     this.mentionsTurnToken = null;
     this.mentionsTurnAuthorizationToken = null;
@@ -2452,6 +2478,10 @@ export class Agent {
           m.kind === 'harness' ||
           m.kind === 'worker' ||
           m.kind === 'watch';
+        if (wakes) {
+          this.residentRecoveredProviderVerificationWake =
+            this.residentRecoveredProviderVerificationWakeSources.get(m) ?? null;
+        }
         const isScopedInternal =
           isInternal && m.channelId !== INTERNAL_CHANNEL_ID;
         this.mindFrontierAllowedThisTurn = retainMindFrontierPermission(
@@ -2695,6 +2725,16 @@ export class Agent {
       }
       this.sleepDepth = 0;
       this.deps.setCurrentInbound?.(this.lastInbound ?? null);
+      this.deps.setResidentRecoveredProviderVerificationTurnOrigin?.(
+        this.residentRecoveredProviderVerificationWake &&
+          !this.personInputTurn &&
+          this.outboundTurnToken
+          ? Object.freeze({
+              wake: this.residentRecoveredProviderVerificationWake,
+              turnToken: this.outboundTurnToken,
+            })
+          : null,
+      );
       this.logger.info(
         '[agent] turn start | drained=',
         drained,
@@ -3574,6 +3614,8 @@ export class Agent {
     this.turnSendScope = 'normal';
     this.directActionReply = null;
     this.outboundTurnToken = null;
+    this.residentRecoveredProviderVerificationWake = null;
+    this.deps.setResidentRecoveredProviderVerificationTurnOrigin?.(null);
     this.mentionsTurnChannelId = null;
     this.mentionsTurnToken = null;
     this.mentionsTurnAuthorizationToken = null;

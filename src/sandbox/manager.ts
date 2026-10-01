@@ -1,6 +1,8 @@
 import type { ChatMessage } from '../llm/llm.js';
 import type { Logger } from '../lib/log.js';
 import type {
+  OutboundEffectScope,
+  ResidentRecoveredProviderVerificationTurnOrigin,
   RunResult,
   SandboxDeps,
   SandboxExecutionMetadata,
@@ -69,6 +71,12 @@ export interface SandboxManagerOptions {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  residentRecoveredProviderBindingVerifier?: (
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
+  residentRecoveredProviderVerificationTurnOrigin?: () =>
+    | ResidentRecoveredProviderVerificationTurnOrigin
+    | null;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -106,6 +114,18 @@ function snapshotResidentCurrentWorldScope(
   });
 }
 
+function snapshotRecoveredProviderVerificationEligibility(
+  origin: ResidentRecoveredProviderVerificationTurnOrigin | null | undefined,
+  outboundScope: OutboundEffectScope | undefined,
+): boolean {
+  return Boolean(
+    origin &&
+      outboundScope?.kind === 'sandbox-run' &&
+      outboundScope.turnToken !== null &&
+      origin.turnToken === outboundScope.turnToken,
+  );
+}
+
 class ResidentRunLease {
   readonly binding: SandboxResidentRunLifecycle;
   private state: 'active' | 'detached' | 'closed' = 'active';
@@ -140,7 +160,11 @@ class ResidentRunLease {
           snapshot: ResidentToolCallSnapshotV1,
         ) => string)
       | undefined,
+    private readonly recoveredProviderBindingVerifier:
+      | ((snapshot: ResidentToolCallSnapshotV1) => string)
+      | undefined,
     private readonly currentWorldScope: ResidentCurrentWorldScopeV1 | undefined,
+    private readonly recoveredProviderVerificationEligible: boolean,
     private readonly onClose: () => void,
   ) {
     this.binding = Object.freeze({
@@ -156,6 +180,8 @@ class ResidentRunLease {
         this.assembleCurrentWorldDarkRequest(),
       bindCurrentWorldIsolatedProvider: () =>
         this.bindCurrentWorldIsolatedProvider(),
+      verifyRecoveredIsolatedProviderBinding: () =>
+        this.verifyRecoveredIsolatedProviderBinding(),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -295,6 +321,32 @@ class ResidentRunLease {
     return result;
   }
 
+  verifyRecoveredIsolatedProviderBinding(): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `recovered provider binding verification: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.recoveredProviderBindingVerifier) {
+      throw new Error(
+        'recovered provider binding verification: verifier is not configured',
+      );
+    }
+    if (!this.recoveredProviderVerificationEligible) {
+      throw new Error(
+        'recovered provider binding verification: current run is not a trusted internal restart or heartbeat wake',
+      );
+    }
+    const result = this.recoveredProviderBindingVerifier(snapshot);
+    if (typeof result !== 'string') {
+      throw new Error(
+        'recovered provider binding verification: verifier returned a non-string result',
+      );
+    }
+    return result;
+  }
+
   observeSandboxResult(result: RunResult): void {
     if (result.detached) {
       if (this.state === 'active') this.detach();
@@ -375,6 +427,12 @@ export class SandboxManager {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentRecoveredProviderBindingVerifier?: (
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
+  private readonly residentRecoveredProviderVerificationTurnOrigin?: () =>
+    | ResidentRecoveredProviderVerificationTurnOrigin
+    | null;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -401,6 +459,10 @@ export class SandboxManager {
     this.residentDarkRequestAssembler = options.residentDarkRequestAssembler;
     this.residentIsolatedProviderBinder =
       options.residentIsolatedProviderBinder;
+    this.residentRecoveredProviderBindingVerifier =
+      options.residentRecoveredProviderBindingVerifier;
+    this.residentRecoveredProviderVerificationTurnOrigin =
+      options.residentRecoveredProviderVerificationTurnOrigin;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -573,7 +635,12 @@ export class SandboxManager {
       this.residentWorldProfileBinder,
       this.residentDarkRequestAssembler,
       this.residentIsolatedProviderBinder,
+      this.residentRecoveredProviderBindingVerifier,
       snapshotResidentCurrentWorldScope(this.deps.inbound),
+      snapshotRecoveredProviderVerificationEligibility(
+        this.residentRecoveredProviderVerificationTurnOrigin?.(),
+        this.deps.captureOutboundScope?.(),
+      ),
       () => this.releaseResidentRunLease(lease),
     );
     this.residentRunLeases.add(lease);
