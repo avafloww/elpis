@@ -46,6 +46,8 @@ export type EffectId = ContextId<'EffectId'>;
 export type EventMessageProjectionId = ContextId<'EventMessageProjectionId'>;
 export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
 export type SystemLayerApprovalId = ContextId<'SystemLayerApprovalId'>;
+export type ResidentIdentitySystemDerivationId =
+  ContextId<'ResidentIdentitySystemDerivationId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -125,6 +127,14 @@ export const systemLayerApprovalId = (
     'systemLayerApprovalId',
     value,
     'system-layer-approval:',
+  );
+export const residentIdentitySystemDerivationId = (
+  value: string,
+): ResidentIdentitySystemDerivationId =>
+  branded<'ResidentIdentitySystemDerivationId'>(
+    'residentIdentitySystemDerivationId',
+    value,
+    'resident-identity-derivation:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -675,6 +685,29 @@ export interface ResidentSourceCandidateAuthorizationV1 {
   readonly authorizedAt: number;
 }
 
+export interface ResidentIdentitySystemDerivationV1 {
+  readonly derivationId: ResidentIdentitySystemDerivationId;
+  readonly schemaVersion: 1;
+  readonly derivationKind: 'authorized_resident_identity_layers';
+  readonly activationEpoch: number;
+  readonly authorityRevision: number;
+  readonly predecessorDerivationId: ResidentIdentitySystemDerivationId | null;
+  readonly authorizationId: string;
+  readonly contractArtifactId: string;
+  readonly soulSnapshotId: string;
+  readonly contractLayerId: SystemLayerProjectionId;
+  readonly contractApprovalId: SystemLayerApprovalId;
+  readonly identityLayerId: SystemLayerProjectionId;
+  readonly identityApprovalId: SystemLayerApprovalId;
+  readonly deriveBatchId: string;
+  readonly deriveBatchSha256: string;
+  readonly deriveCallIndex: number;
+  readonly deriveCallCount: number;
+  readonly deriveToolName: 'run';
+  readonly deriveArgumentsSha256: string;
+  readonly derivedAt: number;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -810,6 +843,45 @@ function residentSourceAuthorizationId(input: {
       authorizeArgumentsSha256: input.provenance.argumentsSha256,
     }),
   )}`;
+}
+
+function residentIdentitySystemDerivationIdentity(input: {
+  activationEpoch: number;
+  authorityRevision: number;
+  predecessorDerivationId: ResidentIdentitySystemDerivationId | null;
+  authorizationId: string;
+  contractArtifactId: string;
+  soulSnapshotId: string;
+  contractLayerId: SystemLayerProjectionId;
+  contractApprovalId: SystemLayerApprovalId;
+  identityLayerId: SystemLayerProjectionId;
+  identityApprovalId: SystemLayerApprovalId;
+  provenance: ResidentToolCallSnapshotV1;
+}): ResidentIdentitySystemDerivationId {
+  return residentIdentitySystemDerivationId(
+    `resident-identity-derivation:${hashContextBytes(
+      serialize({
+        schemaVersion: 1,
+        derivationKind: 'authorized_resident_identity_layers',
+        activationEpoch: input.activationEpoch,
+        authorityRevision: input.authorityRevision,
+        predecessorDerivationId: input.predecessorDerivationId,
+        authorizationId: input.authorizationId,
+        contractArtifactId: input.contractArtifactId,
+        soulSnapshotId: input.soulSnapshotId,
+        contractLayerId: input.contractLayerId,
+        contractApprovalId: input.contractApprovalId,
+        identityLayerId: input.identityLayerId,
+        identityApprovalId: input.identityApprovalId,
+        deriveBatchId: input.provenance.batchId,
+        deriveBatchSha256: input.provenance.batchSha256,
+        deriveCallIndex: input.provenance.callIndex,
+        deriveCallCount: input.provenance.callCount,
+        deriveToolName: input.provenance.toolName,
+        deriveArgumentsSha256: input.provenance.argumentsSha256,
+      }),
+    )}`,
+  );
 }
 
 function sha256(label: string, value: string): string {
@@ -1670,6 +1742,29 @@ interface ResidentSourceCandidateAuthorizationRow {
   authorized_at: number;
 }
 
+interface ResidentIdentitySystemDerivationRow {
+  derivation_id: string;
+  schema_version: number;
+  derivation_kind: string;
+  activation_epoch: number;
+  authority_revision: number;
+  predecessor_derivation_id: string | null;
+  authorization_id: string;
+  contract_artifact_id: string;
+  soul_snapshot_id: string;
+  contract_layer_id: string;
+  contract_approval_id: string;
+  identity_layer_id: string;
+  identity_approval_id: string;
+  derive_batch_id: string;
+  derive_batch_sha256: string;
+  derive_call_index: number;
+  derive_call_count: number;
+  derive_tool_name: string;
+  derive_arguments_sha256: string;
+  derived_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -2472,6 +2567,23 @@ function normalizeResidentAuthorizationProvenance(
   });
 }
 
+function normalizeResidentIdentityDerivationProvenance(
+  input: ResidentToolCallSnapshotV1,
+): ResidentToolCallSnapshotV1 {
+  const provenance = normalizeResidentAuthorizationProvenance(input);
+  return Object.freeze({
+    ...provenance,
+    batchSha256: sha256(
+      'resident identity derivation batchSha256',
+      provenance.batchSha256,
+    ),
+    argumentsSha256: sha256(
+      'resident identity derivation argumentsSha256',
+      provenance.argumentsSha256,
+    ),
+  });
+}
+
 function mapResidentInspectionCandidate(
   row: ResidentSourceInspectionCandidateRow,
 ): ResidentSourceInspectionCandidateV1 {
@@ -2604,6 +2716,102 @@ function mapResidentSourceAuthorization(
   });
 }
 
+function mapResidentIdentitySystemDerivation(
+  row: ResidentIdentitySystemDerivationRow,
+  authorization: ResidentSourceCandidateAuthorizationV1,
+): ResidentIdentitySystemDerivationV1 {
+  if (
+    row.schema_version !== 1 ||
+    row.derivation_kind !== 'authorized_resident_identity_layers' ||
+    row.authorization_id !== authorization.authorizationId ||
+    row.activation_epoch !== authorization.activationEpoch ||
+    row.contract_artifact_id !== authorization.contractArtifactId ||
+    row.soul_snapshot_id !== authorization.soulSnapshotId
+  ) {
+    throw new Error('stored resident identity system derivation is invalid');
+  }
+  const provenance = normalizeResidentIdentityDerivationProvenance({
+    version: 1,
+    batchId: row.derive_batch_id,
+    batchSha256: row.derive_batch_sha256,
+    callIndex: row.derive_call_index,
+    callCount: row.derive_call_count,
+    toolName: row.derive_tool_name,
+    argumentsSha256: row.derive_arguments_sha256,
+  });
+  if (provenance.batchId === authorization.authorizeBatchId) {
+    throw new Error(
+      'stored resident identity system derivation reuses its authorization batch',
+    );
+  }
+  const activationEpoch = generation(
+    'resident identity derivation activationEpoch',
+    row.activation_epoch,
+  );
+  const authorityRevision = generation(
+    'resident identity derivation authorityRevision',
+    row.authority_revision,
+  );
+  if (authorityRevision < 1) {
+    throw new Error('stored resident identity system derivation revision is invalid');
+  }
+  const predecessorDerivationId =
+    row.predecessor_derivation_id === null
+      ? null
+      : residentIdentitySystemDerivationId(row.predecessor_derivation_id);
+  const contractLayerId = systemLayerProjectionId(row.contract_layer_id);
+  const contractApprovalId = systemLayerApprovalId(row.contract_approval_id);
+  const identityLayerId = systemLayerProjectionId(row.identity_layer_id);
+  const identityApprovalId = systemLayerApprovalId(row.identity_approval_id);
+  const derivationId = residentIdentitySystemDerivationIdentity({
+    activationEpoch,
+    authorityRevision,
+    predecessorDerivationId,
+    authorizationId: authorization.authorizationId,
+    contractArtifactId: authorization.contractArtifactId,
+    soulSnapshotId: authorization.soulSnapshotId,
+    contractLayerId,
+    contractApprovalId,
+    identityLayerId,
+    identityApprovalId,
+    provenance,
+  });
+  if (row.derivation_id !== derivationId) {
+    throw new Error('stored resident identity system derivation identity is invalid');
+  }
+  const derivedAt = timestamp(
+    'resident identity derivation derivedAt',
+    row.derived_at,
+  );
+  if (derivedAt < authorization.authorizedAt) {
+    throw new Error(
+      'stored resident identity system derivation chronology is invalid',
+    );
+  }
+  return Object.freeze({
+    derivationId,
+    schemaVersion: 1,
+    derivationKind: 'authorized_resident_identity_layers',
+    activationEpoch,
+    authorityRevision,
+    predecessorDerivationId,
+    authorizationId: authorization.authorizationId,
+    contractArtifactId: authorization.contractArtifactId,
+    soulSnapshotId: authorization.soulSnapshotId,
+    contractLayerId,
+    contractApprovalId,
+    identityLayerId,
+    identityApprovalId,
+    deriveBatchId: provenance.batchId,
+    deriveBatchSha256: provenance.batchSha256,
+    deriveCallIndex: provenance.callIndex,
+    deriveCallCount: provenance.callCount,
+    deriveToolName: 'run',
+    deriveArgumentsSha256: provenance.argumentsSha256,
+    derivedAt,
+  });
+}
+
 /**
  * Durable, dark-mode persistence for the scoped context graph.
  *
@@ -2700,6 +2908,185 @@ export class ContextGraphStore {
       );
     }
     return mapResidentSourceAuthorization(row, capture.candidate);
+  }
+
+  getResidentIdentitySystemDerivation(
+    id: ResidentIdentitySystemDerivationId,
+  ): ResidentIdentitySystemDerivationV1 | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_resident_identity_system_derivations
+         WHERE derivation_id = ?`,
+      )
+      .get(id) as ResidentIdentitySystemDerivationRow | undefined;
+    if (!row) return null;
+    const authorization = this.getResidentSourceCandidateAuthorization(
+      row.authorization_id,
+    );
+    if (!authorization) {
+      throw new Error(
+        'stored resident identity system derivation has no authorization',
+      );
+    }
+    const receipt = mapResidentIdentitySystemDerivation(row, authorization);
+    const soul = this.getResidentSoulSourceSnapshot(receipt.soulSnapshotId);
+    const artifact = this.getScopedRuntimeContractArtifact();
+    const contractLayer = this.getSystemLayerProjection(receipt.contractLayerId);
+    const contractApproval = this.getSystemLayerApproval(
+      receipt.contractApprovalId,
+    );
+    const identityLayer = this.getSystemLayerProjection(receipt.identityLayerId);
+    const identityApproval = this.getSystemLayerApproval(
+      receipt.identityApprovalId,
+    );
+    if (
+      !soul ||
+      artifact.artifactId !== receipt.contractArtifactId ||
+      !contractLayer ||
+      contractLayer.kind !== 'runtime_contract' ||
+      contractLayer.visibility !== 'global_contract' ||
+      contractLayer.worldId !== null ||
+      contractLayer.rendererGeneration !== artifact.systemRendererGeneration ||
+      contractLayer.policyGeneration !== artifact.policyGeneration ||
+      contractLayer.sourceKind !== artifact.sourceKind ||
+      contractLayer.sourceHash !== artifact.sourceHash ||
+      contractLayer.content !== artifact.content ||
+      contractLayer.contentHash !== artifact.contentHash ||
+      contractLayer.contentBytes !== artifact.contentBytes ||
+      contractLayer.createdAt > receipt.derivedAt ||
+      !contractApproval ||
+      contractApproval.layerId !== contractLayer.layerId ||
+      contractApproval.role !== 'scoped_runtime_contract' ||
+      contractApproval.basisKind !== 'authored_scoped_contract' ||
+      contractApproval.basisRef !== artifact.artifactId ||
+      contractApproval.basisHash !== artifact.sourceHash ||
+      contractApproval.approvalGeneration !== 1 ||
+      contractApproval.approvedAt !== contractLayer.createdAt ||
+      !identityLayer ||
+      identityLayer.kind !== 'identity' ||
+      identityLayer.visibility !== 'integrated_self' ||
+      identityLayer.worldId !== null ||
+      identityLayer.rendererGeneration !== artifact.systemRendererGeneration ||
+      identityLayer.policyGeneration !== artifact.policyGeneration ||
+      identityLayer.sourceKind !== 'soul_snapshot' ||
+      identityLayer.sourceHash !== soul.sourceFileHash ||
+      identityLayer.content !== soul.body ||
+      identityLayer.contentHash !== soul.bodyHash ||
+      identityLayer.contentBytes !== soul.bodyBytes ||
+      identityLayer.createdAt > receipt.derivedAt ||
+      !identityApproval ||
+      identityApproval.layerId !== identityLayer.layerId ||
+      identityApproval.role !== 'identity' ||
+      identityApproval.basisKind !== 'soul_snapshot' ||
+      identityApproval.basisRef !== soul.snapshotId ||
+      identityApproval.basisHash !== soul.sourceFileHash ||
+      identityApproval.approvalGeneration !== 1 ||
+      identityApproval.approvedAt !== identityLayer.createdAt
+    ) {
+      throw new Error(
+        'stored resident identity system derivation layer lineage is invalid',
+      );
+    }
+    const validateLayerOrigin = (
+      layerId: SystemLayerProjectionId,
+      approvalId: SystemLayerApprovalId,
+      createdAt: number,
+      layerColumn: 'contract_layer_id' | 'identity_layer_id',
+      approvalColumn: 'contract_approval_id' | 'identity_approval_id',
+    ) => {
+      const origin = this.database
+        .prepare(
+          `SELECT derivation_id, authority_revision, derived_at
+           FROM context_resident_identity_system_derivations
+           WHERE ${layerColumn} = ? AND ${approvalColumn} = ?
+           ORDER BY authority_revision ASC
+           LIMIT 1`,
+        )
+        .get(layerId, approvalId) as
+        | {
+            derivation_id: string;
+            authority_revision: number;
+            derived_at: number;
+          }
+        | undefined;
+      if (
+        !origin ||
+        origin.authority_revision > receipt.authorityRevision ||
+        origin.derived_at !== createdAt
+      ) {
+        throw new Error(
+          'stored resident identity system derivation layer origin is invalid',
+        );
+      }
+      if (origin.derivation_id === receipt.derivationId) {
+        if (createdAt !== receipt.derivedAt) {
+          throw new Error(
+            'stored resident identity system derivation layer origin is invalid',
+          );
+        }
+        return;
+      }
+      if (
+        origin.authority_revision >= receipt.authorityRevision ||
+        !this.getResidentIdentitySystemDerivation(
+          residentIdentitySystemDerivationId(origin.derivation_id),
+        )
+      ) {
+        throw new Error(
+          'stored resident identity system derivation layer origin is invalid',
+        );
+      }
+    };
+    validateLayerOrigin(
+      contractLayer.layerId,
+      contractApproval.approvalId,
+      contractLayer.createdAt,
+      'contract_layer_id',
+      'contract_approval_id',
+    );
+    validateLayerOrigin(
+      identityLayer.layerId,
+      identityApproval.approvalId,
+      identityLayer.createdAt,
+      'identity_layer_id',
+      'identity_approval_id',
+    );
+    if (receipt.authorityRevision === 1) {
+      if (receipt.predecessorDerivationId !== null) {
+        throw new Error(
+          'stored resident identity system derivation predecessor is invalid',
+        );
+      }
+    } else {
+      if (receipt.predecessorDerivationId === null) {
+        throw new Error(
+          'stored resident identity system derivation predecessor is invalid',
+        );
+      }
+      const predecessor = this.database
+        .prepare(
+          `SELECT activation_epoch, authority_revision, derived_at
+           FROM context_resident_identity_system_derivations
+           WHERE derivation_id = ?`,
+        )
+        .get(receipt.predecessorDerivationId) as
+        | Pick<
+            ResidentIdentitySystemDerivationRow,
+            'activation_epoch' | 'authority_revision' | 'derived_at'
+          >
+        | undefined;
+      if (
+        !predecessor ||
+        predecessor.activation_epoch !== receipt.activationEpoch ||
+        predecessor.authority_revision !== receipt.authorityRevision - 1 ||
+        predecessor.derived_at > receipt.derivedAt
+      ) {
+        throw new Error(
+          'stored resident identity system derivation predecessor is invalid',
+        );
+      }
+    }
+    return receipt;
   }
 
   createResidentSourceInspectionCandidate(input: {
@@ -3002,6 +3389,370 @@ export class ContextGraphStore {
       );
       if (!created) {
         throw new Error('resident source candidate authorization was not stored');
+      }
+      return finish(created);
+    });
+  }
+
+  deriveResidentIdentitySystemLayers(input: {
+    authorizationId: string;
+    freshSoul: PromptFacingSoulSnapshot;
+    provenance: ResidentToolCallSnapshotV1;
+    derivedAt: number;
+  }): ResidentIdentitySystemDerivationV1;
+  deriveResidentIdentitySystemLayers<T>(
+    input: {
+      authorizationId: string;
+      freshSoul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      derivedAt: number;
+    },
+    finalize: (receipt: ResidentIdentitySystemDerivationV1) => T,
+  ): T;
+  deriveResidentIdentitySystemLayers<T>(
+    input: {
+      authorizationId: string;
+      freshSoul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      derivedAt: number;
+    },
+    finalize?: (receipt: ResidentIdentitySystemDerivationV1) => T,
+  ): ResidentIdentitySystemDerivationV1 | T {
+    if (!/^resident-source-authorization:[0-9a-f]{64}$/.test(input.authorizationId)) {
+      throw new Error(
+        'resident identity system derivation authorizationId is invalid',
+      );
+    }
+    const derivedAt = timestamp(
+      'resident identity system derivation derivedAt',
+      input.derivedAt,
+    );
+    const freshSoul = normalizeResidentSoulSnapshot({
+      parserGeneration: input.freshSoul.parserGeneration,
+      sourceFile: input.freshSoul.sourceFile,
+      sourceFileHash: input.freshSoul.sourceFileHash,
+      sourceFileBytes: input.freshSoul.sourceFileBytes,
+      body: input.freshSoul.body,
+      bodyHash: input.freshSoul.bodyHash,
+      bodyBytes: input.freshSoul.bodyBytes,
+      capturedAt: derivedAt,
+    });
+    const provenance = normalizeResidentIdentityDerivationProvenance(
+      input.provenance,
+    );
+    const finish = (receipt: ResidentIdentitySystemDerivationV1) =>
+      finalize ? finalize(receipt) : receipt;
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error(
+          'resident identity system derivation requires dark graph mode',
+        );
+      }
+      const authorization = this.getResidentSourceCandidateAuthorization(
+        input.authorizationId,
+      );
+      if (!authorization) {
+        throw new Error(
+          'resident identity system derivation authorization does not exist',
+        );
+      }
+      if (authorization.activationEpoch !== activation.epoch) {
+        throw new Error(
+          'resident identity system derivation authorization has a stale activation epoch',
+        );
+      }
+      const capture = this.getResidentSourceInspectionCandidate(
+        authorization.candidateId,
+      );
+      if (!capture) {
+        throw new Error(
+          'resident identity system derivation candidate does not exist',
+        );
+      }
+      if (
+        provenance.batchId === authorization.authorizeBatchId ||
+        provenance.batchId === capture.candidate.inspectBatchId
+      ) {
+        throw new Error(
+          'resident identity system derivation requires a later distinct assistant batch',
+        );
+      }
+      if (!sameResidentSoulSource(capture.soul, freshSoul)) {
+        throw new Error(
+          'resident identity system derivation requires the current exact authorized SOUL source',
+        );
+      }
+      if (derivedAt < authorization.authorizedAt) {
+        throw new Error(
+          'resident identity system derivation predates its authorization',
+        );
+      }
+
+      const priorCall = this.database
+        .prepare(
+          `SELECT derivation_id, authorization_id, derive_batch_sha256,
+                  derive_call_count, derive_tool_name, derive_arguments_sha256
+           FROM context_resident_identity_system_derivations
+           WHERE derive_batch_id = ? AND derive_call_index = ?`,
+        )
+        .get(provenance.batchId, provenance.callIndex) as
+        | {
+            derivation_id: string;
+            authorization_id: string;
+            derive_batch_sha256: string;
+            derive_call_count: number;
+            derive_tool_name: string;
+            derive_arguments_sha256: string;
+          }
+        | undefined;
+      if (priorCall) {
+        if (
+          priorCall.authorization_id !== authorization.authorizationId ||
+          priorCall.derive_batch_sha256 !== provenance.batchSha256 ||
+          priorCall.derive_call_count !== provenance.callCount ||
+          priorCall.derive_tool_name !== provenance.toolName ||
+          priorCall.derive_arguments_sha256 !== provenance.argumentsSha256
+        ) {
+          throw new Error(
+            'resident identity system derivation call already derived different sources',
+          );
+        }
+        const existing = this.getResidentIdentitySystemDerivation(
+          residentIdentitySystemDerivationId(priorCall.derivation_id),
+        );
+        if (!existing || existing.activationEpoch !== activation.epoch) {
+          throw new Error('resident identity system derivation disappeared');
+        }
+        return finish(existing);
+      }
+      const priorAuthorization = this.database
+        .prepare(
+          `SELECT derivation_id
+           FROM context_resident_identity_system_derivations
+           WHERE authorization_id = ?`,
+        )
+        .get(authorization.authorizationId) as
+        | { derivation_id: string }
+        | undefined;
+      if (priorAuthorization) {
+        throw new Error(
+          'resident identity authorization was already derived by a different call',
+        );
+      }
+
+      const artifact = this.getScopedRuntimeContractArtifact();
+      const last = this.database
+        .prepare(
+          `SELECT derivation_id, authority_revision, derived_at
+           FROM context_resident_identity_system_derivations
+           WHERE activation_epoch = ?
+           ORDER BY authority_revision DESC
+           LIMIT 1`,
+        )
+        .get(activation.epoch) as
+        | {
+            derivation_id: string;
+            authority_revision: number;
+            derived_at: number;
+          }
+        | undefined;
+      if (last && last.derived_at > derivedAt) {
+        throw new Error(
+          'resident identity system derivation predates its predecessor',
+        );
+      }
+      const authorityRevision = (last?.authority_revision ?? 0) + 1;
+      const predecessorDerivationId = last
+        ? residentIdentitySystemDerivationId(last.derivation_id)
+        : null;
+      const contractLayerId = systemLayerIdentity({
+        kind: 'runtime_contract',
+        visibility: 'global_contract',
+        worldId: null,
+        rendererGeneration: artifact.systemRendererGeneration,
+        policyGeneration: artifact.policyGeneration,
+        sourceKind: artifact.sourceKind,
+        sourceHash: artifact.sourceHash,
+        contentHash: artifact.contentHash,
+        contentBytes: artifact.contentBytes,
+      });
+      const identityLayerId = systemLayerIdentity({
+        kind: 'identity',
+        visibility: 'integrated_self',
+        worldId: null,
+        rendererGeneration: artifact.systemRendererGeneration,
+        policyGeneration: artifact.policyGeneration,
+        sourceKind: 'soul_snapshot',
+        sourceHash: capture.soul.sourceFileHash,
+        contentHash: capture.soul.bodyHash,
+        contentBytes: capture.soul.bodyBytes,
+      });
+      const contractApprovalId = systemLayerApprovalIdentity({
+        layerId: contractLayerId,
+        role: 'scoped_runtime_contract',
+        basisKind: 'authored_scoped_contract',
+        basisRef: artifact.artifactId,
+        basisHash: artifact.sourceHash,
+        approvalGeneration: 1,
+      });
+      const identityApprovalId = systemLayerApprovalIdentity({
+        layerId: identityLayerId,
+        role: 'identity',
+        basisKind: 'soul_snapshot',
+        basisRef: capture.soul.snapshotId,
+        basisHash: capture.soul.sourceFileHash,
+        approvalGeneration: 1,
+      });
+      const contractLayerExists =
+        this.getSystemLayerProjection(contractLayerId) !== null;
+      const contractApprovalExists =
+        this.getSystemLayerApproval(contractApprovalId) !== null;
+      const identityLayerExists =
+        this.getSystemLayerProjection(identityLayerId) !== null;
+      const identityApprovalExists =
+        this.getSystemLayerApproval(identityApprovalId) !== null;
+      const verifyReceiptedPair = (
+        layerId: SystemLayerProjectionId,
+        approvalId: SystemLayerApprovalId,
+        layerExists: boolean,
+        approvalExists: boolean,
+        layerColumn: 'contract_layer_id' | 'identity_layer_id',
+        approvalColumn: 'contract_approval_id' | 'identity_approval_id',
+      ) => {
+        if (!layerExists && !approvalExists) return;
+        if (!layerExists || !approvalExists) {
+          throw new Error(
+            'resident identity system derivation refuses preexisting unreceipted target rows',
+          );
+        }
+        const origin = this.database
+          .prepare(
+            `SELECT derivation_id
+             FROM context_resident_identity_system_derivations
+             WHERE ${layerColumn} = ? AND ${approvalColumn} = ?
+             ORDER BY authority_revision ASC
+             LIMIT 1`,
+          )
+          .get(layerId, approvalId) as { derivation_id: string } | undefined;
+        if (
+          !origin ||
+          !this.getResidentIdentitySystemDerivation(
+            residentIdentitySystemDerivationId(origin.derivation_id),
+          )
+        ) {
+          throw new Error(
+            'resident identity system derivation refuses preexisting unreceipted target rows',
+          );
+        }
+      };
+      verifyReceiptedPair(
+        contractLayerId,
+        contractApprovalId,
+        contractLayerExists,
+        contractApprovalExists,
+        'contract_layer_id',
+        'contract_approval_id',
+      );
+      verifyReceiptedPair(
+        identityLayerId,
+        identityApprovalId,
+        identityLayerExists,
+        identityApprovalExists,
+        'identity_layer_id',
+        'identity_approval_id',
+      );
+      const derivationId = residentIdentitySystemDerivationIdentity({
+        activationEpoch: activation.epoch,
+        authorityRevision,
+        predecessorDerivationId,
+        authorizationId: authorization.authorizationId,
+        contractArtifactId: artifact.artifactId,
+        soulSnapshotId: capture.soul.snapshotId,
+        contractLayerId,
+        contractApprovalId,
+        identityLayerId,
+        identityApprovalId,
+        provenance,
+      });
+
+      if (!contractLayerExists) {
+        this.createSystemLayerProjection({
+          kind: 'runtime_contract',
+          visibility: 'global_contract',
+          worldId: null,
+          rendererGeneration: artifact.systemRendererGeneration,
+          policyGeneration: artifact.policyGeneration,
+          sourceKind: artifact.sourceKind,
+          sourceHash: artifact.sourceHash,
+          content: artifact.content,
+          createdAt: derivedAt,
+        });
+        this.approveSystemLayer({
+          layerId: contractLayerId,
+          role: 'scoped_runtime_contract',
+          basisRef: artifact.artifactId,
+          approvalGeneration: 1,
+          approvedAt: derivedAt,
+        });
+      }
+      if (!identityLayerExists) {
+        this.createSystemLayerProjection({
+          kind: 'identity',
+          visibility: 'integrated_self',
+          worldId: null,
+          rendererGeneration: artifact.systemRendererGeneration,
+          policyGeneration: artifact.policyGeneration,
+          sourceKind: 'soul_snapshot',
+          sourceHash: capture.soul.sourceFileHash,
+          content: capture.soul.body,
+          createdAt: derivedAt,
+        });
+        this.approveSystemLayer({
+          layerId: identityLayerId,
+          role: 'identity',
+          basisRef: capture.soul.snapshotId,
+          approvalGeneration: 1,
+          approvedAt: derivedAt,
+        });
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_resident_identity_system_derivations(
+             derivation_id, schema_version, derivation_kind,
+             activation_epoch, authority_revision, predecessor_derivation_id,
+             authorization_id, contract_artifact_id, soul_snapshot_id,
+             contract_layer_id, contract_approval_id, identity_layer_id,
+             identity_approval_id, derive_batch_id, derive_batch_sha256,
+             derive_call_index, derive_call_count, derive_tool_name,
+             derive_arguments_sha256, derived_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          derivationId,
+          'authorized_resident_identity_layers',
+          activation.epoch,
+          authorityRevision,
+          predecessorDerivationId,
+          authorization.authorizationId,
+          artifact.artifactId,
+          capture.soul.snapshotId,
+          contractLayerId,
+          contractApprovalId,
+          identityLayerId,
+          identityApprovalId,
+          provenance.batchId,
+          provenance.batchSha256,
+          provenance.callIndex,
+          provenance.callCount,
+          provenance.toolName,
+          provenance.argumentsSha256,
+          derivedAt,
+        );
+      const created = this.getResidentIdentitySystemDerivation(derivationId);
+      if (!created) {
+        throw new Error('resident identity system derivation was not stored');
       }
       return finish(created);
     });

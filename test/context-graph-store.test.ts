@@ -516,6 +516,396 @@ test('resident source authorizations are exact, separate-batch, immutable receip
   }
 });
 
+test('authorized resident identity layers derive atomically without creating runtime authority', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('201'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('202'),
+      authorizedAt: 200,
+    });
+
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('202'),
+          derivedAt: 300,
+        }),
+      /later distinct assistant batch/,
+    );
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: residentSoulSnapshot(
+            value.directory,
+            '# Changed synthetic soul\n',
+          ),
+          provenance: residentRunProvenance('203'),
+          derivedAt: 300,
+        }),
+      /current exact authorized SOUL source/,
+    );
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers(
+          {
+            authorizationId: authorization.authorizationId,
+            freshSoul: soul,
+            provenance: residentRunProvenance('203'),
+            derivedAt: 300,
+          },
+          () => {
+            throw new Error('forced derivation presentation failure');
+          },
+        ),
+      /forced derivation presentation failure/,
+    );
+    const afterRollback = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...afterRollback },
+      { derivations: 0, layers: 0, approvals: 0 },
+    );
+
+    const receipt = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorization.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('203'),
+      derivedAt: 300,
+    });
+    assert.match(
+      receipt.derivationId,
+      /^resident-identity-derivation:[0-9a-f]{64}$/,
+    );
+    assert.equal(receipt.authorityRevision, 1);
+    assert.equal(receipt.predecessorDerivationId, null);
+    assert.equal(receipt.authorizationId, authorization.authorizationId);
+    assert.deepEqual(
+      value.store.getResidentIdentitySystemDerivation(receipt.derivationId),
+      receipt,
+    );
+    assert.deepEqual(
+      value.store.deriveResidentIdentitySystemLayers({
+        authorizationId: authorization.authorizationId,
+        freshSoul: soul,
+        provenance: residentRunProvenance('203'),
+        derivedAt: 350,
+      }),
+      receipt,
+    );
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: residentSoulSnapshot(
+            value.directory,
+            '# Replay source drift\n',
+          ),
+          provenance: residentRunProvenance('203'),
+          derivedAt: 350,
+        }),
+      /current exact authorized SOUL source/,
+    );
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: soul,
+          provenance: {
+            ...residentRunProvenance('203'),
+            batchSha256: hashContextBytes('changed replay batch'),
+          },
+          derivedAt: 350,
+        }),
+      /call already derived different sources/,
+    );
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('204'),
+          derivedAt: 350,
+        }),
+      /already derived by a different call/,
+    );
+
+    const artifact = value.store.getScopedRuntimeContractArtifact();
+    const contractLayer = value.store.getSystemLayerProjection(
+      receipt.contractLayerId,
+    );
+    const identityLayer = value.store.getSystemLayerProjection(
+      receipt.identityLayerId,
+    );
+    assert.equal(contractLayer?.content, artifact.content);
+    assert.equal(contractLayer?.worldId, null);
+    assert.equal(identityLayer?.content, soul.body);
+    assert.equal(identityLayer?.worldId, null);
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_world_events) AS worldEvents,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_effects) AS effects`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      {
+        derivations: 1,
+        layers: 2,
+        approvals: 2,
+        profiles: 0,
+        worldEvents: 0,
+        branches: 0,
+        effects: 0,
+      },
+    );
+    assert.deepEqual(value.store.getActivationState(), {
+      mode: 'dark',
+      epoch: 0,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+
+    const inspectedAgain = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('205'),
+      observedAt: 400,
+    });
+    const authorizationAgain = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspectedAgain.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('206'),
+      authorizedAt: 410,
+    });
+    const receiptAgain = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorizationAgain.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('207'),
+      derivedAt: 420,
+    });
+    assert.equal(receiptAgain.authorityRevision, 2);
+    assert.equal(receiptAgain.predecessorDerivationId, receipt.derivationId);
+    assert.equal(receiptAgain.contractLayerId, receipt.contractLayerId);
+    assert.equal(receiptAgain.contractApprovalId, receipt.contractApprovalId);
+    assert.equal(receiptAgain.identityLayerId, receipt.identityLayerId);
+    assert.equal(receiptAgain.identityApprovalId, receipt.identityApprovalId);
+    const reusedCounts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...reusedCounts },
+      { derivations: 2, layers: 2, approvals: 2 },
+    );
+    assert.deepEqual(
+      value.store.getResidentIdentitySystemDerivation(
+        receiptAgain.derivationId,
+      ),
+      receiptAgain,
+    );
+
+    const sourceOnlyPath = path.join(value.directory, 'source-only-SOUL.md');
+    fs.writeFileSync(
+      sourceOnlyPath,
+      `---\nname: Briar\n---\n\n${soul.body}`,
+    );
+    const sourceOnlyChangedSoul = readPromptFacingSoulSnapshot(sourceOnlyPath);
+    assert.equal(sourceOnlyChangedSoul.body, soul.body);
+    assert.notEqual(sourceOnlyChangedSoul.sourceFileHash, soul.sourceFileHash);
+    const inspectedSourceOnly =
+      value.store.createResidentSourceInspectionCandidate({
+        soul: sourceOnlyChangedSoul,
+        provenance: residentRunProvenance('208'),
+        observedAt: 430,
+      });
+    const authorizationSourceOnly =
+      value.store.authorizeResidentSourceCandidate({
+        candidateId: inspectedSourceOnly.candidate.candidateId,
+        freshSoul: sourceOnlyChangedSoul,
+        provenance: residentRunProvenance('209'),
+        authorizedAt: 440,
+      });
+    const receiptSourceOnly = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorizationSourceOnly.authorizationId,
+      freshSoul: sourceOnlyChangedSoul,
+      provenance: residentRunProvenance('210'),
+      derivedAt: 450,
+    });
+    assert.equal(receiptSourceOnly.authorityRevision, 3);
+    assert.equal(
+      receiptSourceOnly.predecessorDerivationId,
+      receiptAgain.derivationId,
+    );
+    assert.equal(receiptSourceOnly.contractLayerId, receipt.contractLayerId);
+    assert.equal(receiptSourceOnly.contractApprovalId, receipt.contractApprovalId);
+    assert.notEqual(receiptSourceOnly.identityLayerId, receipt.identityLayerId);
+    assert.notEqual(
+      receiptSourceOnly.identityApprovalId,
+      receipt.identityApprovalId,
+    );
+
+    const changedSoul = residentSoulSnapshot(
+      value.directory,
+      '# Changed authorized synthetic soul\n',
+    );
+    const inspectedChanged = value.store.createResidentSourceInspectionCandidate({
+      soul: changedSoul,
+      provenance: residentRunProvenance('211'),
+      observedAt: 460,
+    });
+    const authorizationChanged = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspectedChanged.candidate.candidateId,
+      freshSoul: changedSoul,
+      provenance: residentRunProvenance('212'),
+      authorizedAt: 470,
+    });
+    const receiptChanged = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorizationChanged.authorizationId,
+      freshSoul: changedSoul,
+      provenance: residentRunProvenance('213'),
+      derivedAt: 480,
+    });
+    assert.equal(receiptChanged.authorityRevision, 4);
+    assert.equal(
+      receiptChanged.predecessorDerivationId,
+      receiptSourceOnly.derivationId,
+    );
+    assert.equal(receiptChanged.contractLayerId, receipt.contractLayerId);
+    assert.equal(receiptChanged.contractApprovalId, receipt.contractApprovalId);
+    assert.notEqual(receiptChanged.identityLayerId, receipt.identityLayerId);
+    assert.notEqual(receiptChanged.identityApprovalId, receipt.identityApprovalId);
+    const changedCounts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...changedCounts },
+      { derivations: 4, layers: 4, approvals: 4 },
+    );
+    assert.deepEqual(
+      value.store.getResidentIdentitySystemDerivation(
+        receiptChanged.derivationId,
+      ),
+      receiptChanged,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_resident_identity_system_derivations
+             SET derived_at = derived_at + 1 WHERE derivation_id = ?`,
+          )
+          .run(receipt.derivationId),
+      /resident identity system derivations are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_resident_identity_system_derivations
+             SELECT * FROM context_resident_identity_system_derivations
+             WHERE derivation_id = ?`,
+          )
+          .run(receipt.derivationId),
+      /resident identity system derivation (identity conflict|lineage is invalid)/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('resident identity derivation refuses preexisting target rows without a derivation receipt', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('220'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('221'),
+      authorizedAt: 200,
+    });
+    const artifact = value.store.getScopedRuntimeContractArtifact();
+    const contractLayer = value.store.createSystemLayerProjection({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      rendererGeneration: artifact.systemRendererGeneration,
+      policyGeneration: artifact.policyGeneration,
+      sourceKind: artifact.sourceKind,
+      sourceHash: artifact.sourceHash,
+      content: artifact.content,
+      createdAt: 250,
+    });
+    value.store.approveSystemLayer({
+      layerId: contractLayer.layerId,
+      role: 'scoped_runtime_contract',
+      basisRef: artifact.artifactId,
+      approvalGeneration: 1,
+      approvedAt: 250,
+    });
+
+    assert.throws(
+      () =>
+        value.store.deriveResidentIdentitySystemLayers({
+          authorizationId: authorization.authorizationId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('222'),
+          derivedAt: 300,
+        }),
+      /refuses preexisting unreceipted target rows/,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      { derivations: 0, layers: 1, approvals: 1 },
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('scoped runtime contract artifact is exact, independent from legacy prompt inputs, and immutable', () => {
 
   const value = fixture();
@@ -4188,6 +4578,11 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_resident_identity_system_derivations_identity_conflict;
+      DROP TRIGGER context_resident_identity_system_derivations_lineage_guard;
+      DROP TRIGGER context_resident_identity_system_derivations_no_update;
+      DROP TRIGGER context_resident_identity_system_derivations_no_delete;
+      DROP TABLE context_resident_identity_system_derivations;
       DROP TRIGGER context_resident_source_candidate_authorizations_identity_conflict;
       DROP TRIGGER context_resident_source_candidate_authorizations_lineage_guard;
       DROP TRIGGER context_resident_source_candidate_authorizations_no_update;
@@ -4213,7 +4608,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0041-context-dark-pending-profile-binding',
             '0042-context-scoped-runtime-contract-artifact',
             '0043-context-resident-source-inspection-candidates',
-            '0044-context-resident-source-candidate-authorizations'
+            '0044-context-resident-source-candidate-authorizations',
+            '0045-context-resident-identity-system-derivations'
           );
       PRAGMA user_version = 40;
     `);

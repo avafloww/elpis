@@ -51,6 +51,10 @@ export interface SandboxManagerOptions {
     candidateId: string,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  residentIdentitySystemDeriver?: (
+    authorizationId: string,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -88,6 +92,9 @@ class ResidentRunLease {
     private readonly authorizer:
       | ((candidateId: string, snapshot: ResidentToolCallSnapshotV1) => string)
       | undefined,
+    private readonly deriver:
+      | ((authorizationId: string, snapshot: ResidentToolCallSnapshotV1) => string)
+      | undefined,
     private readonly onClose: () => void,
   ) {
     this.binding = Object.freeze({
@@ -95,6 +102,8 @@ class ResidentRunLease {
       inspectIdentityCandidate: () => this.inspectIdentityCandidate(),
       authorizeIdentityCandidate: (candidateId: string) =>
         this.authorizeIdentityCandidate(candidateId),
+      deriveAuthorizedIdentityLayers: (authorizationId: string) =>
+        this.deriveAuthorizedIdentityLayers(authorizationId),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -134,6 +143,25 @@ class ResidentRunLease {
     if (typeof result !== 'string') {
       throw new Error(
         'resident source authorization: recorder returned a non-string result',
+      );
+    }
+    return result;
+  }
+
+  deriveAuthorizedIdentityLayers(authorizationId: string): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `resident identity derivation: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.deriver) {
+      throw new Error('resident identity derivation: recorder is not configured');
+    }
+    const result = this.deriver(authorizationId, snapshot);
+    if (typeof result !== 'string') {
+      throw new Error(
+        'resident identity derivation: recorder returned a non-string result',
       );
     }
     return result;
@@ -202,6 +230,10 @@ export class SandboxManager {
     candidateId: string,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentIdentitySystemDeriver?: (
+    authorizationId: string,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -222,6 +254,8 @@ export class SandboxManager {
     this.residentRunVerifier = options.residentRunVerifier;
     this.residentSourceInspector = options.residentSourceInspector;
     this.residentSourceAuthorizer = options.residentSourceAuthorizer;
+    this.residentIdentitySystemDeriver =
+      options.residentIdentitySystemDeriver;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -390,6 +424,7 @@ export class SandboxManager {
       handle,
       this.residentSourceInspector,
       this.residentSourceAuthorizer,
+      this.residentIdentitySystemDeriver,
       () => this.releaseResidentRunLease(lease),
     );
     this.residentRunLeases.add(lease);

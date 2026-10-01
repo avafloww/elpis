@@ -2,11 +2,18 @@ import type { RunScope } from '../sandbox/globals.js';
 
 export type ResidentSourceInspectionAction = () => string;
 export type ResidentSourceAuthorizationAction = (candidateId: string) => string;
+export type ResidentIdentitySystemDerivationAction = (
+  authorizationId: string,
+) => string;
 
 const actions = new WeakMap<RunScope, ResidentSourceInspectionAction>();
 const authorizationActions = new WeakMap<
   RunScope,
   ResidentSourceAuthorizationAction
+>();
+const derivationActions = new WeakMap<
+  RunScope,
+  ResidentIdentitySystemDerivationAction
 >();
 
 export function bindResidentSourceInspectionAction(
@@ -38,4 +45,20 @@ export function residentSourceAuthorizationActionForScope(
   scope: RunScope,
 ): ResidentSourceAuthorizationAction | undefined {
   return authorizationActions.get(scope);
+}
+
+export function bindResidentIdentitySystemDerivationAction(
+  scope: RunScope,
+  action: ResidentIdentitySystemDerivationAction,
+): void {
+  if (derivationActions.has(scope)) {
+    throw new Error('resident identity derivation: run scope is already bound');
+  }
+  derivationActions.set(scope, action);
+}
+
+export function residentIdentitySystemDerivationActionForScope(
+  scope: RunScope,
+): ResidentIdentitySystemDerivationAction | undefined {
+  return derivationActions.get(scope);
 }

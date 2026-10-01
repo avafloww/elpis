@@ -23,6 +23,7 @@ import { parseFailureHints } from './parse-hints.js';
 import { isContextResourceInterrupt } from '../context-resources.js';
 import { bindResidentRunHandle } from '../kernel/resident-run-scope.js';
 import {
+  bindResidentIdentitySystemDerivationAction,
   bindResidentSourceAuthorizationAction,
   bindResidentSourceInspectionAction,
 } from '../kernel/resident-source-inspection-scope.js';
@@ -39,6 +40,7 @@ export interface SandboxResidentRunLifecycle {
   readonly handle: ResidentRunScopeHandle;
   inspectIdentityCandidate(): string;
   authorizeIdentityCandidate(candidateId: string): string;
+  deriveAuthorizedIdentityLayers(authorizationId: string): string;
   detach(): void;
   settled(): void;
 }
@@ -177,6 +179,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentSourceAuthorizationAction(
         scope,
         options.residentRun.authorizeIdentityCandidate,
+      );
+      bindResidentIdentitySystemDerivationAction(
+        scope,
+        options.residentRun.deriveAuthorizedIdentityLayers,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

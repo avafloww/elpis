@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 44;
+const SCHEMA_VERSION = 45;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3430,6 +3430,207 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_resident_source_candidate_authorizations_no_delete
           BEFORE DELETE ON context_resident_source_candidate_authorizations BEGIN
             SELECT RAISE(ABORT, 'resident source candidate authorizations are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0045-context-resident-identity-system-derivations',
+      sql: `
+        CREATE TABLE context_resident_identity_system_derivations (
+          derivation_id                 TEXT PRIMARY KEY
+            CHECK (length(derivation_id) = 93
+              AND derivation_id GLOB 'resident-identity-derivation:*'
+              AND substr(derivation_id, 30) NOT GLOB '*[^0-9a-f]*'),
+          schema_version                INTEGER NOT NULL CHECK (schema_version = 1),
+          derivation_kind               TEXT NOT NULL
+            CHECK (derivation_kind = 'authorized_resident_identity_layers'),
+          activation_epoch              INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          authority_revision            INTEGER NOT NULL
+            CHECK (typeof(authority_revision) = 'integer' AND authority_revision >= 1),
+          predecessor_derivation_id     TEXT,
+          authorization_id              TEXT NOT NULL UNIQUE,
+          contract_artifact_id          TEXT NOT NULL,
+          soul_snapshot_id              TEXT NOT NULL,
+          contract_layer_id             TEXT NOT NULL,
+          contract_approval_id          TEXT NOT NULL,
+          identity_layer_id             TEXT NOT NULL,
+          identity_approval_id          TEXT NOT NULL,
+          derive_batch_id               TEXT NOT NULL
+            CHECK (length(derive_batch_id) = 56
+              AND derive_batch_id GLOB 'resident-tool-batch:*'),
+          derive_batch_sha256           TEXT NOT NULL
+            CHECK (length(derive_batch_sha256) = 64
+              AND derive_batch_sha256 NOT GLOB '*[^0-9a-f]*'),
+          derive_call_index             INTEGER NOT NULL
+            CHECK (typeof(derive_call_index) = 'integer' AND derive_call_index >= 0),
+          derive_call_count             INTEGER NOT NULL
+            CHECK (typeof(derive_call_count) = 'integer'
+              AND derive_call_count >= 1 AND derive_call_count <= 64
+              AND derive_call_index < derive_call_count),
+          derive_tool_name              TEXT NOT NULL CHECK (derive_tool_name = 'run'),
+          derive_arguments_sha256       TEXT NOT NULL
+            CHECK (length(derive_arguments_sha256) = 64
+              AND derive_arguments_sha256 NOT GLOB '*[^0-9a-f]*'),
+          derived_at                    INTEGER NOT NULL
+            CHECK (typeof(derived_at) = 'integer' AND derived_at >= 0),
+          UNIQUE (activation_epoch, authority_revision),
+          UNIQUE (derive_batch_id, derive_call_index),
+          FOREIGN KEY (predecessor_derivation_id)
+            REFERENCES context_resident_identity_system_derivations(derivation_id) ON DELETE RESTRICT,
+          FOREIGN KEY (authorization_id)
+            REFERENCES context_resident_source_candidate_authorizations(authorization_id) ON DELETE RESTRICT,
+          FOREIGN KEY (contract_artifact_id)
+            REFERENCES context_scoped_runtime_contract_artifacts(artifact_id) ON DELETE RESTRICT,
+          FOREIGN KEY (soul_snapshot_id)
+            REFERENCES context_resident_soul_source_snapshots(snapshot_id) ON DELETE RESTRICT,
+          FOREIGN KEY (contract_layer_id)
+            REFERENCES context_system_layer_projections(layer_id) ON DELETE RESTRICT,
+          FOREIGN KEY (contract_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT,
+          FOREIGN KEY (identity_layer_id)
+            REFERENCES context_system_layer_projections(layer_id) ON DELETE RESTRICT,
+          FOREIGN KEY (identity_approval_id)
+            REFERENCES context_system_layer_approvals(approval_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_resident_identity_system_derivations_identity_conflict
+          BEFORE INSERT ON context_resident_identity_system_derivations
+          WHEN EXISTS (
+            SELECT 1 FROM context_resident_identity_system_derivations
+            WHERE derivation_id = NEW.derivation_id
+               OR authorization_id = NEW.authorization_id
+               OR (derive_batch_id = NEW.derive_batch_id
+                   AND derive_call_index = NEW.derive_call_index)
+               OR (activation_epoch = NEW.activation_epoch
+                   AND authority_revision = NEW.authority_revision)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident identity system derivation identity conflict');
+          END;
+
+        CREATE TRIGGER context_resident_identity_system_derivations_lineage_guard
+          BEFORE INSERT ON context_resident_identity_system_derivations
+          WHEN NOT EXISTS (
+            SELECT 1 FROM context_graph_activation
+            WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_resident_source_candidate_authorizations a
+            JOIN context_resident_source_inspection_candidates c
+              ON c.candidate_id = a.candidate_id
+            WHERE a.authorization_id = NEW.authorization_id
+              AND a.activation_epoch = NEW.activation_epoch
+              AND a.contract_artifact_id = NEW.contract_artifact_id
+              AND a.soul_snapshot_id = NEW.soul_snapshot_id
+              AND a.authorize_batch_id <> NEW.derive_batch_id
+              AND c.inspect_batch_id <> NEW.derive_batch_id
+              AND a.authorized_at <= NEW.derived_at
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_scoped_runtime_contract_artifacts a
+            JOIN context_system_layer_projections l
+              ON l.layer_id = NEW.contract_layer_id
+            JOIN context_system_layer_approvals p
+              ON p.approval_id = NEW.contract_approval_id
+            WHERE a.artifact_id = NEW.contract_artifact_id
+              AND a.artifact_id = '${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId}'
+              AND l.layer_kind = 'runtime_contract'
+              AND l.visibility = 'global_contract'
+              AND l.world_id IS NULL
+              AND l.renderer_generation = a.system_renderer_generation
+              AND l.policy_generation = a.policy_generation
+              AND l.source_kind = a.source_kind
+              AND l.source_hash = a.source_hash
+              AND l.content_text = a.content_text
+              AND l.content_hash = a.content_hash
+              AND l.content_bytes = a.content_bytes
+              AND l.created_at <= NEW.derived_at
+              AND p.layer_id = l.layer_id
+              AND p.approval_role = 'scoped_runtime_contract'
+              AND p.basis_kind = 'authored_scoped_contract'
+              AND p.basis_ref = a.artifact_id
+              AND p.basis_hash = a.source_hash
+              AND p.approval_generation = 1
+              AND p.approved_at = l.created_at
+              AND (
+                l.created_at = NEW.derived_at
+                OR EXISTS (
+                  SELECT 1
+                  FROM context_resident_identity_system_derivations d
+                  WHERE d.contract_layer_id = l.layer_id
+                    AND d.contract_approval_id = p.approval_id
+                    AND d.derived_at = l.created_at
+                    AND d.authority_revision < NEW.authority_revision
+                )
+              )
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_resident_soul_source_snapshots s
+            JOIN context_scoped_runtime_contract_artifacts a
+              ON a.artifact_id = NEW.contract_artifact_id
+            JOIN context_system_layer_projections l
+              ON l.layer_id = NEW.identity_layer_id
+            JOIN context_system_layer_approvals p
+              ON p.approval_id = NEW.identity_approval_id
+            WHERE s.snapshot_id = NEW.soul_snapshot_id
+              AND l.layer_kind = 'identity'
+              AND l.visibility = 'integrated_self'
+              AND l.world_id IS NULL
+              AND l.renderer_generation = a.system_renderer_generation
+              AND l.policy_generation = a.policy_generation
+              AND l.source_kind = 'soul_snapshot'
+              AND l.source_hash = s.source_file_hash
+              AND CAST(l.content_text AS BLOB) = s.body_blob
+              AND l.content_hash = s.body_hash
+              AND l.content_bytes = s.body_bytes
+              AND l.created_at <= NEW.derived_at
+              AND p.layer_id = l.layer_id
+              AND p.approval_role = 'identity'
+              AND p.basis_kind = 'soul_snapshot'
+              AND p.basis_ref = s.snapshot_id
+              AND p.basis_hash = s.source_file_hash
+              AND p.approval_generation = 1
+              AND p.approved_at = l.created_at
+              AND (
+                l.created_at = NEW.derived_at
+                OR EXISTS (
+                  SELECT 1
+                  FROM context_resident_identity_system_derivations d
+                  WHERE d.identity_layer_id = l.layer_id
+                    AND d.identity_approval_id = p.approval_id
+                    AND d.derived_at = l.created_at
+                    AND d.authority_revision < NEW.authority_revision
+                )
+              )
+          ) OR NOT (
+            (NEW.authority_revision = 1
+              AND NEW.predecessor_derivation_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM context_resident_identity_system_derivations
+                WHERE activation_epoch = NEW.activation_epoch
+              ))
+            OR
+            (NEW.authority_revision > 1
+              AND EXISTS (
+                SELECT 1 FROM context_resident_identity_system_derivations p
+                WHERE p.derivation_id = NEW.predecessor_derivation_id
+                  AND p.activation_epoch = NEW.activation_epoch
+                  AND p.authority_revision = NEW.authority_revision - 1
+                  AND p.derived_at <= NEW.derived_at
+              ))
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident identity system derivation lineage is invalid');
+          END;
+
+        CREATE TRIGGER context_resident_identity_system_derivations_no_update
+          BEFORE UPDATE ON context_resident_identity_system_derivations BEGIN
+            SELECT RAISE(ABORT, 'resident identity system derivations are immutable');
+          END;
+        CREATE TRIGGER context_resident_identity_system_derivations_no_delete
+          BEFORE DELETE ON context_resident_identity_system_derivations BEGIN
+            SELECT RAISE(ABORT, 'resident identity system derivations are immutable');
           END;
       `,
     },

@@ -61,6 +61,7 @@ Dynamic `import()` is not available inside the VM. Use `require()` for runtime-l
 - `elpis.mind`;
 - `elpis.context.inspectIdentityCandidate()` for candidate-only exact source review during a live resident run;
 - `elpis.context.authorizeIdentityCandidate(candidateId)` for a separate later-batch exact-source authorization receipt, without profile or runtime authority;
+- `elpis.context.deriveAuthorizedIdentityLayers(authorizationId)` for a later-batch atomic derivation of the worldless contract and identity layers plus typed approvals, still without any profile or runtime authority;
 
 - `elpis.schedule`, including `.list()` and `.remove(ref)`.
 

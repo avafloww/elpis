@@ -13,6 +13,7 @@ import {
   formatResidentSourceInspectionPresentation,
 } from '../src/context/resident-source-inspection.js';
 import { createResidentSourceCandidateAuthorizer } from '../src/context/resident-source-authorization.js';
+import { createResidentIdentitySystemDeriver } from '../src/context/resident-identity-system-derivation.js';
 import { preview } from '../src/sandbox/preview.js';
 
 function provenance(suffix: string) {
@@ -51,6 +52,13 @@ function fixture(
     redactForOutput,
     now: () => 200,
   });
+  const derive = createResidentIdentitySystemDeriver({
+    store,
+    soulPath,
+    previewMaxBytes,
+    redactForOutput,
+    now: () => 300,
+  });
   return {
     directory,
     database,
@@ -58,6 +66,7 @@ function fixture(
     soulPath,
     inspect,
     authorize,
+    derive,
     close() {
       database.close();
       fs.rmSync(directory, { recursive: true, force: true });
@@ -187,6 +196,15 @@ function inspectedCandidateId(result: string): string {
   return match[1];
 }
 
+function authorizedSourceId(result: string): string {
+  const match =
+    /^authorization_id: (resident-source-authorization:[0-9a-f]{64})$/m.exec(
+      result,
+    );
+  assert.ok(match);
+  return match[1];
+}
+
 test('resident source authorization records the exact inspected candidate from a later batch', () => {
   const value = fixture('# Synthetic soul\nsmall exact body\n');
   try {
@@ -281,6 +299,93 @@ test('resident source authorization rolls back exact receipt presentation failur
       candidates: 1,
       authorizations: 0,
     });
+  } finally {
+    value.close();
+  }
+});
+
+test('resident identity derivation presents an exact receipt and creates no runtime authority', () => {
+  const value = fixture('# Synthetic soul\nsmall exact body\n');
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('20')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('21')),
+    );
+    const result = value.derive(authorizationId, provenance('22'));
+    assert.match(
+      result,
+      /^AUTHORIZED IDENTITY SYSTEM LAYERS DERIVED — NOT PROFILED OR ACTIVE/m,
+    );
+    assert.match(result, new RegExp(`authorization_id: ${authorizationId}`));
+    assert.match(result, /exactly two immutable worldless system layers/);
+    assert.match(result, /creates no profile, world, branch, request view/);
+    assert.equal(
+      preview(result, 16_384),
+      `string(${result.length} chars):\n${result}`,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_world_events) AS world_events,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_effects) AS effects,
+           (SELECT count(*) FROM context_continuation_advances) AS advances`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      {
+        derivations: 1,
+        layers: 2,
+        approvals: 2,
+        profiles: 0,
+        world_events: 0,
+        branches: 0,
+        effects: 0,
+        advances: 0,
+      },
+    );
+    assert.equal(value.derive(authorizationId, provenance('22')), result);
+  } finally {
+    value.close();
+  }
+});
+
+test('resident identity derivation rolls back exact presentation redaction', () => {
+  const value = fixture(
+    '# Synthetic soul\n',
+    16_384,
+    (text) =>
+      text.replace(
+        'AUTHORIZED IDENTITY SYSTEM LAYERS DERIVED',
+        '[SECRET REDACTED] IDENTITY SYSTEM LAYERS',
+      ),
+  );
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('23')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('24')),
+    );
+    assert.throws(
+      () => value.derive(authorizationId, provenance('25')),
+      /secret redaction would alter it/,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_identity_system_derivations) AS derivations,
+           (SELECT count(*) FROM context_system_layer_projections) AS layers,
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      { derivations: 0, layers: 0, approvals: 0 },
+    );
   } finally {
     value.close();
   }

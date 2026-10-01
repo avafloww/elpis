@@ -325,11 +325,12 @@ test('resident identity inspection exists on resident surfaces but not worker sa
   for (const surface of ['core', 'full'] as const) {
     const resident = createSandbox(deps(surface));
     const result = await resident.run(
-      `({ kind: typeof elpis.context, inspect: typeof elpis.context.inspectIdentityCandidate, authorize: typeof elpis.context.authorizeIdentityCandidate, failure: (() => { try { elpis.context.authorizeIdentityCandidate("resident-source-candidate:" + "a".repeat(64)); return 'missing'; } catch (error) { return String(error); } })() })`,
+      `({ kind: typeof elpis.context, inspect: typeof elpis.context.inspectIdentityCandidate, authorize: typeof elpis.context.authorizeIdentityCandidate, derive: typeof elpis.context.deriveAuthorizedIdentityLayers, failure: (() => { try { elpis.context.authorizeIdentityCandidate("resident-source-candidate:" + "a".repeat(64)); return 'missing'; } catch (error) { return String(error); } })() })`,
     );
     assert.match(result.preview ?? '', /kind: "object"/);
     assert.match(result.preview ?? '', /inspect: "function"/);
     assert.match(result.preview ?? '', /authorize: "function"/);
+    assert.match(result.preview ?? '', /derive: "function"/);
     assert.match(result.preview ?? '', /active resident run/);
   }
   const worker = createSandbox(deps('worker'));

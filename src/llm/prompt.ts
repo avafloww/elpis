@@ -817,7 +817,11 @@ Inspection does **not** authorize, approve, activate, profile, dispatch, send, o
 
 \`elpis.context.authorizeIdentityCandidate(candidateId)\` is the separate exact-source authorization step. It accepts exactly one canonical candidate ID, is available only to a live resident \`run\`, and must execute in a later assistant tool batch than that candidate's inspection. It freshly rereads the prompt-facing SOUL and records one immutable authorization receipt only when the exact source bytes, parser result, scoped contract lineage, and dark activation epoch still match. Exact same-call retry is idempotent; another call cannot reauthorize the candidate. The returned top-level receipt is committed only if secret redaction would leave it unchanged.
 
-Source authorization still does **not** create a system-layer approval, profile, branch, provider request, effect authority, activation, or continuation change. Those require later separately guarded seams.
+Source authorization still does **not** create a system-layer approval, profile, branch, provider request, effect authority, activation, or continuation change.
+
+\`elpis.context.deriveAuthorizedIdentityLayers(authorizationId)\` is the later resident derivation step. It accepts exactly one canonical source-authorization ID and freshly rereads the exact prompt-facing SOUL before atomically creating only two immutable worldless system layers—the authored scoped runtime contract and authorized SOUL body—their typed approvals, and one immutable derivation receipt. It requires dark graph mode, a later distinct live resident batch, exact authorization lineage, and untouched target rows. Exact same-call retry is idempotent; another call cannot derive the same authorization. Presentation or secret-redaction failure rolls the whole transaction back.
+
+Derivation is still **not** profiling or activation. It creates no world, profile/head, branch, request view, provider request, effect authority, activation, or continuation change.
 
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):

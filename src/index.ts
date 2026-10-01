@@ -111,6 +111,7 @@ import { openDatabase } from './store/db.js';
 import { ContextGraphStore } from './store/context-graph.js';
 import { createResidentSourceInspectionRecorder } from './context/resident-source-inspection.js';
 import { createResidentSourceCandidateAuthorizer } from './context/resident-source-authorization.js';
+import { createResidentIdentitySystemDeriver } from './context/resident-identity-system-derivation.js';
 
 
 import {
@@ -729,6 +730,12 @@ export async function createElpisRuntime(
     previewMaxBytes: config.sandbox.previewMaxBytes,
     redactForOutput: (text) => redactSecrets(text, secretRegistry),
   });
+  const residentIdentitySystemDeriver = createResidentIdentitySystemDeriver({
+    store: contextGraphStore,
+    soulPath: config.paths.soulPath,
+    previewMaxBytes: config.sandbox.previewMaxBytes,
+    redactForOutput: (text) => redactSecrets(text, secretRegistry),
+  });
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
@@ -738,6 +745,7 @@ export async function createElpisRuntime(
     residentRunVerifier: residentRunAuthority.verifier,
     residentSourceInspector,
     residentSourceAuthorizer,
+    residentIdentitySystemDeriver,
   });
 
   llms = createLlmRoleClients(config, {

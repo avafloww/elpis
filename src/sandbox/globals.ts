@@ -65,6 +65,7 @@ import {
 import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
 import {
+  residentIdentitySystemDerivationActionForScope,
   residentSourceAuthorizationActionForScope,
   residentSourceInspectionActionForScope,
 } from '../kernel/resident-source-inspection-scope.js';
@@ -487,6 +488,26 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       }
       return authorize(args[0]);
+    },
+    deriveAuthorizedIdentityLayers: (...args: unknown[]) => {
+      if (
+        args.length !== 1 ||
+        typeof args[0] !== 'string' ||
+        !/^resident-source-authorization:[0-9a-f]{64}$/.test(args[0])
+      ) {
+        throw new Error(
+          'elpis.context.deriveAuthorizedIdentityLayers: exactly one canonical authorization ID is required',
+        );
+      }
+      const scope = runScope.getStore();
+      const derive =
+        scope && residentIdentitySystemDerivationActionForScope(scope);
+      if (!derive) {
+        throw new Error(
+          'elpis.context.deriveAuthorizedIdentityLayers: unavailable without an active resident run',
+        );
+      }
+      return derive(args[0]);
     },
   };
 

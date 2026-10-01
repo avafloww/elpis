@@ -39,6 +39,10 @@ function fixture(
       candidateId: string,
       snapshot: ResidentToolCallSnapshotV1,
     ) => string;
+    residentIdentitySystemDeriver?: (
+      authorizationId: string,
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -113,6 +117,7 @@ function fixture(
     residentRunVerifier: opts.residentRunVerifier,
     residentSourceInspector: opts.residentSourceInspector,
     residentSourceAuthorizer: opts.residentSourceAuthorizer,
+    residentIdentitySystemDeriver: opts.residentIdentitySystemDeriver,
   });
   return {
     dir,
@@ -1045,6 +1050,65 @@ test('resident identity authorization is active-run-only and receives exact live
     assert.equal(inherited.ok, false);
     assert.match(inherited.error ?? '', /active resident run/);
     assert.equal(authorizations.length, 2);
+  } finally {
+    f.close();
+  }
+});
+
+const SYNTHETIC_AUTHORIZATION_ID = `resident-source-authorization:${'b'.repeat(64)}`;
+
+test('resident identity derivation is active-run-only and receives exact live provenance', async () => {
+  const authority = createResidentRunAuthority();
+  const derivations: Array<{
+    authorizationId: string;
+    snapshot: ResidentToolCallSnapshotV1;
+  }> = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentIdentitySystemDeriver: (authorizationId, snapshot) => {
+      derivations.push({ authorizationId, snapshot });
+      return 'AUTHORIZED IDENTITY SYSTEM LAYERS DERIVED — NOT PROFILED OR ACTIVE';
+    },
+  });
+  try {
+    const direct = await f.manager.run({
+      code: `elpis.context.deriveAuthorizedIdentityLayers('${SYNTHETIC_AUTHORIZATION_ID}')`,
+    });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+    assert.equal(derivations.length, 0);
+
+    const core = await f.manager.run({
+      code: `elpis.context.deriveAuthorizedIdentityLayers('${SYNTHETIC_AUTHORIZATION_ID}')`,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(core.ok, true);
+    assert.match(core.preview ?? '', /IDENTITY SYSTEM LAYERS DERIVED/);
+    assert.equal(derivations.length, 1);
+    assert.equal(derivations[0]?.authorizationId, SYNTHETIC_AUTHORIZATION_ID);
+    assert.equal(derivations[0]?.snapshot.toolName, 'run');
+    assert.equal(derivations[0]?.snapshot.callIndex, 0);
+
+    const item = f.mind.create({ title: 'resident identity derivation' });
+    const persistent = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.context.deriveAuthorizedIdentityLayers('${SYNTHETIC_AUTHORIZATION_ID}')`,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(persistent.ok, true);
+    assert.equal(derivations.length, 2);
+    assert.notEqual(
+      derivations[0]?.snapshot.batchId,
+      derivations[1]?.snapshot.batchId,
+    );
+
+    const inherited = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.context.deriveAuthorizedIdentityLayers('${SYNTHETIC_AUTHORIZATION_ID}')`,
+    });
+    assert.equal(inherited.ok, false);
+    assert.match(inherited.error ?? '', /active resident run/);
+    assert.equal(derivations.length, 2);
   } finally {
     f.close();
   }
