@@ -47,6 +47,10 @@ export interface SandboxManagerOptions {
   wakeAdvisorTimeoutMs?: number;
   residentRunVerifier?: ResidentRunVerifier;
   residentSourceInspector?: (snapshot: ResidentToolCallSnapshotV1) => string;
+  residentSourceAuthorizer?: (
+    candidateId: string,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -81,11 +85,16 @@ class ResidentRunLease {
     readonly handle: ResidentRunScopeHandle,
     private readonly inspector:
       ((snapshot: ResidentToolCallSnapshotV1) => string) | undefined,
+    private readonly authorizer:
+      | ((candidateId: string, snapshot: ResidentToolCallSnapshotV1) => string)
+      | undefined,
     private readonly onClose: () => void,
   ) {
     this.binding = Object.freeze({
       handle,
       inspectIdentityCandidate: () => this.inspectIdentityCandidate(),
+      authorizeIdentityCandidate: (candidateId: string) =>
+        this.authorizeIdentityCandidate(candidateId),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -108,6 +117,25 @@ class ResidentRunLease {
       throw new Error(
         'resident source inspection: recorder returned a non-string result',
       );
+    return result;
+  }
+
+  authorizeIdentityCandidate(candidateId: string): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `resident source authorization: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.authorizer) {
+      throw new Error('resident source authorization: recorder is not configured');
+    }
+    const result = this.authorizer(candidateId, snapshot);
+    if (typeof result !== 'string') {
+      throw new Error(
+        'resident source authorization: recorder returned a non-string result',
+      );
+    }
     return result;
   }
 
@@ -170,6 +198,10 @@ export class SandboxManager {
   private readonly residentSourceInspector?: (
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentSourceAuthorizer?: (
+    candidateId: string,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -189,6 +221,7 @@ export class SandboxManager {
       options.wakeAdvisorTimeoutMs ?? WAKE_ADVISOR_TIMEOUT_MS;
     this.residentRunVerifier = options.residentRunVerifier;
     this.residentSourceInspector = options.residentSourceInspector;
+    this.residentSourceAuthorizer = options.residentSourceAuthorizer;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -356,6 +389,7 @@ export class SandboxManager {
       this.residentRunVerifier,
       handle,
       this.residentSourceInspector,
+      this.residentSourceAuthorizer,
       () => this.releaseResidentRunLease(lease),
     );
     this.residentRunLeases.add(lease);

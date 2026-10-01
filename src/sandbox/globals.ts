@@ -64,7 +64,11 @@ import {
 } from '../llm/tool-runtime.js';
 import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
-import { residentSourceInspectionActionForScope } from '../kernel/resident-source-inspection-scope.js';
+import {
+  residentSourceAuthorizationActionForScope,
+  residentSourceInspectionActionForScope,
+} from '../kernel/resident-source-inspection-scope.js';
+
 
 // ─── Per-run scope (A5 / / ) ─────────────────────────────────────────
 // Each run(code) call establishes its OWN scope via AsyncLocalStorage so that
@@ -463,6 +467,26 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
           'elpis.context.inspectIdentityCandidate: unavailable without an active resident run',
         );
       return inspect();
+    },
+    authorizeIdentityCandidate: (...args: unknown[]) => {
+      if (
+        args.length !== 1 ||
+        typeof args[0] !== 'string' ||
+        !/^resident-source-candidate:[0-9a-f]{64}$/.test(args[0])
+      ) {
+        throw new Error(
+          'elpis.context.authorizeIdentityCandidate: exactly one canonical candidate ID is required',
+        );
+      }
+      const scope = runScope.getStore();
+      const authorize =
+        scope && residentSourceAuthorizationActionForScope(scope);
+      if (!authorize) {
+        throw new Error(
+          'elpis.context.authorizeIdentityCandidate: unavailable without an active resident run',
+        );
+      }
+      return authorize(args[0]);
     },
   };
 

@@ -813,7 +813,11 @@ the only moderation verb on the handle (no \`unmute\`/\`deafen\`); see "Living i
 ### \`elpis.context\`
 \`elpis.context.inspectIdentityCandidate()\` records the exact current prompt-facing SOUL source and the exact scoped runtime contract as one private, immutable **candidate-only** inspection tied to this live resident \`run\` call. It returns a top-level review string: full exact content when the configured preview budget permits, otherwise exact UTF-8-safe head/tail ranges with the omitted body-byte interval named. It accepts no arguments, is unavailable in worker sandboxes, and rejects direct, restored, inherited, detached, or closed runs. If the exact presentation would be changed by registered-secret redaction, the action fails and rolls the new candidate back rather than committing bytes you were not shown.
 
-Inspection does **not** authorize, approve, activate, profile, dispatch, send, or issue any effect. Any future authorization must happen in a later assistant tool batch with a different batch ID and must revalidate the exact candidate against the then-current SOUL.
+Inspection does **not** authorize, approve, activate, profile, dispatch, send, or issue any effect.
+
+\`elpis.context.authorizeIdentityCandidate(candidateId)\` is the separate exact-source authorization step. It accepts exactly one canonical candidate ID, is available only to a live resident \`run\`, and must execute in a later assistant tool batch than that candidate's inspection. It freshly rereads the prompt-facing SOUL and records one immutable authorization receipt only when the exact source bytes, parser result, scoped contract lineage, and dark activation epoch still match. Exact same-call retry is idempotent; another call cannot reauthorize the candidate. The returned top-level receipt is committed only if secret redaction would leave it unchanged.
+
+Source authorization still does **not** create a system-layer approval, profile, branch, provider request, effect authority, activation, or continuation change. Those require later separately guarded seams.
 
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):

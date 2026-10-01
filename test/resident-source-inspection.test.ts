@@ -12,6 +12,7 @@ import {
   createResidentSourceInspectionRecorder,
   formatResidentSourceInspectionPresentation,
 } from '../src/context/resident-source-inspection.js';
+import { createResidentSourceCandidateAuthorizer } from '../src/context/resident-source-authorization.js';
 import { preview } from '../src/sandbox/preview.js';
 
 function provenance(suffix: string) {
@@ -43,11 +44,20 @@ function fixture(
     redactForOutput,
     now: () => 100,
   });
+  const authorize = createResidentSourceCandidateAuthorizer({
+    store,
+    soulPath,
+    previewMaxBytes,
+    redactForOutput,
+    now: () => 200,
+  });
   return {
     directory,
     database,
     store,
+    soulPath,
     inspect,
+    authorize,
     close() {
       database.close();
       fs.rmSync(directory, { recursive: true, force: true });
@@ -75,6 +85,15 @@ function rowCounts(value: ReturnType<typeof fixture>) {
           .get() as { n: number }
       ).n,
     ),
+    authorizations: Number(
+      (
+        value.database
+          .prepare(
+            'SELECT count(*) AS n FROM context_resident_source_candidate_authorizations',
+          )
+          .get() as { n: number }
+      ).n,
+    ),
   };
 }
 
@@ -91,7 +110,7 @@ test('resident source inspection presents complete exact review text before comm
       preview(result, 16_384),
       `string(${result.length} chars):\n${result}`,
     );
-    assert.deepEqual(rowCounts(value), { snapshots: 1, candidates: 1 });
+    assert.deepEqual(rowCounts(value), { snapshots: 1, candidates: 1, authorizations: 0 });
   } finally {
     value.close();
   }
@@ -123,7 +142,7 @@ test('resident source inspection presents UTF-8-safe exact ranges when the body 
       preview(result, 4_096),
       `string(${result.length} chars):\n${result}`,
     );
-    assert.deepEqual(rowCounts(value), { snapshots: 1, candidates: 1 });
+    assert.deepEqual(rowCounts(value), { snapshots: 1, candidates: 1, authorizations: 0 });
   } finally {
     value.close();
   }
@@ -136,7 +155,7 @@ test('resident source inspection presentation failure rolls back every candidate
       () => value.inspect(provenance('3')),
       /cannot present exact candidate metadata/,
     );
-    assert.deepEqual(rowCounts(value), { snapshots: 0, candidates: 0 });
+    assert.deepEqual(rowCounts(value), { snapshots: 0, candidates: 0, authorizations: 0 });
   } finally {
     value.close();
   }
@@ -154,13 +173,121 @@ test('secret-redacted presentation rolls back the exact source candidate', () =>
       () => value.inspect(provenance('5')),
       /secret redaction would alter it/,
     );
-    assert.deepEqual(rowCounts(value), { snapshots: 0, candidates: 0 });
+    assert.deepEqual(rowCounts(value), { snapshots: 0, candidates: 0, authorizations: 0 });
+  } finally {
+    value.close();
+  }
+});
+
+function inspectedCandidateId(result: string): string {
+  const match = /^candidate_id: (resident-source-candidate:[0-9a-f]{64})$/m.exec(
+    result,
+  );
+  assert.ok(match);
+  return match[1];
+}
+
+test('resident source authorization records the exact inspected candidate from a later batch', () => {
+  const value = fixture('# Synthetic soul\nsmall exact body\n');
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('10')));
+    const result = value.authorize(candidateId, provenance('11'));
+    assert.match(
+      result,
+      /^SOURCE CANDIDATE AUTHORIZED — NOT PROFILED OR ACTIVE/m,
+    );
+    assert.match(result, new RegExp(`candidate_id: ${candidateId}`));
+    assert.match(result, /creates no system-layer approval, profile, branch/);
+    assert.deepEqual(rowCounts(value), {
+      snapshots: 1,
+      candidates: 1,
+      authorizations: 1,
+    });
+    assert.equal(value.authorize(candidateId, provenance('11')), result);
+    const authorizationId =
+      /^authorization_id: (resident-source-authorization:[0-9a-f]{64})$/m.exec(
+        result,
+      )?.[1];
+    assert.ok(authorizationId);
+    assert.equal(
+      value.store.getResidentSourceCandidateAuthorization(authorizationId)
+        ?.candidateId,
+      candidateId,
+    );
+    const sideEffects = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_system_layer_approvals) AS approvals,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_effects) AS effects,
+           (SELECT count(*) FROM context_continuation_advances) AS advances`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...sideEffects },
+      { approvals: 0, profiles: 0, branches: 0, effects: 0, advances: 0 },
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('resident source authorization rejects the inspection batch and stale current SOUL', () => {
+  const value = fixture('# Synthetic soul\nsmall exact body\n');
+  try {
+    const inspected = value.inspect(provenance('12'));
+    const candidateId = inspectedCandidateId(inspected);
+    assert.throws(
+      () => value.authorize(candidateId, provenance('12')),
+      /different assistant batch/,
+    );
+    fs.writeFileSync(
+      value.soulPath,
+      '---\nname: Aster\n---\n\n# Changed synthetic soul\n',
+    );
+    assert.throws(
+      () => value.authorize(candidateId, provenance('13')),
+      /current exact inspected SOUL source/,
+    );
+    assert.deepEqual(rowCounts(value), {
+      snapshots: 1,
+      candidates: 1,
+      authorizations: 0,
+    });
+  } finally {
+    value.close();
+  }
+});
+
+test('resident source authorization rolls back exact receipt presentation failures', () => {
+  const value = fixture(
+    '# Synthetic soul\n',
+    16_384,
+    (text) =>
+      text.replace(
+        'SOURCE CANDIDATE AUTHORIZED',
+        '[SECRET REDACTED] AUTHORIZED',
+      ),
+  );
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('14')));
+    assert.throws(
+      () => value.authorize(candidateId, provenance('15')),
+      /secret redaction would alter it/,
+    );
+    assert.deepEqual(rowCounts(value), {
+      snapshots: 1,
+      candidates: 1,
+      authorizations: 0,
+    });
   } finally {
     value.close();
   }
 });
 
 test('resident source inspection formatter rejects invalid budgets without a partial view', () => {
+
   const value = fixture('# Synthetic soul\n');
   try {
     const capture = value.store.createResidentSourceInspectionCandidate({

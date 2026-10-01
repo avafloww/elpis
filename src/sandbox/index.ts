@@ -22,7 +22,11 @@ import { preview, capLines } from './preview.js';
 import { parseFailureHints } from './parse-hints.js';
 import { isContextResourceInterrupt } from '../context-resources.js';
 import { bindResidentRunHandle } from '../kernel/resident-run-scope.js';
-import { bindResidentSourceInspectionAction } from '../kernel/resident-source-inspection-scope.js';
+import {
+  bindResidentSourceAuthorizationAction,
+  bindResidentSourceInspectionAction,
+} from '../kernel/resident-source-inspection-scope.js';
+
 
 import type { ResidentRunScopeHandle } from '../kernel/resident-run-provenance.js';
 import type {
@@ -34,6 +38,7 @@ import type {
 export interface SandboxResidentRunLifecycle {
   readonly handle: ResidentRunScopeHandle;
   inspectIdentityCandidate(): string;
+  authorizeIdentityCandidate(candidateId: string): string;
   detach(): void;
   settled(): void;
 }
@@ -168,6 +173,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentSourceInspectionAction(
         scope,
         options.residentRun.inspectIdentityCandidate,
+      );
+      bindResidentSourceAuthorizationAction(
+        scope,
+        options.residentRun.authorizeIdentityCandidate,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

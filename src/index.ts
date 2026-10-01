@@ -110,6 +110,8 @@ import { createDiscordPersonSettingsStore } from './store/discord-person-setting
 import { openDatabase } from './store/db.js';
 import { ContextGraphStore } from './store/context-graph.js';
 import { createResidentSourceInspectionRecorder } from './context/resident-source-inspection.js';
+import { createResidentSourceCandidateAuthorizer } from './context/resident-source-authorization.js';
+
 
 import {
   ContextGraphShadowRecorder,
@@ -721,6 +723,12 @@ export async function createElpisRuntime(
     previewMaxBytes: config.sandbox.previewMaxBytes,
     redactForOutput: (text) => redactSecrets(text, secretRegistry),
   });
+  const residentSourceAuthorizer = createResidentSourceCandidateAuthorizer({
+    store: contextGraphStore,
+    soulPath: config.paths.soulPath,
+    previewMaxBytes: config.sandbox.previewMaxBytes,
+    redactForOutput: (text) => redactSecrets(text, secretRegistry),
+  });
   const sandboxRegistry = createSandboxRegistry({ db });
   sandboxManager = createSandboxManager({
     deps: sandboxDeps,
@@ -729,6 +737,7 @@ export async function createElpisRuntime(
     create: adapters.createSandbox ?? createSandbox,
     residentRunVerifier: residentRunAuthority.verifier,
     residentSourceInspector,
+    residentSourceAuthorizer,
   });
 
   llms = createLlmRoleClients(config, {

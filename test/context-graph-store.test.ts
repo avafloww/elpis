@@ -356,7 +356,168 @@ test('resident source candidate writes roll back late failures and stored record
   }
 });
 
+test('resident source authorizations are exact, separate-batch, immutable receipts', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const first = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('101'),
+      observedAt: 100,
+    });
+    const second = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('102'),
+      observedAt: 110,
+    });
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate({
+          candidateId: first.candidate.candidateId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('101'),
+          authorizedAt: 200,
+        }),
+      /different assistant batch/,
+    );
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate(
+          {
+            candidateId: first.candidate.candidateId,
+            freshSoul: soul,
+            provenance: residentRunProvenance('103'),
+            authorizedAt: 200,
+          },
+          () => {
+            throw new Error('forced authorization presentation failure');
+          },
+        ),
+      /forced authorization presentation failure/,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT count(*) AS n FROM context_resident_source_candidate_authorizations',
+          )
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: first.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('103'),
+      authorizedAt: 200,
+    });
+    assert.match(
+      authorization.authorizationId,
+      /^resident-source-authorization:[0-9a-f]{64}$/,
+    );
+    assert.equal(authorization.candidateId, first.candidate.candidateId);
+    assert.equal(authorization.authorizeBatchId, residentRunProvenance('103').batchId);
+    assert.deepEqual(
+      value.store.authorizeResidentSourceCandidate({
+        candidateId: first.candidate.candidateId,
+        freshSoul: soul,
+        provenance: residentRunProvenance('103'),
+        authorizedAt: 250,
+      }),
+      authorization,
+    );
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate({
+          candidateId: first.candidate.candidateId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('104'),
+          authorizedAt: 250,
+        }),
+      /already authorized by a different call/,
+    );
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate({
+          candidateId: second.candidate.candidateId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('103'),
+          authorizedAt: 250,
+        }),
+      /already authorized different sources/,
+    );
+    const changed = residentSoulSnapshot(
+      value.directory,
+      '# Changed synthetic soul\n',
+    );
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate({
+          candidateId: second.candidate.candidateId,
+          freshSoul: changed,
+          provenance: residentRunProvenance('105'),
+          authorizedAt: 250,
+        }),
+      /current exact inspected SOUL source/,
+    );
+
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_resident_source_candidate_authorizations
+             SET authorized_at = authorized_at + 1 WHERE authorization_id = ?`,
+          )
+          .run(authorization.authorizationId),
+      /resident source candidate authorizations are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT OR REPLACE INTO context_resident_source_candidate_authorizations
+             SELECT * FROM context_resident_source_candidate_authorizations
+             WHERE authorization_id = ?`,
+          )
+          .run(authorization.authorizationId),
+      /resident source candidate authorization identity conflict/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `DELETE FROM context_resident_source_candidate_authorizations
+             WHERE authorization_id = ?`,
+          )
+          .run(authorization.authorizationId),
+      /resident source candidate authorizations are immutable/,
+    );
+
+    value.store.activate(0, 300);
+    assert.deepEqual(
+      value.store.getResidentSourceCandidateAuthorization(
+        authorization.authorizationId,
+      ),
+      authorization,
+    );
+    assert.throws(
+      () =>
+        value.store.authorizeResidentSourceCandidate({
+          candidateId: second.candidate.candidateId,
+          freshSoul: soul,
+          provenance: residentRunProvenance('106'),
+          authorizedAt: 350,
+        }),
+      /requires dark graph mode/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('scoped runtime contract artifact is exact, independent from legacy prompt inputs, and immutable', () => {
+
   const value = fixture();
   try {
     const artifact = value.store.getScopedRuntimeContractArtifact();
@@ -4027,6 +4188,11 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_resident_source_candidate_authorizations_identity_conflict;
+      DROP TRIGGER context_resident_source_candidate_authorizations_lineage_guard;
+      DROP TRIGGER context_resident_source_candidate_authorizations_no_update;
+      DROP TRIGGER context_resident_source_candidate_authorizations_no_delete;
+      DROP TABLE context_resident_source_candidate_authorizations;
       DROP TRIGGER context_resident_source_inspection_candidates_identity_conflict;
       DROP TRIGGER context_resident_source_inspection_candidates_lineage_guard;
       DROP TRIGGER context_resident_source_inspection_candidates_no_update;
@@ -4046,7 +4212,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
           AND name IN (
             '0041-context-dark-pending-profile-binding',
             '0042-context-scoped-runtime-contract-artifact',
-            '0043-context-resident-source-inspection-candidates'
+            '0043-context-resident-source-inspection-candidates',
+            '0044-context-resident-source-candidate-authorizations'
           );
       PRAGMA user_version = 40;
     `);

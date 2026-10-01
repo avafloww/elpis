@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 43;
+const SCHEMA_VERSION = 44;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3309,6 +3309,127 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_resident_source_inspection_candidates_no_delete
           BEFORE DELETE ON context_resident_source_inspection_candidates BEGIN
             SELECT RAISE(ABORT, 'resident source inspection candidates are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0044-context-resident-source-candidate-authorizations',
+      sql: `
+        CREATE TABLE context_resident_source_candidate_authorizations (
+          authorization_id              TEXT PRIMARY KEY
+            CHECK (length(authorization_id) = 94
+              AND authorization_id GLOB 'resident-source-authorization:*'
+              AND substr(authorization_id, 31) NOT GLOB '*[^0-9a-f]*'),
+          schema_version                INTEGER NOT NULL CHECK (schema_version = 1),
+          authorization_kind           TEXT NOT NULL
+            CHECK (authorization_kind = 'resident_source_candidate'),
+          scope_kind                   TEXT NOT NULL
+            CHECK (scope_kind = 'private_integrated_self_source'),
+          execution_context            TEXT NOT NULL
+            CHECK (execution_context = 'legacy_monocontext_resident'),
+          candidate_id                 TEXT NOT NULL UNIQUE,
+          activation_epoch             INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          contract_artifact_id         TEXT NOT NULL,
+          contract_migration_checksum TEXT NOT NULL
+            CHECK (length(contract_migration_checksum) = 64
+              AND contract_migration_checksum NOT GLOB '*[^0-9a-f]*'),
+          contract_content_hash        TEXT NOT NULL
+            CHECK (length(contract_content_hash) = 64
+              AND contract_content_hash NOT GLOB '*[^0-9a-f]*'),
+          contract_content_bytes       INTEGER NOT NULL
+            CHECK (typeof(contract_content_bytes) = 'integer' AND contract_content_bytes >= 0),
+          soul_snapshot_id             TEXT NOT NULL,
+          authorize_batch_id           TEXT NOT NULL
+            CHECK (length(authorize_batch_id) = 56
+              AND authorize_batch_id GLOB 'resident-tool-batch:*'),
+          authorize_batch_sha256       TEXT NOT NULL
+            CHECK (length(authorize_batch_sha256) = 64
+              AND authorize_batch_sha256 NOT GLOB '*[^0-9a-f]*'),
+          authorize_call_index         INTEGER NOT NULL
+            CHECK (typeof(authorize_call_index) = 'integer' AND authorize_call_index >= 0),
+          authorize_call_count         INTEGER NOT NULL
+            CHECK (typeof(authorize_call_count) = 'integer'
+              AND authorize_call_count >= 1 AND authorize_call_count <= 64
+              AND authorize_call_index < authorize_call_count),
+          authorize_tool_name          TEXT NOT NULL CHECK (authorize_tool_name = 'run'),
+          authorize_arguments_sha256   TEXT NOT NULL
+            CHECK (length(authorize_arguments_sha256) = 64
+              AND authorize_arguments_sha256 NOT GLOB '*[^0-9a-f]*'),
+          authorized_at                INTEGER NOT NULL
+            CHECK (typeof(authorized_at) = 'integer' AND authorized_at >= 0),
+          UNIQUE (authorize_batch_id, authorize_call_index),
+          FOREIGN KEY (candidate_id)
+            REFERENCES context_resident_source_inspection_candidates(candidate_id) ON DELETE RESTRICT,
+          FOREIGN KEY (contract_artifact_id)
+            REFERENCES context_scoped_runtime_contract_artifacts(artifact_id) ON DELETE RESTRICT,
+          FOREIGN KEY (soul_snapshot_id)
+            REFERENCES context_resident_soul_source_snapshots(snapshot_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_resident_source_candidate_authorizations_identity_conflict
+          BEFORE INSERT ON context_resident_source_candidate_authorizations
+          WHEN EXISTS (
+            SELECT 1 FROM context_resident_source_candidate_authorizations
+            WHERE authorization_id = NEW.authorization_id
+               OR candidate_id = NEW.candidate_id
+               OR (
+                 authorize_batch_id = NEW.authorize_batch_id
+                 AND authorize_call_index = NEW.authorize_call_index
+               )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident source candidate authorization identity conflict');
+          END;
+        CREATE TRIGGER context_resident_source_candidate_authorizations_lineage_guard
+          BEFORE INSERT ON context_resident_source_candidate_authorizations
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_graph_activation
+            WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_resident_source_inspection_candidates c
+            JOIN context_resident_soul_source_snapshots s
+              ON s.snapshot_id = c.soul_snapshot_id
+            WHERE c.candidate_id = NEW.candidate_id
+              AND c.activation_epoch = NEW.activation_epoch
+              AND c.contract_artifact_id = NEW.contract_artifact_id
+              AND c.contract_migration_checksum = NEW.contract_migration_checksum
+              AND c.contract_content_hash = NEW.contract_content_hash
+              AND c.contract_content_bytes = NEW.contract_content_bytes
+              AND c.soul_snapshot_id = NEW.soul_snapshot_id
+              AND c.inspect_batch_id <> NEW.authorize_batch_id
+              AND c.observed_at <= NEW.authorized_at
+              AND s.captured_at <= c.observed_at
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_scoped_runtime_contract_artifacts
+            WHERE artifact_id = NEW.contract_artifact_id
+              AND artifact_id = '${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.artifactId}'
+              AND content_hash = NEW.contract_content_hash
+              AND content_hash = '${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentHash}'
+              AND content_bytes = NEW.contract_content_bytes
+              AND content_bytes = ${SCOPED_RUNTIME_CONTRACT_ARTIFACT_V1.contentBytes}
+              AND introduced_by_migration = '${SCOPED_RUNTIME_CONTRACT_MIGRATION}'
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM elpis_migrations
+            WHERE component = 'core'
+              AND name = '${SCOPED_RUNTIME_CONTRACT_MIGRATION}'
+              AND checksum = NEW.contract_migration_checksum
+              AND checksum = '${SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM}'
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident source candidate authorization lineage is invalid');
+          END;
+        CREATE TRIGGER context_resident_source_candidate_authorizations_no_update
+          BEFORE UPDATE ON context_resident_source_candidate_authorizations BEGIN
+            SELECT RAISE(ABORT, 'resident source candidate authorizations are immutable');
+          END;
+        CREATE TRIGGER context_resident_source_candidate_authorizations_no_delete
+          BEFORE DELETE ON context_resident_source_candidate_authorizations BEGIN
+            SELECT RAISE(ABORT, 'resident source candidate authorizations are immutable');
           END;
       `,
     },

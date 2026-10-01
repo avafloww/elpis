@@ -653,6 +653,28 @@ export interface ResidentSourceInspectionCaptureV1 {
   readonly candidate: ResidentSourceInspectionCandidateV1;
 }
 
+export interface ResidentSourceCandidateAuthorizationV1 {
+  readonly authorizationId: string;
+  readonly schemaVersion: 1;
+  readonly authorizationKind: 'resident_source_candidate';
+  readonly scopeKind: 'private_integrated_self_source';
+  readonly executionContext: 'legacy_monocontext_resident';
+  readonly candidateId: string;
+  readonly activationEpoch: number;
+  readonly contractArtifactId: string;
+  readonly contractMigrationChecksum: string;
+  readonly contractContentHash: string;
+  readonly contractContentBytes: number;
+  readonly soulSnapshotId: string;
+  readonly authorizeBatchId: string;
+  readonly authorizeBatchSha256: string;
+  readonly authorizeCallIndex: number;
+  readonly authorizeCallCount: number;
+  readonly authorizeToolName: 'run';
+  readonly authorizeArgumentsSha256: string;
+  readonly authorizedAt: number;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -759,6 +781,33 @@ function residentSourceCandidateId(input: {
       inspectCallCount: input.provenance.callCount,
       inspectToolName: input.provenance.toolName,
       inspectArgumentsSha256: input.provenance.argumentsSha256,
+    }),
+  )}`;
+}
+
+function residentSourceAuthorizationId(input: {
+  candidate: ResidentSourceInspectionCandidateV1;
+  provenance: ResidentToolCallSnapshotV1;
+}): string {
+  return `resident-source-authorization:${hashContextBytes(
+    serialize({
+      schemaVersion: 1,
+      authorizationKind: 'resident_source_candidate',
+      scopeKind: 'private_integrated_self_source',
+      executionContext: 'legacy_monocontext_resident',
+      candidateId: input.candidate.candidateId,
+      activationEpoch: input.candidate.activationEpoch,
+      contractArtifactId: input.candidate.contractArtifactId,
+      contractMigrationChecksum: input.candidate.contractMigrationChecksum,
+      contractContentHash: input.candidate.contractContentHash,
+      contractContentBytes: input.candidate.contractContentBytes,
+      soulSnapshotId: input.candidate.soulSnapshotId,
+      authorizeBatchId: input.provenance.batchId,
+      authorizeBatchSha256: input.provenance.batchSha256,
+      authorizeCallIndex: input.provenance.callIndex,
+      authorizeCallCount: input.provenance.callCount,
+      authorizeToolName: input.provenance.toolName,
+      authorizeArgumentsSha256: input.provenance.argumentsSha256,
     }),
   )}`;
 }
@@ -1599,6 +1648,28 @@ interface ResidentSourceInspectionCandidateRow {
   observed_at: number;
 }
 
+interface ResidentSourceCandidateAuthorizationRow {
+  authorization_id: string;
+  schema_version: number;
+  authorization_kind: string;
+  scope_kind: string;
+  execution_context: string;
+  candidate_id: string;
+  activation_epoch: number;
+  contract_artifact_id: string;
+  contract_migration_checksum: string;
+  contract_content_hash: string;
+  contract_content_bytes: number;
+  soul_snapshot_id: string;
+  authorize_batch_id: string;
+  authorize_batch_sha256: string;
+  authorize_call_index: number;
+  authorize_call_count: number;
+  authorize_tool_name: string;
+  authorize_arguments_sha256: string;
+  authorized_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -2368,6 +2439,39 @@ function normalizeResidentInspectionProvenance(
   });
 }
 
+function normalizeResidentAuthorizationProvenance(
+  input: ResidentToolCallSnapshotV1,
+): ResidentToolCallSnapshotV1 {
+  if (
+    input.version !== 1 ||
+    typeof input.batchId !== 'string' ||
+    !/^resident-tool-batch:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      input.batchId,
+    ) ||
+    !Number.isSafeInteger(input.callIndex) ||
+    !Number.isSafeInteger(input.callCount) ||
+    input.callIndex < 0 ||
+    input.callCount < 1 ||
+    input.callCount > 64 ||
+    input.callIndex >= input.callCount ||
+    input.toolName !== 'run'
+  ) {
+    throw new Error('resident source authorization provenance is invalid');
+  }
+  return Object.freeze({
+    version: 1,
+    batchId: input.batchId,
+    batchSha256: sha256('resident authorization batchSha256', input.batchSha256),
+    callIndex: input.callIndex,
+    callCount: input.callCount,
+    toolName: 'run',
+    argumentsSha256: sha256(
+      'resident authorization argumentsSha256',
+      input.argumentsSha256,
+    ),
+  });
+}
+
 function mapResidentInspectionCandidate(
   row: ResidentSourceInspectionCandidateRow,
 ): ResidentSourceInspectionCandidateV1 {
@@ -2426,6 +2530,77 @@ function mapResidentInspectionCandidate(
     inspectToolName: 'run',
     inspectArgumentsSha256: provenance.argumentsSha256,
     observedAt: timestamp('resident inspection observedAt', row.observed_at),
+  });
+}
+
+function mapResidentSourceAuthorization(
+  row: ResidentSourceCandidateAuthorizationRow,
+  candidate: ResidentSourceInspectionCandidateV1,
+): ResidentSourceCandidateAuthorizationV1 {
+  if (
+    row.schema_version !== 1 ||
+    row.authorization_kind !== 'resident_source_candidate' ||
+    row.scope_kind !== 'private_integrated_self_source' ||
+    row.execution_context !== 'legacy_monocontext_resident' ||
+    row.candidate_id !== candidate.candidateId ||
+    row.activation_epoch !== candidate.activationEpoch ||
+    row.contract_artifact_id !== candidate.contractArtifactId ||
+    row.contract_migration_checksum !== candidate.contractMigrationChecksum ||
+    row.contract_content_hash !== candidate.contractContentHash ||
+    row.contract_content_bytes !== candidate.contractContentBytes ||
+    row.soul_snapshot_id !== candidate.soulSnapshotId
+  ) {
+    throw new Error('stored resident source candidate authorization is invalid');
+  }
+  const provenance = normalizeResidentAuthorizationProvenance({
+    version: 1,
+    batchId: row.authorize_batch_id,
+    batchSha256: row.authorize_batch_sha256,
+    callIndex: row.authorize_call_index,
+    callCount: row.authorize_call_count,
+    toolName: row.authorize_tool_name,
+    argumentsSha256: row.authorize_arguments_sha256,
+  });
+  if (provenance.batchId === candidate.inspectBatchId) {
+    throw new Error(
+      'stored resident source candidate authorization reuses its inspection batch',
+    );
+  }
+  const authorizationId = residentSourceAuthorizationId({ candidate, provenance });
+  if (row.authorization_id !== authorizationId) {
+    throw new Error(
+      'stored resident source candidate authorization identity is invalid',
+    );
+  }
+  const authorizedAt = timestamp(
+    'resident source authorization authorizedAt',
+    row.authorized_at,
+  );
+  if (authorizedAt < candidate.observedAt) {
+    throw new Error(
+      'stored resident source candidate authorization chronology is invalid',
+    );
+  }
+  return Object.freeze({
+    authorizationId,
+    schemaVersion: 1,
+    authorizationKind: 'resident_source_candidate',
+    scopeKind: 'private_integrated_self_source',
+    executionContext: 'legacy_monocontext_resident',
+    candidateId: candidate.candidateId,
+    activationEpoch: candidate.activationEpoch,
+    contractArtifactId: candidate.contractArtifactId,
+    contractMigrationChecksum: candidate.contractMigrationChecksum,
+    contractContentHash: candidate.contractContentHash,
+    contractContentBytes: candidate.contractContentBytes,
+    soulSnapshotId: candidate.soulSnapshotId,
+    authorizeBatchId: provenance.batchId,
+    authorizeBatchSha256: provenance.batchSha256,
+    authorizeCallIndex: provenance.callIndex,
+    authorizeCallCount: provenance.callCount,
+    authorizeToolName: 'run',
+    authorizeArgumentsSha256: provenance.argumentsSha256,
+    authorizedAt,
   });
 }
 
@@ -2504,6 +2679,27 @@ export class ContextGraphStore {
       );
     }
     return Object.freeze({ soul, candidate });
+  }
+
+  getResidentSourceCandidateAuthorization(
+    authorizationId: string,
+  ): ResidentSourceCandidateAuthorizationV1 | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_resident_source_candidate_authorizations
+         WHERE authorization_id = ?`,
+      )
+      .get(authorizationId) as
+      | ResidentSourceCandidateAuthorizationRow
+      | undefined;
+    if (!row) return null;
+    const capture = this.getResidentSourceInspectionCandidate(row.candidate_id);
+    if (!capture) {
+      throw new Error(
+        'stored resident source candidate authorization has no candidate',
+      );
+    }
+    return mapResidentSourceAuthorization(row, capture.candidate);
   }
 
   createResidentSourceInspectionCandidate(input: {
@@ -2653,6 +2849,160 @@ export class ContextGraphStore {
       const created = this.getResidentSourceInspectionCandidate(candidateId);
       if (!created)
         throw new Error('resident source inspection candidate was not stored');
+      return finish(created);
+    });
+  }
+
+  authorizeResidentSourceCandidate(input: {
+    candidateId: string;
+    freshSoul: PromptFacingSoulSnapshot;
+    provenance: ResidentToolCallSnapshotV1;
+    authorizedAt: number;
+  }): ResidentSourceCandidateAuthorizationV1;
+  authorizeResidentSourceCandidate<T>(
+    input: {
+      candidateId: string;
+      freshSoul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      authorizedAt: number;
+    },
+    finalize: (receipt: ResidentSourceCandidateAuthorizationV1) => T,
+  ): T;
+  authorizeResidentSourceCandidate<T>(
+    input: {
+      candidateId: string;
+      freshSoul: PromptFacingSoulSnapshot;
+      provenance: ResidentToolCallSnapshotV1;
+      authorizedAt: number;
+    },
+    finalize?: (receipt: ResidentSourceCandidateAuthorizationV1) => T,
+  ): ResidentSourceCandidateAuthorizationV1 | T {
+    if (!/^resident-source-candidate:[0-9a-f]{64}$/.test(input.candidateId)) {
+      throw new Error('resident source authorization candidateId is invalid');
+    }
+    const authorizedAt = timestamp(
+      'resident source authorization authorizedAt',
+      input.authorizedAt,
+    );
+    const freshSoul = normalizeResidentSoulSnapshot({
+      parserGeneration: input.freshSoul.parserGeneration,
+      sourceFile: input.freshSoul.sourceFile,
+      sourceFileHash: input.freshSoul.sourceFileHash,
+      sourceFileBytes: input.freshSoul.sourceFileBytes,
+      body: input.freshSoul.body,
+      bodyHash: input.freshSoul.bodyHash,
+      bodyBytes: input.freshSoul.bodyBytes,
+      capturedAt: authorizedAt,
+    });
+    const provenance = normalizeResidentAuthorizationProvenance(input.provenance);
+    const finish = (receipt: ResidentSourceCandidateAuthorizationV1) =>
+      finalize ? finalize(receipt) : receipt;
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('resident source authorization requires dark graph mode');
+      }
+      const capture = this.getResidentSourceInspectionCandidate(input.candidateId);
+      if (!capture) {
+        throw new Error('resident source authorization candidate does not exist');
+      }
+      const { candidate, soul } = capture;
+      if (candidate.activationEpoch !== activation.epoch) {
+        throw new Error(
+          'resident source authorization candidate has a stale activation epoch',
+        );
+      }
+      if (candidate.inspectBatchId === provenance.batchId) {
+        throw new Error(
+          'resident source authorization requires a different assistant batch than inspection',
+        );
+      }
+      if (!sameResidentSoulSource(soul, freshSoul)) {
+        throw new Error(
+          'resident source authorization requires the current exact inspected SOUL source',
+        );
+      }
+      const authorizationId = residentSourceAuthorizationId({
+        candidate,
+        provenance,
+      });
+      const priorCall = this.database
+        .prepare(
+          `SELECT authorization_id
+           FROM context_resident_source_candidate_authorizations
+           WHERE authorize_batch_id = ? AND authorize_call_index = ?`,
+        )
+        .get(provenance.batchId, provenance.callIndex) as
+        | { authorization_id: string }
+        | undefined;
+      if (priorCall) {
+        if (priorCall.authorization_id !== authorizationId) {
+          throw new Error(
+            'resident source authorization call already authorized different sources',
+          );
+        }
+        const existing = this.getResidentSourceCandidateAuthorization(
+          authorizationId,
+        );
+        if (!existing) {
+          throw new Error('resident source candidate authorization disappeared');
+        }
+        return finish(existing);
+      }
+      const priorCandidate = this.database
+        .prepare(
+          `SELECT authorization_id
+           FROM context_resident_source_candidate_authorizations
+           WHERE candidate_id = ?`,
+        )
+        .get(candidate.candidateId) as
+        | { authorization_id: string }
+        | undefined;
+      if (priorCandidate) {
+        throw new Error(
+          'resident source candidate was already authorized by a different call',
+        );
+      }
+
+      this.database
+        .prepare(
+          `INSERT INTO context_resident_source_candidate_authorizations(
+             authorization_id, schema_version, authorization_kind, scope_kind,
+             execution_context, candidate_id, activation_epoch,
+             contract_artifact_id, contract_migration_checksum,
+             contract_content_hash, contract_content_bytes, soul_snapshot_id,
+             authorize_batch_id, authorize_batch_sha256, authorize_call_index,
+             authorize_call_count, authorize_tool_name,
+             authorize_arguments_sha256, authorized_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          authorizationId,
+          'resident_source_candidate',
+          'private_integrated_self_source',
+          'legacy_monocontext_resident',
+          candidate.candidateId,
+          candidate.activationEpoch,
+          candidate.contractArtifactId,
+          candidate.contractMigrationChecksum,
+          candidate.contractContentHash,
+          candidate.contractContentBytes,
+          candidate.soulSnapshotId,
+          provenance.batchId,
+          provenance.batchSha256,
+          provenance.callIndex,
+          provenance.callCount,
+          provenance.toolName,
+          provenance.argumentsSha256,
+          authorizedAt,
+        );
+      const created = this.getResidentSourceCandidateAuthorization(
+        authorizationId,
+      );
+      if (!created) {
+        throw new Error('resident source candidate authorization was not stored');
+      }
       return finish(created);
     });
   }

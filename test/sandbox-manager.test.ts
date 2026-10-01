@@ -35,6 +35,10 @@ function fixture(
     retirementGraceMs?: number;
     residentRunVerifier?: ResidentRunVerifier;
     residentSourceInspector?: (snapshot: ResidentToolCallSnapshotV1) => string;
+    residentSourceAuthorizer?: (
+      candidateId: string,
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -108,6 +112,7 @@ function fixture(
     coldStart: opts.coldStart,
     residentRunVerifier: opts.residentRunVerifier,
     residentSourceInspector: opts.residentSourceInspector,
+    residentSourceAuthorizer: opts.residentSourceAuthorizer,
   });
   return {
     dir,
@@ -978,7 +983,75 @@ test('resident identity inspection is active-run-only on core and persistent sur
   }
 });
 
+const SYNTHETIC_CANDIDATE_ID = `resident-source-candidate:${'a'.repeat(64)}`;
+
+test('resident identity authorization is active-run-only and receives exact live provenance', async () => {
+  const authority = createResidentRunAuthority();
+  const inspections: ResidentToolCallSnapshotV1[] = [];
+  const authorizations: Array<{
+    candidateId: string;
+    snapshot: ResidentToolCallSnapshotV1;
+  }> = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentSourceInspector: (snapshot) => {
+      inspections.push(snapshot);
+      return SYNTHETIC_CANDIDATE_ID;
+    },
+    residentSourceAuthorizer: (candidateId, snapshot) => {
+      authorizations.push({ candidateId, snapshot });
+      return 'SOURCE CANDIDATE AUTHORIZED — NOT PROFILED OR ACTIVE';
+    },
+  });
+  try {
+    const direct = await f.manager.run({
+      code: `elpis.context.authorizeIdentityCandidate('${SYNTHETIC_CANDIDATE_ID}')`,
+    });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+    assert.equal(authorizations.length, 0);
+
+    const sameBatch = await f.manager.run({
+      code: `elpis.context.inspectIdentityCandidate(); elpis.context.authorizeIdentityCandidate('${SYNTHETIC_CANDIDATE_ID}')`,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(sameBatch.ok, true);
+    assert.match(sameBatch.preview ?? '', /SOURCE CANDIDATE AUTHORIZED/);
+    assert.equal(inspections.length, 1);
+    assert.equal(authorizations.length, 1);
+    assert.equal(authorizations[0]?.candidateId, SYNTHETIC_CANDIDATE_ID);
+    assert.equal(
+      authorizations[0]?.snapshot.batchId,
+      inspections[0]?.batchId,
+    );
+
+    const item = f.mind.create({ title: 'resident identity authorization' });
+    const persistent = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.context.authorizeIdentityCandidate('${SYNTHETIC_CANDIDATE_ID}')`,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(persistent.ok, true);
+    assert.equal(authorizations.length, 2);
+    assert.notEqual(
+      authorizations[0]?.snapshot.batchId,
+      authorizations[1]?.snapshot.batchId,
+    );
+
+    const inherited = await f.manager.run({
+      sandbox: item.id,
+      code: `elpis.context.authorizeIdentityCandidate('${SYNTHETIC_CANDIDATE_ID}')`,
+    });
+    assert.equal(inherited.ok, false);
+    assert.match(inherited.error ?? '', /active resident run/);
+    assert.equal(authorizations.length, 2);
+  } finally {
+    f.close();
+  }
+});
+
 test('persistent invocations bind fresh resident handles without inheritance', async () => {
+
   const authority = createResidentRunAuthority();
   const f = fixture({ residentRunVerifier: authority.verifier });
   const seen: Array<ReturnType<typeof residentRunHandleForScope>> = [];
