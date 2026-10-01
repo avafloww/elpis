@@ -65,6 +65,7 @@ import {
 import { resolveDataLayout } from '../store/data-layout.js';
 import { parseMindId } from '../store/mind.js';
 import {
+  residentDarkRequestAssemblyActionForScope,
   residentIdentitySystemDerivationActionForScope,
   residentSourceAuthorizationActionForScope,
   residentSourceInspectionActionForScope,
@@ -529,6 +530,22 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       }
       return bind(args[0]);
+    },
+    assembleCurrentWorldDarkRequest: (...args: unknown[]) => {
+      if (args.length !== 0) {
+        throw new Error(
+          'elpis.context.assembleCurrentWorldDarkRequest: no arguments are accepted',
+        );
+      }
+      const scope = runScope.getStore();
+      const assemble =
+        scope && residentDarkRequestAssemblyActionForScope(scope);
+      if (!assemble) {
+        throw new Error(
+          'elpis.context.assembleCurrentWorldDarkRequest: unavailable without an active resident run',
+        );
+      }
+      return assemble();
     },
   };
 

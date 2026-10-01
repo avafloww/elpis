@@ -1099,6 +1099,141 @@ test('resident current-world profile binding is atomic and social-lineage scoped
   }
 });
 
+test('resident current-world dark request admits and assembles atomically', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('401'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('402'),
+      authorizedAt: 200,
+    });
+    const derivation = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorization.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('403'),
+      derivedAt: 300,
+    });
+    const targetWorldId = worldId('world:signal:dark-request-contact');
+    const bindingIngress = value.store.appendWorldEvent({
+      eventId: eventId('event:dark-request-binding-ingress'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'PROFILE_BINDING_CANARY' },
+      occurredAt: 50,
+      recordedAt: 50,
+    });
+    const profileBinding = value.store.bindResidentCurrentWorldProfile({
+      derivationId: derivation.derivationId,
+      worldId: targetWorldId,
+      eventId: bindingIngress.eventId,
+      sequence: bindingIngress.sequence,
+      provenance: residentRunProvenance('404'),
+      boundAt: 500,
+    });
+    const current = value.store.appendWorldEvent({
+      eventId: eventId('event:dark-request-current-ingress'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'CURRENT_DARK_REQUEST_CANARY' },
+      occurredAt: 600,
+      recordedAt: 600,
+    });
+    const projection = value.store.createEventMessageProjection({
+      sourceEventId: current.eventId,
+      sourceSequence: current.sequence,
+      worldId: targetWorldId,
+      rendererGeneration: 1,
+      message: {
+        role: 'user',
+        content: '<incoming>CURRENT_DARK_REQUEST_CANARY</incoming>',
+      },
+      createdAt: 600,
+    });
+    const input = {
+      worldId: targetWorldId,
+      eventId: current.eventId,
+      sequence: current.sequence,
+      branchId: branchId('branch:resident-dark-request-rollback'),
+      maxEvents: 64,
+      assembledAt: 700,
+    };
+    assert.throws(
+      () =>
+        value.store.assembleResidentCurrentWorldDarkRequest(input, () => {
+          throw new Error('forced dark request presentation failure');
+        }),
+      /forced dark request presentation failure/,
+    );
+    for (const table of [
+      'context_dark_ingress_admissions',
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_system_profile_request_view_bindings',
+      'context_dark_pending_branch_attempts',
+    ]) {
+      assert.equal(tableCount(value.database, table), 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+
+    const record = value.store.assembleResidentCurrentWorldDarkRequest({
+      ...input,
+      branchId: branchId('branch:resident-dark-request-success'),
+    });
+    assert.equal(record.currentEvent.eventId, current.eventId);
+    assert.equal(record.admission.eventId, current.eventId);
+    assert.equal(record.residentProfileBinding.bindingId, profileBinding.bindingId);
+    assert.equal(record.attempt.selectedCount, 1);
+    assert.equal(record.attempt.firstSourceSequence, current.sequence);
+    assert.equal(record.attempt.lastSourceSequence, current.sequence);
+    assert.equal(record.assembly.requestView.view.messageProjectionIds[0], projection.projectionId);
+    assert.equal(record.assembly.profileBinding.binding.profileId, profileBinding.profileId);
+    assert.equal(record.assembly.profileBinding.binding.profileHeadRevision, 1);
+    assert.equal(record.assembly.request.runnable, false);
+    assert.equal(record.assembly.request.toolMode, 'none');
+    assert.deepEqual(
+      value.store.assembleResidentCurrentWorldDarkRequest({
+        ...input,
+        branchId: record.assembly.branch.branchId,
+        assembledAt: 701,
+      }),
+      record,
+    );
+    assert.equal(
+      record.assembly.request.candidateJson.includes('CURRENT_DARK_REQUEST_CANARY'),
+      true,
+    );
+    assert.equal(
+      record.assembly.request.candidateJson.includes('PROFILE_BINDING_CANARY'),
+      false,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(tableCount(value.database, 'context_effects'), 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 0);
+    assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
+    assert.equal(tableCount(value.database, 'context_shadow_request_observations'), 0);
+
+    const recovered = value.store.recoverCoordinatedBranch(800);
+    assert.equal(recovered?.branchId, record.assembly.branch.branchId);
+    assert.equal(
+      value.store.getBranch(record.assembly.branch.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('resident identity derivation refuses preexisting target rows without a derivation receipt', () => {
   const value = fixture();
   try {

@@ -23,6 +23,7 @@ import { parseFailureHints } from './parse-hints.js';
 import { isContextResourceInterrupt } from '../context-resources.js';
 import { bindResidentRunHandle } from '../kernel/resident-run-scope.js';
 import {
+  bindResidentDarkRequestAssemblyAction,
   bindResidentIdentitySystemDerivationAction,
   bindResidentSourceAuthorizationAction,
   bindResidentSourceInspectionAction,
@@ -43,6 +44,7 @@ export interface SandboxResidentRunLifecycle {
   authorizeIdentityCandidate(candidateId: string): string;
   deriveAuthorizedIdentityLayers(authorizationId: string): string;
   bindCurrentWorldProfile(derivationId: string): string;
+  assembleCurrentWorldDarkRequest(): string;
   detach(): void;
   settled(): void;
 }
@@ -189,6 +191,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentWorldProfileBindingAction(
         scope,
         options.residentRun.bindCurrentWorldProfile,
+      );
+      bindResidentDarkRequestAssemblyAction(
+        scope,
+        options.residentRun.assembleCurrentWorldDarkRequest,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

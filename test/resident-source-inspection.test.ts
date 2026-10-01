@@ -17,6 +17,7 @@ import {
 import { createResidentSourceCandidateAuthorizer } from '../src/context/resident-source-authorization.js';
 import { createResidentIdentitySystemDeriver } from '../src/context/resident-identity-system-derivation.js';
 import { createResidentWorldProfileBinder } from '../src/context/resident-world-profile-binding.js';
+import { createResidentDarkRequestAssembler } from '../src/context/resident-dark-request-assembly.js';
 import { preview } from '../src/sandbox/preview.js';
 
 function provenance(suffix: string) {
@@ -68,6 +69,12 @@ function fixture(
     redactForOutput,
     now: () => 500,
   });
+  const assemble = createResidentDarkRequestAssembler({
+    store,
+    previewMaxBytes,
+    redactForOutput,
+    now: () => 700,
+  });
   return {
     directory,
     database,
@@ -77,6 +84,7 @@ function fixture(
     authorize,
     derive,
     bind,
+    assemble,
     close() {
       database.close();
       fs.rmSync(directory, { recursive: true, force: true });
@@ -560,6 +568,194 @@ test('resident source inspection formatter rejects invalid budgets without a par
       () => formatResidentSourceInspectionPresentation(capture, 0),
       /budget is invalid/,
     );
+  } finally {
+    value.close();
+  }
+});
+
+test('resident dark request assembly presents the complete exact candidate', () => {
+  const value = fixture('# Synthetic soul\n' + 'x'.repeat(11_000), 16_384);
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('40')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('41')),
+    );
+    const derivationId = identityDerivationId(
+      value.derive(authorizationId, provenance('42')),
+    );
+    const targetWorldId = worldId('world:signal:synthetic-dark-request');
+    const bindingIngress = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-dark-request-binding'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'BINDING_ONLY_CANARY' },
+      occurredAt: 400,
+      recordedAt: 400,
+    });
+    value.bind(
+      derivationId,
+      {
+        worldId: targetWorldId,
+        eventId: bindingIngress.eventId,
+        sequence: bindingIngress.sequence,
+      },
+      provenance('43'),
+    );
+    const current = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-dark-request-current'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'EXACT_DARK_REQUEST_CANARY' },
+      occurredAt: 600,
+      recordedAt: 600,
+    });
+    value.store.createEventMessageProjection({
+      sourceEventId: current.eventId,
+      sourceSequence: current.sequence,
+      worldId: targetWorldId,
+      rendererGeneration: 1,
+      message: {
+        role: 'user',
+        content: '<incoming>EXACT_DARK_REQUEST_CANARY</incoming>',
+      },
+      createdAt: 600,
+    });
+    const result = value.assemble(
+      {
+        worldId: targetWorldId,
+        eventId: current.eventId,
+        sequence: current.sequence,
+      },
+      provenance('44'),
+    );
+    assert.match(
+      result,
+      /^CURRENT WORLD DARK REQUEST ASSEMBLED — NON-RUNNABLE/m,
+    );
+    assert.match(result, /PROVIDER-NEUTRAL CANDIDATE JSON/);
+    assert.match(result, /EXACT_DARK_REQUEST_CANARY/);
+    assert.doesNotMatch(result, /BINDING_ONLY_CANARY/);
+    assert.match(result, /NON-RUNNABLE/);
+    assert.match(result, /dark, tool-free request candidate only/);
+    assert.match(result, /was not sent to a provider/);
+    assert.equal(
+      preview(result, 16_384),
+      `string(${result.length} chars):\n${result}`,
+    );
+    assert.equal(
+      value.assemble(
+        {
+          worldId: targetWorldId,
+          eventId: current.eventId,
+          sequence: current.sequence,
+        },
+        provenance('44'),
+      ),
+      result,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT count(*) AS n FROM context_dark_pending_branch_attempts',
+          )
+          .get() as { n: number }
+      ).n,
+      1,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare('SELECT count(*) AS n FROM context_effects')
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    value.close();
+  }
+});
+
+test('resident dark request assembly rolls back when redaction changes the exact candidate', () => {
+  const value = fixture(
+    '# Synthetic soul\n',
+    32_768,
+    (text) => text.replace('REDACTION_DARK_REQUEST_CANARY', '[SECRET REDACTED]'),
+  );
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('50')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('51')),
+    );
+    const derivationId = identityDerivationId(
+      value.derive(authorizationId, provenance('52')),
+    );
+    const targetWorldId = worldId('world:discord:synthetic-dark-redaction');
+    const bindingIngress = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-dark-redaction-binding'),
+      worldId: targetWorldId,
+      kind: 'inbound:discord',
+      payload: { synthetic: true },
+      occurredAt: 400,
+      recordedAt: 400,
+    });
+    value.bind(
+      derivationId,
+      {
+        worldId: targetWorldId,
+        eventId: bindingIngress.eventId,
+        sequence: bindingIngress.sequence,
+      },
+      provenance('53'),
+    );
+    const current = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-dark-redaction-current'),
+      worldId: targetWorldId,
+      kind: 'inbound:discord',
+      payload: { synthetic: true },
+      occurredAt: 600,
+      recordedAt: 600,
+    });
+    value.store.createEventMessageProjection({
+      sourceEventId: current.eventId,
+      sourceSequence: current.sequence,
+      worldId: targetWorldId,
+      rendererGeneration: 1,
+      message: {
+        role: 'user',
+        content: '<incoming>REDACTION_DARK_REQUEST_CANARY</incoming>',
+      },
+      createdAt: 600,
+    });
+    assert.throws(
+      () =>
+        value.assemble(
+          {
+            worldId: targetWorldId,
+            eventId: current.eventId,
+            sequence: current.sequence,
+          },
+          provenance('54'),
+        ),
+      /secret redaction would alter it/,
+    );
+    for (const table of [
+      'context_dark_ingress_admissions',
+      'context_branches',
+      'context_branch_starts',
+      'context_manifests',
+      'context_local_branch_request_views',
+      'context_system_profile_request_view_bindings',
+      'context_dark_pending_branch_attempts',
+    ]) {
+      const count = value.database
+        .prepare(`SELECT count(*) AS n FROM ${table}`)
+        .get() as { n: number };
+      assert.equal(count.n, 0, table);
+    }
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(value.store.getContinuationHead().revision, 0);
   } finally {
     value.close();
   }

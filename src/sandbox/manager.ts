@@ -61,6 +61,10 @@ export interface SandboxManagerOptions {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  residentDarkRequestAssembler?: (
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -120,6 +124,12 @@ class ResidentRunLease {
           snapshot: ResidentToolCallSnapshotV1,
         ) => string)
       | undefined,
+    private readonly darkRequestAssembler:
+      | ((
+          scope: ResidentCurrentWorldScopeV1,
+          snapshot: ResidentToolCallSnapshotV1,
+        ) => string)
+      | undefined,
     private readonly currentWorldScope: ResidentCurrentWorldScopeV1 | undefined,
     private readonly onClose: () => void,
   ) {
@@ -132,6 +142,8 @@ class ResidentRunLease {
         this.deriveAuthorizedIdentityLayers(authorizationId),
       bindCurrentWorldProfile: (derivationId: string) =>
         this.bindCurrentWorldProfile(derivationId),
+      assembleCurrentWorldDarkRequest: () =>
+        this.assembleCurrentWorldDarkRequest(),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -223,6 +235,30 @@ class ResidentRunLease {
     return result;
   }
 
+  assembleCurrentWorldDarkRequest(): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `resident dark request assembly: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.darkRequestAssembler) {
+      throw new Error('resident dark request assembly: assembler is not configured');
+    }
+    if (!this.currentWorldScope) {
+      throw new Error(
+        'resident dark request assembly: current run has no routed social ingress lineage',
+      );
+    }
+    const result = this.darkRequestAssembler(this.currentWorldScope, snapshot);
+    if (typeof result !== 'string') {
+      throw new Error(
+        'resident dark request assembly: assembler returned a non-string result',
+      );
+    }
+    return result;
+  }
+
   observeSandboxResult(result: RunResult): void {
     if (result.detached) {
       if (this.state === 'active') this.detach();
@@ -295,6 +331,10 @@ export class SandboxManager {
     scope: ResidentCurrentWorldScopeV1,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentDarkRequestAssembler?: (
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -318,6 +358,7 @@ export class SandboxManager {
     this.residentIdentitySystemDeriver =
       options.residentIdentitySystemDeriver;
     this.residentWorldProfileBinder = options.residentWorldProfileBinder;
+    this.residentDarkRequestAssembler = options.residentDarkRequestAssembler;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -488,6 +529,7 @@ export class SandboxManager {
       this.residentSourceAuthorizer,
       this.residentIdentitySystemDeriver,
       this.residentWorldProfileBinder,
+      this.residentDarkRequestAssembler,
       snapshotResidentCurrentWorldScope(this.deps.inbound),
       () => this.releaseResidentRunLease(lease),
     );

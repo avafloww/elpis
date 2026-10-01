@@ -312,6 +312,14 @@ export type DarkPendingBranchAssemblyResult =
       readonly assembly: DarkLocalBranchAssemblyRecord;
     };
 
+export interface ResidentCurrentWorldDarkRequestRecord {
+  readonly currentEvent: WorldEventRecord;
+  readonly admission: DarkIngressAdmissionRecord;
+  readonly residentProfileBinding: ResidentWorldProfileBindingV1;
+  readonly attempt: DarkPendingBranchAttemptRecord;
+  readonly assembly: DarkLocalBranchAssemblyRecord;
+}
+
 export interface ProjectedUserMessage {
   readonly role: 'user';
   readonly content: string;
@@ -6372,6 +6380,348 @@ export class ContextGraphStore {
         assembledAt,
       ),
     );
+  }
+
+  private rereadResidentCurrentWorldDarkRequest(input: {
+    worldId: WorldId;
+    currentEvent: WorldEventRecord;
+    branchId: BranchId;
+    maxEvents: number;
+    activationEpoch: number;
+    queueGeneration: number;
+    residentProfileBinding: ResidentWorldProfileBindingV1;
+    admission: DarkIngressAdmissionRecord;
+  }): ResidentCurrentWorldDarkRequestRecord | null {
+    const attempt = this.getDarkPendingBranchAttempt(input.branchId);
+    if (!attempt) return null;
+    if (
+      input.admission.worldId !== input.worldId ||
+      input.admission.sourceSequence !== input.currentEvent.sequence ||
+      input.admission.activationEpoch !== input.activationEpoch ||
+      input.admission.queueGeneration !== input.queueGeneration ||
+      attempt.worldId !== input.worldId ||
+      attempt.activationEpoch !== input.activationEpoch ||
+      attempt.queueGeneration !== input.queueGeneration ||
+      attempt.maxEvents !== input.maxEvents ||
+      attempt.lastSourceSequence !== input.currentEvent.sequence
+    ) {
+      throw new Error(
+        'resident dark request current event was admitted by a different assembly',
+      );
+    }
+    const branch = this.getBranch(input.branchId);
+    const start = this.getBranchStart(input.branchId);
+    const requestView = this.getLocalBranchRequestView(attempt.requestViewId);
+    if (
+      !branch ||
+      branch.status !== 'running' ||
+      branch.worldId !== input.worldId ||
+      !start ||
+      start.worldId !== input.worldId ||
+      !requestView ||
+      requestView.branchId !== branch.branchId ||
+      requestView.worldId !== input.worldId
+    ) {
+      throw new Error('resident dark request stored assembly lineage is invalid');
+    }
+    const coordinator = this.getRootCoordinatorState();
+    if (
+      coordinator.activeBranchId !== branch.branchId ||
+      coordinator.activeWorldId !== branch.worldId ||
+      coordinator.baseRevision !== start.baseRevision
+    ) {
+      throw new Error('resident dark request stored coordinator lineage is invalid');
+    }
+    const manifestProjection = this.getManifestProjection(
+      requestView.manifestId,
+      { requireActiveShares: true },
+    );
+    const profileBinding = this.getSystemProfileRequestViewBindingForView(
+      requestView.requestViewId,
+    );
+    if (
+      !manifestProjection ||
+      manifestProjection.record.branchId !== branch.branchId ||
+      !profileBinding ||
+      profileBinding.binding.profileId !== input.residentProfileBinding.profileId ||
+      profileBinding.binding.profileHeadRevision !==
+        input.residentProfileBinding.profileHeadRevision
+    ) {
+      throw new Error('resident dark request stored request lineage is invalid');
+    }
+    const systemLayers = requestView.view.systemLayerProjectionIds.map((id) => {
+      const layer = this.getSystemLayerProjection(id);
+      if (!layer) {
+        throw new Error(`resident dark request system layer disappeared: ${id}`);
+      }
+      return layer;
+    });
+    const messageProjections = requestView.view.messageProjectionIds.map((id) => {
+      const projection = this.getEventMessageProjection(id);
+      if (!projection) {
+        throw new Error(`resident dark request message disappeared: ${id}`);
+      }
+      return projection;
+    });
+    const request = buildMaterializedLocalBranchRequest({
+      requestViewId: requestView.requestViewId,
+      messages: [
+        {
+          role: 'system',
+          content: systemLayers.map((layer) => layer.content).join(''),
+        },
+        ...messageProjections.map((projection) => ({
+          role: projection.message.role,
+          content: projection.message.content,
+        })),
+      ],
+    });
+    return {
+      currentEvent: input.currentEvent,
+      admission: input.admission,
+      residentProfileBinding: input.residentProfileBinding,
+      attempt,
+      assembly: {
+        branch,
+        start,
+        manifest: manifestProjection.record,
+        requestView,
+        profileBinding,
+        request,
+      },
+    };
+  }
+
+  assembleResidentCurrentWorldDarkRequest(input: {
+    worldId: WorldId;
+    eventId: EventId;
+    sequence: number;
+    branchId: BranchId;
+    maxEvents: number;
+    assembledAt: number;
+  }): ResidentCurrentWorldDarkRequestRecord;
+  assembleResidentCurrentWorldDarkRequest<T>(
+    input: {
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      branchId: BranchId;
+      maxEvents: number;
+      assembledAt: number;
+    },
+    finalize: (record: ResidentCurrentWorldDarkRequestRecord) => T,
+  ): T;
+  assembleResidentCurrentWorldDarkRequest<T>(
+    input: {
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      branchId: BranchId;
+      maxEvents: number;
+      assembledAt: number;
+    },
+    finalize?: (record: ResidentCurrentWorldDarkRequestRecord) => T,
+  ): ResidentCurrentWorldDarkRequestRecord | T {
+    const targetWorldId = worldId(input.worldId);
+    const currentEventId = eventId(input.eventId);
+    const currentSequence = generation('currentSequence', input.sequence);
+    const maxEvents = generation('maxEvents', input.maxEvents);
+    const assembledAt = timestamp('assembledAt', input.assembledAt);
+    if (currentSequence < 1) throw new Error('currentSequence must be positive');
+    if (maxEvents < 1 || maxEvents > 1_024) {
+      throw new Error('maxEvents must be between 1 and 1024');
+    }
+    const finish = (record: ResidentCurrentWorldDarkRequestRecord) =>
+      finalize ? finalize(record) : record;
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('resident dark request assembly requires dark graph mode');
+      }
+      const currentEvent = this.getWorldEvent(currentEventId);
+      if (
+        !currentEvent ||
+        currentEvent.worldId !== targetWorldId ||
+        currentEvent.sequence !== currentSequence ||
+        !['inbound:discord', 'inbound:signal'].includes(currentEvent.kind)
+      ) {
+        throw new Error(
+          'resident dark request assembly requires exact current social ingress lineage',
+        );
+      }
+      const bindingRow = this.database
+        .prepare(
+          `SELECT binding_id FROM context_resident_world_profile_bindings
+           WHERE activation_epoch = ? AND world_id = ?`,
+        )
+        .get(activation.epoch, targetWorldId) as
+        | { binding_id: string }
+        | undefined;
+      if (!bindingRow) {
+        throw new Error('resident dark request assembly requires a bound world profile');
+      }
+      const residentProfileBinding = this.getResidentWorldProfileBinding(
+        residentWorldProfileBindingId(bindingRow.binding_id),
+      );
+      if (!residentProfileBinding) {
+        throw new Error('resident dark request world profile binding disappeared');
+      }
+      const profileHead = this.getSystemProfileHead(
+        targetWorldId,
+        activation.epoch,
+      );
+      if (
+        !profileHead ||
+        profileHead.profileId !== residentProfileBinding.profileId ||
+        profileHead.revision !== residentProfileBinding.profileHeadRevision
+      ) {
+        throw new Error(
+          'resident dark request assembly requires the accepted world profile head',
+        );
+      }
+      const projection = this.getEventMessageProjectionForSource(
+        currentEventId,
+        1,
+      );
+      if (!projection || projection.worldId !== targetWorldId) {
+        throw new Error(
+          'resident dark request assembly requires the current text projection',
+        );
+      }
+      const generationRow = this.database
+        .prepare(
+          `SELECT queue_generation, first_admissible_sequence, activation_epoch
+           FROM context_dark_ingress_generations
+           ORDER BY queue_generation DESC LIMIT 1`,
+        )
+        .get() as DarkIngressGenerationRow | undefined;
+      if (!generationRow) {
+        throw new Error('resident dark request ingress generation is unavailable');
+      }
+      const queue = mapDarkIngressGeneration(generationRow);
+      if (
+        queue.activationEpoch !== activation.epoch ||
+        currentSequence < queue.firstAdmissibleSequence
+      ) {
+        throw new Error('resident dark request ingress generation is stale');
+      }
+      const existingAdmission = this.getDarkIngressAdmission(currentEventId);
+      if (existingAdmission) {
+        const replay = this.rereadResidentCurrentWorldDarkRequest({
+          worldId: targetWorldId,
+          currentEvent,
+          branchId: input.branchId,
+          maxEvents,
+          activationEpoch: activation.epoch,
+          queueGeneration: queue.queueGeneration,
+          residentProfileBinding,
+          admission: existingAdmission,
+        });
+        if (!replay) {
+          throw new Error(
+            'resident dark request current event was already admitted by another path',
+          );
+        }
+        return finish(replay);
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_ingress_admissions(
+             event_id, world_id, source_sequence, activation_epoch,
+             queue_generation, wake_class, message_renderer_generation,
+             admitted_at
+           ) VALUES (?, ?, ?, ?, ?, 'text_user_turn', ?, ?)`,
+        )
+        .run(
+          currentEvent.eventId,
+          currentEvent.worldId,
+          currentEvent.sequence,
+          activation.epoch,
+          queue.queueGeneration,
+          projection.rendererGeneration,
+          assembledAt,
+        );
+      const admission = this.getDarkIngressAdmission(currentEventId);
+      if (!admission) {
+        throw new Error('resident dark request admission was not persisted');
+      }
+      const inspection = this.inspectNextDarkPendingBatch({
+        expectedActivationEpoch: activation.epoch,
+        queueGeneration: queue.queueGeneration,
+        maxEvents,
+      });
+      if (inspection.status !== 'ready' || inspection.items.length < 1) {
+        throw new Error(
+          `resident dark request frontier is not ready: ${inspection.status}`,
+        );
+      }
+      const last = inspection.items[inspection.items.length - 1]!;
+      if (
+        inspection.worldId !== targetWorldId ||
+        last.eventId !== currentEventId ||
+        last.sourceSequence !== currentSequence
+      ) {
+        throw new Error(
+          'resident dark request frontier does not terminate at the current ingress',
+        );
+      }
+      const head = this.getContinuationHead();
+      const assembly = this.assembleDarkLocalBranchRecordsInTransaction(
+        {
+          expectedActivationEpoch: activation.epoch,
+          expectedHeadRevision: head.revision,
+          worldId: targetWorldId,
+          branchId: input.branchId,
+          messageProjectionIds: inspection.items.map((item) => item.projectionId),
+          assembledAt,
+        },
+        activation.epoch,
+        head.revision,
+        assembledAt,
+      );
+      if (
+        assembly.profileBinding.binding.profileId !==
+          residentProfileBinding.profileId ||
+        assembly.profileBinding.binding.profileHeadRevision !==
+          residentProfileBinding.profileHeadRevision
+      ) {
+        throw new Error('resident dark request profile binding changed during assembly');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_pending_branch_attempts(
+             branch_id, world_id, request_view_id, activation_epoch,
+             queue_generation, max_events, selected_count,
+             first_source_sequence, last_source_sequence, assembled_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          assembly.branch.branchId,
+          assembly.branch.worldId,
+          assembly.requestView.requestViewId,
+          activation.epoch,
+          queue.queueGeneration,
+          maxEvents,
+          inspection.items.length,
+          inspection.items[0]!.sourceSequence,
+          last.sourceSequence,
+          assembledAt,
+        );
+      const attempt = this.getDarkPendingBranchAttempt(
+        assembly.branch.branchId,
+      );
+      if (!attempt) {
+        throw new Error('resident dark request attempt was not persisted');
+      }
+      return finish({
+        currentEvent,
+        admission,
+        residentProfileBinding,
+        attempt,
+        assembly,
+      });
+    });
   }
 
   assembleNextDarkPendingBranchRecords(input: {

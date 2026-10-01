@@ -8,6 +8,7 @@ export type ResidentIdentitySystemDerivationAction = (
 export type ResidentWorldProfileBindingAction = (
   derivationId: string,
 ) => string;
+export type ResidentDarkRequestAssemblyAction = () => string;
 
 const actions = new WeakMap<RunScope, ResidentSourceInspectionAction>();
 const authorizationActions = new WeakMap<
@@ -21,6 +22,10 @@ const derivationActions = new WeakMap<
 const worldProfileBindingActions = new WeakMap<
   RunScope,
   ResidentWorldProfileBindingAction
+>();
+const darkRequestAssemblyActions = new WeakMap<
+  RunScope,
+  ResidentDarkRequestAssemblyAction
 >();
 
 export function bindResidentSourceInspectionAction(
@@ -84,4 +89,20 @@ export function residentWorldProfileBindingActionForScope(
   scope: RunScope,
 ): ResidentWorldProfileBindingAction | undefined {
   return worldProfileBindingActions.get(scope);
+}
+
+export function bindResidentDarkRequestAssemblyAction(
+  scope: RunScope,
+  action: ResidentDarkRequestAssemblyAction,
+): void {
+  if (darkRequestAssemblyActions.has(scope)) {
+    throw new Error('resident dark request assembly: run scope is already bound');
+  }
+  darkRequestAssemblyActions.set(scope, action);
+}
+
+export function residentDarkRequestAssemblyActionForScope(
+  scope: RunScope,
+): ResidentDarkRequestAssemblyAction | undefined {
+  return darkRequestAssemblyActions.get(scope);
 }

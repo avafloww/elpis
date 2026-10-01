@@ -827,6 +827,10 @@ Derivation is still **not** profiling or activation. It creates no world, profil
 
 The bound profile remains dark and non-runnable. This action creates no branch, request view, provider request, effect authority, activation, or continuation change; direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
 
+\`elpis.context.assembleCurrentWorldDarkRequest()\` atomically assembles the first complete provider-neutral request candidate for the exact wake-defining Discord or Signal ingress captured by this live resident \`run\`. It accepts no arguments and cannot be retargeted. The action requires dark graph mode, that exact immutable social event and renderer-1 text projection, the accepted current-world profile/head, and a globally earliest admitted pending prefix that terminates at the captured event. It admits only that event, creates one profile-bound branch, manifest, non-runnable request view, and recoverable pending attempt, then returns bounded exact metadata plus the complete canonical candidate. Exact same-call retry rereads the stored candidate; presentation overflow or secret-redaction changes roll the whole transaction back.
+
+Assembly is still dark observation, not execution. It performs no provider dispatch, tool/effect issuance, capsule creation, activation, or continuation advance. A successful assembly intentionally leaves one running dark branch for explicit recovery or later branch-lifecycle work; direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
+
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):
 \`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it. A Signal \`<reply-to source="signal-quote">\` is bounded sender-embedded context, not independently fetched proof of the original message.

@@ -50,6 +50,10 @@ function fixture(
       scope: ResidentCurrentWorldScopeV1,
       snapshot: ResidentToolCallSnapshotV1,
     ) => string;
+    residentDarkRequestAssembler?: (
+      scope: ResidentCurrentWorldScopeV1,
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
   } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-manager-'));
@@ -126,6 +130,7 @@ function fixture(
     residentSourceAuthorizer: opts.residentSourceAuthorizer,
     residentIdentitySystemDeriver: opts.residentIdentitySystemDeriver,
     residentWorldProfileBinder: opts.residentWorldProfileBinder,
+    residentDarkRequestAssembler: opts.residentDarkRequestAssembler,
   });
   return {
     dir,
@@ -1194,6 +1199,81 @@ test('resident world profile binding is active-run-only and captures current ing
     assert.equal(inherited.ok, false);
     assert.match(inherited.error ?? '', /active resident run/);
     assert.equal(bindings.length, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test('resident dark request assembly is zero-argument, active-run-only, and current-world scoped', async () => {
+  const authority = createResidentRunAuthority();
+  const assemblies: Array<{
+    scope: ResidentCurrentWorldScopeV1;
+    snapshot: ResidentToolCallSnapshotV1;
+  }> = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentDarkRequestAssembler: (scope, snapshot) => {
+      assemblies.push({ scope, snapshot });
+      return 'CURRENT WORLD DARK REQUEST ASSEMBLED — NON-RUNNABLE';
+    },
+  });
+  try {
+    const code = 'elpis.context.assembleCurrentWorldDarkRequest()';
+    const direct = await f.manager.run({ code });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+
+    const unrouted = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(unrouted.ok, false);
+    assert.match(unrouted.error ?? '', /no routed social ingress lineage/);
+    assert.equal(assemblies.length, 0);
+
+    const routedScope = {
+      worldId: worldId('world:signal:dark-request-current'),
+      eventId: eventId('event:dark-request-current'),
+      sequence: 9,
+    };
+    f.deps.inbound = {
+      wakeClass: 'wake',
+      contextGraphLineage: routedScope,
+    } as SandboxDeps['inbound'];
+    const routed = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(routed.ok, true);
+    assert.match(routed.preview ?? '', /CURRENT WORLD DARK REQUEST ASSEMBLED/);
+    assert.equal(assemblies.length, 1);
+    assert.deepEqual(assemblies[0]?.scope, routedScope);
+    assert.notEqual(assemblies[0]?.scope, routedScope);
+    assert.equal(assemblies[0]?.snapshot.toolName, 'run');
+
+    const withArgument = await f.manager.run({
+      code: 'elpis.context.assembleCurrentWorldDarkRequest("retarget")',
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(withArgument.ok, false);
+    assert.match(withArgument.error ?? '', /no arguments are accepted/);
+    assert.equal(assemblies.length, 1);
+
+    f.deps.inbound = {
+      wakeClass: 'ambient',
+      contextGraphLineage: {
+        worldId: worldId('world:discord:dark-request-ambient'),
+        eventId: eventId('event:dark-request-ambient'),
+        sequence: 10,
+      },
+    } as SandboxDeps['inbound'];
+    const ambient = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(ambient.ok, false);
+    assert.match(ambient.error ?? '', /no routed social ingress lineage/);
+    assert.equal(assemblies.length, 1);
   } finally {
     f.close();
   }
