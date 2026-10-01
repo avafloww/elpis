@@ -823,6 +823,10 @@ Source authorization still does **not** create a system-layer approval, profile,
 
 Derivation is still **not** profiling or activation. It creates no world, profile/head, branch, request view, provider request, effect authority, activation, or continuation change.
 
+\`elpis.context.bindCurrentWorldProfile(derivationId)\` binds the accepted identity derivation to the exact first wake-defining social ingress captured when this live resident \`run\` was accepted. It accepts only the canonical derivation ID; world, event, sequence, profile, and head are not caller-supplied. The action requires dark graph mode, an immutable Discord or Signal world event matching that captured lineage, the current derivation, a later distinct resident batch, and no preexisting profile/head or binding for the target world. One transaction creates a contract-and-identity-only \`SystemProfileV1\`, revision-one world profile head, and immutable binding receipt. Exact same-call retry is idempotent, and presentation or secret-redaction failure rolls the whole transaction back.
+
+The bound profile remains dark and non-runnable. This action creates no branch, request view, provider request, effect authority, activation, or continuation change; direct, restored, inherited, detached, closed, ambient-only, unlineaged, synthetic, and worker runs cannot use it.
+
 ### \`elpis.inbound\`
 The external message currently being processed (or \`null\` between wakes):
 \`{ id, transport?, channelId, channelName, guildId?, guildSlug?, author, authorId, content, createdAt, replyTo, forwarded, mentions, attachments }\`. Signal direct messages carry \`transport: "signal"\`; Discord omits it. A Signal \`<reply-to source="signal-quote">\` is bounded sender-embedded context, not independently fetched proof of the original message.

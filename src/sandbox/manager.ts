@@ -19,6 +19,7 @@ import type {
 } from '../kernel/resident-run-provenance.js';
 import { transform } from './transform.js';
 import type { SandboxRegistration, SandboxRegistry } from './registry.js';
+import type { ResidentCurrentWorldScopeV1 } from '../context/resident-world-profile-binding.js';
 import {
   adviseWake as chooseWakeAdvice,
   snapshotWakeAdvisorState,
@@ -55,6 +56,11 @@ export interface SandboxManagerOptions {
     authorizationId: string,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  residentWorldProfileBinder?: (
+    derivationId: string,
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
 }
 
 type LiveContext = { sandbox: Sandbox; generation: number };
@@ -80,6 +86,18 @@ function hasSubstance(code: string): boolean {
   );
 }
 
+function snapshotResidentCurrentWorldScope(
+  inbound: SandboxDeps['inbound'],
+): ResidentCurrentWorldScopeV1 | undefined {
+  const lineage = inbound?.contextGraphLineage;
+  if (!lineage || inbound?.wakeClass === 'ambient') return undefined;
+  return Object.freeze({
+    worldId: lineage.worldId,
+    eventId: lineage.eventId,
+    sequence: lineage.sequence,
+  });
+}
+
 class ResidentRunLease {
   readonly binding: SandboxResidentRunLifecycle;
   private state: 'active' | 'detached' | 'closed' = 'active';
@@ -95,6 +113,14 @@ class ResidentRunLease {
     private readonly deriver:
       | ((authorizationId: string, snapshot: ResidentToolCallSnapshotV1) => string)
       | undefined,
+    private readonly worldProfileBinder:
+      | ((
+          derivationId: string,
+          scope: ResidentCurrentWorldScopeV1,
+          snapshot: ResidentToolCallSnapshotV1,
+        ) => string)
+      | undefined,
+    private readonly currentWorldScope: ResidentCurrentWorldScopeV1 | undefined,
     private readonly onClose: () => void,
   ) {
     this.binding = Object.freeze({
@@ -104,6 +130,8 @@ class ResidentRunLease {
         this.authorizeIdentityCandidate(candidateId),
       deriveAuthorizedIdentityLayers: (authorizationId: string) =>
         this.deriveAuthorizedIdentityLayers(authorizationId),
+      bindCurrentWorldProfile: (derivationId: string) =>
+        this.bindCurrentWorldProfile(derivationId),
       detach: () => this.detach(),
       settled: () => this.close(),
     });
@@ -162,6 +190,34 @@ class ResidentRunLease {
     if (typeof result !== 'string') {
       throw new Error(
         'resident identity derivation: recorder returned a non-string result',
+      );
+    }
+    return result;
+  }
+
+  bindCurrentWorldProfile(derivationId: string): string {
+    const snapshot = this.verifier.resolveActive(this.handle);
+    if (snapshot.toolName !== 'run') {
+      throw new Error(
+        `resident world profile binding: provenance is for ${snapshot.toolName}, not run`,
+      );
+    }
+    if (!this.worldProfileBinder) {
+      throw new Error('resident world profile binding: binder is not configured');
+    }
+    if (!this.currentWorldScope) {
+      throw new Error(
+        'resident world profile binding: current run has no routed social ingress lineage',
+      );
+    }
+    const result = this.worldProfileBinder(
+      derivationId,
+      this.currentWorldScope,
+      snapshot,
+    );
+    if (typeof result !== 'string') {
+      throw new Error(
+        'resident world profile binding: binder returned a non-string result',
       );
     }
     return result;
@@ -234,6 +290,11 @@ export class SandboxManager {
     authorizationId: string,
     snapshot: ResidentToolCallSnapshotV1,
   ) => string;
+  private readonly residentWorldProfileBinder?: (
+    derivationId: string,
+    scope: ResidentCurrentWorldScopeV1,
+    snapshot: ResidentToolCallSnapshotV1,
+  ) => string;
   private readonly residentRunLeases = new Set<ResidentRunLease>();
   private readonly residentDetachedLeases = new Map<string, ResidentRunLease>();
   private readonly contexts = new Map<string, LiveContext>();
@@ -256,6 +317,7 @@ export class SandboxManager {
     this.residentSourceAuthorizer = options.residentSourceAuthorizer;
     this.residentIdentitySystemDeriver =
       options.residentIdentitySystemDeriver;
+    this.residentWorldProfileBinder = options.residentWorldProfileBinder;
     this.stopFutureTerminal =
       this.deps.bg?.onFutureTerminal((id) => {
         const residentRun = this.residentDetachedLeases.get(id);
@@ -425,6 +487,8 @@ export class SandboxManager {
       this.residentSourceInspector,
       this.residentSourceAuthorizer,
       this.residentIdentitySystemDeriver,
+      this.residentWorldProfileBinder,
+      snapshotResidentCurrentWorldScope(this.deps.inbound),
       () => this.releaseResidentRunLease(lease),
     );
     this.residentRunLeases.add(lease);

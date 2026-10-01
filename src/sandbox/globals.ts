@@ -68,6 +68,7 @@ import {
   residentIdentitySystemDerivationActionForScope,
   residentSourceAuthorizationActionForScope,
   residentSourceInspectionActionForScope,
+  residentWorldProfileBindingActionForScope,
 } from '../kernel/resident-source-inspection-scope.js';
 
 
@@ -508,6 +509,26 @@ export function buildGlobals(deps: SandboxDeps): Record<string, unknown> {
         );
       }
       return derive(args[0]);
+    },
+    bindCurrentWorldProfile: (...args: unknown[]) => {
+      if (
+        args.length !== 1 ||
+        typeof args[0] !== 'string' ||
+        !/^resident-identity-derivation:[0-9a-f]{64}$/.test(args[0])
+      ) {
+        throw new Error(
+          'elpis.context.bindCurrentWorldProfile: exactly one canonical derivation ID is required',
+        );
+      }
+      const scope = runScope.getStore();
+      const bind =
+        scope && residentWorldProfileBindingActionForScope(scope);
+      if (!bind) {
+        throw new Error(
+          'elpis.context.bindCurrentWorldProfile: unavailable without an active resident run',
+        );
+      }
+      return bind(args[0]);
     },
   };
 

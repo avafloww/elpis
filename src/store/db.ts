@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 45;
+const SCHEMA_VERSION = 46;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -3631,6 +3631,146 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_resident_identity_system_derivations_no_delete
           BEFORE DELETE ON context_resident_identity_system_derivations BEGIN
             SELECT RAISE(ABORT, 'resident identity system derivations are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0046-context-resident-world-profile-bindings',
+      sql: `
+        CREATE TABLE context_resident_world_profile_bindings (
+          binding_id                    TEXT PRIMARY KEY
+            CHECK (length(binding_id) = 95
+              AND binding_id GLOB 'resident-world-profile-binding:*'
+              AND substr(binding_id, 32) NOT GLOB '*[^0-9a-f]*'),
+          schema_version                INTEGER NOT NULL CHECK (schema_version = 1),
+          binding_kind                  TEXT NOT NULL
+            CHECK (binding_kind = 'resident_current_world_profile'),
+          activation_epoch              INTEGER NOT NULL
+            CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          derivation_id                 TEXT NOT NULL,
+          world_id                      TEXT NOT NULL,
+          ingress_event_id              TEXT NOT NULL,
+          ingress_sequence              INTEGER NOT NULL
+            CHECK (typeof(ingress_sequence) = 'integer' AND ingress_sequence >= 1),
+          profile_id                    TEXT NOT NULL UNIQUE,
+          profile_hash                  TEXT NOT NULL
+            CHECK (length(profile_hash) = 64
+              AND profile_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_head_revision         INTEGER NOT NULL CHECK (profile_head_revision = 1),
+          predecessor_profile_id        TEXT CHECK (predecessor_profile_id IS NULL),
+          bind_batch_id                 TEXT NOT NULL
+            CHECK (length(bind_batch_id) = 56
+              AND bind_batch_id GLOB 'resident-tool-batch:*'),
+          bind_batch_sha256             TEXT NOT NULL
+            CHECK (length(bind_batch_sha256) = 64
+              AND bind_batch_sha256 NOT GLOB '*[^0-9a-f]*'),
+          bind_call_index               INTEGER NOT NULL
+            CHECK (typeof(bind_call_index) = 'integer' AND bind_call_index >= 0),
+          bind_call_count               INTEGER NOT NULL
+            CHECK (typeof(bind_call_count) = 'integer'
+              AND bind_call_count >= 1 AND bind_call_count <= 64
+              AND bind_call_index < bind_call_count),
+          bind_tool_name                TEXT NOT NULL CHECK (bind_tool_name = 'run'),
+          bind_arguments_sha256         TEXT NOT NULL
+            CHECK (length(bind_arguments_sha256) = 64
+              AND bind_arguments_sha256 NOT GLOB '*[^0-9a-f]*'),
+          bound_at                      INTEGER NOT NULL
+            CHECK (typeof(bound_at) = 'integer' AND bound_at >= 0),
+          UNIQUE (activation_epoch, world_id),
+          UNIQUE (bind_batch_id, bind_call_index),
+          FOREIGN KEY (derivation_id)
+            REFERENCES context_resident_identity_system_derivations(derivation_id) ON DELETE RESTRICT,
+          FOREIGN KEY (ingress_event_id)
+            REFERENCES context_world_events(event_id) ON DELETE RESTRICT,
+          FOREIGN KEY (profile_id)
+            REFERENCES context_system_profiles(profile_id) ON DELETE RESTRICT,
+          FOREIGN KEY (world_id, activation_epoch, profile_head_revision)
+            REFERENCES context_system_profile_advances(world_id, activation_epoch, revision) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_resident_world_profile_bindings_identity_conflict
+          BEFORE INSERT ON context_resident_world_profile_bindings
+          WHEN EXISTS (
+            SELECT 1 FROM context_resident_world_profile_bindings
+            WHERE binding_id = NEW.binding_id
+               OR profile_id = NEW.profile_id
+               OR (activation_epoch = NEW.activation_epoch AND world_id = NEW.world_id)
+               OR (bind_batch_id = NEW.bind_batch_id AND bind_call_index = NEW.bind_call_index)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident world profile binding identity conflict');
+          END;
+
+        CREATE TRIGGER context_resident_world_profile_bindings_lineage_guard
+          BEFORE INSERT ON context_resident_world_profile_bindings
+          WHEN NOT EXISTS (
+            SELECT 1 FROM context_graph_activation
+            WHERE singleton = 1 AND mode = 'dark' AND epoch = NEW.activation_epoch
+          ) OR NEW.world_id IN ('world:internal', 'world:console', 'world:legacy-unscoped')
+          OR NOT EXISTS (
+            SELECT 1
+            FROM context_resident_identity_system_derivations d
+            JOIN context_resident_source_candidate_authorizations a
+              ON a.authorization_id = d.authorization_id
+            JOIN context_resident_source_inspection_candidates c
+              ON c.candidate_id = a.candidate_id
+            WHERE d.derivation_id = NEW.derivation_id
+              AND d.activation_epoch = NEW.activation_epoch
+              AND d.derive_batch_id <> NEW.bind_batch_id
+              AND a.authorize_batch_id <> NEW.bind_batch_id
+              AND c.inspect_batch_id <> NEW.bind_batch_id
+              AND d.derived_at <= NEW.bound_at
+              AND NOT EXISTS (
+                SELECT 1 FROM context_resident_identity_system_derivations later
+                WHERE later.activation_epoch = d.activation_epoch
+                  AND later.authority_revision > d.authority_revision
+              )
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_world_events e
+            JOIN context_resident_identity_system_derivations d
+              ON d.derivation_id = NEW.derivation_id
+            WHERE e.event_id = NEW.ingress_event_id
+              AND e.sequence = NEW.ingress_sequence
+              AND e.world_id = NEW.world_id
+              AND e.event_kind IN ('inbound:discord', 'inbound:signal')
+              AND e.recorded_at <= NEW.bound_at
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM context_system_profiles p
+            JOIN context_resident_identity_system_derivations d
+              ON d.derivation_id = NEW.derivation_id
+            WHERE p.profile_id = NEW.profile_id
+              AND p.profile_hash = NEW.profile_hash
+              AND p.world_id = NEW.world_id
+              AND p.activation_epoch = NEW.activation_epoch
+              AND p.scoped_runtime_contract_approval_id = d.contract_approval_id
+              AND p.identity_approval_id = d.identity_approval_id
+              AND p.integrated_self_approval_id IS NULL
+              AND p.world_policy_approval_id IS NULL
+              AND p.created_at = NEW.bound_at
+          ) OR NOT EXISTS (
+            SELECT 1 FROM context_system_profile_advances h
+            WHERE h.world_id = NEW.world_id
+              AND h.activation_epoch = NEW.activation_epoch
+              AND h.revision = NEW.profile_head_revision
+              AND h.revision = 1
+              AND h.predecessor_profile_id IS NEW.predecessor_profile_id
+              AND h.predecessor_profile_id IS NULL
+              AND h.profile_id = NEW.profile_id
+              AND h.advanced_at = NEW.bound_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'resident world profile binding lineage is invalid');
+          END;
+
+        CREATE TRIGGER context_resident_world_profile_bindings_no_update
+          BEFORE UPDATE ON context_resident_world_profile_bindings BEGIN
+            SELECT RAISE(ABORT, 'resident world profile bindings are immutable');
+          END;
+        CREATE TRIGGER context_resident_world_profile_bindings_no_delete
+          BEFORE DELETE ON context_resident_world_profile_bindings BEGIN
+            SELECT RAISE(ABORT, 'resident world profile bindings are immutable');
           END;
       `,
     },

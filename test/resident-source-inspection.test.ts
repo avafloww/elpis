@@ -6,7 +6,9 @@ import * as path from 'node:path';
 import { openDatabase } from '../src/store/db.js';
 import {
   ContextGraphStore,
+  eventId,
   hashContextBytes,
+  worldId,
 } from '../src/store/context-graph.js';
 import {
   createResidentSourceInspectionRecorder,
@@ -14,6 +16,7 @@ import {
 } from '../src/context/resident-source-inspection.js';
 import { createResidentSourceCandidateAuthorizer } from '../src/context/resident-source-authorization.js';
 import { createResidentIdentitySystemDeriver } from '../src/context/resident-identity-system-derivation.js';
+import { createResidentWorldProfileBinder } from '../src/context/resident-world-profile-binding.js';
 import { preview } from '../src/sandbox/preview.js';
 
 function provenance(suffix: string) {
@@ -59,6 +62,12 @@ function fixture(
     redactForOutput,
     now: () => 300,
   });
+  const bind = createResidentWorldProfileBinder({
+    store,
+    previewMaxBytes,
+    redactForOutput,
+    now: () => 500,
+  });
   return {
     directory,
     database,
@@ -67,6 +76,7 @@ function fixture(
     inspect,
     authorize,
     derive,
+    bind,
     close() {
       database.close();
       fs.rmSync(directory, { recursive: true, force: true });
@@ -199,6 +209,15 @@ function inspectedCandidateId(result: string): string {
 function authorizedSourceId(result: string): string {
   const match =
     /^authorization_id: (resident-source-authorization:[0-9a-f]{64})$/m.exec(
+      result,
+    );
+  assert.ok(match);
+  return match[1];
+}
+
+function identityDerivationId(result: string): string {
+  const match =
+    /^derivation_id: (resident-identity-derivation:[0-9a-f]{64})$/m.exec(
       result,
     );
   assert.ok(match);
@@ -385,6 +404,135 @@ test('resident identity derivation rolls back exact presentation redaction', () 
     assert.deepEqual(
       { ...counts },
       { derivations: 0, layers: 0, approvals: 0 },
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('resident world profile binding presents an exact dark receipt', () => {
+  const value = fixture('# Synthetic soul\nsmall exact body\n');
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('30')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('31')),
+    );
+    const derivationId = identityDerivationId(
+      value.derive(authorizationId, provenance('32')),
+    );
+    const targetWorldId = worldId('world:signal:synthetic-binding');
+    const ingress = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-binding'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { synthetic: true },
+      occurredAt: 400,
+      recordedAt: 400,
+    });
+    const result = value.bind(
+      derivationId,
+      {
+        worldId: targetWorldId,
+        eventId: ingress.eventId,
+        sequence: ingress.sequence,
+      },
+      provenance('33'),
+    );
+    assert.match(
+      result,
+      /^CURRENT WORLD SYSTEM PROFILE BOUND — DARK AND NON-RUNNABLE/m,
+    );
+    assert.match(result, new RegExp(`derivation_id: ${derivationId}`));
+    assert.match(result, new RegExp(`world_id: ${targetWorldId}`));
+    assert.match(result, new RegExp(`ingress_event_id: ${ingress.eventId}`));
+    assert.match(result, /creates no branch, request view, provider request/);
+    assert.equal(
+      preview(result, 16_384),
+      `string(${result.length} chars):\n${result}`,
+    );
+    assert.equal(
+      value.bind(
+        derivationId,
+        {
+          worldId: targetWorldId,
+          eventId: ingress.eventId,
+          sequence: ingress.sequence,
+        },
+        provenance('33'),
+      ),
+      result,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_world_profile_bindings) AS bindings,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_system_profile_advances) AS heads,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_effects) AS effects,
+           (SELECT count(*) FROM context_continuation_advances) AS advances`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      { bindings: 1, profiles: 1, heads: 1, branches: 0, effects: 0, advances: 0 },
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('resident world profile binding rolls back exact presentation redaction', () => {
+  const value = fixture(
+    '# Synthetic soul\n',
+    16_384,
+    (text) =>
+      text.replace(
+        'CURRENT WORLD SYSTEM PROFILE BOUND',
+        '[SECRET REDACTED] WORLD SYSTEM PROFILE',
+      ),
+  );
+  try {
+    const candidateId = inspectedCandidateId(value.inspect(provenance('34')));
+    const authorizationId = authorizedSourceId(
+      value.authorize(candidateId, provenance('35')),
+    );
+    const derivationId = identityDerivationId(
+      value.derive(authorizationId, provenance('36')),
+    );
+    const targetWorldId = worldId('world:discord:synthetic-binding');
+    const ingress = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-binding-redaction'),
+      worldId: targetWorldId,
+      kind: 'inbound:discord',
+      payload: { synthetic: true },
+      occurredAt: 400,
+      recordedAt: 400,
+    });
+    assert.throws(
+      () =>
+        value.bind(
+          derivationId,
+          {
+            worldId: targetWorldId,
+            eventId: ingress.eventId,
+            sequence: ingress.sequence,
+          },
+          provenance('37'),
+        ),
+      /secret redaction would alter it/,
+    );
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_world_profile_bindings) AS bindings,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_system_profile_advances) AS heads`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      { bindings: 0, profiles: 0, heads: 0 },
     );
   } finally {
     value.close();

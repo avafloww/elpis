@@ -5,6 +5,9 @@ export type ResidentSourceAuthorizationAction = (candidateId: string) => string;
 export type ResidentIdentitySystemDerivationAction = (
   authorizationId: string,
 ) => string;
+export type ResidentWorldProfileBindingAction = (
+  derivationId: string,
+) => string;
 
 const actions = new WeakMap<RunScope, ResidentSourceInspectionAction>();
 const authorizationActions = new WeakMap<
@@ -14,6 +17,10 @@ const authorizationActions = new WeakMap<
 const derivationActions = new WeakMap<
   RunScope,
   ResidentIdentitySystemDerivationAction
+>();
+const worldProfileBindingActions = new WeakMap<
+  RunScope,
+  ResidentWorldProfileBindingAction
 >();
 
 export function bindResidentSourceInspectionAction(
@@ -61,4 +68,20 @@ export function residentIdentitySystemDerivationActionForScope(
   scope: RunScope,
 ): ResidentIdentitySystemDerivationAction | undefined {
   return derivationActions.get(scope);
+}
+
+export function bindResidentWorldProfileBindingAction(
+  scope: RunScope,
+  action: ResidentWorldProfileBindingAction,
+): void {
+  if (worldProfileBindingActions.has(scope)) {
+    throw new Error('resident world profile binding: run scope is already bound');
+  }
+  worldProfileBindingActions.set(scope, action);
+}
+
+export function residentWorldProfileBindingActionForScope(
+  scope: RunScope,
+): ResidentWorldProfileBindingAction | undefined {
+  return worldProfileBindingActions.get(scope);
 }

@@ -26,6 +26,7 @@ import {
   bindResidentIdentitySystemDerivationAction,
   bindResidentSourceAuthorizationAction,
   bindResidentSourceInspectionAction,
+  bindResidentWorldProfileBindingAction,
 } from '../kernel/resident-source-inspection-scope.js';
 
 
@@ -41,6 +42,7 @@ export interface SandboxResidentRunLifecycle {
   inspectIdentityCandidate(): string;
   authorizeIdentityCandidate(candidateId: string): string;
   deriveAuthorizedIdentityLayers(authorizationId: string): string;
+  bindCurrentWorldProfile(derivationId: string): string;
   detach(): void;
   settled(): void;
 }
@@ -183,6 +185,10 @@ export function createSandbox(deps: SandboxDeps): Sandbox {
       bindResidentIdentitySystemDerivationAction(
         scope,
         options.residentRun.deriveAuthorizedIdentityLayers,
+      );
+      bindResidentWorldProfileBindingAction(
+        scope,
+        options.residentRun.bindCurrentWorldProfile,
       );
     }
     return runScope.run(scope, () => runInScope(code, scope, options));

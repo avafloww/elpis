@@ -15,6 +15,7 @@ import {
 } from '../src/sandbox/globals.js';
 import { runMigrations } from '../src/store/db.js';
 import { MindService } from '../src/store/mind.js';
+import { eventId, worldId } from '../src/store/context-graph.js';
 import { noopLogger } from '../src/lib/log.js';
 import { makeConfig } from './helpers.js';
 import type { SandboxDeps } from '../src/types.js';
@@ -26,6 +27,7 @@ import {
   type ResidentToolCallSnapshotV1,
 } from '../src/kernel/resident-run-provenance.js';
 import { residentRunHandleForScope } from '../src/kernel/resident-run-scope.js';
+import type { ResidentCurrentWorldScopeV1 } from '../src/context/resident-world-profile-binding.js';
 
 function fixture(
   opts: {
@@ -41,6 +43,11 @@ function fixture(
     ) => string;
     residentIdentitySystemDeriver?: (
       authorizationId: string,
+      snapshot: ResidentToolCallSnapshotV1,
+    ) => string;
+    residentWorldProfileBinder?: (
+      derivationId: string,
+      scope: ResidentCurrentWorldScopeV1,
       snapshot: ResidentToolCallSnapshotV1,
     ) => string;
   } = {},
@@ -118,6 +125,7 @@ function fixture(
     residentSourceInspector: opts.residentSourceInspector,
     residentSourceAuthorizer: opts.residentSourceAuthorizer,
     residentIdentitySystemDeriver: opts.residentIdentitySystemDeriver,
+    residentWorldProfileBinder: opts.residentWorldProfileBinder,
   });
   return {
     dir,
@@ -1109,6 +1117,83 @@ test('resident identity derivation is active-run-only and receives exact live pr
     assert.equal(inherited.ok, false);
     assert.match(inherited.error ?? '', /active resident run/);
     assert.equal(derivations.length, 2);
+  } finally {
+    f.close();
+  }
+});
+
+const SYNTHETIC_DERIVATION_ID = `resident-identity-derivation:${'c'.repeat(64)}`;
+
+test('resident world profile binding is active-run-only and captures current ingress lineage', async () => {
+  const authority = createResidentRunAuthority();
+  const bindings: Array<{
+    derivationId: string;
+    scope: ResidentCurrentWorldScopeV1;
+    snapshot: ResidentToolCallSnapshotV1;
+  }> = [];
+  const f = fixture({
+    residentRunVerifier: authority.verifier,
+    residentWorldProfileBinder: (derivationId, scope, snapshot) => {
+      bindings.push({ derivationId, scope, snapshot });
+      return 'CURRENT WORLD SYSTEM PROFILE BOUND — DARK AND NON-RUNNABLE';
+    },
+  });
+  try {
+    const code = `elpis.context.bindCurrentWorldProfile('${SYNTHETIC_DERIVATION_ID}')`;
+    const direct = await f.manager.run({ code });
+    assert.equal(direct.ok, false);
+    assert.match(direct.error ?? '', /active resident run/);
+
+    const unrouted = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(unrouted.ok, false);
+    assert.match(unrouted.error ?? '', /no routed social ingress lineage/);
+    assert.equal(bindings.length, 0);
+
+    const routedScope = {
+      worldId: worldId('world:signal:synthetic-current'),
+      eventId: eventId('event:synthetic-current'),
+      sequence: 7,
+    };
+    f.deps.inbound = {
+      wakeClass: 'wake',
+      contextGraphLineage: routedScope,
+    } as SandboxDeps['inbound'];
+    const routed = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(routed.ok, true);
+    assert.match(routed.preview ?? '', /CURRENT WORLD SYSTEM PROFILE BOUND/);
+    assert.equal(bindings.length, 1);
+    assert.equal(bindings[0]?.derivationId, SYNTHETIC_DERIVATION_ID);
+    assert.deepEqual(bindings[0]?.scope, routedScope);
+    assert.notEqual(bindings[0]?.scope, routedScope);
+    assert.equal(bindings[0]?.snapshot.toolName, 'run');
+
+    f.deps.inbound = {
+      wakeClass: 'ambient',
+      contextGraphLineage: {
+        worldId: worldId('world:discord:ambient'),
+        eventId: eventId('event:ambient'),
+        sequence: 8,
+      },
+    } as SandboxDeps['inbound'];
+    const ambient = await f.manager.run({
+      code,
+      residentRunToken: committedRunToken(authority),
+    });
+    assert.equal(ambient.ok, false);
+    assert.match(ambient.error ?? '', /no routed social ingress lineage/);
+    assert.equal(bindings.length, 1);
+
+    const item = f.mind.create({ title: 'resident profile binding' });
+    const inherited = await f.manager.run({ sandbox: item.id, code });
+    assert.equal(inherited.ok, false);
+    assert.match(inherited.error ?? '', /active resident run/);
+    assert.equal(bindings.length, 1);
   } finally {
     f.close();
   }

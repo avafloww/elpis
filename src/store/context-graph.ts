@@ -48,6 +48,8 @@ export type SystemLayerProjectionId = ContextId<'SystemLayerProjectionId'>;
 export type SystemLayerApprovalId = ContextId<'SystemLayerApprovalId'>;
 export type ResidentIdentitySystemDerivationId =
   ContextId<'ResidentIdentitySystemDerivationId'>;
+export type ResidentWorldProfileBindingId =
+  ContextId<'ResidentWorldProfileBindingId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -135,6 +137,14 @@ export const residentIdentitySystemDerivationId = (
     'residentIdentitySystemDerivationId',
     value,
     'resident-identity-derivation:',
+  );
+export const residentWorldProfileBindingId = (
+  value: string,
+): ResidentWorldProfileBindingId =>
+  branded<'ResidentWorldProfileBindingId'>(
+    'residentWorldProfileBindingId',
+    value,
+    'resident-world-profile-binding:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -708,6 +718,28 @@ export interface ResidentIdentitySystemDerivationV1 {
   readonly derivedAt: number;
 }
 
+export interface ResidentWorldProfileBindingV1 {
+  readonly bindingId: ResidentWorldProfileBindingId;
+  readonly schemaVersion: 1;
+  readonly bindingKind: 'resident_current_world_profile';
+  readonly activationEpoch: number;
+  readonly derivationId: ResidentIdentitySystemDerivationId;
+  readonly worldId: WorldId;
+  readonly ingressEventId: EventId;
+  readonly ingressSequence: number;
+  readonly profileId: SystemProfileId;
+  readonly profileHash: string;
+  readonly profileHeadRevision: 1;
+  readonly predecessorProfileId: null;
+  readonly bindBatchId: string;
+  readonly bindBatchSha256: string;
+  readonly bindCallIndex: number;
+  readonly bindCallCount: number;
+  readonly bindToolName: 'run';
+  readonly bindArgumentsSha256: string;
+  readonly boundAt: number;
+}
+
 export class StaleContinuationHeadError extends Error {
   constructor(expectedRevision: number) {
     super(`continuation head is not at revision ${expectedRevision}`);
@@ -879,6 +911,43 @@ function residentIdentitySystemDerivationIdentity(input: {
         deriveCallCount: input.provenance.callCount,
         deriveToolName: input.provenance.toolName,
         deriveArgumentsSha256: input.provenance.argumentsSha256,
+      }),
+    )}`,
+  );
+}
+
+function residentWorldProfileBindingIdentity(input: {
+  activationEpoch: number;
+  derivationId: ResidentIdentitySystemDerivationId;
+  worldId: WorldId;
+  ingressEventId: EventId;
+  ingressSequence: number;
+  profileId: SystemProfileId;
+  profileHash: string;
+  profileHeadRevision: 1;
+  predecessorProfileId: null;
+  provenance: ResidentToolCallSnapshotV1;
+}): ResidentWorldProfileBindingId {
+  return residentWorldProfileBindingId(
+    `resident-world-profile-binding:${hashContextBytes(
+      serialize({
+        schemaVersion: 1,
+        bindingKind: 'resident_current_world_profile',
+        activationEpoch: input.activationEpoch,
+        derivationId: input.derivationId,
+        worldId: input.worldId,
+        ingressEventId: input.ingressEventId,
+        ingressSequence: input.ingressSequence,
+        profileId: input.profileId,
+        profileHash: input.profileHash,
+        profileHeadRevision: input.profileHeadRevision,
+        predecessorProfileId: input.predecessorProfileId,
+        bindBatchId: input.provenance.batchId,
+        bindBatchSha256: input.provenance.batchSha256,
+        bindCallIndex: input.provenance.callIndex,
+        bindCallCount: input.provenance.callCount,
+        bindToolName: input.provenance.toolName,
+        bindArgumentsSha256: input.provenance.argumentsSha256,
       }),
     )}`,
   );
@@ -1765,6 +1834,28 @@ interface ResidentIdentitySystemDerivationRow {
   derived_at: number;
 }
 
+interface ResidentWorldProfileBindingRow {
+  binding_id: string;
+  schema_version: number;
+  binding_kind: string;
+  activation_epoch: number;
+  derivation_id: string;
+  world_id: string;
+  ingress_event_id: string;
+  ingress_sequence: number;
+  profile_id: string;
+  profile_hash: string;
+  profile_head_revision: number;
+  predecessor_profile_id: string | null;
+  bind_batch_id: string;
+  bind_batch_sha256: string;
+  bind_call_index: number;
+  bind_call_count: number;
+  bind_tool_name: string;
+  bind_arguments_sha256: string;
+  bound_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -2584,6 +2675,23 @@ function normalizeResidentIdentityDerivationProvenance(
   });
 }
 
+function normalizeResidentWorldProfileBindingProvenance(
+  input: ResidentToolCallSnapshotV1,
+): ResidentToolCallSnapshotV1 {
+  const provenance = normalizeResidentAuthorizationProvenance(input);
+  return Object.freeze({
+    ...provenance,
+    batchSha256: sha256(
+      'resident world profile binding batchSha256',
+      provenance.batchSha256,
+    ),
+    argumentsSha256: sha256(
+      'resident world profile binding argumentsSha256',
+      provenance.argumentsSha256,
+    ),
+  });
+}
+
 function mapResidentInspectionCandidate(
   row: ResidentSourceInspectionCandidateRow,
 ): ResidentSourceInspectionCandidateV1 {
@@ -2809,6 +2917,107 @@ function mapResidentIdentitySystemDerivation(
     deriveToolName: 'run',
     deriveArgumentsSha256: provenance.argumentsSha256,
     derivedAt,
+  });
+}
+
+function mapResidentWorldProfileBinding(
+  row: ResidentWorldProfileBindingRow,
+  derivation: ResidentIdentitySystemDerivationV1,
+  event: WorldEventRecord,
+  profile: SystemProfileRecord,
+): ResidentWorldProfileBindingV1 {
+  if (
+    row.schema_version !== 1 ||
+    row.binding_kind !== 'resident_current_world_profile' ||
+    row.derivation_id !== derivation.derivationId ||
+    row.activation_epoch !== derivation.activationEpoch ||
+    row.world_id !== event.worldId ||
+    row.ingress_event_id !== event.eventId ||
+    row.ingress_sequence !== event.sequence ||
+    !['inbound:discord', 'inbound:signal'].includes(event.kind) ||
+    row.profile_id !== profile.profileId ||
+    row.profile_hash !== profile.profileHash ||
+    profile.profile.worldId !== event.worldId ||
+    profile.profile.activationEpoch !== derivation.activationEpoch ||
+    profile.profile.approvals.scopedRuntimeContract !==
+      derivation.contractApprovalId ||
+    profile.profile.approvals.identity !== derivation.identityApprovalId ||
+    profile.profile.approvals.integratedSelf !== null ||
+    profile.profile.approvals.worldPolicy !== null ||
+    row.profile_head_revision !== 1 ||
+    row.predecessor_profile_id !== null
+  ) {
+    throw new Error('stored resident world profile binding is invalid');
+  }
+  const provenance = normalizeResidentWorldProfileBindingProvenance({
+    version: 1,
+    batchId: row.bind_batch_id,
+    batchSha256: row.bind_batch_sha256,
+    callIndex: row.bind_call_index,
+    callCount: row.bind_call_count,
+    toolName: row.bind_tool_name,
+    argumentsSha256: row.bind_arguments_sha256,
+  });
+  if (provenance.batchId === derivation.deriveBatchId) {
+    throw new Error(
+      'stored resident world profile binding reuses its derivation batch',
+    );
+  }
+  const activationEpoch = generation(
+    'resident world profile binding activationEpoch',
+    row.activation_epoch,
+  );
+  const ingressSequence = generation(
+    'resident world profile binding ingressSequence',
+    row.ingress_sequence,
+  );
+  const boundAt = timestamp(
+    'resident world profile binding boundAt',
+    row.bound_at,
+  );
+  if (
+    ingressSequence < 1 ||
+    boundAt < derivation.derivedAt ||
+    boundAt < event.recordedAt ||
+    profile.createdAt !== boundAt
+  ) {
+    throw new Error('stored resident world profile binding chronology is invalid');
+  }
+  const bindingId = residentWorldProfileBindingIdentity({
+    activationEpoch,
+    derivationId: derivation.derivationId,
+    worldId: event.worldId,
+    ingressEventId: event.eventId,
+    ingressSequence,
+    profileId: profile.profileId,
+    profileHash: profile.profileHash,
+    profileHeadRevision: 1,
+    predecessorProfileId: null,
+    provenance,
+  });
+  if (row.binding_id !== bindingId) {
+    throw new Error('stored resident world profile binding identity is invalid');
+  }
+  return Object.freeze({
+    bindingId,
+    schemaVersion: 1,
+    bindingKind: 'resident_current_world_profile',
+    activationEpoch,
+    derivationId: derivation.derivationId,
+    worldId: event.worldId,
+    ingressEventId: event.eventId,
+    ingressSequence,
+    profileId: profile.profileId,
+    profileHash: profile.profileHash,
+    profileHeadRevision: 1,
+    predecessorProfileId: null,
+    bindBatchId: provenance.batchId,
+    bindBatchSha256: provenance.batchSha256,
+    bindCallIndex: provenance.callIndex,
+    bindCallCount: provenance.callCount,
+    bindToolName: 'run',
+    bindArgumentsSha256: provenance.argumentsSha256,
+    boundAt,
   });
 }
 
@@ -3085,6 +3294,74 @@ export class ContextGraphStore {
           'stored resident identity system derivation predecessor is invalid',
         );
       }
+    }
+    return receipt;
+  }
+
+  getResidentWorldProfileBinding(
+    id: ResidentWorldProfileBindingId,
+  ): ResidentWorldProfileBindingV1 | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_resident_world_profile_bindings
+         WHERE binding_id = ?`,
+      )
+      .get(id) as ResidentWorldProfileBindingRow | undefined;
+    if (!row) return null;
+    const derivation = this.getResidentIdentitySystemDerivation(
+      residentIdentitySystemDerivationId(row.derivation_id),
+    );
+    const event = this.getWorldEvent(eventId(row.ingress_event_id));
+    const profile = this.getSystemProfile(systemProfileId(row.profile_id));
+    if (!derivation || !event || !profile) {
+      throw new Error('stored resident world profile binding lineage is missing');
+    }
+    const receipt = mapResidentWorldProfileBinding(
+      row,
+      derivation,
+      event,
+      profile,
+    );
+    const sourceBatches = this.database
+      .prepare(
+        `SELECT d.derive_batch_id, a.authorize_batch_id, c.inspect_batch_id
+         FROM context_resident_identity_system_derivations d
+         JOIN context_resident_source_candidate_authorizations a
+           ON a.authorization_id = d.authorization_id
+         JOIN context_resident_source_inspection_candidates c
+           ON c.candidate_id = a.candidate_id
+         WHERE d.derivation_id = ?`,
+      )
+      .get(receipt.derivationId) as
+      | {
+          derive_batch_id: string;
+          authorize_batch_id: string;
+          inspect_batch_id: string;
+        }
+      | undefined;
+    if (
+      !sourceBatches ||
+      receipt.bindBatchId === sourceBatches.derive_batch_id ||
+      receipt.bindBatchId === sourceBatches.authorize_batch_id ||
+      receipt.bindBatchId === sourceBatches.inspect_batch_id
+    ) {
+      throw new Error(
+        'stored resident world profile binding source batches are invalid',
+      );
+    }
+    const head = this.getSystemProfileHeadPrefix(
+      receipt.worldId,
+      receipt.activationEpoch,
+      receipt.profileHeadRevision,
+    );
+    if (
+      !head ||
+      head.revision !== 1 ||
+      head.profileId !== receipt.profileId ||
+      head.predecessorProfileId !== null ||
+      head.advancedAt !== receipt.boundAt
+    ) {
+      throw new Error('stored resident world profile binding head is invalid');
     }
     return receipt;
   }
@@ -3753,6 +4030,292 @@ export class ContextGraphStore {
       const created = this.getResidentIdentitySystemDerivation(derivationId);
       if (!created) {
         throw new Error('resident identity system derivation was not stored');
+      }
+      return finish(created);
+    });
+  }
+
+  bindResidentCurrentWorldProfile(input: {
+    derivationId: ResidentIdentitySystemDerivationId;
+    worldId: WorldId;
+    eventId: EventId;
+    sequence: number;
+    provenance: ResidentToolCallSnapshotV1;
+    boundAt: number;
+  }): ResidentWorldProfileBindingV1;
+  bindResidentCurrentWorldProfile<T>(
+    input: {
+      derivationId: ResidentIdentitySystemDerivationId;
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      provenance: ResidentToolCallSnapshotV1;
+      boundAt: number;
+    },
+    finalize: (receipt: ResidentWorldProfileBindingV1) => T,
+  ): T;
+  bindResidentCurrentWorldProfile<T>(
+    input: {
+      derivationId: ResidentIdentitySystemDerivationId;
+      worldId: WorldId;
+      eventId: EventId;
+      sequence: number;
+      provenance: ResidentToolCallSnapshotV1;
+      boundAt: number;
+    },
+    finalize?: (receipt: ResidentWorldProfileBindingV1) => T,
+  ): ResidentWorldProfileBindingV1 | T {
+    const derivationIdValue = residentIdentitySystemDerivationId(
+      input.derivationId,
+    );
+    const targetWorldId = worldId(input.worldId);
+    const ingressEventId = eventId(input.eventId);
+    const ingressSequence = generation(
+      'resident world profile binding sequence',
+      input.sequence,
+    );
+    if (ingressSequence < 1) {
+      throw new Error('resident world profile binding sequence is invalid');
+    }
+    const provenance = normalizeResidentWorldProfileBindingProvenance(
+      input.provenance,
+    );
+    const boundAt = timestamp(
+      'resident world profile binding boundAt',
+      input.boundAt,
+    );
+    const finish = (receipt: ResidentWorldProfileBindingV1) =>
+      finalize ? finalize(receipt) : receipt;
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('resident world profile binding requires dark graph mode');
+      }
+      const derivation = this.getResidentIdentitySystemDerivation(
+        derivationIdValue,
+      );
+      if (!derivation) {
+        throw new Error('resident world profile binding derivation does not exist');
+      }
+      if (derivation.activationEpoch !== activation.epoch) {
+        throw new Error(
+          'resident world profile binding derivation has a stale activation epoch',
+        );
+      }
+      const latest = this.database
+        .prepare(
+          `SELECT derivation_id
+           FROM context_resident_identity_system_derivations
+           WHERE activation_epoch = ?
+           ORDER BY authority_revision DESC
+           LIMIT 1`,
+        )
+        .get(activation.epoch) as { derivation_id: string } | undefined;
+      if (!latest || latest.derivation_id !== derivation.derivationId) {
+        throw new Error(
+          'resident world profile binding requires the current identity derivation',
+        );
+      }
+      const sourceBatches = this.database
+        .prepare(
+          `SELECT d.derive_batch_id, a.authorize_batch_id, c.inspect_batch_id
+           FROM context_resident_identity_system_derivations d
+           JOIN context_resident_source_candidate_authorizations a
+             ON a.authorization_id = d.authorization_id
+           JOIN context_resident_source_inspection_candidates c
+             ON c.candidate_id = a.candidate_id
+           WHERE d.derivation_id = ?`,
+        )
+        .get(derivation.derivationId) as
+        | {
+            derive_batch_id: string;
+            authorize_batch_id: string;
+            inspect_batch_id: string;
+          }
+        | undefined;
+      if (
+        !sourceBatches ||
+        provenance.batchId === sourceBatches.derive_batch_id ||
+        provenance.batchId === sourceBatches.authorize_batch_id ||
+        provenance.batchId === sourceBatches.inspect_batch_id
+      ) {
+        throw new Error(
+          'resident world profile binding requires a later distinct assistant batch',
+        );
+      }
+      const event = this.getWorldEvent(ingressEventId);
+      if (
+        !event ||
+        event.worldId !== targetWorldId ||
+        event.sequence !== ingressSequence ||
+        !['inbound:discord', 'inbound:signal'].includes(event.kind)
+      ) {
+        throw new Error(
+          'resident world profile binding requires exact current social ingress lineage',
+        );
+      }
+      if (
+        boundAt < derivation.derivedAt ||
+        boundAt < event.recordedAt
+      ) {
+        throw new Error('resident world profile binding chronology is invalid');
+      }
+
+      const contract = this.requireSystemProfileApproval(
+        derivation.contractApprovalId,
+        'scoped_runtime_contract',
+      );
+      this.requireSystemProfileApproval(
+        derivation.identityApprovalId,
+        'identity',
+      );
+      const profile: SystemProfileV1 = {
+        schemaVersion: 1,
+        worldId: targetWorldId,
+        activationEpoch: activation.epoch,
+        systemRendererGeneration: contract.layer.rendererGeneration,
+        policyGeneration: contract.layer.policyGeneration,
+        approvals: {
+          scopedRuntimeContract: derivation.contractApprovalId,
+          identity: derivation.identityApprovalId,
+          integratedSelf: null,
+          worldPolicy: null,
+        },
+      };
+      this.validateSystemProfileLineage(profile, boundAt);
+      const profileJson = serialize(profile);
+      const profileHash = hashContextBytes(profileJson);
+      const profileIdValue = systemProfileIdentity(profile);
+      const bindingId = residentWorldProfileBindingIdentity({
+        activationEpoch: activation.epoch,
+        derivationId: derivation.derivationId,
+        worldId: targetWorldId,
+        ingressEventId,
+        ingressSequence,
+        profileId: profileIdValue,
+        profileHash,
+        profileHeadRevision: 1,
+        predecessorProfileId: null,
+        provenance,
+      });
+
+      const priorCall = this.database
+        .prepare(
+          `SELECT * FROM context_resident_world_profile_bindings
+           WHERE bind_batch_id = ? AND bind_call_index = ?`,
+        )
+        .get(provenance.batchId, provenance.callIndex) as
+        | ResidentWorldProfileBindingRow
+        | undefined;
+      if (priorCall) {
+        if (
+          priorCall.binding_id !== bindingId ||
+          priorCall.derivation_id !== derivation.derivationId ||
+          priorCall.world_id !== targetWorldId ||
+          priorCall.ingress_event_id !== ingressEventId ||
+          priorCall.ingress_sequence !== ingressSequence ||
+          priorCall.profile_id !== profileIdValue ||
+          priorCall.profile_hash !== profileHash ||
+          priorCall.bind_batch_sha256 !== provenance.batchSha256 ||
+          priorCall.bind_call_count !== provenance.callCount ||
+          priorCall.bind_tool_name !== provenance.toolName ||
+          priorCall.bind_arguments_sha256 !== provenance.argumentsSha256
+        ) {
+          throw new Error(
+            'resident world profile binding call already bound different lineage',
+          );
+        }
+        const existing = this.getResidentWorldProfileBinding(bindingId);
+        if (!existing || existing.activationEpoch !== activation.epoch) {
+          throw new Error('resident world profile binding disappeared');
+        }
+        return finish(existing);
+      }
+      const priorWorld = this.database
+        .prepare(
+          `SELECT binding_id FROM context_resident_world_profile_bindings
+           WHERE activation_epoch = ? AND world_id = ?`,
+        )
+        .get(activation.epoch, targetWorldId) as
+        | { binding_id: string }
+        | undefined;
+      if (priorWorld) {
+        throw new Error(
+          'resident world profile was already bound by a different call',
+        );
+      }
+      if (
+        this.getSystemProfile(profileIdValue) ||
+        this.getSystemProfileHead(targetWorldId, activation.epoch)
+      ) {
+        throw new Error(
+          'resident world profile binding refuses preexisting unreceipted target rows',
+        );
+      }
+
+      this.database
+        .prepare(
+          `INSERT INTO context_system_profiles(
+             profile_id, world_id, activation_epoch,
+             system_renderer_generation, policy_generation,
+             scoped_runtime_contract_approval_id, identity_approval_id,
+             integrated_self_approval_id, world_policy_approval_id,
+             profile_json, profile_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+        )
+        .run(
+          profileIdValue,
+          profile.worldId,
+          profile.activationEpoch,
+          profile.systemRendererGeneration,
+          profile.policyGeneration,
+          profile.approvals.scopedRuntimeContract,
+          profile.approvals.identity,
+          profileJson,
+          profileHash,
+          boundAt,
+        );
+      this.database
+        .prepare(
+          `INSERT INTO context_system_profile_advances(
+             world_id, activation_epoch, revision,
+             predecessor_profile_id, profile_id, advanced_at
+           ) VALUES (?, ?, 1, NULL, ?, ?)`,
+        )
+        .run(targetWorldId, activation.epoch, profileIdValue, boundAt);
+      this.database
+        .prepare(
+          `INSERT INTO context_resident_world_profile_bindings(
+             binding_id, schema_version, binding_kind, activation_epoch,
+             derivation_id, world_id, ingress_event_id, ingress_sequence,
+             profile_id, profile_hash, profile_head_revision,
+             predecessor_profile_id, bind_batch_id, bind_batch_sha256,
+             bind_call_index, bind_call_count, bind_tool_name,
+             bind_arguments_sha256, bound_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          bindingId,
+          'resident_current_world_profile',
+          activation.epoch,
+          derivation.derivationId,
+          targetWorldId,
+          ingressEventId,
+          ingressSequence,
+          profileIdValue,
+          profileHash,
+          provenance.batchId,
+          provenance.batchSha256,
+          provenance.callIndex,
+          provenance.callCount,
+          provenance.toolName,
+          provenance.argumentsSha256,
+          boundAt,
+        );
+      const created = this.getResidentWorldProfileBinding(bindingId);
+      if (!created) {
+        throw new Error('resident world profile binding was not stored');
       }
       return finish(created);
     });

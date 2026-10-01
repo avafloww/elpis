@@ -32,6 +32,7 @@ import {
   hashContextBytes,
   legacyImportReceiptId,
   manifestId,
+  residentWorldProfileBindingId,
   shareGrantId,
   shadowProjectionPlanId,
   shadowRequestObservationId,
@@ -838,6 +839,260 @@ test('authorized resident identity layers derive atomically without creating run
           )
           .run(receipt.derivationId),
       /resident identity system derivation (identity conflict|lineage is invalid)/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('resident current-world profile binding is atomic and social-lineage scoped', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('301'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('302'),
+      authorizedAt: 200,
+    });
+    const derivation = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorization.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('303'),
+      derivedAt: 300,
+    });
+    const targetWorldId = worldId('world:signal:synthetic-contact');
+    const ingress = value.store.appendWorldEvent({
+      eventId: eventId('event:synthetic-signal-ingress'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { transport: 'signal', synthetic: true },
+      occurredAt: 50,
+      recordedAt: 50,
+    });
+
+    assert.throws(
+      () =>
+        value.store.bindResidentCurrentWorldProfile({
+          derivationId: derivation.derivationId,
+          worldId: targetWorldId,
+          eventId: ingress.eventId,
+          sequence: ingress.sequence,
+          provenance: residentRunProvenance('303'),
+          boundAt: 500,
+        }),
+      /later distinct assistant batch/,
+    );
+    assert.throws(
+      () =>
+        value.store.bindResidentCurrentWorldProfile(
+          {
+            derivationId: derivation.derivationId,
+            worldId: targetWorldId,
+            eventId: ingress.eventId,
+            sequence: ingress.sequence,
+            provenance: residentRunProvenance('304'),
+            boundAt: 500,
+          },
+          () => {
+            throw new Error('forced binding presentation failure');
+          },
+        ),
+      /forced binding presentation failure/,
+    );
+    const afterRollback = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_world_profile_bindings) AS bindings,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_system_profile_advances) AS heads`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...afterRollback },
+      { bindings: 0, profiles: 0, heads: 0 },
+    );
+
+    const receipt = value.store.bindResidentCurrentWorldProfile({
+      derivationId: derivation.derivationId,
+      worldId: targetWorldId,
+      eventId: ingress.eventId,
+      sequence: ingress.sequence,
+      provenance: residentRunProvenance('304'),
+      boundAt: 500,
+    });
+    assert.match(
+      receipt.bindingId,
+      /^resident-world-profile-binding:[0-9a-f]{64}$/,
+    );
+    assert.equal(receipt.derivationId, derivation.derivationId);
+    assert.equal(receipt.worldId, targetWorldId);
+    assert.equal(receipt.ingressEventId, ingress.eventId);
+    assert.equal(receipt.profileHeadRevision, 1);
+    assert.equal(receipt.predecessorProfileId, null);
+    assert.deepEqual(
+      value.store.getResidentWorldProfileBinding(receipt.bindingId),
+      receipt,
+    );
+    assert.deepEqual(
+      value.store.bindResidentCurrentWorldProfile({
+        derivationId: derivation.derivationId,
+        worldId: targetWorldId,
+        eventId: ingress.eventId,
+        sequence: ingress.sequence,
+        provenance: residentRunProvenance('304'),
+        boundAt: 550,
+      }),
+      receipt,
+    );
+    const profile = value.store.getSystemProfile(receipt.profileId);
+    assert.equal(
+      profile?.profile.approvals.scopedRuntimeContract,
+      derivation.contractApprovalId,
+    );
+    assert.equal(profile?.profile.approvals.identity, derivation.identityApprovalId);
+    assert.equal(profile?.profile.approvals.integratedSelf, null);
+    assert.equal(profile?.profile.approvals.worldPolicy, null);
+    assert.deepEqual(
+      value.store.getSystemProfileHead(targetWorldId, 0),
+      {
+        worldId: targetWorldId,
+        activationEpoch: 0,
+        revision: 1,
+        predecessorProfileId: null,
+        profileId: receipt.profileId,
+        advancedAt: 500,
+      },
+    );
+    assert.throws(
+      () =>
+        value.store.bindResidentCurrentWorldProfile({
+          derivationId: derivation.derivationId,
+          worldId: targetWorldId,
+          eventId: ingress.eventId,
+          sequence: ingress.sequence,
+          provenance: residentRunProvenance('305'),
+          boundAt: 600,
+        }),
+      /already bound by a different call/,
+    );
+    assert.throws(
+      () =>
+        value.store.bindResidentCurrentWorldProfile({
+          derivationId: derivation.derivationId,
+          worldId: worldId('world:signal:other-contact'),
+          eventId: ingress.eventId,
+          sequence: ingress.sequence,
+          provenance: residentRunProvenance('306'),
+          boundAt: 600,
+        }),
+      /exact current social ingress lineage/,
+    );
+
+    const counts = value.database
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM context_resident_world_profile_bindings) AS bindings,
+           (SELECT count(*) FROM context_system_profiles) AS profiles,
+           (SELECT count(*) FROM context_system_profile_advances) AS heads,
+           (SELECT count(*) FROM context_branches) AS branches,
+           (SELECT count(*) FROM context_local_branch_request_views) AS requestViews,
+           (SELECT count(*) FROM context_effects) AS effects,
+           (SELECT count(*) FROM context_continuation_advances) AS continuations`,
+      )
+      .get();
+    assert.deepEqual(
+      { ...counts },
+      {
+        bindings: 1,
+        profiles: 1,
+        heads: 1,
+        branches: 0,
+        requestViews: 0,
+        effects: 0,
+        continuations: 0,
+      },
+    );
+
+    const laterIdentityLayer = value.store.createSystemLayerProjection({
+      kind: 'identity',
+      visibility: 'integrated_self',
+      worldId: null,
+      rendererGeneration: 1,
+      policyGeneration: 1,
+      sourceKind: 'soul_snapshot',
+      sourceHash: hashContextBytes('later-profile-identity'),
+      content: 'later profile identity',
+      createdAt: 510,
+    });
+    const laterIdentityApproval = value.store.approveSystemLayer({
+      layerId: laterIdentityLayer.layerId,
+      role: 'identity',
+      basisRef: 'fixture:later-profile-identity',
+      approvalGeneration: 1,
+      approvedAt: 520,
+    });
+    const laterProfile = value.store.createSystemProfile({
+      worldId: targetWorldId,
+      scopedRuntimeContractApprovalId: derivation.contractApprovalId,
+      identityApprovalId: laterIdentityApproval.approvalId,
+      createdAt: 530,
+    });
+    const laterHead = value.store.advanceSystemProfileHead({
+      worldId: targetWorldId,
+      expectedRevision: 1,
+      expectedProfileId: receipt.profileId,
+      profileId: laterProfile.profileId,
+      advancedAt: 540,
+    });
+    assert.equal(laterHead.revision, 2);
+    assert.deepEqual(
+      value.store.getResidentWorldProfileBinding(receipt.bindingId),
+      receipt,
+    );
+
+    const reusedSourceBatchId = authorization.authorizeBatchId;
+    const corruptedBindingId = residentWorldProfileBindingId(
+      `resident-world-profile-binding:${hashContextBytes(
+        JSON.stringify({
+          schemaVersion: 1,
+          bindingKind: 'resident_current_world_profile',
+          activationEpoch: receipt.activationEpoch,
+          derivationId: receipt.derivationId,
+          worldId: receipt.worldId,
+          ingressEventId: receipt.ingressEventId,
+          ingressSequence: receipt.ingressSequence,
+          profileId: receipt.profileId,
+          profileHash: receipt.profileHash,
+          profileHeadRevision: receipt.profileHeadRevision,
+          predecessorProfileId: receipt.predecessorProfileId,
+          bindBatchId: reusedSourceBatchId,
+          bindBatchSha256: receipt.bindBatchSha256,
+          bindCallIndex: receipt.bindCallIndex,
+          bindCallCount: receipt.bindCallCount,
+          bindToolName: receipt.bindToolName,
+          bindArgumentsSha256: receipt.bindArgumentsSha256,
+        }),
+      )}`,
+    );
+    value.database.exec(
+      'DROP TRIGGER context_resident_world_profile_bindings_no_update',
+    );
+    value.database
+      .prepare(
+        `UPDATE context_resident_world_profile_bindings
+         SET binding_id = ?, bind_batch_id = ?
+         WHERE binding_id = ?`,
+      )
+      .run(corruptedBindingId, reusedSourceBatchId, receipt.bindingId);
+    assert.throws(
+      () => value.store.getResidentWorldProfileBinding(corruptedBindingId),
+      /source batches are invalid/,
     );
   } finally {
     closeFixture(value);
@@ -4578,6 +4833,11 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_resident_world_profile_bindings_identity_conflict;
+      DROP TRIGGER context_resident_world_profile_bindings_lineage_guard;
+      DROP TRIGGER context_resident_world_profile_bindings_no_update;
+      DROP TRIGGER context_resident_world_profile_bindings_no_delete;
+      DROP TABLE context_resident_world_profile_bindings;
       DROP TRIGGER context_resident_identity_system_derivations_identity_conflict;
       DROP TRIGGER context_resident_identity_system_derivations_lineage_guard;
       DROP TRIGGER context_resident_identity_system_derivations_no_update;
@@ -4609,7 +4869,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0042-context-scoped-runtime-contract-artifact',
             '0043-context-resident-source-inspection-candidates',
             '0044-context-resident-source-candidate-authorizations',
-            '0045-context-resident-identity-system-derivations'
+            '0045-context-resident-identity-system-derivations',
+            '0046-context-resident-world-profile-bindings'
           );
       PRAGMA user_version = 40;
     `);
