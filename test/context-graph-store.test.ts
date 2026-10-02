@@ -1280,6 +1280,121 @@ test('resident current-world dark request admits and assembles atomically', () =
         }),
       /already bound by a different call/,
     );
+    assert.throws(
+      () =>
+        value.store.admitDarkIsolatedProviderInvocation({
+          bindingId: providerBinding.bindingId,
+          expectedTarget: { ...providerTarget, model: 'aster-2' },
+          admittedAt: 760,
+        }),
+      /binding or target is invalid/,
+    );
+    assert.throws(
+      () =>
+        value.store.admitDarkIsolatedProviderInvocation({
+          bindingId: providerBinding.bindingId,
+          expectedTarget: providerTarget,
+          admittedAt: 749,
+        }),
+      /predates its binding/,
+    );
+    const invocation = value.store.admitDarkIsolatedProviderInvocation({
+      bindingId: providerBinding.bindingId,
+      expectedTarget: providerTarget,
+      admittedAt: 760,
+    });
+    assert.equal(invocation.admission.admissionKind, 'dark_isolated_provider_invocation');
+    assert.equal(invocation.admission.runnable, false);
+    assert.equal(invocation.admission.networkAuthority, 'none');
+    assert.equal(invocation.admission.toolMode, 'none');
+    assert.equal(invocation.admission.historicalToolMessages, false);
+    assert.equal(invocation.admission.effectAuthority, 'none');
+    assert.equal(invocation.admission.capsuleAuthority, 'none');
+    assert.equal(invocation.admission.continuationAuthority, 'none');
+    assert.equal(invocation.admission.maxAttempts, 1);
+    assert.equal(invocation.admission.transportRetries, 0);
+    assert.equal(invocation.admission.surfaceFallback, false);
+    assert.equal(invocation.admission.bindingId, providerBinding.bindingId);
+    assert.equal(invocation.admission.bindingHash, providerBinding.bindingHash);
+    assert.equal(
+      invocation.admission.residentProfileBindingId,
+      providerBinding.binding.residentProfileBindingId,
+    );
+    assert.equal(
+      invocation.admission.requestProfileBindingId,
+      providerBinding.binding.requestProfileBindingId,
+    );
+    assert.equal(
+      invocation.admission.requestProfileBindingHash,
+      providerBinding.binding.requestProfileBindingHash,
+    );
+    assert.equal(invocation.admission.targetHash, providerBinding.targetHash);
+    assert.deepEqual(invocation.admission.target, providerBinding.binding.target);
+    assert.equal(invocation.admission.candidateHash, providerBinding.binding.candidateHash);
+    assert.match(invocation.admission.manifestCacheNamespace, /^context:/);
+    assert.deepEqual(
+      value.store.admitDarkIsolatedProviderInvocation({
+        bindingId: providerBinding.bindingId,
+        expectedTarget: providerTarget,
+        admittedAt: 760,
+      }),
+      invocation,
+    );
+    assert.throws(
+      () =>
+        value.store.admitDarkIsolatedProviderInvocation({
+          bindingId: providerBinding.bindingId,
+          expectedTarget: providerTarget,
+          admittedAt: 761,
+        }),
+      /already has a conflicting admission/,
+    );
+    assert.deepEqual(
+      value.store.getDarkIsolatedProviderInvocationAdmission(invocation.invocationId),
+      invocation,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_dark_isolated_provider_invocation_admissions'),
+      1,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'UPDATE context_dark_isolated_provider_invocation_admissions SET admitted_at = admitted_at + 1 WHERE invocation_id = ?',
+          )
+          .run(invocation.invocationId),
+      /invocation admissions are immutable/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'DELETE FROM context_dark_isolated_provider_invocation_admissions WHERE invocation_id = ?',
+          )
+          .run(invocation.invocationId),
+      /invocation admissions are immutable/,
+    );
+    value.database.exec(`
+      CREATE TEMP TABLE invocation_admission_copy AS
+        SELECT * FROM context_dark_isolated_provider_invocation_admissions;
+      DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete;
+      DELETE FROM context_dark_isolated_provider_invocation_admissions;
+      UPDATE invocation_admission_copy SET admitted_at = 749;
+    `);
+    assert.throws(
+      () =>
+        value.database.exec(
+          'INSERT INTO context_dark_isolated_provider_invocation_admissions SELECT * FROM invocation_admission_copy',
+        ),
+      /invocation admission lineage is invalid/,
+    );
+    value.database.exec(`
+      UPDATE invocation_admission_copy SET admitted_at = 760;
+      INSERT INTO context_dark_isolated_provider_invocation_admissions
+        SELECT * FROM invocation_admission_copy;
+      DROP TABLE invocation_admission_copy;
+    `);
     assert.equal(value.store.getContinuationHead().revision, 0);
     assert.equal(tableCount(value.database, 'context_effects'), 0);
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
@@ -1301,6 +1416,27 @@ test('resident current-world dark request admits and assembles atomically', () =
     assert.deepEqual(
       value.store.getDarkIsolatedProviderBinding(providerBinding.bindingId),
       providerBinding,
+    );
+    assert.deepEqual(
+      value.store.getDarkIsolatedProviderInvocationAdmission(invocation.invocationId),
+      invocation,
+    );
+    assert.deepEqual(
+      value.store.admitDarkIsolatedProviderInvocation({
+        bindingId: providerBinding.bindingId,
+        expectedTarget: providerTarget,
+        admittedAt: 760,
+      }),
+      invocation,
+    );
+    assert.throws(
+      () =>
+        value.store.admitDarkIsolatedProviderInvocation({
+          bindingId: providerBinding.bindingId,
+          expectedTarget: providerTarget,
+          admittedAt: 801,
+        }),
+      /already has a conflicting admission/,
     );
     const verification =
       value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget);
@@ -5103,6 +5239,10 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_update;
+      DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete;
+      DROP TRIGGER context_dark_isolated_provider_invocation_admissions_lineage_guard;
+      DROP TABLE context_dark_isolated_provider_invocation_admissions;
       DROP TRIGGER context_dark_isolated_provider_binding_order_no_update;
       DROP TRIGGER context_dark_isolated_provider_binding_order_no_delete;
       DROP TRIGGER context_dark_isolated_provider_bindings_append_order;
@@ -5151,7 +5291,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0045-context-resident-identity-system-derivations',
             '0046-context-resident-world-profile-bindings',
             '0047-context-dark-isolated-provider-bindings',
-            '0048-context-dark-isolated-provider-binding-order'
+            '0048-context-dark-isolated-provider-binding-order',
+            '0049-context-dark-isolated-provider-invocation-admissions'
           );
       PRAGMA user_version = 40;
     `);

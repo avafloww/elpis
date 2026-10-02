@@ -54,6 +54,8 @@ export type ResidentWorldProfileBindingId =
   ContextId<'ResidentWorldProfileBindingId'>;
 export type DarkIsolatedProviderBindingId =
   ContextId<'DarkIsolatedProviderBindingId'>;
+export type DarkIsolatedProviderInvocationId =
+  ContextId<'DarkIsolatedProviderInvocationId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -157,6 +159,14 @@ export const darkIsolatedProviderBindingId = (
     'darkIsolatedProviderBindingId',
     value,
     'dark-isolated-provider-binding:',
+  );
+export const darkIsolatedProviderInvocationId = (
+  value: string,
+): DarkIsolatedProviderInvocationId =>
+  branded<'DarkIsolatedProviderInvocationId'>(
+    'darkIsolatedProviderInvocationId',
+    value,
+    'dark-provider-invocation:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -833,6 +843,53 @@ export interface DarkIsolatedProviderBindingRecord {
   readonly bindingHash: string;
 }
 
+export interface DarkIsolatedProviderInvocationAdmissionV1 {
+  readonly schemaVersion: 1;
+  readonly admissionKind: 'dark_isolated_provider_invocation';
+  readonly executionMode: 'dark';
+  readonly laneKind: 'isolated-standalone';
+  readonly runnable: false;
+  readonly networkAuthority: 'none';
+  readonly toolMode: 'none';
+  readonly historicalToolMessages: false;
+  readonly effectAuthority: 'none';
+  readonly capsuleAuthority: 'none';
+  readonly continuationAuthority: 'none';
+  readonly maxAttempts: 1;
+  readonly transportRetries: 0;
+  readonly surfaceFallback: false;
+  readonly bindingId: DarkIsolatedProviderBindingId;
+  readonly bindingHash: string;
+  readonly residentProfileBindingId: ResidentWorldProfileBindingId;
+  readonly requestProfileBindingId: SystemProfileRequestViewBindingId;
+  readonly requestProfileBindingHash: string;
+  readonly activationEpoch: number;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly authorityEpoch: number;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly profileId: SystemProfileId;
+  readonly profileHash: string;
+  readonly profileHeadRevision: number;
+  readonly manifestId: ManifestId;
+  readonly manifestHash: string;
+  readonly manifestCacheNamespace: string;
+  readonly candidateHash: string;
+  readonly candidateBytes: number;
+  readonly target: ExactIsolatedProviderTargetV1;
+  readonly targetHash: string;
+  readonly cacheNamespace: string;
+  readonly admittedAt: number;
+}
+
+export interface DarkIsolatedProviderInvocationAdmissionRecord {
+  readonly invocationId: DarkIsolatedProviderInvocationId;
+  readonly admission: DarkIsolatedProviderInvocationAdmissionV1;
+  readonly admissionJson: string;
+  readonly admissionHash: string;
+}
+
 export interface RecoveredIsolatedProviderBindingVerificationV1 {
   readonly schemaVersion: 1;
   readonly verificationKind: 'latest_recovered_dark_isolated_provider_binding';
@@ -1205,6 +1262,60 @@ function darkIsolatedProviderBindingIdentity(
   return darkIsolatedProviderBindingId(
     `dark-isolated-provider-binding:${hashContextBytes(bindingJson)}`,
   );
+}
+
+function darkIsolatedProviderInvocationIdentity(
+  admissionJson: string,
+): DarkIsolatedProviderInvocationId {
+  return darkIsolatedProviderInvocationId(
+    `dark-provider-invocation:${hashContextBytes(admissionJson)}`,
+  );
+}
+
+function darkIsolatedProviderInvocationAdmission(
+  binding: DarkIsolatedProviderBindingRecord,
+  manifestCacheNamespace: string,
+  admittedAt: number,
+): DarkIsolatedProviderInvocationAdmissionV1 {
+  return Object.freeze({
+    schemaVersion: 1,
+    admissionKind: 'dark_isolated_provider_invocation',
+    executionMode: 'dark',
+    laneKind: 'isolated-standalone',
+    runnable: false,
+    networkAuthority: 'none',
+    toolMode: 'none',
+    historicalToolMessages: false,
+    effectAuthority: 'none',
+    capsuleAuthority: 'none',
+    continuationAuthority: 'none',
+    maxAttempts: 1,
+    transportRetries: 0,
+    surfaceFallback: false,
+    bindingId: binding.bindingId,
+    bindingHash: binding.bindingHash,
+    residentProfileBindingId: binding.binding.residentProfileBindingId,
+    requestProfileBindingId: binding.binding.requestProfileBindingId,
+    requestProfileBindingHash: binding.binding.requestProfileBindingHash,
+    activationEpoch: binding.binding.activationEpoch,
+    branchId: binding.binding.branchId,
+    worldId: binding.binding.worldId,
+    authorityEpoch: binding.binding.authorityEpoch,
+    requestViewId: binding.binding.requestViewId,
+    requestViewHash: binding.binding.requestViewHash,
+    profileId: binding.binding.profileId,
+    profileHash: binding.binding.profileHash,
+    profileHeadRevision: binding.binding.profileHeadRevision,
+    manifestId: binding.binding.manifestId,
+    manifestHash: binding.binding.manifestHash,
+    manifestCacheNamespace,
+    candidateHash: binding.binding.candidateHash,
+    candidateBytes: binding.binding.candidateBytes,
+    target: binding.binding.target,
+    targetHash: binding.targetHash,
+    cacheNamespace: binding.binding.cacheNamespace,
+    admittedAt,
+  });
 }
 
 function isolatedProviderCacheNamespace(input: {
@@ -2170,6 +2281,49 @@ interface DarkIsolatedProviderBindingRow {
   binding_json: string;
   binding_hash: string;
   bound_at: number;
+}
+
+interface DarkIsolatedProviderInvocationAdmissionRow {
+  invocation_id: string;
+  schema_version: number;
+  admission_kind: string;
+  execution_mode: string;
+  lane_kind: string;
+  runnable: number;
+  network_authority: string;
+  tool_mode: string;
+  historical_tool_messages: number;
+  effect_authority: string;
+  capsule_authority: string;
+  continuation_authority: string;
+  max_attempts: number;
+  transport_retries: number;
+  surface_fallback: number;
+  binding_id: string;
+  binding_hash: string;
+  resident_profile_binding_id: string;
+  request_profile_binding_id: string;
+  request_profile_binding_hash: string;
+  activation_epoch: number;
+  branch_id: string;
+  world_id: string;
+  authority_epoch: number;
+  request_view_id: string;
+  request_view_hash: string;
+  profile_id: string;
+  profile_hash: string;
+  profile_head_revision: number;
+  manifest_id: string;
+  manifest_hash: string;
+  manifest_cache_namespace: string;
+  candidate_hash: string;
+  candidate_bytes: number;
+  target_json: string;
+  target_hash: string;
+  cache_namespace: string;
+  admission_json: string;
+  admission_hash: string;
+  admitted_at: number;
 }
 
 interface ScopedRuntimeContractArtifactRow {
@@ -3882,6 +4036,258 @@ export class ContextGraphStore {
       bindingJson,
       bindingHash,
     };
+  }
+
+  getDarkIsolatedProviderInvocationAdmission(
+    id: DarkIsolatedProviderInvocationId,
+  ): DarkIsolatedProviderInvocationAdmissionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_dark_isolated_provider_invocation_admissions
+         WHERE invocation_id = ?`,
+      )
+      .get(id) as DarkIsolatedProviderInvocationAdmissionRow | undefined;
+    if (!row) return null;
+    if (
+      row.schema_version !== 1 ||
+      row.admission_kind !== 'dark_isolated_provider_invocation' ||
+      row.execution_mode !== 'dark' ||
+      row.lane_kind !== 'isolated-standalone' ||
+      row.runnable !== 0 ||
+      row.network_authority !== 'none' ||
+      row.tool_mode !== 'none' ||
+      row.historical_tool_messages !== 0 ||
+      row.effect_authority !== 'none' ||
+      row.capsule_authority !== 'none' ||
+      row.continuation_authority !== 'none' ||
+      row.max_attempts !== 1 ||
+      row.transport_retries !== 0 ||
+      row.surface_fallback !== 0
+    ) {
+      throw new Error('stored dark isolated provider invocation admission policy is invalid');
+    }
+    const bindingId = darkIsolatedProviderBindingId(row.binding_id);
+    const binding = this.getDarkIsolatedProviderBinding(bindingId);
+    if (!binding) {
+      throw new Error('stored dark isolated provider invocation binding is missing');
+    }
+    const admittedAt = timestamp(
+      'dark isolated provider invocation admittedAt',
+      row.admitted_at,
+    );
+    const manifest = this.getManifestProjection(binding.binding.manifestId, {
+      requireActiveShares: true,
+    });
+    if (!manifest) {
+      throw new Error('stored dark isolated provider invocation manifest is missing');
+    }
+    const admission = darkIsolatedProviderInvocationAdmission(
+      binding,
+      manifest.record.cacheNamespace,
+      admittedAt,
+    );
+    const admissionJson = serialize(admission);
+    const admissionHash = sha256(
+      'dark isolated provider invocation admissionHash',
+      row.admission_hash,
+    );
+    if (
+      row.binding_hash !== binding.bindingHash ||
+      row.resident_profile_binding_id !== admission.residentProfileBindingId ||
+      row.request_profile_binding_id !== admission.requestProfileBindingId ||
+      row.request_profile_binding_hash !== admission.requestProfileBindingHash ||
+      row.activation_epoch !== admission.activationEpoch ||
+      row.branch_id !== admission.branchId ||
+      row.world_id !== admission.worldId ||
+      row.authority_epoch !== admission.authorityEpoch ||
+      row.request_view_id !== admission.requestViewId ||
+      row.request_view_hash !== admission.requestViewHash ||
+      row.profile_id !== admission.profileId ||
+      row.profile_hash !== admission.profileHash ||
+      row.profile_head_revision !== admission.profileHeadRevision ||
+      row.manifest_id !== admission.manifestId ||
+      row.manifest_hash !== admission.manifestHash ||
+      row.manifest_cache_namespace !== admission.manifestCacheNamespace ||
+      row.candidate_hash !== admission.candidateHash ||
+      row.candidate_bytes !== admission.candidateBytes ||
+      row.target_json !== binding.targetJson ||
+      row.target_hash !== admission.targetHash ||
+      row.cache_namespace !== admission.cacheNamespace ||
+      admittedAt < binding.binding.boundAt ||
+      row.admission_json !== admissionJson ||
+      hashContextBytes(admissionJson) !== admissionHash ||
+      darkIsolatedProviderInvocationIdentity(admissionJson) !== id
+    ) {
+      throw new Error('stored dark isolated provider invocation admission is invalid');
+    }
+    return { invocationId: id, admission, admissionJson, admissionHash };
+  }
+
+  admitDarkIsolatedProviderInvocation(input: {
+    bindingId: DarkIsolatedProviderBindingId;
+    expectedTarget: ExactIsolatedProviderTargetV1;
+    admittedAt: number;
+  }): DarkIsolatedProviderInvocationAdmissionRecord {
+    const bindingId = darkIsolatedProviderBindingId(input.bindingId);
+    const targetJson = serialize(
+      normalizeExactIsolatedProviderTarget(input.expectedTarget),
+    );
+    const admittedAt = timestamp(
+      'dark isolated provider invocation admittedAt',
+      input.admittedAt,
+    );
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      if (activation.mode !== 'dark') {
+        throw new Error('isolated provider invocation admission requires dark graph mode');
+      }
+      const binding = this.getDarkIsolatedProviderBinding(bindingId);
+      if (!binding || binding.targetJson !== targetJson) {
+        throw new Error('isolated provider invocation binding or target is invalid');
+      }
+      if (activation.epoch !== binding.binding.activationEpoch) {
+        throw new Error('isolated provider invocation admission lineage is not current');
+      }
+      const manifest = this.getManifestProjection(binding.binding.manifestId, {
+        requireActiveShares: true,
+      });
+      if (!manifest) {
+        throw new Error('isolated provider invocation manifest is missing');
+      }
+      const admission = darkIsolatedProviderInvocationAdmission(
+        binding,
+        manifest.record.cacheNamespace,
+        admittedAt,
+      );
+      const admissionJson = serialize(admission);
+      const prior = this.database
+        .prepare(
+          `SELECT invocation_id FROM context_dark_isolated_provider_invocation_admissions
+           WHERE binding_id = ?`,
+        )
+        .get(bindingId) as { invocation_id: string } | undefined;
+      if (prior) {
+        const replay = this.getDarkIsolatedProviderInvocationAdmission(
+          darkIsolatedProviderInvocationId(prior.invocation_id),
+        );
+        if (!replay) {
+          throw new Error('isolated provider invocation admission disappeared');
+        }
+        if (replay.admissionJson !== admissionJson) {
+          throw new Error('isolated provider invocation binding already has a conflicting admission');
+        }
+        return replay;
+      }
+      if (admittedAt < binding.binding.boundAt) {
+        throw new Error('isolated provider invocation admission predates its binding');
+      }
+      const branch = this.getBranch(binding.binding.branchId);
+      const coordinator = this.getRootCoordinatorState();
+      const abandonment = this.getDarkPendingBranchAbandonment(
+        binding.binding.branchId,
+      );
+      const recovery = this.database
+        .prepare('SELECT 1 AS present FROM context_branch_recoveries WHERE branch_id = ?')
+        .get(binding.binding.branchId) as { present: number } | undefined;
+      const laterProfile = this.database
+        .prepare(
+          `SELECT 1 AS present FROM context_system_profile_advances
+           WHERE world_id = ? AND activation_epoch = ? AND revision > ?
+           LIMIT 1`,
+        )
+        .get(
+          binding.binding.worldId,
+          binding.binding.activationEpoch,
+          binding.binding.profileHeadRevision,
+        ) as { present: number } | undefined;
+      const branchArtifacts = this.database
+        .prepare(
+          `SELECT
+             (SELECT count(*) FROM context_effects WHERE branch_id = ?) AS effects,
+             (SELECT count(*) FROM context_capsules WHERE branch_id = ?) AS capsules,
+             (SELECT count(*) FROM context_continuation_advances WHERE branch_id = ?) AS advances`,
+        )
+        .get(
+          binding.binding.branchId,
+          binding.binding.branchId,
+          binding.binding.branchId,
+        ) as { effects: number; capsules: number; advances: number };
+      if (
+        activation.epoch !== binding.binding.activationEpoch ||
+        !branch ||
+        branch.status !== 'running' ||
+        branch.worldId !== binding.binding.worldId ||
+        branch.authorityEpoch !== binding.binding.authorityEpoch ||
+        coordinator.activeBranchId !== branch.branchId ||
+        coordinator.activeWorldId !== branch.worldId ||
+        abandonment ||
+        recovery ||
+        laterProfile ||
+        branchArtifacts.effects !== 0 ||
+        branchArtifacts.capsules !== 0 ||
+        branchArtifacts.advances !== 0
+      ) {
+        throw new Error('isolated provider invocation admission lineage is not current');
+      }
+      const admissionHash = hashContextBytes(admissionJson);
+      const invocationId = darkIsolatedProviderInvocationIdentity(admissionJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_dark_isolated_provider_invocation_admissions(
+             invocation_id, schema_version, admission_kind, execution_mode,
+             lane_kind, runnable, network_authority, tool_mode,
+             historical_tool_messages, effect_authority, capsule_authority, continuation_authority, max_attempts,
+             transport_retries, surface_fallback, binding_id, binding_hash,
+             resident_profile_binding_id, request_profile_binding_id,
+             request_profile_binding_hash, activation_epoch, branch_id, world_id, authority_epoch,
+             request_view_id, request_view_hash, profile_id, profile_hash,
+             profile_head_revision, manifest_id, manifest_hash,
+             manifest_cache_namespace, candidate_hash, candidate_bytes,
+             target_json, target_hash, cache_namespace, admission_json,
+             admission_hash, admitted_at
+           ) VALUES (
+             ?, 1, 'dark_isolated_provider_invocation', 'dark',
+             'isolated-standalone', 0, 'none', 'none', 0, 'none',
+             'none', 'none', 1, 0, 0,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?
+           )`,
+        )
+        .run(
+          invocationId,
+          bindingId,
+          binding.bindingHash,
+          admission.residentProfileBindingId,
+          admission.requestProfileBindingId,
+          admission.requestProfileBindingHash,
+          admission.activationEpoch,
+          admission.branchId,
+          admission.worldId,
+          admission.authorityEpoch,
+          admission.requestViewId,
+          admission.requestViewHash,
+          admission.profileId,
+          admission.profileHash,
+          admission.profileHeadRevision,
+          admission.manifestId,
+          admission.manifestHash,
+          admission.manifestCacheNamespace,
+          admission.candidateHash,
+          admission.candidateBytes,
+          binding.targetJson,
+          admission.targetHash,
+          admission.cacheNamespace,
+          admissionJson,
+          admissionHash,
+          admittedAt,
+        );
+      const created = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+      if (!created) {
+        throw new Error('isolated provider invocation admission was not stored');
+      }
+      return created;
+    });
   }
 
   private latestDarkIsolatedProviderBindingId(): DarkIsolatedProviderBindingId | null {

@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 48;
+const SCHEMA_VERSION = 49;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -4005,6 +4005,129 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_dark_isolated_provider_binding_order_no_delete
           BEFORE DELETE ON context_dark_isolated_provider_binding_order BEGIN
             SELECT RAISE(ABORT, 'dark isolated provider binding order is immutable');
+          END;
+      `,
+    },
+    {
+      name: '0049-context-dark-isolated-provider-invocation-admissions',
+      sql: `
+        CREATE TABLE context_dark_isolated_provider_invocation_admissions (
+          invocation_id                 TEXT PRIMARY KEY
+            CHECK (length(invocation_id) = 89
+              AND invocation_id GLOB 'dark-provider-invocation:*'
+              AND substr(invocation_id, 26) NOT GLOB '*[^0-9a-f]*'),
+          schema_version                INTEGER NOT NULL CHECK (schema_version = 1),
+          admission_kind                TEXT NOT NULL CHECK (admission_kind = 'dark_isolated_provider_invocation'),
+          execution_mode               TEXT NOT NULL CHECK (execution_mode = 'dark'),
+          lane_kind                    TEXT NOT NULL CHECK (lane_kind = 'isolated-standalone'),
+          runnable                     INTEGER NOT NULL CHECK (runnable = 0),
+          network_authority            TEXT NOT NULL CHECK (network_authority = 'none'),
+          tool_mode                    TEXT NOT NULL CHECK (tool_mode = 'none'),
+          historical_tool_messages     INTEGER NOT NULL CHECK (historical_tool_messages = 0),
+          effect_authority             TEXT NOT NULL CHECK (effect_authority = 'none'),
+          capsule_authority            TEXT NOT NULL CHECK (capsule_authority = 'none'),
+          continuation_authority       TEXT NOT NULL CHECK (continuation_authority = 'none'),
+          max_attempts                 INTEGER NOT NULL CHECK (max_attempts = 1),
+          transport_retries            INTEGER NOT NULL CHECK (transport_retries = 0),
+          surface_fallback             INTEGER NOT NULL CHECK (surface_fallback = 0),
+          binding_id                   TEXT NOT NULL UNIQUE,
+          binding_hash                 TEXT NOT NULL CHECK (length(binding_hash) = 64 AND binding_hash NOT GLOB '*[^0-9a-f]*'),
+          resident_profile_binding_id  TEXT NOT NULL,
+          request_profile_binding_id   TEXT NOT NULL,
+          request_profile_binding_hash TEXT NOT NULL CHECK (length(request_profile_binding_hash) = 64 AND request_profile_binding_hash NOT GLOB '*[^0-9a-f]*'),
+          activation_epoch             INTEGER NOT NULL CHECK (typeof(activation_epoch) = 'integer' AND activation_epoch >= 0),
+          branch_id                    TEXT NOT NULL UNIQUE,
+          world_id                     TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          authority_epoch              INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 0),
+          request_view_id              TEXT NOT NULL UNIQUE,
+          request_view_hash            TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_id                   TEXT NOT NULL,
+          profile_hash                 TEXT NOT NULL CHECK (length(profile_hash) = 64 AND profile_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_head_revision        INTEGER NOT NULL CHECK (typeof(profile_head_revision) = 'integer' AND profile_head_revision >= 1),
+          manifest_id                  TEXT NOT NULL,
+          manifest_hash                TEXT NOT NULL CHECK (length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+          manifest_cache_namespace     TEXT NOT NULL CHECK (length(manifest_cache_namespace) BETWEEN 16 AND 256),
+          candidate_hash               TEXT NOT NULL CHECK (length(candidate_hash) = 64 AND candidate_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_bytes              INTEGER NOT NULL CHECK (typeof(candidate_bytes) = 'integer' AND candidate_bytes BETWEEN 1 AND 8388608),
+          target_json                  TEXT NOT NULL CHECK (length(target_json) >= 1 AND json_valid(target_json)),
+          target_hash                  TEXT NOT NULL CHECK (length(target_hash) = 64 AND target_hash NOT GLOB '*[^0-9a-f]*'),
+          cache_namespace              TEXT NOT NULL CHECK (length(cache_namespace) BETWEEN 16 AND 256),
+          admission_json              TEXT NOT NULL CHECK (length(admission_json) >= 1 AND json_valid(admission_json)),
+          admission_hash              TEXT NOT NULL CHECK (length(admission_hash) = 64 AND admission_hash NOT GLOB '*[^0-9a-f]*'),
+          admitted_at                 INTEGER NOT NULL CHECK (typeof(admitted_at) = 'integer' AND admitted_at >= 0),
+          UNIQUE (invocation_id, binding_id, branch_id, world_id),
+          FOREIGN KEY (binding_id) REFERENCES context_dark_isolated_provider_bindings(binding_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id) REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id) REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (manifest_id, world_id) REFERENCES context_manifests(manifest_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (profile_id, world_id, activation_epoch) REFERENCES context_system_profiles(profile_id, world_id, activation_epoch) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_dark_isolated_provider_invocation_admissions_lineage_guard
+          BEFORE INSERT ON context_dark_isolated_provider_invocation_admissions
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_dark_isolated_provider_bindings AS bindings
+            JOIN context_branches AS branches
+              ON branches.branch_id = bindings.branch_id
+             AND branches.world_id = bindings.world_id
+            JOIN context_manifests AS manifests
+              ON manifests.manifest_id = bindings.manifest_id
+             AND manifests.world_id = bindings.world_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            WHERE bindings.binding_id = NEW.binding_id
+              AND bindings.binding_hash = NEW.binding_hash
+              AND bindings.resident_profile_binding_id = NEW.resident_profile_binding_id
+              AND bindings.request_profile_binding_id = NEW.request_profile_binding_id
+              AND bindings.request_profile_binding_hash = NEW.request_profile_binding_hash
+              AND bindings.activation_epoch = NEW.activation_epoch
+              AND bindings.branch_id = NEW.branch_id
+              AND bindings.world_id = NEW.world_id
+              AND bindings.authority_epoch = NEW.authority_epoch
+              AND bindings.request_view_id = NEW.request_view_id
+              AND bindings.request_view_hash = NEW.request_view_hash
+              AND bindings.profile_id = NEW.profile_id
+              AND bindings.profile_hash = NEW.profile_hash
+              AND bindings.profile_head_revision = NEW.profile_head_revision
+              AND bindings.manifest_id = NEW.manifest_id
+              AND bindings.manifest_hash = NEW.manifest_hash
+              AND manifests.cache_namespace = NEW.manifest_cache_namespace
+              AND bindings.candidate_hash = NEW.candidate_hash
+              AND bindings.candidate_bytes = NEW.candidate_bytes
+              AND bindings.target_json = NEW.target_json
+              AND bindings.target_hash = NEW.target_hash
+              AND bindings.cache_namespace = NEW.cache_namespace
+              AND bindings.bound_at <= NEW.admitted_at
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND activation.mode = 'dark'
+              AND activation.epoch = NEW.activation_epoch
+              AND NOT EXISTS (SELECT 1 FROM context_dark_pending_branch_abandonments a WHERE a.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = NEW.branch_id)
+              AND NOT EXISTS (
+                SELECT 1 FROM context_system_profile_advances later
+                WHERE later.world_id = NEW.world_id
+                  AND later.activation_epoch = NEW.activation_epoch
+                  AND later.revision > NEW.profile_head_revision
+              )
+              AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules c WHERE c.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = NEW.branch_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'dark isolated provider invocation admission lineage is invalid');
+          END;
+
+        CREATE TRIGGER context_dark_isolated_provider_invocation_admissions_no_update
+          BEFORE UPDATE ON context_dark_isolated_provider_invocation_admissions BEGIN
+            SELECT RAISE(ABORT, 'dark isolated provider invocation admissions are immutable');
+          END;
+        CREATE TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete
+          BEFORE DELETE ON context_dark_isolated_provider_invocation_admissions BEGIN
+            SELECT RAISE(ABORT, 'dark isolated provider invocation admissions are immutable');
           END;
       `,
     },
