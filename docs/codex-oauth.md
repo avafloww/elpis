@@ -37,7 +37,9 @@ The adapter:
 - supports tool-free summarization and standalone bounded completion lanes;
 - enforces configured stream-idle and total-call timeouts in standalone lanes,
   including memory consolidation, so a stalled provider cannot hold boot indefinitely;
-- refreshes once after an authentication failure;
+- refreshes once after an authentication failure by default; isolated one-attempt
+  standalone calls can disable that replay and attach synchronous durable
+  lifecycle hooks immediately around the underlying network boundary;
 - stops the current turn without automatic retries when a 429 explicitly reports
   an exhausted plan, quota, or usage window, while preserving the blocked input
   for a later explicit retry; ordinary transient rate-limit 429s remain retriable;

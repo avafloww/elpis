@@ -42,6 +42,14 @@ export type CodexOAuthObserver = (
   exchange: CodexOAuthObservedExchange,
 ) => void | Promise<void>;
 
+export interface CodexOAuthDispatchLifecycle {
+  beforeNetwork(input: { readonly attempt: 1 | 2 }): void;
+  responseReceived(input: {
+    readonly attempt: 1 | 2;
+    readonly status: number;
+  }): void;
+}
+
 export interface CodexOAuthFetchOptions {
   readonly credentials: CodexOAuthCredentialSource;
   readonly sessionId: () => string;
@@ -51,6 +59,7 @@ export interface CodexOAuthFetchOptions {
   readonly dispatcher?: unknown;
   readonly observe?: CodexOAuthObserver;
   readonly retryUnauthorized?: boolean;
+  readonly dispatchLifecycle?: CodexOAuthDispatchLifecycle;
 }
 
 type FetchInitWithDispatcher = RequestInit & { dispatcher?: unknown };
@@ -364,6 +373,13 @@ export function createCodexOAuthFetch(
     typeof options.retryUnauthorized !== 'boolean'
   )
     throw configurationError('retryUnauthorized must be a boolean');
+  if (
+    options.dispatchLifecycle !== undefined &&
+    (typeof options.dispatchLifecycle !== 'object' ||
+      typeof options.dispatchLifecycle.beforeNetwork !== 'function' ||
+      typeof options.dispatchLifecycle.responseReceived !== 'function')
+  )
+    throw configurationError('dispatchLifecycle must expose synchronous hooks');
   const underlyingFetch = options.fetch ?? globalThis.fetch;
   if (typeof underlyingFetch !== 'function')
     throw configurationError('requires an underlying fetch function');
@@ -372,6 +388,7 @@ export function createCodexOAuthFetch(
   const dispatcher = options.dispatcher;
   const observe = options.observe;
   const retryUnauthorized = options.retryUnauthorized ?? true;
+  const dispatchLifecycle = options.dispatchLifecycle;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const ownedInput = snapshotInput(input, init);
@@ -421,10 +438,12 @@ export function createCodexOAuthFetch(
       setTransport('accept', 'application/json');
 
       throwIfAborted(snapshot.signal);
+      dispatchLifecycle?.beforeNetwork({ attempt });
       const response = await underlyingFetch(
         snapshot.url,
         requestInitFromSnapshot(snapshot, headers, dispatcher),
       );
+      dispatchLifecycle?.responseReceived({ attempt, status: response.status });
       if (observe) {
         await observe({
           request: {

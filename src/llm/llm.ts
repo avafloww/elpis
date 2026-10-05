@@ -225,6 +225,14 @@ export interface LLMUsage {
   cached_tokens?: number;
 }
 
+export interface StandaloneDispatchLifecycle {
+  beforeNetwork(input: { readonly attempt: 1 | 2 }): void;
+  responseReceived(input: {
+    readonly attempt: 1 | 2;
+    readonly status: number;
+  }): void;
+}
+
 export interface StandaloneCompleteOptions {
   /** Provider cache/conversation identity for this isolated lane. Omit for a fresh one-shot lane. */
   cacheKey?: string;
@@ -246,6 +254,8 @@ export interface StandaloneCompleteOptions {
   allowHistoricalToolMessages?: boolean;
   /** Refuse transport-layer replay after an unauthorized response. */
   retryUnauthorized?: boolean;
+  /** Synchronous durable callbacks around the exact provider network boundary. */
+  dispatchLifecycle?: StandaloneDispatchLifecycle;
   /** Abort the provider request and response stream. */
   signal?: AbortSignal;
 }

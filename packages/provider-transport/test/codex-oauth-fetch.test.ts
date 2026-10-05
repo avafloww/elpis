@@ -111,6 +111,50 @@ test('injects exact Codex headers and replays the body once after 401', async ()
     assert.equal(seen[1].headers.has(name), false, name);
 });
 
+test('dispatch lifecycle brackets network and may reject before issuance', async () => {
+  const credentials = credentialSource();
+  const order: string[] = [];
+  const transport = createCodexOAuthFetch({
+    credentials: credentials.source,
+    sessionId: () => 'session-1',
+    retryUnauthorized: false,
+    dispatchLifecycle: {
+      beforeNetwork: ({ attempt }) => order.push(`before:${attempt}`),
+      responseReceived: ({ attempt, status }) =>
+        order.push(`response:${attempt}:${status}`),
+    },
+    fetch: async () => {
+      order.push('network');
+      return new Response('', { status: 202 });
+    },
+  });
+  const response = await transport(responsesUrl, { method: 'POST', body: '{}' });
+  assert.equal(response.status, 202);
+  assert.deepEqual(order, ['before:1', 'network', 'response:1:202']);
+
+  let networkCalls = 0;
+  const blocked = createCodexOAuthFetch({
+    credentials: credentials.source,
+    sessionId: () => 'session-2',
+    retryUnauthorized: false,
+    dispatchLifecycle: {
+      beforeNetwork: () => {
+        throw new Error('durable dispatch record rejected');
+      },
+      responseReceived: () => undefined,
+    },
+    fetch: async () => {
+      networkCalls += 1;
+      return new Response();
+    },
+  });
+  await assert.rejects(
+    () => blocked(responsesUrl, { method: 'POST', body: '{}' }),
+    /durable dispatch record rejected/,
+  );
+  assert.equal(networkCalls, 0);
+});
+
 test('refuses hostile Codex targets before credential or network access', async () => {
   const credentials = credentialSource();
   let networkCalls = 0;

@@ -50,6 +50,7 @@ import {
   type ReasoningItemParam,
   type StandaloneCompleteOptions,
   type StandaloneCompleteResult,
+  type StandaloneDispatchLifecycle,
 } from './llm.js';
 import {
   endpointAt,
@@ -79,6 +80,7 @@ export function createCodexFetch(
   preserveTransportHeaders = false,
   dispatcher?: unknown,
   retryUnauthorized = true,
+  dispatchLifecycle?: () => StandaloneDispatchLifecycle | undefined,
 ): FetchFn {
   let policyMonitorSequence = 0;
   const policyConfig = config;
@@ -275,6 +277,15 @@ export function createCodexFetch(
     dispatcher,
     observe,
     retryUnauthorized,
+    ...(dispatchLifecycle
+      ? {
+          dispatchLifecycle: {
+            beforeNetwork: (input) => dispatchLifecycle()?.beforeNetwork(input),
+            responseReceived: (input) =>
+              dispatchLifecycle()?.responseReceived(input),
+          },
+        }
+      : {}),
   });
 }
 
@@ -285,6 +296,7 @@ function codexClient(
   fetchFn: FetchFn = fetch,
   responsesLite = false,
   retryUnauthorized = true,
+  dispatchLifecycle?: () => StandaloneDispatchLifecycle | undefined,
 ): OpenAI {
   const dispatcher = new Agent({
     bodyTimeout: 1_200_000,
@@ -307,6 +319,7 @@ function codexClient(
       false,
       dispatcher,
       retryUnauthorized,
+      dispatchLifecycle,
     ),
   });
 }
@@ -655,7 +668,10 @@ async function codexSummarize(
 export type CodexClientFactory = (
   sessionId: () => string,
   responsesLite: boolean,
-  options?: { retryUnauthorized?: boolean },
+  options?: {
+    retryUnauthorized?: boolean;
+    dispatchLifecycle?: () => StandaloneDispatchLifecycle | undefined;
+  },
 ) => OpenAI;
 
 /** Build the resident Codex facade over session-scoped SDK clients. */
@@ -670,6 +686,8 @@ export function createCodexLLM(
   const responsesLite = usesCodexResponsesLite(config.llm.model);
   const client = clientFactory(() => sessionId, responsesLite);
   const standaloneLane = new AsyncLocalStorage<string>();
+  const standaloneDispatchLifecycle =
+    new AsyncLocalStorage<StandaloneDispatchLifecycle | null>();
   const standaloneFallbackId = randomUUID();
   const standaloneClient = clientFactory(
     () => standaloneLane.getStore() ?? standaloneFallbackId,
@@ -678,7 +696,10 @@ export function createCodexLLM(
   const oneAttemptStandaloneClient = clientFactory(
     () => standaloneLane.getStore() ?? standaloneFallbackId,
     responsesLite,
-    { retryUnauthorized: false },
+    {
+      retryUnauthorized: false,
+      dispatchLifecycle: () => standaloneDispatchLifecycle.getStore() ?? undefined,
+    },
   );
   return {
     ...(options.exposeClient ? { client } : {}),
@@ -708,6 +729,10 @@ export function createCodexLLM(
         throw new Error(
           `standalone model must use the configured role target ${config.llm.model}`,
         );
+      if (opts.dispatchLifecycle && opts.retryUnauthorized !== false)
+        throw new Error(
+          'dispatchLifecycle requires retryUnauthorized false',
+        );
       const model = opts.model ?? config.llm.model;
       if (usesCodexResponsesLite(model) !== responsesLite) {
         throw new Error(
@@ -715,15 +740,17 @@ export function createCodexLLM(
         );
       }
       const result = await standaloneLane.run(laneId, () =>
-        codexStandaloneComplete(
-          opts.retryUnauthorized === false
-            ? oneAttemptStandaloneClient
-            : standaloneClient,
-          config,
-          messages,
-          laneId,
-          responsesLite,
-          opts,
+        standaloneDispatchLifecycle.run(opts.dispatchLifecycle ?? null, () =>
+          codexStandaloneComplete(
+            opts.retryUnauthorized === false
+              ? oneAttemptStandaloneClient
+              : standaloneClient,
+            config,
+            messages,
+            laneId,
+            responsesLite,
+            opts,
+          ),
         ),
       );
       if (!identity.gateway) return result;
@@ -807,6 +834,7 @@ export function createCodexOAuthLLM(
         fetchFn,
         responsesLite,
         clientOptions?.retryUnauthorized ?? true,
+        clientOptions?.dispatchLifecycle,
       ),
     {
       toolContractVersion: TOOL_CONTRACT_VERSION,

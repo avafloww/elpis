@@ -109,6 +109,7 @@ test('Codex fetch injects subscription headers and retries one 401 after refresh
 test('one-attempt standalone Codex completion does not refresh and replay a 401', async () => {
   const { store, refreshes } = fakeStore();
   let networkCalls = 0;
+  const lifecycle: string[] = [];
   const llm = createCodexOAuthLLM(
     codexConfig('gpt-5.6-sol'),
     store,
@@ -126,10 +127,16 @@ test('one-attempt standalone Codex completion does not refresh and replay a 401'
     llm.completeStandalone!([{ role: 'user', content: 'one attempt' }], {
       cacheKey: 'isolated-one-attempt',
       retryUnauthorized: false,
+      dispatchLifecycle: {
+        beforeNetwork: ({ attempt }) => lifecycle.push(`before:${attempt}`),
+        responseReceived: ({ attempt, status }) =>
+          lifecycle.push(`response:${attempt}:${status}`),
+      },
     }),
   );
   assert.equal(networkCalls, 1);
   assert.equal(refreshes(), 0);
+  assert.deepEqual(lifecycle, ['before:1', 'response:1:401']);
 });
 
 test('Codex fetch refuses to expose the OAuth token to another host or path', async () => {
