@@ -106,6 +106,32 @@ test('Codex fetch injects subscription headers and retries one 401 after refresh
   );
 });
 
+test('one-attempt standalone Codex completion does not refresh and replay a 401', async () => {
+  const { store, refreshes } = fakeStore();
+  let networkCalls = 0;
+  const llm = createCodexOAuthLLM(
+    codexConfig('gpt-5.6-sol'),
+    store,
+    undefined,
+    (async () => {
+      networkCalls += 1;
+      return new Response(
+        JSON.stringify({ error: { message: 'unauthorized', type: 'auth_error' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch,
+  );
+
+  await assert.rejects(() =>
+    llm.completeStandalone!([{ role: 'user', content: 'one attempt' }], {
+      cacheKey: 'isolated-one-attempt',
+      retryUnauthorized: false,
+    }),
+  );
+  assert.equal(networkCalls, 1);
+  assert.equal(refreshes(), 0);
+});
+
 test('Codex fetch refuses to expose the OAuth token to another host or path', async () => {
   const { store } = fakeStore();
   let networkCalls = 0;

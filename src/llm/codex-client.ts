@@ -78,6 +78,7 @@ export function createCodexFetch(
   config?: Config,
   preserveTransportHeaders = false,
   dispatcher?: unknown,
+  retryUnauthorized = true,
 ): FetchFn {
   let policyMonitorSequence = 0;
   const policyConfig = config;
@@ -273,6 +274,7 @@ export function createCodexFetch(
     preserveTransportHeaders,
     dispatcher,
     observe,
+    retryUnauthorized,
   });
 }
 
@@ -282,6 +284,7 @@ function codexClient(
   sessionId: () => string,
   fetchFn: FetchFn = fetch,
   responsesLite = false,
+  retryUnauthorized = true,
 ): OpenAI {
   const dispatcher = new Agent({
     bodyTimeout: 1_200_000,
@@ -303,6 +306,7 @@ function codexClient(
       config,
       false,
       dispatcher,
+      retryUnauthorized,
     ),
   });
 }
@@ -651,6 +655,7 @@ async function codexSummarize(
 export type CodexClientFactory = (
   sessionId: () => string,
   responsesLite: boolean,
+  options?: { retryUnauthorized?: boolean },
 ) => OpenAI;
 
 /** Build the resident Codex facade over session-scoped SDK clients. */
@@ -669,6 +674,11 @@ export function createCodexLLM(
   const standaloneClient = clientFactory(
     () => standaloneLane.getStore() ?? standaloneFallbackId,
     responsesLite,
+  );
+  const oneAttemptStandaloneClient = clientFactory(
+    () => standaloneLane.getStore() ?? standaloneFallbackId,
+    responsesLite,
+    { retryUnauthorized: false },
   );
   return {
     ...(options.exposeClient ? { client } : {}),
@@ -706,7 +716,9 @@ export function createCodexLLM(
       }
       const result = await standaloneLane.run(laneId, () =>
         codexStandaloneComplete(
-          standaloneClient,
+          opts.retryUnauthorized === false
+            ? oneAttemptStandaloneClient
+            : standaloneClient,
           config,
           messages,
           laneId,
@@ -787,8 +799,15 @@ export function createCodexOAuthLLM(
 ): LLM {
   return createCodexLLM(
     config,
-    (sessionId, responsesLite) =>
-      codexClient(config, store, sessionId, fetchFn, responsesLite),
+    (sessionId, responsesLite, clientOptions) =>
+      codexClient(
+        config,
+        store,
+        sessionId,
+        fetchFn,
+        responsesLite,
+        clientOptions?.retryUnauthorized ?? true,
+      ),
     {
       toolContractVersion: TOOL_CONTRACT_VERSION,
       providerType: 'codex-oauth',

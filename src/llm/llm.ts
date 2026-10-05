@@ -244,6 +244,8 @@ export interface StandaloneCompleteOptions {
   chatTemplateKwargs?: Record<string, unknown>;
   /** Replay a closed historical function-call/output chain. */
   allowHistoricalToolMessages?: boolean;
+  /** Refuse transport-layer replay after an unauthorized response. */
+  retryUnauthorized?: boolean;
   /** Abort the provider request and response stream. */
   signal?: AbortSignal;
 }

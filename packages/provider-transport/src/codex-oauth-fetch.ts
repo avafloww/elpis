@@ -50,6 +50,7 @@ export interface CodexOAuthFetchOptions {
   readonly fetch?: typeof globalThis.fetch;
   readonly dispatcher?: unknown;
   readonly observe?: CodexOAuthObserver;
+  readonly retryUnauthorized?: boolean;
 }
 
 type FetchInitWithDispatcher = RequestInit & { dispatcher?: unknown };
@@ -358,6 +359,11 @@ export function createCodexOAuthFetch(
     throw configurationError('requires a session-id source');
   if (options.observe !== undefined && typeof options.observe !== 'function')
     throw configurationError('observer must be a function');
+  if (
+    options.retryUnauthorized !== undefined &&
+    typeof options.retryUnauthorized !== 'boolean'
+  )
+    throw configurationError('retryUnauthorized must be a boolean');
   const underlyingFetch = options.fetch ?? globalThis.fetch;
   if (typeof underlyingFetch !== 'function')
     throw configurationError('requires an underlying fetch function');
@@ -365,6 +371,7 @@ export function createCodexOAuthFetch(
   const preserveTransportHeaders = options.preserveTransportHeaders ?? false;
   const dispatcher = options.dispatcher;
   const observe = options.observe;
+  const retryUnauthorized = options.retryUnauthorized ?? true;
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const ownedInput = snapshotInput(input, init);
@@ -435,7 +442,7 @@ export function createCodexOAuthFetch(
     };
 
     let response = await send(1);
-    if (response.status === 401) {
+    if (response.status === 401 && retryUnauthorized) {
       cancelRejectedResponse(response);
       throwIfAborted(snapshot.signal);
       await awaitWithAbort(
