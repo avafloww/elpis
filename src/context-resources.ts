@@ -486,7 +486,7 @@ export class ContextResources {
       return null;
     const lines = [
       '[harness: context resources were present before the fold.]',
-      'Before responding or running more code, decide which are still relevant. Reload relevant skills with the top-level skill tool, and reload relevant AGENTS.md files with elpis.read(path) in their own run call. Do not reload irrelevant resources; only resources loaded again belong to this context window.',
+      'Before responding or running more code, decide which are still relevant. Reload relevant skills with the top-level skill tool. For listed AGENTS.md paths, do not call elpis.read(path): the next supported access to a governed file injects the full nearest instructions and stops that run; read the injected body, then retry the original operation. Do not reload irrelevant resources; only resources loaded again belong to this context window.',
     ];
     if (prior.skills.length > 0) {
       lines.push(

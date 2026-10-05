@@ -457,6 +457,8 @@ test('ContextResources compaction reminder clears and requires deliberate reload
       reminder ?? '',
       new RegExp(agents.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     );
+    assert.match(reminder ?? '', /do not call elpis\.read\(path\)/i);
+    assert.match(reminder ?? '', /retry the original operation/i);
     assert.deepEqual(resources.snapshot(), { skills: [], agentsFiles: [] });
     assert.equal(resources.takeCompactionReminder(), null);
 

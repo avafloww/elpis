@@ -248,7 +248,9 @@ it will recur until the instructions have reached model-visible context. Raw \`f
 surfaces can bypass this best-effort guidance; do not use them merely to evade it.
 
 Loaded skills and AGENTS.md files apply only to the current context window. After compaction, follow the
-single reload reminder: deliberately reload only resources still relevant to the work ahead.`;
+single reload reminder. Reload only relevant skills with \`skill\`. For AGENTS.md, do not reread the listed file:
+the next supported access to a governed file injects the full nearest instructions and stops that run;
+read the injected body, then retry the original operation.`;
   const externalThinkingSection = input.externalThinking
     ? `
 When \`think\` is present, it is a second model-facing tool for intermediate cognition, not a sandbox.
