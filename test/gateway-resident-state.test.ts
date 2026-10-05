@@ -214,6 +214,52 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
   // Reopening must interpret every legacy rotation as not yet proposed.
   db.exec(`
+    DROP TRIGGER context_isolated_provider_outcomes_no_update;
+    DROP TRIGGER context_isolated_provider_outcomes_no_delete;
+    DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
+    DROP TABLE context_isolated_provider_outcomes;
+    DROP TRIGGER context_isolated_provider_response_evidence_no_update;
+    DROP TRIGGER context_isolated_provider_response_evidence_no_delete;
+    DROP TRIGGER context_isolated_provider_response_evidence_lineage_guard;
+    DROP TABLE context_isolated_provider_response_evidence;
+    DROP TRIGGER context_dark_pending_branch_effect_guard;
+    DROP TRIGGER context_dark_pending_branch_transition_guard;
+    DROP TRIGGER context_isolated_provider_execution_attempts_no_update;
+    DROP TRIGGER context_isolated_provider_execution_attempts_no_delete;
+    DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+    DROP TABLE context_isolated_provider_execution_attempts;
+    CREATE TRIGGER context_dark_pending_branch_effect_guard
+      BEFORE INSERT ON context_effects
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot issue effects');
+      END;
+    CREATE TRIGGER context_dark_pending_branch_transition_guard
+      BEFORE UPDATE OF status, ended_at ON context_branches
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = OLD.branch_id
+      )
+        AND NOT (
+          OLD.status = 'running'
+          AND NEW.status = 'crashed'
+          AND NEW.ended_at IS NOT NULL
+          AND NEW.ended_at >= (
+            SELECT abandoned_at
+            FROM context_dark_pending_branch_abandonments
+            WHERE branch_id = OLD.branch_id
+          )
+          AND EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_abandonments
+            WHERE branch_id = OLD.branch_id
+          )
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
+      END;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_update;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_lineage_guard;
@@ -332,7 +378,8 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0046-context-resident-world-profile-bindings',
           '0047-context-dark-isolated-provider-bindings',
           '0048-context-dark-isolated-provider-binding-order',
-          '0049-context-dark-isolated-provider-invocation-admissions'
+          '0049-context-dark-isolated-provider-invocation-admissions',
+          '0050-context-isolated-provider-execution-ledger'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

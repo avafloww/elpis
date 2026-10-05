@@ -505,26 +505,27 @@ export async function codexStandaloneComplete(
   const abortFromCaller = (): void => controller.abort(opts.signal?.reason);
   if (opts.signal?.aborted) abortFromCaller();
   else opts.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const streamIdleTimeoutMs =
+    opts.streamIdleTimeoutMs ?? config.llm.streamIdleTimeoutMs;
+  const callTimeoutMs = opts.callTimeoutMs ?? config.llm.callTimeoutMs;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const markProgress = (): void => {
     clearTimeout(idleTimer);
-    if (config.llm.streamIdleTimeoutMs > 0)
+    if (streamIdleTimeoutMs > 0)
       idleTimer = setTimeout(
         () =>
           controller.abort(
-            new Error(
-              `Codex standalone stream idle for ${config.llm.streamIdleTimeoutMs}ms`,
-            ),
+            new Error(`Codex standalone stream idle for ${streamIdleTimeoutMs}ms`),
           ),
-        config.llm.streamIdleTimeoutMs,
+        streamIdleTimeoutMs,
       );
   };
   markProgress();
   const callTimer =
-    config.llm.callTimeoutMs > 0
+    callTimeoutMs > 0
       ? setTimeout(
           () => controller.abort(new Error('Codex standalone call timed out')),
-          config.llm.callTimeoutMs,
+          callTimeoutMs,
         )
       : undefined;
   // Race cancellation explicitly: a provider iterator may ignore its signal.
@@ -753,7 +754,12 @@ export function createCodexLLM(
           ),
         ),
       );
-      if (!identity.gateway) return result;
+      if (!identity.gateway) {
+        return {
+          ...result,
+          toolContractVersion: identity.toolContractVersion,
+        };
+      }
       return {
         ...result,
         model: identity.model,

@@ -597,7 +597,6 @@ for (const phase of ['acquisition', 'stream']) {
   test(`Codex standalone bounds idle ${phase} even when the provider ignores abort`, async () => {
     const { store } = fakeStore();
     const config = codexConfig('gpt-6-astra');
-    config.llm.streamIdleTimeoutMs = 20;
     const llm = createCodexOAuthLLM(config, store);
     let signal: AbortSignal | undefined;
     let closed = false;
@@ -626,6 +625,7 @@ for (const phase of ['acquisition', 'stream']) {
         [{ role: 'user', content: 'Summarize synthetic notes.' }],
         'test-lane',
         true,
+        { streamIdleTimeoutMs: 20 },
       ),
       /standalone stream idle/,
     );
@@ -633,6 +633,32 @@ for (const phase of ['acquisition', 'stream']) {
     assert.equal(closed, phase === 'stream');
   });
 }
+
+test('Codex standalone honors an exact call-timeout override', async () => {
+  const { store } = fakeStore();
+  const config = codexConfig('gpt-6-astra');
+  const llm = createCodexOAuthLLM(config, store);
+  let signal: AbortSignal | undefined;
+  (llm.client!.responses as any).create = async (
+    _body: unknown,
+    opts: { signal: AbortSignal },
+  ) => {
+    signal = opts.signal;
+    return new Promise(() => {});
+  };
+  await assert.rejects(
+    codexStandaloneComplete(
+      llm.client!,
+      config,
+      [{ role: 'user', content: 'Summarize synthetic notes.' }],
+      'test-lane',
+      true,
+      { callTimeoutMs: 20, streamIdleTimeoutMs: 120_000 },
+    ),
+    /standalone call timed out/,
+  );
+  assert.equal(signal?.aborted, true);
+});
 
 test('Codex standalone returns a terminal response without waiting for stream EOF', async () => {
   const { store } = fakeStore();

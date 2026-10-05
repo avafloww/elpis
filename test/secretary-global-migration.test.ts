@@ -19,6 +19,52 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
   for (const trigger of ledgerTriggers)
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   db.exec(`
+    DROP TRIGGER context_isolated_provider_outcomes_no_update;
+    DROP TRIGGER context_isolated_provider_outcomes_no_delete;
+    DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
+    DROP TABLE context_isolated_provider_outcomes;
+    DROP TRIGGER context_isolated_provider_response_evidence_no_update;
+    DROP TRIGGER context_isolated_provider_response_evidence_no_delete;
+    DROP TRIGGER context_isolated_provider_response_evidence_lineage_guard;
+    DROP TABLE context_isolated_provider_response_evidence;
+    DROP TRIGGER context_dark_pending_branch_effect_guard;
+    DROP TRIGGER context_dark_pending_branch_transition_guard;
+    DROP TRIGGER context_isolated_provider_execution_attempts_no_update;
+    DROP TRIGGER context_isolated_provider_execution_attempts_no_delete;
+    DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+    DROP TABLE context_isolated_provider_execution_attempts;
+    CREATE TRIGGER context_dark_pending_branch_effect_guard
+      BEFORE INSERT ON context_effects
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot issue effects');
+      END;
+    CREATE TRIGGER context_dark_pending_branch_transition_guard
+      BEFORE UPDATE OF status, ended_at ON context_branches
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = OLD.branch_id
+      )
+        AND NOT (
+          OLD.status = 'running'
+          AND NEW.status = 'crashed'
+          AND NEW.ended_at IS NOT NULL
+          AND NEW.ended_at >= (
+            SELECT abandoned_at
+            FROM context_dark_pending_branch_abandonments
+            WHERE branch_id = OLD.branch_id
+          )
+          AND EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_abandonments
+            WHERE branch_id = OLD.branch_id
+          )
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
+      END;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_update;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete;
     DROP TRIGGER context_dark_isolated_provider_invocation_admissions_lineage_guard;
@@ -175,7 +221,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings','0047-context-dark-isolated-provider-bindings','0048-context-dark-isolated-provider-binding-order','0049-context-dark-isolated-provider-invocation-admissions')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings','0047-context-dark-isolated-provider-bindings','0048-context-dark-isolated-provider-binding-order','0049-context-dark-isolated-provider-invocation-admissions','0050-context-isolated-provider-execution-ledger')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -235,7 +281,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    49,
+    50,
   );
   assert.equal(
     (

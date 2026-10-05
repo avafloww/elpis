@@ -56,6 +56,8 @@ export type DarkIsolatedProviderBindingId =
   ContextId<'DarkIsolatedProviderBindingId'>;
 export type DarkIsolatedProviderInvocationId =
   ContextId<'DarkIsolatedProviderInvocationId'>;
+export type IsolatedProviderExecutionAttemptId =
+  ContextId<'IsolatedProviderExecutionAttemptId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -167,6 +169,14 @@ export const darkIsolatedProviderInvocationId = (
     'darkIsolatedProviderInvocationId',
     value,
     'dark-provider-invocation:',
+  );
+export const isolatedProviderExecutionAttemptId = (
+  value: string,
+): IsolatedProviderExecutionAttemptId =>
+  branded<'IsolatedProviderExecutionAttemptId'>(
+    'isolatedProviderExecutionAttemptId',
+    value,
+    'isolated-provider-attempt:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -890,6 +900,83 @@ export interface DarkIsolatedProviderInvocationAdmissionRecord {
   readonly admissionHash: string;
 }
 
+export interface IsolatedProviderExecutionAttemptV1 {
+  readonly schemaVersion: 1;
+  readonly executionMode: 'active';
+  readonly authorityKind: 'single_provider_attempt';
+  readonly networkAuthority: 'one_direct_codex_request';
+  readonly toolMode: 'none';
+  readonly historicalToolMessages: false;
+  readonly maxAttempts: 1;
+  readonly transportRetries: 0;
+  readonly surfaceFallback: false;
+  readonly invocationId: DarkIsolatedProviderInvocationId;
+  readonly effectId: EffectId;
+  readonly sourceActivationEpoch: number;
+  readonly activeActivationEpoch: number;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly authorityEpoch: number;
+  readonly admissionHash: string;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly candidateHash: string;
+  readonly candidateBytes: number;
+  readonly targetHash: string;
+  readonly cacheNamespace: string;
+  readonly callTimeoutMs: number;
+  readonly streamIdleTimeoutMs: number;
+  readonly maxOutputBytes: number;
+  readonly effectPayloadHash: string;
+  readonly authorizedAt: number;
+}
+
+export interface IsolatedProviderExecutionAttemptRecord {
+  readonly attemptId: IsolatedProviderExecutionAttemptId;
+  readonly attempt: IsolatedProviderExecutionAttemptV1;
+  readonly effectPayloadJson: string;
+  readonly attemptJson: string;
+  readonly attemptHash: string;
+}
+
+export interface IsolatedProviderResponseEvidenceV1 {
+  readonly schemaVersion: 1;
+  readonly attemptId: IsolatedProviderExecutionAttemptId;
+  readonly effectId: EffectId;
+  readonly statusCode: number;
+  readonly requestId: string | null;
+  readonly receivedAt: number;
+}
+
+export interface IsolatedProviderResponseEvidenceRecord {
+  readonly evidence: IsolatedProviderResponseEvidenceV1;
+  readonly evidenceJson: string;
+  readonly evidenceHash: string;
+}
+
+export type IsolatedProviderOutcomePhase =
+  | 'pre_dispatch_rejected'
+  | 'issuance_uncertain'
+  | 'issued';
+
+export interface IsolatedProviderOutcomeV1 {
+  readonly schemaVersion: 1;
+  readonly attemptId: IsolatedProviderExecutionAttemptId;
+  readonly effectId: EffectId | null;
+  readonly outcomeKind: 'visible_success' | 'visible_error';
+  readonly phase: IsolatedProviderOutcomePhase;
+  readonly visibleText: string;
+  readonly visibleBytes: number;
+  readonly visibleHash: string;
+  readonly completedAt: number;
+}
+
+export interface IsolatedProviderOutcomeRecord {
+  readonly outcome: IsolatedProviderOutcomeV1;
+  readonly outcomeJson: string;
+  readonly outcomeHash: string;
+}
+
 export interface RecoveredIsolatedProviderBindingVerificationV1 {
   readonly schemaVersion: 1;
   readonly verificationKind: 'latest_recovered_dark_isolated_provider_binding';
@@ -1269,6 +1356,14 @@ function darkIsolatedProviderInvocationIdentity(
 ): DarkIsolatedProviderInvocationId {
   return darkIsolatedProviderInvocationId(
     `dark-provider-invocation:${hashContextBytes(admissionJson)}`,
+  );
+}
+
+function isolatedProviderExecutionAttemptIdentity(
+  attemptJson: string,
+): IsolatedProviderExecutionAttemptId {
+  return isolatedProviderExecutionAttemptId(
+    `isolated-provider-attempt:${hashContextBytes(attemptJson)}`,
   );
 }
 
@@ -2324,6 +2419,55 @@ interface DarkIsolatedProviderInvocationAdmissionRow {
   admission_json: string;
   admission_hash: string;
   admitted_at: number;
+}
+
+interface IsolatedProviderExecutionAttemptRow {
+  attempt_id: string;
+  invocation_id: string;
+  effect_id: string;
+  source_activation_epoch: number;
+  active_activation_epoch: number;
+  branch_id: string;
+  world_id: string;
+  authority_epoch: number;
+  admission_hash: string;
+  request_view_id: string;
+  request_view_hash: string;
+  candidate_hash: string;
+  candidate_bytes: number;
+  target_hash: string;
+  cache_namespace: string;
+  call_timeout_ms: number;
+  stream_idle_timeout_ms: number;
+  max_output_bytes: number;
+  effect_payload_json: string;
+  effect_payload_hash: string;
+  attempt_json: string;
+  attempt_hash: string;
+  authorized_at: number;
+}
+
+interface IsolatedProviderResponseEvidenceRow {
+  attempt_id: string;
+  effect_id: string;
+  status_code: number;
+  request_id: string | null;
+  evidence_json: string;
+  evidence_hash: string;
+  received_at: number;
+}
+
+interface IsolatedProviderOutcomeRow {
+  attempt_id: string;
+  effect_id: string | null;
+  outcome_kind: string;
+  phase: string;
+  visible_text: string;
+  visible_bytes: number;
+  visible_hash: string;
+  outcome_json: string;
+  outcome_hash: string;
+  completed_at: number;
 }
 
 interface ScopedRuntimeContractArtifactRow {
@@ -4288,6 +4432,560 @@ export class ContextGraphStore {
       }
       return created;
     });
+  }
+
+  getIsolatedProviderExecutionAttempt(
+    id: IsolatedProviderExecutionAttemptId,
+  ): IsolatedProviderExecutionAttemptRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_isolated_provider_execution_attempts
+         WHERE attempt_id = ?`,
+      )
+      .get(id) as IsolatedProviderExecutionAttemptRow | undefined;
+    if (!row) return null;
+    const invocationId = darkIsolatedProviderInvocationId(row.invocation_id);
+    const admissionRecord = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+    if (!admissionRecord) {
+      throw new Error('isolated provider execution admission is missing');
+    }
+    const requestViewId = localBranchRequestViewId(row.request_view_id);
+    const requestView = this.getLocalBranchRequestView(requestViewId);
+    if (!requestView) {
+      throw new Error('isolated provider execution request view is missing');
+    }
+    const request = this.materializeStoredLocalBranchRequest(requestView);
+    const effectIdValue = effectId(row.effect_id);
+    const authorizedAt = timestamp(
+      'isolated provider execution authorizedAt',
+      row.authorized_at,
+    );
+    const effectPayload = Object.freeze({
+      schemaVersion: 1,
+      kind: 'isolated_provider_completion',
+      invocationId,
+      branchId: admissionRecord.admission.branchId,
+      worldId: admissionRecord.admission.worldId,
+      candidateHash: admissionRecord.admission.candidateHash,
+      targetHash: admissionRecord.admission.targetHash,
+      cacheNamespace: admissionRecord.admission.cacheNamespace,
+    });
+    const effectPayloadJson = serialize(effectPayload);
+    const effectPayloadHash = hashContextBytes(effectPayloadJson);
+    const attempt = Object.freeze<IsolatedProviderExecutionAttemptV1>({
+      schemaVersion: 1,
+      executionMode: 'active',
+      authorityKind: 'single_provider_attempt',
+      networkAuthority: 'one_direct_codex_request',
+      toolMode: 'none',
+      historicalToolMessages: false,
+      maxAttempts: 1,
+      transportRetries: 0,
+      surfaceFallback: false,
+      invocationId,
+      effectId: effectIdValue,
+      sourceActivationEpoch: admissionRecord.admission.activationEpoch,
+      activeActivationEpoch: admissionRecord.admission.activationEpoch + 1,
+      branchId: admissionRecord.admission.branchId,
+      worldId: admissionRecord.admission.worldId,
+      authorityEpoch: admissionRecord.admission.authorityEpoch,
+      admissionHash: admissionRecord.admissionHash,
+      requestViewId,
+      requestViewHash: admissionRecord.admission.requestViewHash,
+      candidateHash: admissionRecord.admission.candidateHash,
+      candidateBytes: admissionRecord.admission.candidateBytes,
+      targetHash: admissionRecord.admission.targetHash,
+      cacheNamespace: admissionRecord.admission.cacheNamespace,
+      callTimeoutMs: generation(
+        'isolated provider execution callTimeoutMs',
+        row.call_timeout_ms,
+      ),
+      streamIdleTimeoutMs: generation(
+        'isolated provider execution streamIdleTimeoutMs',
+        row.stream_idle_timeout_ms,
+      ),
+      maxOutputBytes: generation(
+        'isolated provider execution maxOutputBytes',
+        row.max_output_bytes,
+      ),
+      effectPayloadHash,
+      authorizedAt,
+    });
+    const attemptJson = serialize(attempt);
+    const attemptHash = hashContextBytes(attemptJson);
+    if (
+      row.source_activation_epoch !== attempt.sourceActivationEpoch ||
+      row.active_activation_epoch !== attempt.activeActivationEpoch ||
+      row.branch_id !== attempt.branchId ||
+      row.world_id !== attempt.worldId ||
+      row.authority_epoch !== attempt.authorityEpoch ||
+      row.admission_hash !== attempt.admissionHash ||
+      row.request_view_hash !== attempt.requestViewHash ||
+      request.candidateHash !== attempt.candidateHash ||
+      request.candidateBytes !== attempt.candidateBytes ||
+      row.candidate_hash !== attempt.candidateHash ||
+      row.candidate_bytes !== attempt.candidateBytes ||
+      row.target_hash !== attempt.targetHash ||
+      row.cache_namespace !== attempt.cacheNamespace ||
+      row.effect_payload_json !== effectPayloadJson ||
+      row.effect_payload_hash !== effectPayloadHash ||
+      row.attempt_json !== attemptJson ||
+      row.attempt_hash !== attemptHash ||
+      isolatedProviderExecutionAttemptIdentity(attemptJson) !== id
+    ) {
+      throw new Error('stored isolated provider execution attempt is invalid');
+    }
+    return {
+      attemptId: id,
+      attempt,
+      effectPayloadJson,
+      attemptJson,
+      attemptHash,
+    };
+  }
+
+  getIsolatedProviderExecutionAttemptForInvocation(
+    invocationId: DarkIsolatedProviderInvocationId,
+  ): IsolatedProviderExecutionAttemptRecord | null {
+    const normalizedInvocationId = darkIsolatedProviderInvocationId(invocationId);
+    const row = this.database
+      .prepare(
+        `SELECT attempt_id FROM context_isolated_provider_execution_attempts
+         WHERE invocation_id = ?`,
+      )
+      .get(normalizedInvocationId) as { attempt_id: string } | undefined;
+    return row
+      ? this.getIsolatedProviderExecutionAttempt(
+          isolatedProviderExecutionAttemptId(row.attempt_id),
+        )
+      : null;
+  }
+
+  beginIsolatedProviderExecutionAttempt(input: {
+    invocationId: DarkIsolatedProviderInvocationId;
+    expectedWorldId: WorldId;
+    expectedTarget: ExactIsolatedProviderTargetV1;
+    callTimeoutMs: number;
+    streamIdleTimeoutMs: number;
+    maxOutputBytes: number;
+    authorizedAt: number;
+  }):
+    | {
+        readonly fresh: true;
+        readonly attempt: IsolatedProviderExecutionAttemptRecord;
+        readonly request: MaterializedLocalBranchRequest;
+      }
+    | {
+        readonly fresh: false;
+        readonly attempt: IsolatedProviderExecutionAttemptRecord;
+      } {
+    const invocationId = darkIsolatedProviderInvocationId(input.invocationId);
+    const expectedWorldId = worldId(input.expectedWorldId);
+    return transaction(this.database, () => {
+      const prior = this.getIsolatedProviderExecutionAttemptForInvocation(invocationId);
+      if (prior) {
+        if (prior.attempt.worldId !== expectedWorldId) {
+          throw new Error('isolated provider execution attempt belongs to another world');
+        }
+        return { fresh: false, attempt: prior } as const;
+      }
+      const expectedTarget = normalizeExactIsolatedProviderTarget(input.expectedTarget);
+      const targetJson = serialize(expectedTarget);
+      const targetHash = hashContextBytes(targetJson);
+      const callTimeoutMs = generation('callTimeoutMs', input.callTimeoutMs);
+      const streamIdleTimeoutMs = generation(
+        'streamIdleTimeoutMs',
+        input.streamIdleTimeoutMs,
+      );
+      if (callTimeoutMs < 1 || callTimeoutMs > 3_600_000) {
+        throw new Error('callTimeoutMs must be between 1 and 3600000');
+      }
+      if (streamIdleTimeoutMs < 1 || streamIdleTimeoutMs > 3_600_000) {
+        throw new Error('streamIdleTimeoutMs must be between 1 and 3600000');
+      }
+      const maxOutputBytes = generation('maxOutputBytes', input.maxOutputBytes);
+      if (maxOutputBytes < 1 || maxOutputBytes > 1_048_576) {
+        throw new Error('maxOutputBytes must be between 1 and 1048576');
+      }
+      const authorizedAt = timestamp('authorizedAt', input.authorizedAt);
+      if (
+        expectedTarget.providerType !== 'codex-oauth' ||
+        expectedTarget.apiSurface !== 'codex-responses' ||
+        expectedTarget.gateway !== null
+      ) {
+        throw new Error('isolated provider execution requires direct Codex Responses');
+      }
+      const activation = this.getActivationState();
+      const admissionRecord = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+      if (!admissionRecord) throw new Error('isolated provider invocation admission is missing');
+      const admission = admissionRecord.admission;
+      if (
+        activation.mode !== 'active' ||
+        activation.epoch !== admission.activationEpoch + 1 ||
+        admission.worldId !== expectedWorldId ||
+        admission.targetHash !== targetHash ||
+        serialize(admission.target) !== targetJson
+      ) {
+        throw new Error('isolated provider execution authority is not current');
+      }
+      const branch = this.getBranch(admission.branchId);
+      const coordinator = this.getRootCoordinatorState();
+      if (
+        !branch ||
+        branch.status !== 'running' ||
+        branch.worldId !== admission.worldId ||
+        branch.authorityEpoch !== admission.authorityEpoch ||
+        coordinator.activeBranchId !== branch.branchId ||
+        coordinator.activeWorldId !== branch.worldId
+      ) {
+        throw new Error('isolated provider execution branch is not current');
+      }
+      const requestView = this.getLocalBranchRequestView(admission.requestViewId);
+      if (!requestView) throw new Error('isolated provider execution request view is missing');
+      const request = this.materializeStoredLocalBranchRequest(requestView);
+      if (
+        request.candidateHash !== admission.candidateHash ||
+        request.candidateBytes !== admission.candidateBytes
+      ) {
+        throw new Error('isolated provider execution candidate is invalid');
+      }
+      const effectPayload = Object.freeze({
+        schemaVersion: 1,
+        kind: 'isolated_provider_completion',
+        invocationId,
+        branchId: admission.branchId,
+        worldId: admission.worldId,
+        candidateHash: admission.candidateHash,
+        targetHash: admission.targetHash,
+        cacheNamespace: admission.cacheNamespace,
+      });
+      const effectPayloadJson = serialize(effectPayload);
+      const effectPayloadHash = hashContextBytes(effectPayloadJson);
+      const effectIdValue = effectId(`effect:provider:${effectPayloadHash}`);
+      const attempt = Object.freeze<IsolatedProviderExecutionAttemptV1>({
+        schemaVersion: 1,
+        executionMode: 'active',
+        authorityKind: 'single_provider_attempt',
+        networkAuthority: 'one_direct_codex_request',
+        toolMode: 'none',
+        historicalToolMessages: false,
+        maxAttempts: 1,
+        transportRetries: 0,
+        surfaceFallback: false,
+        invocationId,
+        effectId: effectIdValue,
+        sourceActivationEpoch: admission.activationEpoch,
+        activeActivationEpoch: activation.epoch,
+        branchId: admission.branchId,
+        worldId: admission.worldId,
+        authorityEpoch: admission.authorityEpoch,
+        admissionHash: admissionRecord.admissionHash,
+        requestViewId: admission.requestViewId,
+        requestViewHash: admission.requestViewHash,
+        candidateHash: admission.candidateHash,
+        candidateBytes: admission.candidateBytes,
+        targetHash: admission.targetHash,
+        cacheNamespace: admission.cacheNamespace,
+        callTimeoutMs,
+        streamIdleTimeoutMs,
+        maxOutputBytes,
+        effectPayloadHash,
+        authorizedAt,
+      });
+      const attemptJson = serialize(attempt);
+      const attemptHash = hashContextBytes(attemptJson);
+      const attemptId = isolatedProviderExecutionAttemptIdentity(attemptJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_isolated_provider_execution_attempts(
+             attempt_id, invocation_id, effect_id, source_activation_epoch,
+             active_activation_epoch, branch_id, world_id, authority_epoch,
+             admission_hash, request_view_id, request_view_hash, candidate_hash,
+             candidate_bytes, target_hash, cache_namespace, call_timeout_ms,
+             stream_idle_timeout_ms, max_output_bytes, effect_payload_json,
+             effect_payload_hash, attempt_json, attempt_hash, authorized_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          attemptId,
+          invocationId,
+          effectIdValue,
+          attempt.sourceActivationEpoch,
+          attempt.activeActivationEpoch,
+          attempt.branchId,
+          attempt.worldId,
+          attempt.authorityEpoch,
+          attempt.admissionHash,
+          attempt.requestViewId,
+          attempt.requestViewHash,
+          attempt.candidateHash,
+          attempt.candidateBytes,
+          attempt.targetHash,
+          attempt.cacheNamespace,
+          attempt.callTimeoutMs,
+          attempt.streamIdleTimeoutMs,
+          attempt.maxOutputBytes,
+          effectPayloadJson,
+          effectPayloadHash,
+          attemptJson,
+          attemptHash,
+          authorizedAt,
+        );
+      const stored = this.getIsolatedProviderExecutionAttempt(attemptId);
+      if (!stored) throw new Error('isolated provider execution attempt was not stored');
+      return { fresh: true, attempt: stored, request } as const;
+    });
+  }
+
+  prepareIsolatedProviderExecutionEffect(
+    attemptId: IsolatedProviderExecutionAttemptId,
+    preparedAt: number,
+  ): EffectRecord {
+    const attempt = this.getIsolatedProviderExecutionAttempt(
+      isolatedProviderExecutionAttemptId(attemptId),
+    );
+    if (!attempt) throw new Error('isolated provider execution attempt is missing');
+    return this.prepareEffect({
+      effectId: attempt.attempt.effectId,
+      branchId: attempt.attempt.branchId,
+      worldId: attempt.attempt.worldId,
+      destinationWorldId: attempt.attempt.worldId,
+      kind: 'isolated_provider_completion',
+      authorityEpoch: attempt.attempt.authorityEpoch,
+      payload: JSON.parse(attempt.effectPayloadJson) as unknown,
+      idempotencyKey: attempt.attemptId,
+      preparedAt,
+    });
+  }
+
+  recordIsolatedProviderResponse(input: {
+    attemptId: IsolatedProviderExecutionAttemptId;
+    statusCode: number;
+    requestId?: string;
+    receivedAt: number;
+  }): IsolatedProviderResponseEvidenceRecord {
+    const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
+    const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
+    if (!attempt) throw new Error('isolated provider execution attempt is missing');
+    const statusCode = generation('statusCode', input.statusCode);
+    if (statusCode < 100 || statusCode > 599) {
+      throw new Error('statusCode must be between 100 and 599');
+    }
+    const requestId = input.requestId === undefined
+      ? null
+      : boundedProviderText('requestId', input.requestId, 256);
+    const receivedAt = timestamp('receivedAt', input.receivedAt);
+    const evidence = Object.freeze<IsolatedProviderResponseEvidenceV1>({
+      schemaVersion: 1,
+      attemptId,
+      effectId: attempt.attempt.effectId,
+      statusCode,
+      requestId,
+      receivedAt,
+    });
+    const evidenceJson = serialize(evidence);
+    const evidenceHash = hashContextBytes(evidenceJson);
+    this.database
+      .prepare(
+        `INSERT INTO context_isolated_provider_response_evidence(
+           attempt_id, effect_id, status_code, request_id,
+           evidence_json, evidence_hash, received_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        attemptId,
+        attempt.attempt.effectId,
+        statusCode,
+        requestId,
+        evidenceJson,
+        evidenceHash,
+        receivedAt,
+      );
+    return { evidence, evidenceJson, evidenceHash };
+  }
+
+  getIsolatedProviderResponse(
+    attemptId: IsolatedProviderExecutionAttemptId,
+  ): IsolatedProviderResponseEvidenceRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_isolated_provider_response_evidence
+         WHERE attempt_id = ?`,
+      )
+      .get(attemptId) as IsolatedProviderResponseEvidenceRow | undefined;
+    if (!row) return null;
+    const evidence = Object.freeze<IsolatedProviderResponseEvidenceV1>({
+      schemaVersion: 1,
+      attemptId: isolatedProviderExecutionAttemptId(row.attempt_id),
+      effectId: effectId(row.effect_id),
+      statusCode: generation('statusCode', row.status_code),
+      requestId: row.request_id,
+      receivedAt: timestamp('receivedAt', row.received_at),
+    });
+    const evidenceJson = serialize(evidence);
+    const evidenceHash = hashContextBytes(evidenceJson);
+    if (row.evidence_json !== evidenceJson || row.evidence_hash !== evidenceHash) {
+      throw new Error('stored isolated provider response evidence is invalid');
+    }
+    return { evidence, evidenceJson, evidenceHash };
+  }
+
+  recordIsolatedProviderOutcome(input: {
+    attemptId: IsolatedProviderExecutionAttemptId;
+    outcomeKind: 'visible_success' | 'visible_error';
+    phase: IsolatedProviderOutcomePhase;
+    visibleText: string;
+    completedAt: number;
+  }): IsolatedProviderOutcomeRecord {
+    const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
+    const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
+    if (!attempt) throw new Error('isolated provider execution attempt is missing');
+    if (typeof input.visibleText !== 'string') throw new Error('visibleText must be a string');
+    const visibleBytes = Buffer.byteLength(input.visibleText);
+    if (visibleBytes > attempt.attempt.maxOutputBytes) {
+      throw new Error('isolated provider visible output exceeds byte limit');
+    }
+    const visibleHash = hashContextBytes(input.visibleText);
+    const completedAt = timestamp('completedAt', input.completedAt);
+    const response = this.getIsolatedProviderResponse(attemptId);
+    if (
+      input.phase === 'issued' &&
+      response !== null &&
+      response.evidence.receivedAt > completedAt
+    ) {
+      throw new Error('response evidence is newer than the provider outcome');
+    }
+    const effectIdValue = input.phase === 'pre_dispatch_rejected'
+      ? null
+      : attempt.attempt.effectId;
+    const outcome = Object.freeze<IsolatedProviderOutcomeV1>({
+      schemaVersion: 1,
+      attemptId,
+      effectId: effectIdValue,
+      outcomeKind: input.outcomeKind,
+      phase: input.phase,
+      visibleText: input.visibleText,
+      visibleBytes,
+      visibleHash,
+      completedAt,
+    });
+    const outcomeJson = serialize(outcome);
+    const outcomeHash = hashContextBytes(outcomeJson);
+    return transaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO context_isolated_provider_outcomes(
+             attempt_id, effect_id, outcome_kind, phase, visible_text,
+             visible_bytes, visible_hash, outcome_json, outcome_hash, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          attemptId,
+          effectIdValue,
+          input.outcomeKind,
+          input.phase,
+          input.visibleText,
+          visibleBytes,
+          visibleHash,
+          outcomeJson,
+          outcomeHash,
+          completedAt,
+        );
+      if (effectIdValue !== null) {
+        const status: Exclude<EffectStatus, 'prepared'> =
+          input.phase === 'issuance_uncertain'
+            ? 'uncertain'
+            : input.outcomeKind === 'visible_success'
+              ? 'observed'
+              : 'failed';
+        const observationJson = serialize({
+          schemaVersion: 1,
+          providerOutcomeHash: outcomeHash,
+        });
+        const update = this.database
+          .prepare(
+            `UPDATE context_effects
+             SET status = ?, resolved_at = ?, observation_json = ?
+             WHERE effect_id = ? AND status = 'prepared'`,
+          )
+          .run(status, completedAt, observationJson, effectIdValue);
+        if (update.changes !== 1) {
+          throw new Error('isolated provider execution effect is not prepared');
+        }
+      }
+      return { outcome, outcomeJson, outcomeHash };
+    });
+  }
+
+  getIsolatedProviderOutcome(
+    attemptId: IsolatedProviderExecutionAttemptId,
+  ): IsolatedProviderOutcomeRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_isolated_provider_outcomes
+         WHERE attempt_id = ?`,
+      )
+      .get(attemptId) as IsolatedProviderOutcomeRow | undefined;
+    if (!row) return null;
+    if (
+      (row.outcome_kind !== 'visible_success' && row.outcome_kind !== 'visible_error') ||
+      (row.phase !== 'pre_dispatch_rejected' &&
+        row.phase !== 'issuance_uncertain' &&
+        row.phase !== 'issued') ||
+      (row.outcome_kind === 'visible_success' && row.phase !== 'issued') ||
+      ((row.phase === 'pre_dispatch_rejected') !== (row.effect_id === null))
+    ) {
+      throw new Error('stored isolated provider outcome policy is invalid');
+    }
+    const outcome = Object.freeze<IsolatedProviderOutcomeV1>({
+      schemaVersion: 1,
+      attemptId: isolatedProviderExecutionAttemptId(row.attempt_id),
+      effectId: row.effect_id === null ? null : effectId(row.effect_id),
+      outcomeKind: row.outcome_kind,
+      phase: row.phase,
+      visibleText: row.visible_text,
+      visibleBytes: generation('visibleBytes', row.visible_bytes),
+      visibleHash: sha256('visibleHash', row.visible_hash),
+      completedAt: timestamp('completedAt', row.completed_at),
+    });
+    const outcomeJson = serialize(outcome);
+    const outcomeHash = hashContextBytes(outcomeJson);
+    const attempt = this.getIsolatedProviderExecutionAttempt(outcome.attemptId);
+    if (!attempt) throw new Error('stored isolated provider outcome attempt is missing');
+    const response = this.getIsolatedProviderResponse(outcome.attemptId);
+    const effect = this.getEffect(attempt.attempt.effectId);
+    const expectedEffectStatus: EffectStatus | null =
+      outcome.phase === 'pre_dispatch_rejected'
+        ? null
+        : outcome.phase === 'issuance_uncertain'
+          ? 'uncertain'
+          : outcome.outcomeKind === 'visible_success'
+            ? 'observed'
+            : 'failed';
+    const expectedObservationJson = serialize({
+      schemaVersion: 1,
+      providerOutcomeHash: outcomeHash,
+    });
+    if (
+      Buffer.byteLength(outcome.visibleText) !== outcome.visibleBytes ||
+      outcome.visibleBytes > attempt.attempt.maxOutputBytes ||
+      hashContextBytes(outcome.visibleText) !== outcome.visibleHash ||
+      outcome.completedAt < attempt.attempt.authorizedAt ||
+      (outcome.phase === 'issued') !== (response !== null) ||
+      (response !== null && response.evidence.receivedAt > outcome.completedAt) ||
+      (expectedEffectStatus === null
+        ? effect !== null
+        : effect === null ||
+          outcome.effectId !== attempt.attempt.effectId ||
+          effect.status !== expectedEffectStatus ||
+          effect.resolvedAt !== outcome.completedAt ||
+          effect.observationJson !== expectedObservationJson) ||
+      row.outcome_json !== outcomeJson ||
+      row.outcome_hash !== outcomeHash
+    ) {
+      throw new Error('stored isolated provider outcome is invalid');
+    }
+    return { outcome, outcomeJson, outcomeHash };
   }
 
   private latestDarkIsolatedProviderBindingId(): DarkIsolatedProviderBindingId | null {
@@ -8554,8 +9252,15 @@ export class ContextGraphStore {
         );
       }
       const pendingAttempt = this.getDarkPendingBranchAttempt(branch.branchId);
+      const executionAttempt = this.database
+        .prepare(
+          `SELECT 1 AS present FROM context_isolated_provider_execution_attempts
+           WHERE branch_id = ?`,
+        )
+        .get(branch.branchId) as { present: number } | undefined;
       if (
         pendingAttempt !== null &&
+        executionAttempt === undefined &&
         this.getDarkPendingBranchAbandonment(branch.branchId) === null
       ) {
         this.database

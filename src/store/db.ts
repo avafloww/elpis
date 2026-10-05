@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 49;
+const SCHEMA_VERSION = 50;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -4128,6 +4128,265 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete
           BEFORE DELETE ON context_dark_isolated_provider_invocation_admissions BEGIN
             SELECT RAISE(ABORT, 'dark isolated provider invocation admissions are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0050-context-isolated-provider-execution-ledger',
+      sql: `
+        CREATE TABLE context_isolated_provider_execution_attempts (
+          attempt_id               TEXT PRIMARY KEY CHECK (length(attempt_id) BETWEEN 1 AND 128),
+          invocation_id            TEXT NOT NULL UNIQUE,
+          effect_id                TEXT NOT NULL UNIQUE CHECK (length(effect_id) BETWEEN 1 AND 128),
+          source_activation_epoch  INTEGER NOT NULL CHECK (typeof(source_activation_epoch) = 'integer' AND source_activation_epoch >= 0),
+          active_activation_epoch  INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch = source_activation_epoch + 1),
+          branch_id                TEXT NOT NULL,
+          world_id                 TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          authority_epoch          INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 1),
+          admission_hash           TEXT NOT NULL CHECK (length(admission_hash) = 64 AND admission_hash NOT GLOB '*[^0-9a-f]*'),
+          request_view_id          TEXT NOT NULL,
+          request_view_hash        TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_hash           TEXT NOT NULL CHECK (length(candidate_hash) = 64 AND candidate_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_bytes          INTEGER NOT NULL CHECK (typeof(candidate_bytes) = 'integer' AND candidate_bytes BETWEEN 1 AND 8388608),
+          target_hash              TEXT NOT NULL CHECK (length(target_hash) = 64 AND target_hash NOT GLOB '*[^0-9a-f]*'),
+          cache_namespace          TEXT NOT NULL CHECK (length(cache_namespace) BETWEEN 16 AND 256),
+          call_timeout_ms          INTEGER NOT NULL CHECK (typeof(call_timeout_ms) = 'integer' AND call_timeout_ms BETWEEN 1 AND 3600000),
+          stream_idle_timeout_ms   INTEGER NOT NULL CHECK (typeof(stream_idle_timeout_ms) = 'integer' AND stream_idle_timeout_ms BETWEEN 1 AND 3600000),
+          max_output_bytes         INTEGER NOT NULL CHECK (typeof(max_output_bytes) = 'integer' AND max_output_bytes BETWEEN 1 AND 1048576),
+          effect_payload_json      TEXT NOT NULL CHECK (length(effect_payload_json) >= 1 AND json_valid(effect_payload_json)),
+          effect_payload_hash      TEXT NOT NULL CHECK (length(effect_payload_hash) = 64 AND effect_payload_hash NOT GLOB '*[^0-9a-f]*'),
+          attempt_json             TEXT NOT NULL CHECK (length(attempt_json) >= 1 AND json_valid(attempt_json)),
+          attempt_hash             TEXT NOT NULL CHECK (length(attempt_hash) = 64 AND attempt_hash NOT GLOB '*[^0-9a-f]*'),
+          authorized_at            INTEGER NOT NULL CHECK (typeof(authorized_at) = 'integer' AND authorized_at >= 0),
+          UNIQUE (attempt_id, invocation_id, branch_id, world_id),
+          FOREIGN KEY (invocation_id) REFERENCES context_dark_isolated_provider_invocation_admissions(invocation_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id) REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id) REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_isolated_provider_execution_attempts_lineage_guard
+          BEFORE INSERT ON context_isolated_provider_execution_attempts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_dark_isolated_provider_invocation_admissions AS admissions
+            JOIN context_branches AS branches
+              ON branches.branch_id = admissions.branch_id
+             AND branches.world_id = admissions.world_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            WHERE admissions.invocation_id = NEW.invocation_id
+              AND admissions.admission_hash = NEW.admission_hash
+              AND admissions.activation_epoch = NEW.source_activation_epoch
+              AND admissions.branch_id = NEW.branch_id
+              AND admissions.world_id = NEW.world_id
+              AND admissions.authority_epoch = NEW.authority_epoch
+              AND admissions.request_view_id = NEW.request_view_id
+              AND admissions.request_view_hash = NEW.request_view_hash
+              AND admissions.candidate_hash = NEW.candidate_hash
+              AND admissions.candidate_bytes = NEW.candidate_bytes
+              AND admissions.target_hash = NEW.target_hash
+              AND admissions.cache_namespace = NEW.cache_namespace
+              AND admissions.runnable = 0
+              AND admissions.network_authority = 'none'
+              AND admissions.tool_mode = 'none'
+              AND admissions.historical_tool_messages = 0
+              AND admissions.max_attempts = 1
+              AND admissions.transport_retries = 0
+              AND admissions.surface_fallback = 0
+              AND json_extract(admissions.target_json, '$.providerType') = 'codex-oauth'
+              AND json_extract(admissions.target_json, '$.apiSurface') = 'codex-responses'
+              AND json_extract(admissions.target_json, '$.gateway') IS NULL
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND admissions.admitted_at <= NEW.authorized_at
+              AND NOT EXISTS (SELECT 1 FROM context_dark_pending_branch_abandonments a WHERE a.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules c WHERE c.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = NEW.branch_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'isolated provider execution attempt lineage is invalid');
+          END;
+        CREATE TRIGGER context_isolated_provider_execution_attempts_no_update
+          BEFORE UPDATE ON context_isolated_provider_execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'isolated provider execution attempts are immutable');
+          END;
+        CREATE TRIGGER context_isolated_provider_execution_attempts_no_delete
+          BEFORE DELETE ON context_isolated_provider_execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'isolated provider execution attempts are immutable');
+          END;
+
+        DROP TRIGGER context_dark_pending_branch_effect_guard;
+        DROP TRIGGER context_dark_pending_branch_transition_guard;
+        CREATE TRIGGER context_dark_pending_branch_effect_guard
+          BEFORE INSERT ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_isolated_provider_execution_attempts AS attempts
+              JOIN context_graph_activation AS activation ON activation.singleton = 1
+              WHERE attempts.effect_id = NEW.effect_id
+                AND attempts.branch_id = NEW.branch_id
+                AND attempts.world_id = NEW.world_id
+                AND attempts.world_id = NEW.destination_world_id
+                AND attempts.authority_epoch = NEW.authority_epoch
+                AND attempts.effect_payload_hash = NEW.payload_hash
+                AND NEW.prepared_at >= attempts.authorized_at
+                AND NEW.effect_kind = 'isolated_provider_completion'
+                AND NEW.idempotency_key = attempts.attempt_id
+                AND activation.mode = 'active'
+                AND activation.epoch = attempts.active_activation_epoch
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch cannot issue effects');
+          END;
+        CREATE TRIGGER context_dark_pending_branch_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = OLD.branch_id
+          )
+            AND NOT (
+              OLD.status = 'running'
+              AND NEW.status = 'crashed'
+              AND NEW.ended_at IS NOT NULL
+              AND (
+                (
+                  EXISTS (
+                    SELECT 1 FROM context_dark_pending_branch_abandonments
+                    WHERE branch_id = OLD.branch_id
+                  )
+                  AND NEW.ended_at >= (
+                    SELECT abandoned_at
+                    FROM context_dark_pending_branch_abandonments
+                    WHERE branch_id = OLD.branch_id
+                  )
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM context_isolated_provider_execution_attempts AS attempts
+                  JOIN context_graph_activation AS activation ON activation.singleton = 1
+                  WHERE attempts.branch_id = OLD.branch_id
+                    AND attempts.world_id = OLD.world_id
+                    AND attempts.authority_epoch = OLD.authority_epoch
+                    AND activation.mode = 'active'
+                    AND activation.epoch = attempts.active_activation_epoch
+                    AND NEW.ended_at >= attempts.authorized_at
+                    AND NOT EXISTS (
+                      SELECT 1 FROM context_effects effects
+                      WHERE effects.branch_id = OLD.branch_id
+                        AND effects.status = 'prepared'
+                    )
+                )
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
+          END;
+
+        CREATE TABLE context_isolated_provider_response_evidence (
+          attempt_id       TEXT PRIMARY KEY,
+          effect_id        TEXT NOT NULL UNIQUE,
+          status_code      INTEGER NOT NULL CHECK (typeof(status_code) = 'integer' AND status_code BETWEEN 100 AND 599),
+          request_id       TEXT CHECK (request_id IS NULL OR length(request_id) BETWEEN 1 AND 256),
+          evidence_json    TEXT NOT NULL CHECK (length(evidence_json) >= 1 AND json_valid(evidence_json)),
+          evidence_hash    TEXT NOT NULL CHECK (length(evidence_hash) = 64 AND evidence_hash NOT GLOB '*[^0-9a-f]*'),
+          received_at      INTEGER NOT NULL CHECK (typeof(received_at) = 'integer' AND received_at >= 0),
+          FOREIGN KEY (attempt_id) REFERENCES context_isolated_provider_execution_attempts(attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (effect_id) REFERENCES context_effects(effect_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_isolated_provider_response_evidence_lineage_guard
+          BEFORE INSERT ON context_isolated_provider_response_evidence
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_isolated_provider_execution_attempts AS attempts
+            JOIN context_effects AS effects ON effects.effect_id = attempts.effect_id
+            WHERE attempts.attempt_id = NEW.attempt_id
+              AND attempts.effect_id = NEW.effect_id
+              AND effects.branch_id = attempts.branch_id
+              AND effects.world_id = attempts.world_id
+              AND effects.destination_world_id = attempts.world_id
+              AND effects.effect_kind = 'isolated_provider_completion'
+              AND effects.authority_epoch = attempts.authority_epoch
+              AND effects.payload_hash = attempts.effect_payload_hash
+              AND effects.status = 'prepared'
+              AND effects.prepared_at <= NEW.received_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'isolated provider response evidence lineage is invalid');
+          END;
+        CREATE TRIGGER context_isolated_provider_response_evidence_no_update
+          BEFORE UPDATE ON context_isolated_provider_response_evidence BEGIN
+            SELECT RAISE(ABORT, 'isolated provider response evidence is immutable');
+          END;
+        CREATE TRIGGER context_isolated_provider_response_evidence_no_delete
+          BEFORE DELETE ON context_isolated_provider_response_evidence BEGIN
+            SELECT RAISE(ABORT, 'isolated provider response evidence is immutable');
+          END;
+
+        CREATE TABLE context_isolated_provider_outcomes (
+          attempt_id       TEXT PRIMARY KEY,
+          effect_id        TEXT UNIQUE,
+          outcome_kind     TEXT NOT NULL CHECK (outcome_kind IN ('visible_success','visible_error')),
+          phase            TEXT NOT NULL CHECK (phase IN ('pre_dispatch_rejected','issuance_uncertain','issued')),
+          visible_text     TEXT NOT NULL,
+          visible_bytes    INTEGER NOT NULL CHECK (typeof(visible_bytes) = 'integer' AND visible_bytes BETWEEN 0 AND 1048576),
+          visible_hash     TEXT NOT NULL CHECK (length(visible_hash) = 64 AND visible_hash NOT GLOB '*[^0-9a-f]*'),
+          outcome_json     TEXT NOT NULL CHECK (length(outcome_json) >= 1 AND json_valid(outcome_json)),
+          outcome_hash     TEXT NOT NULL CHECK (length(outcome_hash) = 64 AND outcome_hash NOT GLOB '*[^0-9a-f]*'),
+          completed_at     INTEGER NOT NULL CHECK (typeof(completed_at) = 'integer' AND completed_at >= 0),
+          CHECK ((phase = 'pre_dispatch_rejected' AND effect_id IS NULL)
+            OR (phase IN ('issuance_uncertain','issued') AND effect_id IS NOT NULL)),
+          CHECK ((outcome_kind = 'visible_success' AND phase = 'issued') OR outcome_kind = 'visible_error'),
+          FOREIGN KEY (attempt_id) REFERENCES context_isolated_provider_execution_attempts(attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (effect_id) REFERENCES context_effects(effect_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_isolated_provider_outcomes_lineage_guard
+          BEFORE INSERT ON context_isolated_provider_outcomes
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_isolated_provider_execution_attempts AS attempts
+            WHERE attempts.attempt_id = NEW.attempt_id
+              AND attempts.authorized_at <= NEW.completed_at
+              AND (
+                (NEW.phase = 'pre_dispatch_rejected'
+                  AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id)
+                  AND NOT EXISTS (SELECT 1 FROM context_isolated_provider_response_evidence r WHERE r.attempt_id = attempts.attempt_id))
+                OR
+                (NEW.phase = 'issuance_uncertain'
+                  AND NEW.effect_id = attempts.effect_id
+                  AND EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id AND e.status = 'prepared')
+                  AND NOT EXISTS (SELECT 1 FROM context_isolated_provider_response_evidence r WHERE r.attempt_id = attempts.attempt_id))
+                OR
+                (NEW.phase = 'issued'
+                  AND NEW.effect_id = attempts.effect_id
+                  AND EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id AND e.status = 'prepared')
+                  AND EXISTS (
+                    SELECT 1 FROM context_isolated_provider_response_evidence r
+                    WHERE r.attempt_id = attempts.attempt_id
+                      AND r.effect_id = attempts.effect_id
+                      AND r.received_at <= NEW.completed_at
+                  ))
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'isolated provider outcome lineage is invalid');
+          END;
+        CREATE TRIGGER context_isolated_provider_outcomes_no_update
+          BEFORE UPDATE ON context_isolated_provider_outcomes BEGIN
+            SELECT RAISE(ABORT, 'isolated provider outcomes are immutable');
+          END;
+        CREATE TRIGGER context_isolated_provider_outcomes_no_delete
+          BEFORE DELETE ON context_isolated_provider_outcomes BEGIN
+            SELECT RAISE(ABORT, 'isolated provider outcomes are immutable');
           END;
       `,
     },

@@ -1505,6 +1505,267 @@ test('resident current-world dark request admits and assembles atomically', () =
   }
 });
 
+test('active provider execution is single-attempt and uses durable effect evidence', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory);
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('501'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('502'),
+      authorizedAt: 200,
+    });
+    const derivation = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorization.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('503'),
+      derivedAt: 300,
+    });
+    const targetWorldId = worldId('world:signal:active-provider-contact');
+    const bindingIngress = value.store.appendWorldEvent({
+      eventId: eventId('event:active-provider-binding-ingress'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'binding' },
+      occurredAt: 50,
+      recordedAt: 50,
+    });
+    value.store.bindResidentCurrentWorldProfile({
+      derivationId: derivation.derivationId,
+      worldId: targetWorldId,
+      eventId: bindingIngress.eventId,
+      sequence: bindingIngress.sequence,
+      provenance: residentRunProvenance('504'),
+      boundAt: 500,
+    });
+    const current = value.store.appendWorldEvent({
+      eventId: eventId('event:active-provider-current-ingress'),
+      worldId: targetWorldId,
+      kind: 'inbound:signal',
+      payload: { text: 'ACTIVE_PROVIDER_CANARY' },
+      occurredAt: 600,
+      recordedAt: 600,
+    });
+    value.store.createEventMessageProjection({
+      sourceEventId: current.eventId,
+      sourceSequence: current.sequence,
+      worldId: targetWorldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '<incoming>ACTIVE_PROVIDER_CANARY</incoming>' },
+      createdAt: 600,
+    });
+    const request = value.store.assembleResidentCurrentWorldDarkRequest({
+      worldId: targetWorldId,
+      eventId: current.eventId,
+      sequence: current.sequence,
+      branchId: branchId('branch:active-provider-request'),
+      maxEvents: 64,
+      assembledAt: 700,
+    });
+    const providerTarget = {
+      schemaVersion: 1,
+      role: 'main',
+      targetRef: 'codex/aster',
+      providerType: 'codex-oauth',
+      model: 'aster-codex',
+      apiSurface: 'codex-responses',
+      apiEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
+      gateway: null,
+      reasoningEffort: 'high',
+      reasoningSummary: null,
+      reasoningContext: null,
+      externalThinking: false,
+      toolContractVersion: 'fixture-v1',
+      wireContractGeneration: 1,
+    } as const;
+    const binding = value.store.bindResidentDarkRequestToIsolatedProvider({
+      worldId: targetWorldId,
+      eventId: current.eventId,
+      sequence: current.sequence,
+      target: providerTarget,
+      provenance: residentRunProvenance('505'),
+      boundAt: 720,
+    });
+    const invocation = value.store.admitDarkIsolatedProviderInvocation({
+      bindingId: binding.bindingId,
+      expectedTarget: providerTarget,
+      admittedAt: 730,
+    });
+    assert.throws(
+      () =>
+        value.store.beginIsolatedProviderExecutionAttempt({
+          invocationId: invocation.invocationId,
+          expectedWorldId: targetWorldId,
+          expectedTarget: providerTarget,
+          callTimeoutMs: 120_000,
+          streamIdleTimeoutMs: 30_000,
+          maxOutputBytes: 1024,
+          authorizedAt: 740,
+        }),
+      /authority is not current/,
+    );
+    assert.equal(tableCount(value.database, 'context_isolated_provider_execution_attempts'), 0);
+
+    assert.deepEqual(value.store.activate(0, 750), {
+      mode: 'active',
+      epoch: 1,
+      createdAt: 0,
+      updatedAt: 750,
+    });
+    const started = value.store.beginIsolatedProviderExecutionAttempt({
+      invocationId: invocation.invocationId,
+      expectedWorldId: targetWorldId,
+      expectedTarget: providerTarget,
+      callTimeoutMs: 120_000,
+      streamIdleTimeoutMs: 30_000,
+      maxOutputBytes: 1024,
+      authorizedAt: 760,
+    });
+    assert.equal(started.fresh, true);
+    assert.equal(started.attempt.attempt.networkAuthority, 'one_direct_codex_request');
+    assert.equal(started.attempt.attempt.activeActivationEpoch, 1);
+    assert.equal(started.attempt.attempt.callTimeoutMs, 120_000);
+    assert.equal(started.attempt.attempt.streamIdleTimeoutMs, 30_000);
+    assert.equal(started.request.candidateHash, request.assembly.request.candidateHash);
+    const replay = value.store.beginIsolatedProviderExecutionAttempt({
+      invocationId: invocation.invocationId,
+      expectedWorldId: targetWorldId,
+      expectedTarget: providerTarget,
+      callTimeoutMs: 120_000,
+      streamIdleTimeoutMs: 30_000,
+      maxOutputBytes: 1024,
+      authorizedAt: 760,
+    });
+    assert.equal(replay.fresh, false);
+    assert.deepEqual(replay.attempt, started.attempt);
+    assert.equal('request' in replay, false);
+    const changedConfigReplay = value.store.beginIsolatedProviderExecutionAttempt({
+      invocationId: invocation.invocationId,
+      expectedWorldId: targetWorldId,
+      expectedTarget: { ...providerTarget, reasoningEffort: 'medium' },
+      callTimeoutMs: 119_999,
+      streamIdleTimeoutMs: 29_999,
+      maxOutputBytes: 2048,
+      authorizedAt: 761,
+    });
+    assert.equal(changedConfigReplay.fresh, false);
+    assert.deepEqual(changedConfigReplay.attempt, started.attempt);
+    assert.throws(
+      () =>
+        value.store.beginIsolatedProviderExecutionAttempt({
+          invocationId: invocation.invocationId,
+          expectedWorldId: worldId('world:signal:other-contact'),
+          expectedTarget: providerTarget,
+          callTimeoutMs: 120_000,
+          streamIdleTimeoutMs: 30_000,
+          maxOutputBytes: 1024,
+          authorizedAt: 762,
+        }),
+      /belongs to another world/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_effects(
+               effect_id, branch_id, world_id, destination_world_id,
+               effect_kind, authority_epoch, payload_json, payload_hash,
+               idempotency_key, status, prepared_at, resolved_at,
+               observation_json
+             ) VALUES (?, ?, ?, ?, 'isolated_provider_completion', ?, ?, ?, ?, 'prepared', ?, NULL, NULL)`,
+          )
+          .run(
+            started.attempt.attempt.effectId,
+            started.attempt.attempt.branchId,
+            started.attempt.attempt.worldId,
+            started.attempt.attempt.worldId,
+            started.attempt.attempt.authorityEpoch,
+            started.attempt.effectPayloadJson,
+            started.attempt.attempt.effectPayloadHash,
+            started.attempt.attemptId,
+            started.attempt.attempt.authorizedAt - 1,
+          ),
+      /context dark pending branch cannot issue effects/,
+    );
+
+    const effect = value.store.prepareIsolatedProviderExecutionEffect(
+      started.attempt.attemptId,
+      770,
+    );
+    assert.equal(effect.status, 'prepared');
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `UPDATE context_branches SET status = 'crashed', ended_at = ?
+             WHERE branch_id = ?`,
+          )
+          .run(771, started.attempt.attempt.branchId),
+      /invalid context dark pending branch transition/,
+    );
+    const response = value.store.recordIsolatedProviderResponse({
+      attemptId: started.attempt.attemptId,
+      statusCode: 200,
+      requestId: 'request-fixture',
+      receivedAt: 780,
+    });
+    assert.equal(response.evidence.statusCode, 200);
+    assert.deepEqual(
+      value.store.getIsolatedProviderResponse(started.attempt.attemptId),
+      response,
+    );
+    assert.throws(
+      () =>
+        value.store.recordIsolatedProviderOutcome({
+          attemptId: started.attempt.attemptId,
+          outcomeKind: 'visible_success',
+          phase: 'issued',
+          visibleText: 'too early',
+          completedAt: 779,
+        }),
+      /response evidence is newer than the provider outcome/,
+    );
+    assert.equal(value.store.getIsolatedProviderOutcome(started.attempt.attemptId), null);
+    const outcome = value.store.recordIsolatedProviderOutcome({
+      attemptId: started.attempt.attemptId,
+      outcomeKind: 'visible_success',
+      phase: 'issued',
+      visibleText: 'done ✓',
+      completedAt: 790,
+    });
+    assert.equal(outcome.outcome.visibleBytes, Buffer.byteLength('done ✓'));
+    assert.deepEqual(
+      value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
+      outcome,
+    );
+    assert.equal(value.store.getEffect(started.attempt.attempt.effectId)?.status, 'observed');
+    assert.throws(
+      () => value.store.prepareIsolatedProviderExecutionEffect(started.attempt.attemptId, 800),
+      /UNIQUE constraint failed|context effect/,
+    );
+    for (const table of [
+      'context_isolated_provider_execution_attempts',
+      'context_isolated_provider_response_evidence',
+      'context_isolated_provider_outcomes',
+    ]) {
+      assert.throws(
+        () => value.database.prepare(`DELETE FROM ${table}`).run(),
+        /immutable/,
+      );
+    }
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 0);
+    assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+
 test('resident identity derivation refuses preexisting target rows without a derivation receipt', () => {
   const value = fixture();
   try {
@@ -5239,6 +5500,52 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_isolated_provider_outcomes_no_update;
+      DROP TRIGGER context_isolated_provider_outcomes_no_delete;
+      DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
+      DROP TABLE context_isolated_provider_outcomes;
+      DROP TRIGGER context_isolated_provider_response_evidence_no_update;
+      DROP TRIGGER context_isolated_provider_response_evidence_no_delete;
+      DROP TRIGGER context_isolated_provider_response_evidence_lineage_guard;
+      DROP TABLE context_isolated_provider_response_evidence;
+      DROP TRIGGER context_dark_pending_branch_effect_guard;
+      DROP TRIGGER context_dark_pending_branch_transition_guard;
+      DROP TRIGGER context_isolated_provider_execution_attempts_no_update;
+      DROP TRIGGER context_isolated_provider_execution_attempts_no_delete;
+      DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+      DROP TABLE context_isolated_provider_execution_attempts;
+      CREATE TRIGGER context_dark_pending_branch_effect_guard
+        BEFORE INSERT ON context_effects
+        WHEN EXISTS (
+          SELECT 1 FROM context_dark_pending_branch_attempts
+          WHERE branch_id = NEW.branch_id
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'context dark pending branch cannot issue effects');
+        END;
+      CREATE TRIGGER context_dark_pending_branch_transition_guard
+        BEFORE UPDATE OF status, ended_at ON context_branches
+        WHEN EXISTS (
+          SELECT 1 FROM context_dark_pending_branch_attempts
+          WHERE branch_id = OLD.branch_id
+        )
+          AND NOT (
+            OLD.status = 'running'
+            AND NEW.status = 'crashed'
+            AND NEW.ended_at IS NOT NULL
+            AND NEW.ended_at >= (
+              SELECT abandoned_at
+              FROM context_dark_pending_branch_abandonments
+              WHERE branch_id = OLD.branch_id
+            )
+            AND EXISTS (
+              SELECT 1 FROM context_dark_pending_branch_abandonments
+              WHERE branch_id = OLD.branch_id
+            )
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
+        END;
       DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_update;
       DROP TRIGGER context_dark_isolated_provider_invocation_admissions_no_delete;
       DROP TRIGGER context_dark_isolated_provider_invocation_admissions_lineage_guard;
@@ -5292,7 +5599,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0046-context-resident-world-profile-bindings',
             '0047-context-dark-isolated-provider-bindings',
             '0048-context-dark-isolated-provider-binding-order',
-            '0049-context-dark-isolated-provider-invocation-admissions'
+            '0049-context-dark-isolated-provider-invocation-admissions',
+            '0050-context-isolated-provider-execution-ledger'
           );
       PRAGMA user_version = 40;
     `);

@@ -247,6 +247,10 @@ export interface StandaloneCompleteOptions {
   topP?: number;
   topK?: number;
   maxTokens?: number;
+  /** Abort the complete standalone call after this many milliseconds. */
+  callTimeoutMs?: number;
+  /** Abort a standalone stream after this many milliseconds without progress. */
+  streamIdleTimeoutMs?: number;
   /** Abort standalone streaming after this many visible UTF-8 bytes. */
   maxOutputBytes?: number;
   chatTemplateKwargs?: Record<string, unknown>;
