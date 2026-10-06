@@ -50,7 +50,17 @@ function codexConfig(): MaterializedConfig {
   } as MaterializedConfig;
 }
 
-function fixture(options: { scopeChannelId?: string } = {}) {
+function fixture(
+  options: {
+    scopeChannelId?: string;
+    priorChannelId?: string;
+    currentSource?: 'voice' | null;
+    currentTransport?: 'signal' | null;
+    currentForwarded?: { author: string; channelName: string | null; content: string } | null;
+    currentAttachments?: readonly unknown[];
+    currentContent?: unknown;
+  } = {},
+) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'isolated-provider-executor-'));
   const database = openDatabase(directory);
   const store = new ContextGraphStore(database);
@@ -91,7 +101,7 @@ function fixture(options: { scopeChannelId?: string } = {}) {
     eventId: eventId('event:executor-binding-ingress'),
     worldId: expectedWorldId,
     kind: 'inbound:discord',
-    payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
+    payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'BINDING_PRIVATE_CANARY', channelId, guildId, attachments: [], forwarded: null },
     occurredAt: 400,
     recordedAt: 400,
   });
@@ -103,11 +113,58 @@ function fixture(options: { scopeChannelId?: string } = {}) {
     provenance: provenance('604'),
     boundAt: 500,
   });
+  if (options.priorChannelId) {
+    const prior = store.admitDarkInboundEvent({
+      expectedActivationEpoch: 0,
+      queueGeneration: 1,
+      wakeClass: 'text_user_turn',
+      messageRendererGeneration: 1,
+      event: {
+        eventId: eventId('event:executor-prior-ingress'),
+        worldId: expectedWorldId,
+        kind: 'inbound:discord',
+        payload: {
+          schemaVersion: 1,
+          kind: 'discord',
+          source: null,
+          transport: null,
+          channelId: options.priorChannelId,
+          guildId,
+          content: 'PRIOR_PRIVATE_CANARY',
+          attachments: [],
+          forwarded: null,
+        },
+        occurredAt: 550,
+        recordedAt: 550,
+      },
+      admittedAt: 550,
+    });
+    store.createEventMessageProjection({
+      sourceEventId: prior.event.eventId,
+      sourceSequence: prior.event.sequence,
+      worldId: expectedWorldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '<incoming>PRIOR_PRIVATE_CANARY</incoming>' },
+      createdAt: 550,
+    });
+  }
   const current = store.appendWorldEvent({
     eventId: eventId('event:executor-current-ingress'),
     worldId: expectedWorldId,
     kind: 'inbound:discord',
-    payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
+    payload: {
+      schemaVersion: 1,
+      kind: 'discord',
+      source: options.currentSource ?? null,
+      transport: options.currentTransport ?? null,
+      channelId,
+      guildId,
+      content: Object.hasOwn(options, 'currentContent')
+        ? options.currentContent
+        : 'EXECUTOR_PRIVATE_CANARY',
+      attachments: options.currentAttachments ?? [],
+      forwarded: options.currentForwarded ?? null,
+    },
     occurredAt: 600,
     recordedAt: 600,
   });
@@ -200,11 +257,72 @@ test('isolated provider executor rejects another channel in the scoped guild bef
     });
     await assert.rejects(
       execute(value.invocationId),
-      /route is outside its home scope/,
+      /request is outside its home text scope/,
     );
     assert.equal(calls, 0);
   } finally {
     value.close();
+  }
+});
+
+test('isolated provider executor rejects non-direct or cross-channel request events before dispatch', async (t) => {
+  const cases = [
+    {
+      name: 'forwarded terminal ingress',
+      options: {
+        currentForwarded: {
+          author: 'Bramble',
+          channelName: 'elsewhere',
+          content: 'forwarded synthetic text',
+        },
+      },
+    },
+    {
+      name: 'terminal ingress with an attachment',
+      options: { currentAttachments: [{ id: 'synthetic-attachment' }] },
+    },
+    {
+      name: 'voice-sourced terminal ingress',
+      options: { currentSource: 'voice' as const },
+    },
+    {
+      name: 'terminal ingress with empty content',
+      options: { currentContent: '' },
+    },
+    {
+      name: 'terminal ingress with non-text content',
+      options: { currentContent: 42 },
+    },
+    {
+      name: 'prior request event from another channel in the scoped guild',
+      options: { priorChannelId: '345678901234567890' },
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const value = fixture(entry.options);
+      try {
+        let calls = 0;
+        const execute = createIsolatedProviderExecutor({
+          store: value.store,
+          config: value.config,
+          llm: fakeLlm(async () => {
+            calls += 1;
+            throw new Error('provider must not run for non-direct home text');
+          }),
+          expectedWorldId: value.expectedWorldId,
+          maxOutputBytes: 1024,
+          now: clock(),
+        });
+        await assert.rejects(
+          execute(value.invocationId),
+          /request is outside its home text scope/,
+        );
+        assert.equal(calls, 0);
+      } finally {
+        value.close();
+      }
+    });
   }
 });
 

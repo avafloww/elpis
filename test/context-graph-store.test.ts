@@ -1533,7 +1533,7 @@ test('active provider execution is single-attempt and uses durable effect eviden
       eventId: eventId('event:active-provider-binding-ingress'),
       worldId: targetWorldId,
       kind: 'inbound:discord',
-      payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
+      payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'SYNTHETIC_HOME_TEXT', channelId, guildId, attachments: [], forwarded: null },
       occurredAt: 50,
       recordedAt: 50,
     });
@@ -1549,7 +1549,7 @@ test('active provider execution is single-attempt and uses durable effect eviden
       eventId: eventId('event:active-provider-current-ingress'),
       worldId: targetWorldId,
       kind: 'inbound:discord',
-      payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
+      payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'SYNTHETIC_HOME_TEXT', channelId, guildId, attachments: [], forwarded: null },
       occurredAt: 600,
       recordedAt: 600,
     });
@@ -5566,6 +5566,7 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DROP TRIGGER context_home_text_activation_scope_no_update;
       DROP TRIGGER context_home_text_activation_scope_no_delete;
       DROP TABLE context_home_text_activation_scope;
+      DROP TRIGGER context_isolated_provider_execution_attempts_home_text_guard;
       DROP TABLE context_isolated_provider_execution_attempts;
       CREATE TRIGGER context_dark_pending_branch_effect_guard
         BEFORE INSERT ON context_effects
@@ -5654,7 +5655,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0048-context-dark-isolated-provider-binding-order',
             '0049-context-dark-isolated-provider-invocation-admissions',
             '0050-context-isolated-provider-execution-ledger',
-            '0051-context-home-text-activation-scope'
+            '0051-context-home-text-activation-scope',
+            '0052-context-home-text-request-scope'
           );
       PRAGMA user_version = 40;
     `);

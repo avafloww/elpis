@@ -2688,7 +2688,7 @@ function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
   };
 }
 
-function discordIngressRoute(
+function directDiscordTextIngressRoute(
   event: WorldEventRecord,
 ): { readonly guildId: string; readonly channelId: string } | null {
   if (
@@ -2708,7 +2708,14 @@ function discordIngressRoute(
     typeof payload !== 'object' ||
     Array.isArray(payload) ||
     (payload as { schemaVersion?: unknown }).schemaVersion !== 1 ||
-    (payload as { kind?: unknown }).kind !== 'discord'
+    (payload as { kind?: unknown }).kind !== 'discord' ||
+    (payload as { source?: unknown }).source !== null ||
+    (payload as { transport?: unknown }).transport !== null ||
+    (payload as { forwarded?: unknown }).forwarded !== null ||
+    typeof (payload as { content?: unknown }).content !== 'string' ||
+    (payload as { content: string }).content.length === 0 ||
+    !Array.isArray((payload as { attachments?: unknown }).attachments) ||
+    (payload as { attachments: readonly unknown[] }).attachments.length !== 0
   ) {
     return null;
   }
@@ -4856,22 +4863,26 @@ export class ContextGraphStore {
       }
       const requestView = this.getLocalBranchRequestView(admission.requestViewId);
       if (!requestView) throw new Error('isolated provider execution request view is missing');
-      const terminalProjectionId = requestView.view.messageProjectionIds.at(-1);
-      const terminalProjection = terminalProjectionId
-        ? this.getEventMessageProjection(terminalProjectionId)
-        : null;
-      const terminalEvent = terminalProjection
-        ? this.getWorldEvent(terminalProjection.sourceEventId)
-        : null;
-      const terminalRoute = terminalEvent
-        ? discordIngressRoute(terminalEvent)
-        : null;
+      const requestEvents = requestView.view.messageProjectionIds.map(
+        (projectionId) => {
+          const projection = this.getEventMessageProjection(projectionId);
+          return projection
+            ? this.getWorldEvent(projection.sourceEventId)
+            : null;
+        },
+      );
       if (
-        !terminalRoute ||
-        terminalRoute.guildId !== scopeRecord.scope.guildId ||
-        terminalRoute.channelId !== scopeRecord.scope.channelId
+        requestEvents.length === 0 ||
+        requestEvents.some((event) => {
+          const route = event ? directDiscordTextIngressRoute(event) : null;
+          return (
+            !route ||
+            route.guildId !== scopeRecord.scope.guildId ||
+            route.channelId !== scopeRecord.scope.channelId
+          );
+        })
       ) {
-        throw new Error('isolated provider execution route is outside its home scope');
+        throw new Error('isolated provider execution request is outside its home text scope');
       }
       const request = this.materializeStoredLocalBranchRequest(requestView);
       if (

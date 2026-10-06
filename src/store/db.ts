@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 51;
+const SCHEMA_VERSION = 52;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -4507,6 +4507,64 @@ export function runMigrations(db: DatabaseSync): void {
           )
           BEGIN
             SELECT RAISE(ABORT, 'isolated provider execution attempt lineage is invalid');
+          END;
+      `,
+    },
+    {
+      name: '0052-context-home-text-request-scope',
+      sql: `
+        CREATE TRIGGER context_isolated_provider_execution_attempts_home_text_guard
+          BEFORE INSERT ON context_isolated_provider_execution_attempts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_dark_isolated_provider_invocation_admissions AS admissions
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = admissions.request_view_id
+             AND views.world_id = admissions.world_id
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            WHERE admissions.invocation_id = NEW.invocation_id
+              AND admissions.request_view_id = NEW.request_view_id
+              AND admissions.world_id = NEW.world_id
+              AND scope.source_activation_epoch = NEW.source_activation_epoch
+              AND scope.active_activation_epoch = NEW.active_activation_epoch
+              AND scope.world_id = NEW.world_id
+              AND views.message_projection_count >= 1
+              AND (
+                SELECT COUNT(*)
+                FROM context_local_branch_request_messages AS messages
+                WHERE messages.request_view_id = views.request_view_id
+                  AND messages.world_id = views.world_id
+              ) = views.message_projection_count
+              AND NOT EXISTS (
+                SELECT 1
+                FROM context_local_branch_request_messages AS messages
+                JOIN context_event_message_projections AS projections
+                  ON projections.projection_id = messages.projection_id
+                 AND projections.world_id = messages.world_id
+                JOIN context_world_events AS events
+                  ON events.event_id = projections.source_event_id
+                 AND events.world_id = projections.world_id
+                WHERE messages.request_view_id = views.request_view_id
+                  AND messages.world_id = views.world_id
+                  AND (
+                    events.event_kind IS NOT 'inbound:discord'
+                    OR json_type(events.payload_json, '$.schemaVersion') IS NOT 'integer'
+                    OR json_extract(events.payload_json, '$.schemaVersion') IS NOT 1
+                    OR json_extract(events.payload_json, '$.kind') IS NOT 'discord'
+                    OR json_type(events.payload_json, '$.source') IS NOT 'null'
+                    OR json_type(events.payload_json, '$.transport') IS NOT 'null'
+                    OR json_type(events.payload_json, '$.forwarded') IS NOT 'null'
+                    OR json_type(events.payload_json, '$.content') IS NOT 'text'
+                    OR length(json_extract(events.payload_json, '$.content')) = 0
+                    OR json_type(events.payload_json, '$.attachments') IS NOT 'array'
+                    OR json_array_length(events.payload_json, '$.attachments') IS NOT 0
+                    OR json_extract(events.payload_json, '$.guildId') IS NOT scope.guild_id
+                    OR json_extract(events.payload_json, '$.channelId') IS NOT scope.channel_id
+                  )
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'isolated provider execution request is outside its home text scope');
           END;
       `,
     },
