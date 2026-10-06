@@ -63,6 +63,7 @@ function codexConfig(): MaterializedConfig {
 
 function fixture(
   options: {
+    activeInvocation?: boolean;
     scopeChannelId?: string;
     priorChannelId?: string;
     currentSource?: 'voice' | null;
@@ -140,6 +141,62 @@ function fixture(
     provenance: provenance('604'),
     boundAt: 500,
   });
+  if (options.activeInvocation) {
+    const scope = store.createHomeTextActivationScope({
+      expectedSourceActivationEpoch: 0,
+      expectedWorldId,
+      guildId,
+      channelId,
+      maxOutputBytes: 1900,
+      authorizedAt: 520,
+    });
+    store.activate(0, 530);
+    const current = store.recordActiveSocialInbound({
+      eventId: eventId('event:active-executor-current-ingress'),
+      worldId: expectedWorldId,
+      kind: 'inbound:discord',
+      payload: {
+        schemaVersion: 1,
+        kind: 'discord',
+        source: null,
+        transport: null,
+        originWorldId: null,
+        forwarded: null,
+        content: 'ACTIVE_EXECUTOR_PRIVATE_CANARY',
+        attachments: [],
+        bot: false,
+        wakeClass: 'wake',
+        guildId,
+        channelId,
+      },
+      occurredAt: 540,
+      recordedAt: 550,
+      admittedAt: 560,
+    });
+    const invocation = store.assembleActiveHomeRequest({
+      ingressEventId: current.event.eventId,
+      ingressSourceSequence: current.event.sequence,
+      branchId: branchId('branch:active-executor-fixture'),
+      target,
+      expectedActiveActivationEpoch: 1,
+      expectedActivationScopeHash: scope.scopeHash,
+      expectedHeadRevision: 0,
+      admittedAt: 570,
+    });
+    return {
+      database,
+      store,
+      config,
+      target,
+      expectedWorldId,
+      invocationId: invocation.invocationId,
+      close() {
+        database.close();
+        fs.rmSync(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
   if (options.priorChannelId) {
     const prior = store.admitDarkInboundEvent({
       expectedActivationEpoch: 0,
@@ -456,6 +513,210 @@ test('isolated provider executor records one successful dispatch and never repla
   }
 });
 
+test('isolated provider executor records active-home success without speech authority', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    let calls = 0;
+    const llm = fakeLlm(async (messages, options = {}) => {
+      calls += 1;
+      assert.equal(
+        messages.some((message) =>
+          message.content.includes('ACTIVE_EXECUTOR_PRIVATE_CANARY'),
+        ),
+        true,
+      );
+      options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+      options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 200 });
+      return {
+        content: 'ACTIVE_EXECUTOR_RESULT',
+        usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+        model: value.target.model,
+        providerType: value.target.providerType,
+        apiSurface: value.target.apiSurface,
+        apiEndpoint: value.target.apiEndpoint,
+        toolContractVersion: value.target.toolContractVersion,
+        reasoningEffort: value.target.reasoningEffort ?? undefined,
+      };
+    });
+    const execute = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm,
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1024,
+      now: clock(),
+    });
+    const first = await execute(value.invocationId);
+    assert.equal(first.state, 'succeeded');
+    assert.equal(
+      first.snapshot.outcome?.outcome.visibleText,
+      'ACTIVE_EXECUTOR_RESULT',
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechAttempt(first.snapshot.attempt.attemptId),
+      null,
+    );
+    assert.equal(first.snapshot.effect?.status, 'observed');
+    assert.equal(first.snapshot.response?.evidence.statusCode, 200);
+    assert.equal(
+      value.store.getBranch(first.snapshot.attempt.attempt.branchId)?.status,
+      'running',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      (
+        value.database
+          .prepare('SELECT count(*) AS count FROM context_capsules')
+          .get() as { count: number }
+      ).count,
+      0,
+    );
+    const second = await execute(value.invocationId);
+    assert.equal(second.state, 'succeeded');
+    assert.equal(calls, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('active-home provider recovery freezes prepared issuance without speech', () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const attempt = value.store.beginActiveHomeProviderExecutionAttempt({
+      invocationId: value.invocationId,
+      expectedWorldId: value.expectedWorldId,
+      expectedTarget: value.target,
+      callTimeoutMs: value.config.llm.callTimeoutMs,
+      streamIdleTimeoutMs: value.config.llm.streamIdleTimeoutMs,
+      maxOutputBytes: 1024,
+      authorizedAt: 900,
+    });
+    assert.equal(attempt.fresh, true);
+    assert.throws(
+      () => value.store.recoverCoordinatedBranch(905),
+      /(?:invalid active home provider invocation transition|active home provider effect transition is invalid)/,
+    );
+    value.store.prepareActiveHomeProviderExecutionEffect(
+      attempt.attempt.attemptId,
+      910,
+    );
+    assert.throws(
+      () => value.store.recoverCoordinatedBranch(915),
+      /(?:invalid active home provider invocation transition|active home provider effect transition is invalid)/,
+    );
+    assert.equal(
+      value.store.getEffect(attempt.attempt.attempt.effectId)?.status,
+      'prepared',
+    );
+    const forgedOutcome = {
+      schemaVersion: 1,
+      attemptId: attempt.attempt.attemptId,
+      effectId: attempt.attempt.attempt.effectId,
+      outcomeKind: 'visible_error',
+      phase: 'issuance_uncertain',
+      visibleText: 'U',
+      visibleBytes: 1,
+      visibleHash: hashContextBytes('U'),
+      completedAt: 916,
+    };
+    const forgedOutcomeJson = JSON.stringify(forgedOutcome);
+    value.database.exec('BEGIN IMMEDIATE');
+    try {
+      value.database
+        .prepare(
+          `INSERT INTO context_active_home_provider_outcomes
+             (attempt_id, effect_id, outcome_kind, phase, visible_text,
+              visible_bytes, visible_hash, outcome_json, outcome_hash, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          forgedOutcome.attemptId,
+          forgedOutcome.effectId,
+          forgedOutcome.outcomeKind,
+          forgedOutcome.phase,
+          forgedOutcome.visibleText,
+          forgedOutcome.visibleBytes,
+          forgedOutcome.visibleHash,
+          forgedOutcomeJson,
+          hashContextBytes(forgedOutcomeJson),
+          forgedOutcome.completedAt,
+        );
+      assert.throws(
+        () =>
+          value.database
+            .prepare(
+              `UPDATE context_effects
+               SET status = 'uncertain', resolved_at = ?, observation_json = '{}'
+               WHERE effect_id = ?`,
+            )
+            .run(917, forgedOutcome.effectId),
+        /active home provider effect transition is invalid/,
+      );
+    } finally {
+      value.database.exec('ROLLBACK');
+    }
+    assert.equal(
+      value.store.getIsolatedProviderOutcome(attempt.attempt.attemptId),
+      null,
+    );
+    const reconciled = value.store.reconcileIsolatedProviderBeforeRecovery(920);
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0]?.outcome.phase, 'issuance_uncertain');
+    assert.equal(
+      value.store.getEffect(attempt.attempt.attempt.effectId)?.status,
+      'uncertain',
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechAttempt(attempt.attempt.attemptId),
+      null,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    const recovered = value.store.recoverCoordinatedBranch(930);
+    assert.ok(recovered);
+    assert.equal(
+      value.store.getBranch(attempt.attempt.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.ok(
+      value.store.getActiveHomeProviderInvocationAdmission(value.invocationId),
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('active-home provider errors fit a one-byte output authority', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    let calls = 0;
+    const execute = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm: fakeLlm(async () => {
+        calls += 1;
+        throw new Error('synthetic pre-dispatch failure');
+      }),
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1,
+      now: clock(),
+    });
+    const first = await execute(value.invocationId);
+    assert.equal(first.state, 'failed');
+    assert.equal(
+      first.snapshot.outcome?.outcome.phase,
+      'pre_dispatch_rejected',
+    );
+    assert.equal(first.snapshot.outcome?.outcome.visibleText, 'P');
+    assert.equal(first.snapshot.outcome?.outcome.visibleBytes, 1);
+    assert.equal(first.snapshot.effect, null);
+    const second = await execute(value.invocationId);
+    assert.equal(second.state, 'failed');
+    assert.equal(calls, 1);
+  } finally {
+    value.close();
+  }
+});
+
 test('home Discord delivery observes one message and atomically returns the branch', async () => {
   const value = fixture();
   try {
@@ -706,10 +967,7 @@ test('isolated provider executor records provable pre-dispatch rejection without
       result.snapshot.outcome?.outcome.phase,
       'pre_dispatch_rejected',
     );
-    assert.equal(
-      result.snapshot.outcome?.outcome.visibleText,
-      'provider request rejected before dispatch',
-    );
+    assert.equal(result.snapshot.outcome?.outcome.visibleText, 'P');
     assert.doesNotMatch(
       result.snapshot.outcome?.outcome.visibleText ?? '',
       /PRIVATE_ERROR_CANARY/,
@@ -744,10 +1002,7 @@ test('isolated provider executor freezes after a network-boundary error without 
     assert.equal(result.state, 'issuance_uncertain');
     assert.equal(result.snapshot.outcome?.outcome.phase, 'issuance_uncertain');
     assert.equal(result.snapshot.effect?.status, 'uncertain');
-    assert.equal(
-      result.snapshot.outcome?.outcome.visibleText,
-      'provider request outcome is uncertain',
-    );
+    assert.equal(result.snapshot.outcome?.outcome.visibleText, 'U');
     assert.doesNotMatch(
       result.snapshot.outcome?.outcome.visibleText ?? '',
       /PRIVATE_NETWORK_CANARY/,

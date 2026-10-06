@@ -38,6 +38,11 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
       throw new Error('elpis_sha256 requires text');
     return createHash('sha256').update(value).digest('hex');
   });
+  db.function('elpis_utf8_bytes', { deterministic: true }, (value) => {
+    if (typeof value !== 'string')
+      throw new Error('elpis_utf8_bytes requires text');
+    return Buffer.byteLength(value, 'utf8');
+  });
   db.function('elpis_discord_nonce', { deterministic: true }, (value) => {
     if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
       throw new Error('elpis_discord_nonce requires a sha256 digest');
@@ -160,7 +165,7 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 56;
+const SCHEMA_VERSION = 57;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -6137,6 +6142,520 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_active_home_provider_invocation_admissions_no_delete
           BEFORE DELETE ON context_active_home_provider_invocation_admissions BEGIN
             SELECT RAISE(ABORT, 'active home provider invocation admissions are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0057-context-active-home-provider-execution-ledger',
+      sql: `
+        CREATE TABLE context_active_home_provider_execution_attempts (
+          attempt_id               TEXT PRIMARY KEY CHECK (length(attempt_id) BETWEEN 1 AND 128),
+          invocation_id            TEXT NOT NULL UNIQUE,
+          effect_id                TEXT NOT NULL UNIQUE CHECK (length(effect_id) BETWEEN 1 AND 128),
+          activation_scope_hash    TEXT NOT NULL CHECK (length(activation_scope_hash) = 64 AND activation_scope_hash NOT GLOB '*[^0-9a-f]*'),
+          source_activation_epoch  INTEGER NOT NULL CHECK (typeof(source_activation_epoch) = 'integer' AND source_activation_epoch >= 0),
+          active_activation_epoch  INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch = source_activation_epoch + 1),
+          branch_id                TEXT NOT NULL,
+          world_id                 TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          authority_epoch          INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 1),
+          admission_hash           TEXT NOT NULL CHECK (length(admission_hash) = 64 AND admission_hash NOT GLOB '*[^0-9a-f]*'),
+          request_view_id          TEXT NOT NULL,
+          request_view_hash        TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_hash           TEXT NOT NULL CHECK (length(candidate_hash) = 64 AND candidate_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_bytes          INTEGER NOT NULL CHECK (typeof(candidate_bytes) = 'integer' AND candidate_bytes BETWEEN 1 AND 8388608),
+          target_hash              TEXT NOT NULL CHECK (length(target_hash) = 64 AND target_hash NOT GLOB '*[^0-9a-f]*'),
+          cache_namespace          TEXT NOT NULL CHECK (length(cache_namespace) BETWEEN 16 AND 256),
+          call_timeout_ms          INTEGER NOT NULL CHECK (typeof(call_timeout_ms) = 'integer' AND call_timeout_ms BETWEEN 1 AND 3600000),
+          stream_idle_timeout_ms   INTEGER NOT NULL CHECK (typeof(stream_idle_timeout_ms) = 'integer' AND stream_idle_timeout_ms BETWEEN 1 AND 3600000),
+          max_output_bytes         INTEGER NOT NULL CHECK (typeof(max_output_bytes) = 'integer' AND max_output_bytes BETWEEN 1 AND 1900),
+          effect_payload_json      TEXT NOT NULL CHECK (typeof(effect_payload_json) = 'text' AND length(effect_payload_json) >= 1 AND json_valid(effect_payload_json)),
+          effect_payload_hash      TEXT NOT NULL CHECK (length(effect_payload_hash) = 64 AND effect_payload_hash NOT GLOB '*[^0-9a-f]*'),
+          attempt_json             TEXT NOT NULL CHECK (typeof(attempt_json) = 'text' AND length(attempt_json) >= 1 AND json_valid(attempt_json)),
+          attempt_hash             TEXT NOT NULL CHECK (length(attempt_hash) = 64 AND attempt_hash NOT GLOB '*[^0-9a-f]*'),
+          authorized_at            INTEGER NOT NULL CHECK (typeof(authorized_at) = 'integer' AND authorized_at BETWEEN 0 AND 9007199254740991),
+          UNIQUE (attempt_id, invocation_id, branch_id, world_id),
+          FOREIGN KEY (invocation_id) REFERENCES context_active_home_provider_invocation_admissions(invocation_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id) REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id) REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_provider_execution_attempts_lineage_guard
+          BEFORE INSERT ON context_active_home_provider_execution_attempts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_provider_invocation_admissions AS admissions
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            JOIN context_active_home_ingress_admissions AS ingress
+              ON ingress.event_id = admissions.ingress_event_id
+            JOIN context_branches AS branches
+              ON branches.branch_id = admissions.branch_id
+             AND branches.world_id = admissions.world_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = admissions.request_view_id
+             AND views.world_id = admissions.world_id
+            WHERE admissions.invocation_id = NEW.invocation_id
+              AND admissions.admission_hash = NEW.admission_hash
+              AND admissions.activation_scope_hash = NEW.activation_scope_hash
+              AND admissions.source_activation_epoch = NEW.source_activation_epoch
+              AND admissions.active_activation_epoch = NEW.active_activation_epoch
+              AND admissions.branch_id = NEW.branch_id
+              AND admissions.world_id = NEW.world_id
+              AND admissions.authority_epoch = NEW.authority_epoch
+              AND admissions.request_view_id = NEW.request_view_id
+              AND admissions.request_view_hash = NEW.request_view_hash
+              AND admissions.candidate_hash = NEW.candidate_hash
+              AND admissions.candidate_bytes = NEW.candidate_bytes
+              AND admissions.target_hash = NEW.target_hash
+              AND admissions.cache_namespace = NEW.cache_namespace
+              AND admissions.runnable = 0
+              AND admissions.network_authority = 'none'
+              AND admissions.tool_mode = 'none'
+              AND admissions.historical_tool_messages = 0
+              AND admissions.max_attempts = 1
+              AND admissions.transport_retries = 0
+              AND admissions.surface_fallback = 0
+              AND elpis_exact_provider_target_json(admissions.target_json) = admissions.target_json
+              AND json_extract(admissions.target_json, '$.providerType') = 'codex-oauth'
+              AND json_extract(admissions.target_json, '$.apiSurface') = 'codex-responses'
+              AND json_extract(admissions.target_json, '$.gateway') IS NULL
+              AND scope.scope_hash = NEW.activation_scope_hash
+              AND scope.source_activation_epoch = NEW.source_activation_epoch
+              AND scope.active_activation_epoch = NEW.active_activation_epoch
+              AND scope.world_id = NEW.world_id
+              AND ingress.world_id = NEW.world_id
+              AND ingress.source_sequence = admissions.ingress_source_sequence
+              AND ingress.activation_scope_hash = NEW.activation_scope_hash
+              AND ingress.active_activation_epoch = NEW.active_activation_epoch
+              AND ingress.projection_id = admissions.ingress_projection_id
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND json_extract(views.view_json, '$.executionMode') = 'active'
+              AND views.message_projection_count = 1
+              AND EXISTS (
+                SELECT 1 FROM context_local_branch_request_messages AS messages
+                WHERE messages.request_view_id = NEW.request_view_id
+                  AND messages.world_id = NEW.world_id
+                  AND messages.ordinal = 0
+                  AND messages.projection_id = admissions.ingress_projection_id
+              )
+              AND NEW.max_output_bytes <= scope.max_output_bytes
+              AND scope.authorized_at <= NEW.authorized_at
+              AND admissions.admitted_at <= NEW.authorized_at
+              AND branches.started_at <= NEW.authorized_at
+              AND NEW.effect_payload_json = (json_object(
+                'schemaVersion', 1,
+                'kind', 'isolated_provider_completion',
+                'invocationId', (NEW.invocation_id || ''),
+                'branchId', (NEW.branch_id || ''),
+                'worldId', (NEW.world_id || ''),
+                'candidateHash', (NEW.candidate_hash || ''),
+                'targetHash', (NEW.target_hash || ''),
+                'cacheNamespace', (NEW.cache_namespace || '')
+              ) || '')
+              AND NEW.effect_payload_hash = elpis_sha256(NEW.effect_payload_json)
+              AND NEW.effect_id = 'effect:provider:' || NEW.effect_payload_hash
+              AND NEW.attempt_json = (json_object(
+                'schemaVersion', 1,
+                'executionMode', 'active',
+                'authorityKind', 'single_provider_attempt',
+                'networkAuthority', 'one_direct_codex_request',
+                'toolMode', 'none',
+                'historicalToolMessages', json('false'),
+                'maxAttempts', 1,
+                'transportRetries', 0,
+                'surfaceFallback', json('false'),
+                'invocationId', (NEW.invocation_id || ''),
+                'effectId', (NEW.effect_id || ''),
+                'sourceActivationEpoch', NEW.source_activation_epoch,
+                'activeActivationEpoch', NEW.active_activation_epoch,
+                'branchId', (NEW.branch_id || ''),
+                'worldId', (NEW.world_id || ''),
+                'authorityEpoch', NEW.authority_epoch,
+                'admissionHash', (NEW.admission_hash || ''),
+                'requestViewId', (NEW.request_view_id || ''),
+                'requestViewHash', (NEW.request_view_hash || ''),
+                'candidateHash', (NEW.candidate_hash || ''),
+                'candidateBytes', NEW.candidate_bytes,
+                'targetHash', (NEW.target_hash || ''),
+                'cacheNamespace', (NEW.cache_namespace || ''),
+                'callTimeoutMs', NEW.call_timeout_ms,
+                'streamIdleTimeoutMs', NEW.stream_idle_timeout_ms,
+                'maxOutputBytes', NEW.max_output_bytes,
+                'effectPayloadHash', (NEW.effect_payload_hash || ''),
+                'authorizedAt', NEW.authorized_at
+              ) || '')
+              AND NEW.attempt_hash = elpis_sha256(NEW.attempt_json)
+              AND NEW.attempt_id = 'isolated-provider-attempt:' || NEW.attempt_hash
+              AND NOT EXISTS (
+                SELECT 1 FROM context_isolated_provider_execution_attempts AS dark
+                WHERE dark.attempt_id = NEW.attempt_id
+                   OR dark.invocation_id = NEW.invocation_id
+                   OR dark.effect_id = NEW.effect_id
+              )
+              AND NOT EXISTS (SELECT 1 FROM context_effects WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries WHERE branch_id = NEW.branch_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider execution attempt lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_provider_execution_attempts_no_update
+          BEFORE UPDATE ON context_active_home_provider_execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'active home provider execution attempts are immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_execution_attempts_no_delete
+          BEFORE DELETE ON context_active_home_provider_execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'active home provider execution attempts are immutable');
+          END;
+        CREATE TRIGGER context_isolated_provider_execution_attempts_active_disjoint_guard
+          BEFORE INSERT ON context_isolated_provider_execution_attempts
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_execution_attempts AS active
+            WHERE active.attempt_id = NEW.attempt_id
+               OR active.invocation_id = NEW.invocation_id
+               OR active.effect_id = NEW.effect_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'provider execution attempt lineage collides with active home');
+          END;
+
+        CREATE TABLE context_active_home_provider_response_evidence (
+          attempt_id       TEXT PRIMARY KEY,
+          effect_id        TEXT NOT NULL UNIQUE,
+          status_code      INTEGER NOT NULL CHECK (typeof(status_code) = 'integer' AND status_code BETWEEN 100 AND 599),
+          request_id       TEXT CHECK (request_id IS NULL OR (typeof(request_id) = 'text' AND length(request_id) BETWEEN 1 AND 256)),
+          evidence_json    TEXT NOT NULL CHECK (typeof(evidence_json) = 'text' AND length(evidence_json) >= 1 AND json_valid(evidence_json)),
+          evidence_hash    TEXT NOT NULL CHECK (length(evidence_hash) = 64 AND evidence_hash NOT GLOB '*[^0-9a-f]*'),
+          received_at      INTEGER NOT NULL CHECK (typeof(received_at) = 'integer' AND received_at BETWEEN 0 AND 9007199254740991),
+          FOREIGN KEY (attempt_id) REFERENCES context_active_home_provider_execution_attempts(attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (effect_id) REFERENCES context_effects(effect_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_provider_response_evidence_lineage_guard
+          BEFORE INSERT ON context_active_home_provider_response_evidence
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_provider_execution_attempts AS attempts
+            JOIN context_effects AS effects ON effects.effect_id = attempts.effect_id
+            WHERE attempts.attempt_id = NEW.attempt_id
+              AND attempts.effect_id = NEW.effect_id
+              AND effects.branch_id = attempts.branch_id
+              AND effects.world_id = attempts.world_id
+              AND effects.destination_world_id = attempts.world_id
+              AND effects.effect_kind = 'isolated_provider_completion'
+              AND effects.authority_epoch = attempts.authority_epoch
+              AND effects.payload_json = attempts.effect_payload_json
+              AND effects.payload_hash = attempts.effect_payload_hash
+              AND effects.idempotency_key = attempts.attempt_id
+              AND effects.status = 'prepared'
+              AND effects.prepared_at <= NEW.received_at
+              AND NEW.evidence_json = (json_object(
+                'schemaVersion', 1,
+                'attemptId', (NEW.attempt_id || ''),
+                'effectId', (NEW.effect_id || ''),
+                'statusCode', NEW.status_code,
+                'requestId', NEW.request_id,
+                'receivedAt', NEW.received_at
+              ) || '')
+              AND NEW.evidence_hash = elpis_sha256(NEW.evidence_json)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider response evidence lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_provider_response_evidence_no_update
+          BEFORE UPDATE ON context_active_home_provider_response_evidence BEGIN
+            SELECT RAISE(ABORT, 'active home provider response evidence is immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_response_evidence_no_delete
+          BEFORE DELETE ON context_active_home_provider_response_evidence BEGIN
+            SELECT RAISE(ABORT, 'active home provider response evidence is immutable');
+          END;
+
+        CREATE TABLE context_active_home_provider_outcomes (
+          attempt_id       TEXT PRIMARY KEY,
+          effect_id        TEXT UNIQUE,
+          outcome_kind     TEXT NOT NULL CHECK (outcome_kind IN ('visible_success','visible_error')),
+          phase            TEXT NOT NULL CHECK (phase IN ('pre_dispatch_rejected','issuance_uncertain','issued')),
+          visible_text     TEXT NOT NULL CHECK (typeof(visible_text) = 'text'),
+          visible_bytes    INTEGER NOT NULL CHECK (typeof(visible_bytes) = 'integer' AND visible_bytes BETWEEN 0 AND 1900),
+          visible_hash     TEXT NOT NULL CHECK (length(visible_hash) = 64 AND visible_hash NOT GLOB '*[^0-9a-f]*'),
+          outcome_json     TEXT NOT NULL CHECK (typeof(outcome_json) = 'text' AND length(outcome_json) >= 1 AND json_valid(outcome_json)),
+          outcome_hash     TEXT NOT NULL CHECK (length(outcome_hash) = 64 AND outcome_hash NOT GLOB '*[^0-9a-f]*'),
+          completed_at     INTEGER NOT NULL CHECK (typeof(completed_at) = 'integer' AND completed_at BETWEEN 0 AND 9007199254740991),
+          CHECK ((phase = 'pre_dispatch_rejected' AND effect_id IS NULL)
+            OR (phase IN ('issuance_uncertain','issued') AND effect_id IS NOT NULL)),
+          CHECK ((outcome_kind = 'visible_success' AND phase = 'issued') OR outcome_kind = 'visible_error'),
+          FOREIGN KEY (attempt_id) REFERENCES context_active_home_provider_execution_attempts(attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (effect_id) REFERENCES context_effects(effect_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_provider_outcomes_lineage_guard
+          BEFORE INSERT ON context_active_home_provider_outcomes
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_provider_execution_attempts AS attempts
+            WHERE attempts.attempt_id = NEW.attempt_id
+              AND attempts.authorized_at <= NEW.completed_at
+              AND NEW.visible_bytes = elpis_utf8_bytes(NEW.visible_text)
+              AND NEW.visible_bytes <= attempts.max_output_bytes
+              AND NEW.visible_hash = elpis_sha256(NEW.visible_text)
+              AND NEW.outcome_json = (json_object(
+                'schemaVersion', 1,
+                'attemptId', (NEW.attempt_id || ''),
+                'effectId', NEW.effect_id,
+                'outcomeKind', (NEW.outcome_kind || ''),
+                'phase', (NEW.phase || ''),
+                'visibleText', (NEW.visible_text || ''),
+                'visibleBytes', NEW.visible_bytes,
+                'visibleHash', (NEW.visible_hash || ''),
+                'completedAt', NEW.completed_at
+              ) || '')
+              AND NEW.outcome_hash = elpis_sha256(NEW.outcome_json)
+              AND (
+                (NEW.phase = 'pre_dispatch_rejected'
+                  AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id)
+                  AND NOT EXISTS (SELECT 1 FROM context_active_home_provider_response_evidence r WHERE r.attempt_id = attempts.attempt_id))
+                OR
+                (NEW.phase = 'issuance_uncertain'
+                  AND NEW.effect_id = attempts.effect_id
+                  AND EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id AND e.status = 'prepared' AND e.prepared_at <= NEW.completed_at)
+                  AND NOT EXISTS (SELECT 1 FROM context_active_home_provider_response_evidence r WHERE r.attempt_id = attempts.attempt_id))
+                OR
+                (NEW.phase = 'issued'
+                  AND NEW.effect_id = attempts.effect_id
+                  AND EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = attempts.effect_id AND e.status = 'prepared' AND e.prepared_at <= NEW.completed_at)
+                  AND EXISTS (
+                    SELECT 1 FROM context_active_home_provider_response_evidence r
+                    WHERE r.attempt_id = attempts.attempt_id
+                      AND r.effect_id = attempts.effect_id
+                      AND r.received_at <= NEW.completed_at
+                  ))
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider outcome lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_provider_outcomes_no_update
+          BEFORE UPDATE ON context_active_home_provider_outcomes BEGIN
+            SELECT RAISE(ABORT, 'active home provider outcomes are immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_outcomes_no_delete
+          BEFORE DELETE ON context_active_home_provider_outcomes BEGIN
+            SELECT RAISE(ABORT, 'active home provider outcomes are immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_effect_transition_guard
+          BEFORE UPDATE OF status, resolved_at, observation_json ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_execution_attempts
+            WHERE effect_id = OLD.effect_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_active_home_provider_execution_attempts AS attempts
+              JOIN context_active_home_provider_outcomes AS outcomes
+                ON outcomes.attempt_id = attempts.attempt_id
+              WHERE attempts.effect_id = OLD.effect_id
+                AND OLD.status = 'prepared'
+                AND NEW.resolved_at = outcomes.completed_at
+                AND NEW.observation_json = (json_object(
+                  'schemaVersion', 1,
+                  'providerOutcomeHash', (outcomes.outcome_hash || '')
+                ) || '')
+                AND (
+                  (outcomes.phase = 'issuance_uncertain'
+                    AND outcomes.effect_id = attempts.effect_id
+                    AND NEW.status = 'uncertain')
+                  OR
+                  (outcomes.phase = 'issued'
+                    AND outcomes.effect_id = attempts.effect_id
+                    AND outcomes.outcome_kind = 'visible_success'
+                    AND NEW.status = 'observed')
+                  OR
+                  (outcomes.phase = 'issued'
+                    AND outcomes.effect_id = attempts.effect_id
+                    AND outcomes.outcome_kind = 'visible_error'
+                    AND NEW.status = 'failed')
+                )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider effect transition is invalid');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_effect_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_effect_guard
+          BEFORE INSERT ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_active_home_provider_execution_attempts AS attempts
+              JOIN context_graph_activation AS activation ON activation.singleton = 1
+              WHERE attempts.effect_id = NEW.effect_id
+                AND attempts.branch_id = NEW.branch_id
+                AND attempts.world_id = NEW.world_id
+                AND attempts.world_id = NEW.destination_world_id
+                AND attempts.authority_epoch = NEW.authority_epoch
+                AND attempts.effect_payload_json = NEW.payload_json
+                AND attempts.effect_payload_hash = NEW.payload_hash
+                AND NEW.effect_kind = 'isolated_provider_completion'
+                AND NEW.idempotency_key = attempts.attempt_id
+                AND NEW.status = 'prepared'
+                AND NEW.resolved_at IS NULL
+                AND NEW.observation_json IS NULL
+                AND NEW.prepared_at >= attempts.authorized_at
+                AND activation.mode = 'active'
+                AND activation.epoch = attempts.active_activation_epoch
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation effect is not authorized');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_transition_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = OLD.branch_id
+          )
+            AND NOT (
+              OLD.status = 'running'
+              AND NEW.status = 'crashed'
+              AND NEW.ended_at IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM context_active_home_provider_execution_attempts AS attempts
+                WHERE attempts.branch_id = OLD.branch_id
+                  AND attempts.world_id = OLD.world_id
+                  AND attempts.authority_epoch = OLD.authority_epoch
+                  AND NEW.ended_at >= attempts.authorized_at
+                  AND EXISTS (
+                    SELECT 1
+                    FROM context_active_home_provider_outcomes AS outcomes
+                    LEFT JOIN context_effects AS effect
+                      ON effect.effect_id = attempts.effect_id
+                    WHERE outcomes.attempt_id = attempts.attempt_id
+                      AND outcomes.completed_at <= NEW.ended_at
+                      AND (
+                        (outcomes.phase = 'pre_dispatch_rejected'
+                          AND outcomes.effect_id IS NULL
+                          AND effect.effect_id IS NULL)
+                        OR
+                        (outcomes.phase = 'issuance_uncertain'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND effect.status = 'uncertain'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                        OR
+                        (outcomes.phase = 'issued'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND outcomes.outcome_kind = 'visible_success'
+                          AND effect.status = 'observed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                        OR
+                        (outcomes.phase = 'issued'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND outcomes.outcome_kind = 'visible_error'
+                          AND effect.status = 'failed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                      )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM context_effects AS effects
+                    WHERE effects.branch_id = OLD.branch_id
+                      AND effects.status = 'prepared'
+                  )
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'invalid active home provider invocation transition');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_recovery_guard
+          BEFORE INSERT ON context_branch_recoveries
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_active_home_provider_execution_attempts AS attempts
+              JOIN context_branches AS branches
+                ON branches.branch_id = attempts.branch_id
+               AND branches.world_id = attempts.world_id
+              WHERE attempts.branch_id = NEW.branch_id
+                AND attempts.world_id = NEW.world_id
+                AND branches.status = 'crashed'
+                AND branches.ended_at IS NOT NULL
+                AND NEW.recovered_at >= branches.ended_at
+                AND NEW.recovered_at >= attempts.authorized_at
+                AND EXISTS (
+                  SELECT 1
+                  FROM context_active_home_provider_outcomes AS outcomes
+                  LEFT JOIN context_effects AS effect
+                    ON effect.effect_id = attempts.effect_id
+                  WHERE outcomes.attempt_id = attempts.attempt_id
+                    AND outcomes.completed_at <= NEW.recovered_at
+                    AND (
+                      (outcomes.phase = 'pre_dispatch_rejected'
+                        AND outcomes.effect_id IS NULL
+                        AND effect.effect_id IS NULL)
+                      OR
+                      (outcomes.phase = 'issuance_uncertain'
+                        AND outcomes.effect_id = attempts.effect_id
+                        AND effect.status = 'uncertain'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                      OR
+                      (outcomes.phase = 'issued'
+                        AND outcomes.effect_id = attempts.effect_id
+                        AND outcomes.outcome_kind = 'visible_success'
+                        AND effect.status = 'observed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                      OR
+                      (outcomes.phase = 'issued'
+                        AND outcomes.effect_id = attempts.effect_id
+                        AND outcomes.outcome_kind = 'visible_error'
+                        AND effect.status = 'failed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_effects AS effects
+                  WHERE effects.branch_id = NEW.branch_id
+                    AND effects.status = 'prepared'
+                )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation recovery is not authorized');
           END;
       `,
     },

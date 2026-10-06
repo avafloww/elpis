@@ -1014,7 +1014,8 @@ export interface IsolatedProviderExecutionAttemptV1 {
   readonly maxAttempts: 1;
   readonly transportRetries: 0;
   readonly surfaceFallback: false;
-  readonly invocationId: DarkIsolatedProviderInvocationId;
+  readonly invocationId:
+    DarkIsolatedProviderInvocationId | ActiveHomeProviderInvocationId;
   readonly effectId: EffectId;
   readonly sourceActivationEpoch: number;
   readonly activeActivationEpoch: number;
@@ -2818,6 +2819,10 @@ interface IsolatedProviderExecutionAttemptRow {
   attempt_json: string;
   attempt_hash: string;
   authorized_at: number;
+}
+
+interface ActiveHomeProviderExecutionAttemptRow extends IsolatedProviderExecutionAttemptRow {
+  activation_scope_hash: string;
 }
 
 interface IsolatedProviderResponseEvidenceRow {
@@ -5078,16 +5083,83 @@ export class ContextGraphStore {
     const artifacts = this.database
       .prepare(
         `SELECT
-           EXISTS(SELECT 1 FROM context_effects WHERE branch_id = ?) AS effects,
+           EXISTS(
+             SELECT 1 FROM context_effects AS effects
+             WHERE effects.branch_id = ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM context_active_home_provider_execution_attempts AS attempts
+                 WHERE attempts.invocation_id = ?
+                   AND attempts.branch_id = effects.branch_id
+                   AND attempts.effect_id = effects.effect_id
+                   AND attempts.effect_payload_json = effects.payload_json
+                   AND attempts.effect_payload_hash = effects.payload_hash
+               )
+           ) AS invalid_effects,
            EXISTS(SELECT 1 FROM context_capsules WHERE branch_id = ?) AS capsules,
            EXISTS(SELECT 1 FROM context_continuation_advances WHERE branch_id = ?) AS advances,
-           EXISTS(SELECT 1 FROM context_branch_recoveries WHERE branch_id = ?) AS recoveries`,
+           EXISTS(
+             SELECT 1 FROM context_branch_recoveries AS recoveries
+             WHERE recoveries.branch_id = ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM context_active_home_provider_execution_attempts AS attempts
+                 JOIN context_active_home_provider_outcomes AS outcomes
+                   ON outcomes.attempt_id = attempts.attempt_id
+                 LEFT JOIN context_effects AS effect
+                   ON effect.effect_id = attempts.effect_id
+                 WHERE attempts.invocation_id = ?
+                   AND attempts.branch_id = recoveries.branch_id
+                   AND outcomes.completed_at <= recoveries.recovered_at
+                   AND (
+                     (outcomes.phase = 'pre_dispatch_rejected'
+                       AND outcomes.effect_id IS NULL
+                       AND effect.effect_id IS NULL)
+                     OR
+                     (outcomes.phase = 'issuance_uncertain'
+                       AND outcomes.effect_id = attempts.effect_id
+                       AND effect.status = 'uncertain'
+                       AND effect.resolved_at = outcomes.completed_at
+                       AND effect.observation_json = (json_object(
+                         'schemaVersion', 1,
+                         'providerOutcomeHash', (outcomes.outcome_hash || '')
+                       ) || ''))
+                     OR
+                     (outcomes.phase = 'issued'
+                       AND outcomes.effect_id = attempts.effect_id
+                       AND outcomes.outcome_kind = 'visible_success'
+                       AND effect.status = 'observed'
+                       AND effect.resolved_at = outcomes.completed_at
+                       AND effect.observation_json = (json_object(
+                         'schemaVersion', 1,
+                         'providerOutcomeHash', (outcomes.outcome_hash || '')
+                       ) || ''))
+                     OR
+                     (outcomes.phase = 'issued'
+                       AND outcomes.effect_id = attempts.effect_id
+                       AND outcomes.outcome_kind = 'visible_error'
+                       AND effect.status = 'failed'
+                       AND effect.resolved_at = outcomes.completed_at
+                       AND effect.observation_json = (json_object(
+                         'schemaVersion', 1,
+                         'providerOutcomeHash', (outcomes.outcome_hash || '')
+                       ) || ''))
+                   )
+               )
+           ) AS invalid_recoveries`,
       )
-      .get(row.branch_id, row.branch_id, row.branch_id, row.branch_id) as {
-      effects: number;
+      .get(
+        row.branch_id,
+        id,
+        row.branch_id,
+        row.branch_id,
+        row.branch_id,
+        id,
+      ) as {
+      invalid_effects: number;
       capsules: number;
       advances: number;
-      recoveries: number;
+      invalid_recoveries: number;
     };
     if (
       row.schema_version !== 1 ||
@@ -5142,10 +5214,10 @@ export class ContextGraphStore {
       profileBinding.binding.profileHeadRevision !==
         admission.profileHeadRevision ||
       admission.activeActivationEpoch !== admission.sourceActivationEpoch + 1 ||
-      artifacts.effects !== 0 ||
+      artifacts.invalid_effects !== 0 ||
       artifacts.capsules !== 0 ||
       artifacts.advances !== 0 ||
-      artifacts.recoveries !== 0 ||
+      artifacts.invalid_recoveries !== 0 ||
       admittedAt < ingress.admittedAt ||
       admittedAt < scope.scope.authorizedAt ||
       admittedAt < branch.startedAt ||
@@ -5366,7 +5438,7 @@ export class ContextGraphStore {
          WHERE attempt_id = ?`,
       )
       .get(id) as IsolatedProviderExecutionAttemptRow | undefined;
-    if (!row) return null;
+    if (!row) return this.getActiveHomeProviderExecutionAttempt(id);
     const invocationId = darkIsolatedProviderInvocationId(row.invocation_id);
     const admissionRecord =
       this.getDarkIsolatedProviderInvocationAdmission(invocationId);
@@ -5466,6 +5538,138 @@ export class ContextGraphStore {
       attemptJson,
       attemptHash,
     };
+  }
+
+  getActiveHomeProviderExecutionAttempt(
+    id: IsolatedProviderExecutionAttemptId,
+  ): IsolatedProviderExecutionAttemptRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_active_home_provider_execution_attempts
+         WHERE attempt_id = ?`,
+      )
+      .get(id) as ActiveHomeProviderExecutionAttemptRow | undefined;
+    if (!row) return null;
+    const invocationId = activeHomeProviderInvocationId(row.invocation_id);
+    const admissionRecord =
+      this.getActiveHomeProviderInvocationAdmission(invocationId);
+    if (!admissionRecord) {
+      throw new Error('active home provider execution admission is missing');
+    }
+    const requestViewId = localBranchRequestViewId(row.request_view_id);
+    const requestView = this.getLocalBranchRequestView(requestViewId);
+    if (!requestView) {
+      throw new Error('active home provider execution request view is missing');
+    }
+    const request = this.materializeStoredLocalBranchRequest(requestView);
+    const authorizedAt = timestamp(
+      'active home provider execution authorizedAt',
+      row.authorized_at,
+    );
+    const effectIdValue = effectId(row.effect_id);
+    const effectPayload = Object.freeze({
+      schemaVersion: 1,
+      kind: 'isolated_provider_completion',
+      invocationId,
+      branchId: admissionRecord.admission.branchId,
+      worldId: admissionRecord.admission.worldId,
+      candidateHash: admissionRecord.admission.candidateHash,
+      targetHash: admissionRecord.admission.targetHash,
+      cacheNamespace: admissionRecord.admission.cacheNamespace,
+    });
+    const effectPayloadJson = serialize(effectPayload);
+    const effectPayloadHash = hashContextBytes(effectPayloadJson);
+    const attempt = Object.freeze<IsolatedProviderExecutionAttemptV1>({
+      schemaVersion: 1,
+      executionMode: 'active',
+      authorityKind: 'single_provider_attempt',
+      networkAuthority: 'one_direct_codex_request',
+      toolMode: 'none',
+      historicalToolMessages: false,
+      maxAttempts: 1,
+      transportRetries: 0,
+      surfaceFallback: false,
+      invocationId,
+      effectId: effectIdValue,
+      sourceActivationEpoch: admissionRecord.admission.sourceActivationEpoch,
+      activeActivationEpoch: admissionRecord.admission.activeActivationEpoch,
+      branchId: admissionRecord.admission.branchId,
+      worldId: admissionRecord.admission.worldId,
+      authorityEpoch: admissionRecord.admission.authorityEpoch,
+      admissionHash: admissionRecord.admissionHash,
+      requestViewId,
+      requestViewHash: admissionRecord.admission.requestViewHash,
+      candidateHash: admissionRecord.admission.candidateHash,
+      candidateBytes: admissionRecord.admission.candidateBytes,
+      targetHash: admissionRecord.admission.targetHash,
+      cacheNamespace: admissionRecord.admission.cacheNamespace,
+      callTimeoutMs: generation(
+        'active home provider execution callTimeoutMs',
+        row.call_timeout_ms,
+      ),
+      streamIdleTimeoutMs: generation(
+        'active home provider execution streamIdleTimeoutMs',
+        row.stream_idle_timeout_ms,
+      ),
+      maxOutputBytes: generation(
+        'active home provider execution maxOutputBytes',
+        row.max_output_bytes,
+      ),
+      effectPayloadHash,
+      authorizedAt,
+    });
+    const attemptJson = serialize(attempt);
+    const attemptHash = hashContextBytes(attemptJson);
+    if (
+      row.activation_scope_hash !==
+        admissionRecord.admission.activationScopeHash ||
+      row.source_activation_epoch !== attempt.sourceActivationEpoch ||
+      row.active_activation_epoch !== attempt.activeActivationEpoch ||
+      row.branch_id !== attempt.branchId ||
+      row.world_id !== attempt.worldId ||
+      row.authority_epoch !== attempt.authorityEpoch ||
+      row.admission_hash !== attempt.admissionHash ||
+      row.request_view_hash !== attempt.requestViewHash ||
+      request.candidateHash !== attempt.candidateHash ||
+      request.candidateBytes !== attempt.candidateBytes ||
+      row.candidate_hash !== attempt.candidateHash ||
+      row.candidate_bytes !== attempt.candidateBytes ||
+      row.target_hash !== attempt.targetHash ||
+      row.cache_namespace !== attempt.cacheNamespace ||
+      row.effect_payload_json !== effectPayloadJson ||
+      row.effect_payload_hash !== effectPayloadHash ||
+      row.attempt_json !== attemptJson ||
+      row.attempt_hash !== attemptHash ||
+      isolatedProviderExecutionAttemptIdentity(attemptJson) !== id
+    ) {
+      throw new Error(
+        'stored active home provider execution attempt is invalid',
+      );
+    }
+    return {
+      attemptId: id,
+      attempt,
+      effectPayloadJson,
+      attemptJson,
+      attemptHash,
+    };
+  }
+
+  getActiveHomeProviderExecutionAttemptForInvocation(
+    invocationId: ActiveHomeProviderInvocationId,
+  ): IsolatedProviderExecutionAttemptRecord | null {
+    const normalizedInvocationId = activeHomeProviderInvocationId(invocationId);
+    const row = this.database
+      .prepare(
+        `SELECT attempt_id FROM context_active_home_provider_execution_attempts
+         WHERE invocation_id = ?`,
+      )
+      .get(normalizedInvocationId) as { attempt_id: string } | undefined;
+    return row
+      ? this.getActiveHomeProviderExecutionAttempt(
+          isolatedProviderExecutionAttemptId(row.attempt_id),
+        )
+      : null;
   }
 
   getIsolatedProviderExecutionAttemptForInvocation(
@@ -5704,6 +5908,246 @@ export class ContextGraphStore {
     });
   }
 
+  beginActiveHomeProviderExecutionAttempt(input: {
+    invocationId: ActiveHomeProviderInvocationId;
+    expectedWorldId: WorldId;
+    expectedTarget: ExactIsolatedProviderTargetV1;
+    callTimeoutMs: number;
+    streamIdleTimeoutMs: number;
+    maxOutputBytes: number;
+    authorizedAt: number;
+  }):
+    | {
+        readonly fresh: true;
+        readonly attempt: IsolatedProviderExecutionAttemptRecord;
+        readonly request: MaterializedLocalBranchRequest;
+      }
+    | {
+        readonly fresh: false;
+        readonly attempt: IsolatedProviderExecutionAttemptRecord;
+      } {
+    const invocationId = activeHomeProviderInvocationId(input.invocationId);
+    const expectedWorldId = worldId(input.expectedWorldId);
+    return transaction(this.database, () => {
+      const prior =
+        this.getActiveHomeProviderExecutionAttemptForInvocation(invocationId);
+      if (prior) {
+        if (prior.attempt.worldId !== expectedWorldId) {
+          throw new Error(
+            'active home provider execution attempt belongs to another world',
+          );
+        }
+        return { fresh: false, attempt: prior } as const;
+      }
+      const expectedTarget = normalizeExactIsolatedProviderTarget(
+        input.expectedTarget,
+      );
+      const targetJson = serialize(expectedTarget);
+      const targetHash = hashContextBytes(targetJson);
+      const callTimeoutMs = generation('callTimeoutMs', input.callTimeoutMs);
+      const streamIdleTimeoutMs = generation(
+        'streamIdleTimeoutMs',
+        input.streamIdleTimeoutMs,
+      );
+      if (callTimeoutMs < 1 || callTimeoutMs > 3_600_000) {
+        throw new Error('callTimeoutMs must be between 1 and 3600000');
+      }
+      if (streamIdleTimeoutMs < 1 || streamIdleTimeoutMs > 3_600_000) {
+        throw new Error('streamIdleTimeoutMs must be between 1 and 3600000');
+      }
+      const maxOutputBytes = generation('maxOutputBytes', input.maxOutputBytes);
+      if (maxOutputBytes < 1 || maxOutputBytes > 1900) {
+        throw new Error(
+          'active home maxOutputBytes must be between 1 and 1900',
+        );
+      }
+      const authorizedAt = timestamp('authorizedAt', input.authorizedAt);
+      if (
+        expectedTarget.providerType !== 'codex-oauth' ||
+        expectedTarget.apiSurface !== 'codex-responses' ||
+        expectedTarget.gateway !== null
+      ) {
+        throw new Error(
+          'active home provider execution requires direct Codex Responses',
+        );
+      }
+      const activation = this.getActivationState();
+      const scopeRecord = this.getHomeTextActivationScope();
+      const admissionRecord =
+        this.getActiveHomeProviderInvocationAdmission(invocationId);
+      if (!admissionRecord) {
+        throw new Error('active home provider invocation admission is missing');
+      }
+      const admission = admissionRecord.admission;
+      if (
+        activation.mode !== 'active' ||
+        activation.epoch !== admission.activeActivationEpoch ||
+        !scopeRecord ||
+        scopeRecord.scopeHash !== admission.activationScopeHash ||
+        scopeRecord.scope.sourceActivationEpoch !==
+          admission.sourceActivationEpoch ||
+        scopeRecord.scope.activeActivationEpoch !==
+          admission.activeActivationEpoch ||
+        scopeRecord.scope.worldId !== admission.worldId ||
+        maxOutputBytes > scopeRecord.scope.maxOutputBytes ||
+        admission.worldId !== expectedWorldId ||
+        admission.targetHash !== targetHash ||
+        serialize(admission.target) !== targetJson
+      ) {
+        throw new Error(
+          'active home provider execution authority is not current',
+        );
+      }
+      const branch = this.getBranch(admission.branchId);
+      const coordinator = this.getRootCoordinatorState();
+      if (
+        !branch ||
+        branch.status !== 'running' ||
+        branch.worldId !== admission.worldId ||
+        branch.authorityEpoch !== admission.authorityEpoch ||
+        coordinator.activeBranchId !== branch.branchId ||
+        coordinator.activeWorldId !== branch.worldId
+      ) {
+        throw new Error('active home provider execution branch is not current');
+      }
+      const requestView = this.getLocalBranchRequestView(
+        admission.requestViewId,
+      );
+      if (
+        !requestView ||
+        requestView.view.executionMode !== 'active' ||
+        requestView.view.messageProjectionIds.length !== 1 ||
+        requestView.view.messageProjectionIds[0] !==
+          admission.ingressProjectionId
+      ) {
+        throw new Error(
+          'active home provider execution request view is invalid',
+        );
+      }
+      const request = this.materializeStoredLocalBranchRequest(requestView);
+      if (
+        request.candidateHash !== admission.candidateHash ||
+        request.candidateBytes !== admission.candidateBytes
+      ) {
+        throw new Error('active home provider execution candidate is invalid');
+      }
+      const effectPayload = Object.freeze({
+        schemaVersion: 1,
+        kind: 'isolated_provider_completion',
+        invocationId,
+        branchId: admission.branchId,
+        worldId: admission.worldId,
+        candidateHash: admission.candidateHash,
+        targetHash: admission.targetHash,
+        cacheNamespace: admission.cacheNamespace,
+      });
+      const effectPayloadJson = serialize(effectPayload);
+      const effectPayloadHash = hashContextBytes(effectPayloadJson);
+      const effectIdValue = effectId(`effect:provider:${effectPayloadHash}`);
+      const attempt = Object.freeze<IsolatedProviderExecutionAttemptV1>({
+        schemaVersion: 1,
+        executionMode: 'active',
+        authorityKind: 'single_provider_attempt',
+        networkAuthority: 'one_direct_codex_request',
+        toolMode: 'none',
+        historicalToolMessages: false,
+        maxAttempts: 1,
+        transportRetries: 0,
+        surfaceFallback: false,
+        invocationId,
+        effectId: effectIdValue,
+        sourceActivationEpoch: admission.sourceActivationEpoch,
+        activeActivationEpoch: admission.activeActivationEpoch,
+        branchId: admission.branchId,
+        worldId: admission.worldId,
+        authorityEpoch: admission.authorityEpoch,
+        admissionHash: admissionRecord.admissionHash,
+        requestViewId: admission.requestViewId,
+        requestViewHash: admission.requestViewHash,
+        candidateHash: admission.candidateHash,
+        candidateBytes: admission.candidateBytes,
+        targetHash: admission.targetHash,
+        cacheNamespace: admission.cacheNamespace,
+        callTimeoutMs,
+        streamIdleTimeoutMs,
+        maxOutputBytes,
+        effectPayloadHash,
+        authorizedAt,
+      });
+      const attemptJson = serialize(attempt);
+      const attemptHash = hashContextBytes(attemptJson);
+      const attemptId = isolatedProviderExecutionAttemptIdentity(attemptJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_active_home_provider_execution_attempts(
+             attempt_id, invocation_id, effect_id, activation_scope_hash,
+             source_activation_epoch, active_activation_epoch, branch_id,
+             world_id, authority_epoch, admission_hash, request_view_id,
+             request_view_hash, candidate_hash, candidate_bytes, target_hash,
+             cache_namespace, call_timeout_ms, stream_idle_timeout_ms,
+             max_output_bytes, effect_payload_json, effect_payload_hash,
+             attempt_json, attempt_hash, authorized_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          attemptId,
+          invocationId,
+          effectIdValue,
+          admission.activationScopeHash,
+          attempt.sourceActivationEpoch,
+          attempt.activeActivationEpoch,
+          attempt.branchId,
+          attempt.worldId,
+          attempt.authorityEpoch,
+          attempt.admissionHash,
+          attempt.requestViewId,
+          attempt.requestViewHash,
+          attempt.candidateHash,
+          attempt.candidateBytes,
+          attempt.targetHash,
+          attempt.cacheNamespace,
+          attempt.callTimeoutMs,
+          attempt.streamIdleTimeoutMs,
+          attempt.maxOutputBytes,
+          effectPayloadJson,
+          effectPayloadHash,
+          attemptJson,
+          attemptHash,
+          authorizedAt,
+        );
+      const stored = this.getActiveHomeProviderExecutionAttempt(attemptId);
+      if (!stored) {
+        throw new Error(
+          'active home provider execution attempt was not stored',
+        );
+      }
+      return { fresh: true, attempt: stored, request } as const;
+    });
+  }
+
+  prepareActiveHomeProviderExecutionEffect(
+    attemptId: IsolatedProviderExecutionAttemptId,
+    preparedAt: number,
+  ): EffectRecord {
+    const attempt = this.getActiveHomeProviderExecutionAttempt(
+      isolatedProviderExecutionAttemptId(attemptId),
+    );
+    if (!attempt) {
+      throw new Error('active home provider execution attempt is missing');
+    }
+    return this.prepareEffect({
+      effectId: attempt.attempt.effectId,
+      branchId: attempt.attempt.branchId,
+      worldId: attempt.attempt.worldId,
+      destinationWorldId: attempt.attempt.worldId,
+      kind: 'isolated_provider_completion',
+      authorityEpoch: attempt.attempt.authorityEpoch,
+      payload: JSON.parse(attempt.effectPayloadJson) as unknown,
+      idempotencyKey: attempt.attemptId,
+      preparedAt,
+    });
+  }
+
   prepareIsolatedProviderExecutionEffect(
     attemptId: IsolatedProviderExecutionAttemptId,
     preparedAt: number,
@@ -5755,9 +6199,14 @@ export class ContextGraphStore {
     });
     const evidenceJson = serialize(evidence);
     const evidenceHash = hashContextBytes(evidenceJson);
+    const responseTable = String(attempt.attempt.invocationId).startsWith(
+      'active-home-provider-invocation:',
+    )
+      ? 'context_active_home_provider_response_evidence'
+      : 'context_isolated_provider_response_evidence';
     this.database
       .prepare(
-        `INSERT INTO context_isolated_provider_response_evidence(
+        `INSERT INTO ${responseTable}(
            attempt_id, effect_id, status_code, request_id,
            evidence_json, evidence_hash, received_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -5777,12 +6226,22 @@ export class ContextGraphStore {
   getIsolatedProviderResponse(
     attemptId: IsolatedProviderExecutionAttemptId,
   ): IsolatedProviderResponseEvidenceRecord | null {
-    const row = this.database
+    const darkRow = this.database
       .prepare(
         `SELECT * FROM context_isolated_provider_response_evidence
          WHERE attempt_id = ?`,
       )
       .get(attemptId) as IsolatedProviderResponseEvidenceRow | undefined;
+    const activeRow = this.database
+      .prepare(
+        `SELECT * FROM context_active_home_provider_response_evidence
+         WHERE attempt_id = ?`,
+      )
+      .get(attemptId) as IsolatedProviderResponseEvidenceRow | undefined;
+    if (darkRow && activeRow) {
+      throw new Error('provider response evidence lineage is ambiguous');
+    }
+    const row = darkRow ?? activeRow;
     if (!row) return null;
     const evidence = Object.freeze<IsolatedProviderResponseEvidenceV1>({
       schemaVersion: 1,
@@ -5794,9 +6253,17 @@ export class ContextGraphStore {
     });
     const evidenceJson = serialize(evidence);
     const evidenceHash = hashContextBytes(evidenceJson);
+    const attempt = this.getIsolatedProviderExecutionAttempt(
+      evidence.attemptId,
+    );
+    const effect = attempt ? this.getEffect(attempt.attempt.effectId) : null;
     if (
       row.evidence_json !== evidenceJson ||
-      row.evidence_hash !== evidenceHash
+      row.evidence_hash !== evidenceHash ||
+      attempt === null ||
+      evidence.effectId !== attempt.attempt.effectId ||
+      effect === null ||
+      effect.preparedAt > evidence.receivedAt
     ) {
       throw new Error('stored isolated provider response evidence is invalid');
     }
@@ -5810,18 +6277,22 @@ export class ContextGraphStore {
     visibleText: string;
     completedAt: number;
   }): IsolatedProviderOutcomeRecord {
+    const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
+    const activeAttempt = this.getActiveHomeProviderExecutionAttempt(attemptId);
     if (input.outcomeKind === 'visible_success') {
       if (input.phase !== 'issued') {
         throw new Error('successful isolated provider outcome must be issued');
       }
-      return this.recordHomeTextProviderSuccess({
-        attemptId: input.attemptId,
-        visibleText: input.visibleText,
-        completedAt: input.completedAt,
-      }).outcome;
+      if (!activeAttempt) {
+        return this.recordHomeTextProviderSuccess({
+          attemptId,
+          visibleText: input.visibleText,
+          completedAt: input.completedAt,
+        }).outcome;
+      }
     }
     return transaction(this.database, () =>
-      this.insertIsolatedProviderOutcomeInTransaction(input),
+      this.insertIsolatedProviderOutcomeInTransaction({ ...input, attemptId }),
     );
   }
 
@@ -5833,8 +6304,17 @@ export class ContextGraphStore {
     return transaction(this.database, () => {
       const rows = this.database
         .prepare(
-          `SELECT attempts.attempt_id
-           FROM context_isolated_provider_execution_attempts AS attempts
+          `WITH attempts AS (
+             SELECT attempt_id, branch_id, world_id, active_activation_epoch,
+                    authorized_at
+             FROM context_isolated_provider_execution_attempts
+             UNION ALL
+             SELECT attempt_id, branch_id, world_id, active_activation_epoch,
+                    authorized_at
+             FROM context_active_home_provider_execution_attempts
+           )
+           SELECT attempts.attempt_id
+           FROM attempts
            JOIN context_branches AS branches
              ON branches.branch_id = attempts.branch_id
             AND branches.status = 'running'
@@ -5893,10 +6373,10 @@ export class ContextGraphStore {
             phase,
             visibleText:
               phase === 'pre_dispatch_rejected'
-                ? 'provider request rejected before dispatch'
+                ? 'P'
                 : phase === 'issuance_uncertain'
-                  ? 'provider request outcome is uncertain'
-                  : 'provider response was received but its result was lost',
+                  ? 'U'
+                  : 'E',
             completedAt: recoveredAt,
           }),
         );
@@ -6003,9 +6483,14 @@ export class ContextGraphStore {
     });
     const outcomeJson = serialize(outcome);
     const outcomeHash = hashContextBytes(outcomeJson);
+    const outcomeTable = String(attempt.attempt.invocationId).startsWith(
+      'active-home-provider-invocation:',
+    )
+      ? 'context_active_home_provider_outcomes'
+      : 'context_isolated_provider_outcomes';
     this.database
       .prepare(
-        `INSERT INTO context_isolated_provider_outcomes(
+        `INSERT INTO ${outcomeTable}(
            attempt_id, effect_id, outcome_kind, phase, visible_text,
            visible_bytes, visible_hash, outcome_json, outcome_hash, completed_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -7111,12 +7596,22 @@ export class ContextGraphStore {
   getIsolatedProviderOutcome(
     attemptId: IsolatedProviderExecutionAttemptId,
   ): IsolatedProviderOutcomeRecord | null {
-    const row = this.database
+    const darkRow = this.database
       .prepare(
         `SELECT * FROM context_isolated_provider_outcomes
          WHERE attempt_id = ?`,
       )
       .get(attemptId) as IsolatedProviderOutcomeRow | undefined;
+    const activeRow = this.database
+      .prepare(
+        `SELECT * FROM context_active_home_provider_outcomes
+         WHERE attempt_id = ?`,
+      )
+      .get(attemptId) as IsolatedProviderOutcomeRow | undefined;
+    if (darkRow && activeRow) {
+      throw new Error('provider outcome lineage is ambiguous');
+    }
+    const row = darkRow ?? activeRow;
     if (!row) return null;
     if (
       (row.outcome_kind !== 'visible_success' &&
@@ -11993,7 +12488,12 @@ export class ContextGraphStore {
       const pendingAttempt = this.getDarkPendingBranchAttempt(branch.branchId);
       const executionAttempt = this.database
         .prepare(
-          `SELECT 1 AS present FROM context_isolated_provider_execution_attempts
+          `SELECT 1 AS present
+           FROM (
+             SELECT branch_id FROM context_isolated_provider_execution_attempts
+             UNION ALL
+             SELECT branch_id FROM context_active_home_provider_execution_attempts
+           ) AS execution_attempts
            WHERE branch_id = ?`,
         )
         .get(branch.branchId) as { present: number } | undefined;

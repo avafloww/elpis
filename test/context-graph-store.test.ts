@@ -6453,6 +6453,20 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
       DROP TRIGGER context_home_text_speech_finalizations_lineage_guard;
+      DROP TRIGGER context_active_home_provider_effect_transition_guard;
+      DROP TRIGGER context_active_home_provider_outcomes_no_update;
+      DROP TRIGGER context_active_home_provider_outcomes_no_delete;
+      DROP TRIGGER context_active_home_provider_outcomes_lineage_guard;
+      DROP TABLE context_active_home_provider_outcomes;
+      DROP TRIGGER context_active_home_provider_response_evidence_no_update;
+      DROP TRIGGER context_active_home_provider_response_evidence_no_delete;
+      DROP TRIGGER context_active_home_provider_response_evidence_lineage_guard;
+      DROP TABLE context_active_home_provider_response_evidence;
+      DROP TRIGGER context_isolated_provider_execution_attempts_active_disjoint_guard;
+      DROP TRIGGER context_active_home_provider_execution_attempts_no_update;
+      DROP TRIGGER context_active_home_provider_execution_attempts_no_delete;
+      DROP TRIGGER context_active_home_provider_execution_attempts_lineage_guard;
+      DROP TABLE context_active_home_provider_execution_attempts;
       DROP TRIGGER context_active_home_branch_obligations_after_request_view_insert;
     DROP TRIGGER context_active_home_branch_obligations_no_update;
     DROP TRIGGER context_active_home_branch_obligations_no_delete;
@@ -6607,7 +6621,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0053-context-home-text-speech-attempts',
             '0054-context-home-text-speech-delivery',
             '0055-context-active-home-ingress-admissions',
-            '0056-context-active-home-provider-invocation-admissions'
+            '0056-context-active-home-provider-invocation-admissions',
+            '0057-context-active-home-provider-execution-ledger'
           );
       PRAGMA user_version = 40;
     `);
@@ -9006,11 +9021,11 @@ test('active home request consumes one admission and rolls back late failure', (
     const target = {
       schemaVersion: 1,
       role: 'main',
-      targetRef: 'example/aster',
-      providerType: 'openai-compatible',
+      targetRef: 'codex/aster',
+      providerType: 'codex-oauth',
       model: 'aster-1',
-      apiSurface: 'responses',
-      apiEndpoint: 'https://api.example.com/v1/responses',
+      apiSurface: 'codex-responses',
+      apiEndpoint: 'https://chatgpt.com/backend-api/codex/responses',
       gateway: null,
       reasoningEffort: null,
       reasoningSummary: null,
@@ -9100,7 +9115,7 @@ test('active home request consumes one admission and rolls back late failure', (
           payload: { text: 'must remain dormant' },
           preparedAt: 501,
         }),
-      /has no effect authority/,
+      /effect is not authorized/,
     );
     assert.throws(
       () =>
@@ -9252,7 +9267,61 @@ test('active home request consumes one admission and rolls back late failure', (
         }),
       /conflict/,
     );
-    assert.equal(tableCount(value.database, 'context_effects'), 0);
+
+    const execution = value.store.beginActiveHomeProviderExecutionAttempt({
+      invocationId: admitted.invocationId,
+      expectedWorldId: admitted.admission.worldId,
+      expectedTarget: target,
+      callTimeoutMs: 30_000,
+      streamIdleTimeoutMs: 10_000,
+      maxOutputBytes: 1900,
+      authorizedAt: 510,
+    });
+    assert.equal(execution.fresh, true);
+    const replayed = value.store.beginActiveHomeProviderExecutionAttempt({
+      invocationId: admitted.invocationId,
+      expectedWorldId: admitted.admission.worldId,
+      expectedTarget: target,
+      callTimeoutMs: 30_000,
+      streamIdleTimeoutMs: 10_000,
+      maxOutputBytes: 1900,
+      authorizedAt: 510,
+    });
+    assert.equal(replayed.fresh, false);
+    value.store.prepareActiveHomeProviderExecutionEffect(
+      execution.attempt.attemptId,
+      520,
+    );
+    value.store.recordIsolatedProviderResponse({
+      attemptId: execution.attempt.attemptId,
+      statusCode: 200,
+      requestId: 'request-active-home-1',
+      receivedAt: 530,
+    });
+    const outcome = value.store.recordIsolatedProviderOutcome({
+      attemptId: execution.attempt.attemptId,
+      outcomeKind: 'visible_success',
+      phase: 'issued',
+      visibleText: 'ACTIVE_HOME_PROVIDER_RESULT',
+      completedAt: 540,
+    });
+    assert.equal(outcome.outcome.visibleText, 'ACTIVE_HOME_PROVIDER_RESULT');
+    assert.equal(
+      value.store.getEffect(execution.attempt.attempt.effectId)?.status,
+      'observed',
+    );
+    assert.equal(tableCount(value.database, 'context_effects'), 1);
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_active_home_provider_execution_attempts',
+      ),
+      1,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_active_home_provider_outcomes'),
+      1,
+    );
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
     assert.equal(
       tableCount(value.database, 'context_continuation_advances'),

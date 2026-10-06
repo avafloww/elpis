@@ -222,6 +222,20 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_provider_effect_transition_guard;
+      DROP TRIGGER context_active_home_provider_outcomes_no_update;
+    DROP TRIGGER context_active_home_provider_outcomes_no_delete;
+    DROP TRIGGER context_active_home_provider_outcomes_lineage_guard;
+    DROP TABLE context_active_home_provider_outcomes;
+    DROP TRIGGER context_active_home_provider_response_evidence_no_update;
+    DROP TRIGGER context_active_home_provider_response_evidence_no_delete;
+    DROP TRIGGER context_active_home_provider_response_evidence_lineage_guard;
+    DROP TABLE context_active_home_provider_response_evidence;
+    DROP TRIGGER context_isolated_provider_execution_attempts_active_disjoint_guard;
+    DROP TRIGGER context_active_home_provider_execution_attempts_no_update;
+    DROP TRIGGER context_active_home_provider_execution_attempts_no_delete;
+    DROP TRIGGER context_active_home_provider_execution_attempts_lineage_guard;
+    DROP TABLE context_active_home_provider_execution_attempts;
     DROP TRIGGER context_active_home_provider_invocation_admissions_no_update;
     DROP TRIGGER context_active_home_provider_invocation_admissions_no_delete;
     DROP TRIGGER context_active_home_provider_invocation_admissions_lineage_guard;
@@ -419,7 +433,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0047-context-dark-isolated-provider-bindings',
           '0048-context-dark-isolated-provider-binding-order',
           '0049-context-dark-isolated-provider-invocation-admissions',
-          '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions'
+          '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

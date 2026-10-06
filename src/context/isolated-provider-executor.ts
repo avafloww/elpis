@@ -1,9 +1,11 @@
 import { configForLlmRole, type MaterializedConfig } from '../config.js';
 import type { LLM, StandaloneCompleteResult } from '../llm/llm.js';
 import {
+  activeHomeProviderInvocationId,
   ContextGraphStore,
   darkIsolatedProviderInvocationId,
   worldId,
+  type ActiveHomeProviderInvocationId,
   type DarkIsolatedProviderInvocationId,
   type EffectRecord,
   type IsolatedProviderExecutionAttemptRecord,
@@ -21,11 +23,26 @@ export interface IsolatedProviderExecutionSnapshot {
 }
 
 export type IsolatedProviderExecutionResult =
-  | { readonly state: 'succeeded'; readonly snapshot: IsolatedProviderExecutionSnapshot }
-  | { readonly state: 'failed'; readonly snapshot: IsolatedProviderExecutionSnapshot }
-  | { readonly state: 'issuance_uncertain'; readonly snapshot: IsolatedProviderExecutionSnapshot }
-  | { readonly state: 'issued_outcome_unknown'; readonly snapshot: IsolatedProviderExecutionSnapshot }
-  | { readonly state: 'attempt_recorded'; readonly snapshot: IsolatedProviderExecutionSnapshot };
+  | {
+      readonly state: 'succeeded';
+      readonly snapshot: IsolatedProviderExecutionSnapshot;
+    }
+  | {
+      readonly state: 'failed';
+      readonly snapshot: IsolatedProviderExecutionSnapshot;
+    }
+  | {
+      readonly state: 'issuance_uncertain';
+      readonly snapshot: IsolatedProviderExecutionSnapshot;
+    }
+  | {
+      readonly state: 'issued_outcome_unknown';
+      readonly snapshot: IsolatedProviderExecutionSnapshot;
+    }
+  | {
+      readonly state: 'attempt_recorded';
+      readonly snapshot: IsolatedProviderExecutionSnapshot;
+    };
 
 export interface IsolatedProviderExecutorOptions {
   readonly store: ContextGraphStore;
@@ -49,7 +66,9 @@ function assertExactResultTarget(
     (result.gateway ?? null) !== null ||
     (result.reasoningEffort ?? null) !== target.reasoningEffort
   ) {
-    throw new Error('isolated provider result provenance does not match authorized target');
+    throw new Error(
+      'isolated provider result provenance does not match authorized target',
+    );
   }
 }
 
@@ -65,7 +84,9 @@ function snapshot(
   };
 }
 
-function classifySnapshot(value: IsolatedProviderExecutionSnapshot): IsolatedProviderExecutionResult {
+function classifySnapshot(
+  value: IsolatedProviderExecutionSnapshot,
+): IsolatedProviderExecutionResult {
   if (value.outcome?.outcome.outcomeKind === 'visible_success') {
     return { state: 'succeeded', snapshot: value };
   }
@@ -75,26 +96,49 @@ function classifySnapshot(value: IsolatedProviderExecutionSnapshot): IsolatedPro
   if (value.outcome?.outcome.outcomeKind === 'visible_error') {
     return { state: 'failed', snapshot: value };
   }
-  if (value.response !== null || value.effect?.status === 'observed' || value.effect?.status === 'failed') {
+  if (
+    value.response !== null ||
+    value.effect?.status === 'observed' ||
+    value.effect?.status === 'failed'
+  ) {
     return { state: 'issued_outcome_unknown', snapshot: value };
   }
-  if (value.effect?.status === 'prepared' || value.effect?.status === 'uncertain') {
+  if (
+    value.effect?.status === 'prepared' ||
+    value.effect?.status === 'uncertain'
+  ) {
     return { state: 'issuance_uncertain', snapshot: value };
   }
   return { state: 'attempt_recorded', snapshot: value };
 }
 
-export function createIsolatedProviderExecutor(options: IsolatedProviderExecutorOptions): (
-  invocationId: DarkIsolatedProviderInvocationId,
+export function createIsolatedProviderExecutor(
+  options: IsolatedProviderExecutorOptions,
+): (
+  invocationId:
+    DarkIsolatedProviderInvocationId | ActiveHomeProviderInvocationId,
 ) => Promise<IsolatedProviderExecutionResult> {
   const expectedWorldId = worldId(options.expectedWorldId);
   const now = options.now ?? Date.now;
   return async (invocationValue) => {
-    const invocationId = darkIsolatedProviderInvocationId(invocationValue);
-    const existing = options.store.getIsolatedProviderExecutionAttemptForInvocation(invocationId);
+    const isActiveHome = String(invocationValue).startsWith(
+      'active-home-provider-invocation:',
+    );
+    const invocationId = isActiveHome
+      ? activeHomeProviderInvocationId(invocationValue)
+      : darkIsolatedProviderInvocationId(invocationValue);
+    const existing = isActiveHome
+      ? options.store.getActiveHomeProviderExecutionAttemptForInvocation(
+          activeHomeProviderInvocationId(invocationId),
+        )
+      : options.store.getIsolatedProviderExecutionAttemptForInvocation(
+          darkIsolatedProviderInvocationId(invocationId),
+        );
     if (existing) {
       if (existing.attempt.worldId !== expectedWorldId) {
-        throw new Error('isolated provider execution attempt belongs to another world');
+        throw new Error(
+          'isolated provider execution attempt belongs to another world',
+        );
       }
       return classifySnapshot(snapshot(options.store, existing));
     }
@@ -105,25 +149,38 @@ export function createIsolatedProviderExecutor(options: IsolatedProviderExecutor
       !('callTimeoutMs' in directLlm) ||
       !('streamIdleTimeoutMs' in directLlm)
     ) {
-      throw new Error('isolated provider execution requires direct timeout configuration');
+      throw new Error(
+        'isolated provider execution requires direct timeout configuration',
+      );
     }
     if (options.llm.model !== target.model) {
-      throw new Error('configured provider model does not match authorized target');
+      throw new Error(
+        'configured provider model does not match authorized target',
+      );
     }
     if (!options.llm.completeStandalone) {
       throw new Error('configured provider has no standalone completion lane');
     }
     const completeStandalone = options.llm.completeStandalone.bind(options.llm);
-    const begun = options.store.beginIsolatedProviderExecutionAttempt({
-      invocationId,
+    const beginInput = {
       expectedWorldId,
       expectedTarget: target,
       callTimeoutMs: directLlm.callTimeoutMs,
       streamIdleTimeoutMs: directLlm.streamIdleTimeoutMs,
       maxOutputBytes: options.maxOutputBytes,
       authorizedAt: now(),
-    });
-    if (!begun.fresh) return classifySnapshot(snapshot(options.store, begun.attempt));
+    };
+    const begun = isActiveHome
+      ? options.store.beginActiveHomeProviderExecutionAttempt({
+          ...beginInput,
+          invocationId: activeHomeProviderInvocationId(invocationId),
+        })
+      : options.store.beginIsolatedProviderExecutionAttempt({
+          ...beginInput,
+          invocationId: darkIsolatedProviderInvocationId(invocationId),
+        });
+    if (!begun.fresh)
+      return classifySnapshot(snapshot(options.store, begun.attempt));
 
     let effectPrepared = false;
     try {
@@ -145,15 +202,24 @@ export function createIsolatedProviderExecutor(options: IsolatedProviderExecutor
           retryUnauthorized: false,
           dispatchLifecycle: {
             beforeNetwork({ attempt }) {
-              if (attempt !== 1) throw new Error('isolated provider attempted transport replay');
-              options.store.prepareIsolatedProviderExecutionEffect(
-                begun.attempt.attemptId,
-                now(),
-              );
+              if (attempt !== 1)
+                throw new Error('isolated provider attempted transport replay');
+              if (isActiveHome) {
+                options.store.prepareActiveHomeProviderExecutionEffect(
+                  begun.attempt.attemptId,
+                  now(),
+                );
+              } else {
+                options.store.prepareIsolatedProviderExecutionEffect(
+                  begun.attempt.attemptId,
+                  now(),
+                );
+              }
               effectPrepared = true;
             },
             responseReceived({ attempt, status }) {
-              if (attempt !== 1) throw new Error('isolated provider observed replayed response');
+              if (attempt !== 1)
+                throw new Error('isolated provider observed replayed response');
               options.store.recordIsolatedProviderResponse({
                 attemptId: begun.attempt.attemptId,
                 statusCode: status,
@@ -163,8 +229,14 @@ export function createIsolatedProviderExecutor(options: IsolatedProviderExecutor
           },
         },
       );
-      if (!effectPrepared || options.store.getIsolatedProviderResponse(begun.attempt.attemptId) === null) {
-        throw new Error('isolated provider completion lacked positive response evidence');
+      if (
+        !effectPrepared ||
+        options.store.getIsolatedProviderResponse(begun.attempt.attemptId) ===
+          null
+      ) {
+        throw new Error(
+          'isolated provider completion lacked positive response evidence',
+        );
       }
       if (result.toolCalls && result.toolCalls.length > 0) {
         throw new Error('isolated provider returned forbidden tool calls');
@@ -178,9 +250,13 @@ export function createIsolatedProviderExecutor(options: IsolatedProviderExecutor
         completedAt: now(),
       });
     } catch (error) {
-      const existingOutcome = options.store.getIsolatedProviderOutcome(begun.attempt.attemptId);
+      const existingOutcome = options.store.getIsolatedProviderOutcome(
+        begun.attempt.attemptId,
+      );
       if (existingOutcome === null) {
-        const response = options.store.getIsolatedProviderResponse(begun.attempt.attemptId);
+        const response = options.store.getIsolatedProviderResponse(
+          begun.attempt.attemptId,
+        );
         const phase = !effectPrepared
           ? 'pre_dispatch_rejected'
           : response === null
@@ -192,10 +268,10 @@ export function createIsolatedProviderExecutor(options: IsolatedProviderExecutor
           phase,
           visibleText:
             phase === 'pre_dispatch_rejected'
-              ? 'provider request rejected before dispatch'
+              ? 'P'
               : phase === 'issuance_uncertain'
-                ? 'provider request outcome is uncertain'
-                : 'provider request failed after response',
+                ? 'U'
+                : 'E',
           completedAt: now(),
         });
       }
