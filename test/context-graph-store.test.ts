@@ -780,10 +780,10 @@ test('authorized resident identity layers derive atomically without creating run
     );
     const inspectedChanged =
       value.store.createResidentSourceInspectionCandidate({
-      soul: changedSoul,
-      provenance: residentRunProvenance('211'),
-      observedAt: 460,
-    });
+        soul: changedSoul,
+        provenance: residentRunProvenance('211'),
+        observedAt: 460,
+      });
     const authorizationChanged = value.store.authorizeResidentSourceCandidate({
       candidateId: inspectedChanged.candidate.candidateId,
       freshSoul: changedSoul,
@@ -969,12 +969,12 @@ test('resident current-world profile binding is atomic and social-lineage scoped
     assert.equal(profile?.profile.approvals.integratedSelf, null);
     assert.equal(profile?.profile.approvals.worldPolicy, null);
     assert.deepEqual(value.store.getSystemProfileHead(targetWorldId, 0), {
-        worldId: targetWorldId,
-        activationEpoch: 0,
-        revision: 1,
-        predecessorProfileId: null,
-        profileId: receipt.profileId,
-        advancedAt: 500,
+      worldId: targetWorldId,
+      activationEpoch: 0,
+      revision: 1,
+      predecessorProfileId: null,
+      profileId: receipt.profileId,
+      advancedAt: 500,
     });
     assert.throws(
       () =>
@@ -1777,14 +1777,14 @@ test('active provider execution is single-attempt and uses durable effect eviden
     assert.equal('request' in replay, false);
     const changedConfigReplay =
       value.store.beginIsolatedProviderExecutionAttempt({
-      invocationId: invocation.invocationId,
-      expectedWorldId: targetWorldId,
-      expectedTarget: { ...providerTarget, reasoningEffort: 'medium' },
-      callTimeoutMs: 119_999,
-      streamIdleTimeoutMs: 29_999,
-      maxOutputBytes: 2048,
-      authorizedAt: 761,
-    });
+        invocationId: invocation.invocationId,
+        expectedWorldId: targetWorldId,
+        expectedTarget: { ...providerTarget, reasoningEffort: 'medium' },
+        callTimeoutMs: 119_999,
+        streamIdleTimeoutMs: 29_999,
+        maxOutputBytes: 2048,
+        authorizedAt: 761,
+      });
     assert.equal(changedConfigReplay.fresh, false);
     assert.deepEqual(changedConfigReplay.attempt, started.attempt);
     assert.throws(
@@ -2285,7 +2285,10 @@ test('active provider execution is single-attempt and uses durable effect eviden
           ),
       /home text speech receipt lineage is invalid/,
     );
-    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
     const nulMessageId = `${directEvidence.messageId}\u0000junk`;
     const nulEvidence = { ...directEvidence, messageId: nulMessageId };
     const nulEvidenceJson = JSON.stringify(nulEvidence);
@@ -2323,7 +2326,10 @@ test('active provider execution is single-attempt and uses durable effect eviden
           ),
       /CHECK constraint failed/,
     );
-    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
     assert.throws(
       () =>
         value.database
@@ -2353,7 +2359,10 @@ test('active provider execution is single-attempt and uses durable effect eviden
           ),
       /CHECK constraint failed/,
     );
-    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
     assert.throws(
       () =>
         value.database
@@ -6444,6 +6453,19 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
       DROP TRIGGER context_home_text_speech_finalizations_lineage_guard;
+      DROP TRIGGER context_active_home_branch_obligations_after_request_view_insert;
+    DROP TRIGGER context_active_home_branch_obligations_no_update;
+    DROP TRIGGER context_active_home_branch_obligations_no_delete;
+    DROP TRIGGER context_active_home_provider_invocation_effect_guard;
+    DROP TRIGGER context_active_home_provider_invocation_capsule_guard;
+    DROP TRIGGER context_active_home_provider_invocation_transition_guard;
+    DROP TRIGGER context_active_home_provider_invocation_advance_guard;
+    DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_provider_invocation_admissions_no_update;
+      DROP TRIGGER context_active_home_provider_invocation_admissions_no_delete;
+      DROP TRIGGER context_active_home_provider_invocation_admissions_lineage_guard;
+      DROP TABLE context_active_home_branch_obligations;
+    DROP TABLE context_active_home_provider_invocation_admissions;
       DROP TRIGGER context_active_home_ingress_admissions_no_update;
       DROP TRIGGER context_active_home_ingress_admissions_no_delete;
       DROP TRIGGER context_active_home_ingress_admissions_lineage_guard;
@@ -6584,7 +6606,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0052-context-home-text-request-scope',
             '0053-context-home-text-speech-attempts',
             '0054-context-home-text-speech-delivery',
-            '0055-context-active-home-ingress-admissions'
+            '0055-context-active-home-ingress-admissions',
+            '0056-context-active-home-provider-invocation-admissions'
           );
       PRAGMA user_version = 40;
     `);
@@ -7443,12 +7466,12 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
     assert.throws(
       () =>
         value.store.approveSystemLayer({
-        layerId: specs[1].layer.layerId,
-        role: 'identity',
-        basisRef: 'fixture:identity:backdated',
-        approvalGeneration: 2,
-        approvedAt: 9,
-      }),
+          layerId: specs[1].layer.layerId,
+          role: 'identity',
+          basisRef: 'fixture:identity:backdated',
+          approvalGeneration: 2,
+          approvedAt: 9,
+        }),
       /system layer approval predates its layer/,
     );
     assert.deepEqual(
@@ -7464,23 +7487,23 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
     assert.throws(
       () =>
         value.store.approveSystemLayer({
-        layerId: specs[1].layer.layerId,
-        role: 'identity',
-        basisRef: 'fixture:identity:changed',
-        approvalGeneration: 1,
-        approvedAt: 21,
-      }),
+          layerId: specs[1].layer.layerId,
+          role: 'identity',
+          basisRef: 'fixture:identity:changed',
+          approvalGeneration: 1,
+          approvedAt: 21,
+        }),
       /system layer approval identity conflict/,
     );
     assert.throws(
       () =>
         value.store.approveSystemLayer({
-        layerId: specs[1].layer.layerId,
-        role: 'identity',
-        basisRef: specs[1].basisRef,
-        approvalGeneration: 1,
-        approvedAt: 99,
-      }),
+          layerId: specs[1].layer.layerId,
+          role: 'identity',
+          basisRef: specs[1].basisRef,
+          approvalGeneration: 1,
+          approvedAt: 99,
+        }),
       /system layer approval identity conflict/,
     );
     const unsafe = [
@@ -7503,12 +7526,12 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       assert.throws(
         () =>
           value.store.approveSystemLayer({
-          layerId: layer.layerId,
-          role: 'identity',
-          basisRef: 'fixture:unsafe',
-          approvalGeneration: 1,
-          approvedAt: 30,
-        }),
+            layerId: layer.layerId,
+            role: 'identity',
+            basisRef: 'fixture:unsafe',
+            approvalGeneration: 1,
+            approvedAt: 30,
+          }),
         /system layer approval role does not match layer scope/,
       );
     }
@@ -7522,12 +7545,12 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
     assert.throws(
       () =>
         value.store.approveSystemLayer({
-        layerId: wrongSource.layerId,
-        role: 'identity',
-        basisRef: 'fixture:wrong-source',
-        approvalGeneration: 1,
-        approvedAt: 30,
-      }),
+          layerId: wrongSource.layerId,
+          role: 'identity',
+          basisRef: 'fixture:wrong-source',
+          approvalGeneration: 1,
+          approvedAt: 30,
+        }),
       /system layer approval role does not match layer scope/,
     );
     const corruptLayer = createLayer({
@@ -7542,21 +7565,21 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
     );
     value.database
       .prepare(
-      `INSERT INTO context_system_layer_approvals(
+        `INSERT INTO context_system_layer_approvals(
          approval_id, layer_id, approval_role, basis_kind, basis_ref,
          basis_hash, approval_generation, approved_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-      corruptId,
-      corruptLayer.layerId,
-      'scoped_runtime_contract',
-      'authored_scoped_contract',
-      'fixture:corrupt',
-      corruptLayer.sourceHash,
-      1,
-      31,
-    );
+        corruptId,
+        corruptLayer.layerId,
+        'scoped_runtime_contract',
+        'authored_scoped_contract',
+        'fixture:corrupt',
+        corruptLayer.sourceHash,
+        1,
+        31,
+      );
     assert.throws(
       () => value.store.getSystemLayerApproval(corruptId),
       /stored system layer approval is invalid/,
@@ -7644,12 +7667,12 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.throws(
       () =>
         value.store.createSystemProfile({
-        worldId: worldA,
-        scopedRuntimeContractApprovalId: contract.approvalId,
-        identityApprovalId: identity.approvalId,
-        worldPolicyApprovalId: policyA.approvalId,
-        createdAt: 19,
-      }),
+          worldId: worldA,
+          scopedRuntimeContractApprovalId: contract.approvalId,
+          identityApprovalId: identity.approvalId,
+          worldPolicyApprovalId: policyA.approvalId,
+          createdAt: 19,
+        }),
       /system profile scoped_runtime_contract lineage is invalid/,
     );
     const profileA = value.store.createSystemProfile({
@@ -7682,24 +7705,24 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.throws(
       () =>
         value.store.createSystemProfile({
-        worldId: worldA,
-        scopedRuntimeContractApprovalId: contract.approvalId,
-        identityApprovalId: identity.approvalId,
-        integratedSelfApprovalId: integratedSelf.approvalId,
-        worldPolicyApprovalId: policyA.approvalId,
-        createdAt: 31,
-      }),
+          worldId: worldA,
+          scopedRuntimeContractApprovalId: contract.approvalId,
+          identityApprovalId: identity.approvalId,
+          integratedSelfApprovalId: integratedSelf.approvalId,
+          worldPolicyApprovalId: policyA.approvalId,
+          createdAt: 31,
+        }),
       /system profile identity conflict/,
     );
     assert.throws(
       () =>
         value.store.advanceSystemProfileHead({
-        worldId: worldA,
-        expectedRevision: 0,
-        expectedProfileId: null,
-        profileId: profileA.profileId,
-        advancedAt: 29,
-      }),
+          worldId: worldA,
+          expectedRevision: 0,
+          expectedProfileId: null,
+          profileId: profileA.profileId,
+          advancedAt: 29,
+        }),
       /invalid context system profile advance/,
     );
     const head1 = value.store.advanceSystemProfileHead({
@@ -7731,23 +7754,23 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.throws(
       () =>
         value.store.advanceSystemProfileHead({
-        worldId: worldA,
-        expectedRevision: 0,
-        expectedProfileId: null,
-        profileId: profileB.profileId,
-        advancedAt: 41,
-      }),
+          worldId: worldA,
+          expectedRevision: 0,
+          expectedProfileId: null,
+          profileId: profileB.profileId,
+          advancedAt: 41,
+        }),
       /system profile head is not at revision 0/,
     );
     assert.throws(
       () =>
         value.store.advanceSystemProfileHead({
-        worldId: worldA,
-        expectedRevision: 1,
-        expectedProfileId: profileA.profileId,
-        profileId: profileB.profileId,
-        advancedAt: 39,
-      }),
+          worldId: worldA,
+          expectedRevision: 1,
+          expectedProfileId: profileA.profileId,
+          profileId: profileB.profileId,
+          advancedAt: 39,
+        }),
       /invalid context system profile advance/,
     );
     const head2 = value.store.advanceSystemProfileHead({
@@ -7833,12 +7856,12 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.throws(
       () =>
         value.store.createSystemProfile({
-        worldId: worldA,
-        scopedRuntimeContractApprovalId: contract.approvalId,
-        identityApprovalId: identity.approvalId,
-        worldPolicyApprovalId: policyB.approvalId,
-        createdAt: 50,
-      }),
+          worldId: worldA,
+          scopedRuntimeContractApprovalId: contract.approvalId,
+          identityApprovalId: identity.approvalId,
+          worldPolicyApprovalId: policyB.approvalId,
+          createdAt: 50,
+        }),
       /system profile world_policy lineage is invalid/,
     );
     const wrongGeneration = approve({
@@ -7853,18 +7876,18 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.throws(
       () =>
         value.store.createSystemProfile({
-        worldId: worldA,
-        scopedRuntimeContractApprovalId: contract.approvalId,
-        identityApprovalId: wrongGeneration.approvalId,
-        createdAt: 51,
-      }),
+          worldId: worldA,
+          scopedRuntimeContractApprovalId: contract.approvalId,
+          identityApprovalId: wrongGeneration.approvalId,
+          createdAt: 51,
+        }),
       /system profile identity lineage is invalid/,
     );
     assert.throws(
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_system_profile_advances(
+            `INSERT INTO context_system_profile_advances(
            world_id, activation_epoch, revision, predecessor_profile_id,
            profile_id, advanced_at
          ) VALUES (?, 0, 4, ?, ?, 60)`,
@@ -8019,16 +8042,16 @@ test('profile bindings seal one exact historical request view', () => {
     assert.throws(
       () =>
         value.store.createSystemProfileRequestViewBinding({
-        requestViewId: assembly.requestView.requestViewId,
-        expectedProfileId: profileA.profileId,
-        expectedProfileHeadRevision: 1,
-        boundAt: 41,
-      }),
+          requestViewId: assembly.requestView.requestViewId,
+          expectedProfileId: profileA.profileId,
+          expectedProfileHeadRevision: 1,
+          boundAt: 41,
+        }),
       /binding identity conflict/,
     );
     const storedBinding = value.database
       .prepare(
-      `SELECT * FROM context_system_profile_request_view_bindings
+        `SELECT * FROM context_system_profile_request_view_bindings
        WHERE binding_id = ?`,
       )
       .get(binding.bindingId) as Record<string, string | number>;
@@ -8052,25 +8075,25 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_system_profile_request_view_bindings(
+            `INSERT INTO context_system_profile_request_view_bindings(
            binding_id, request_view_id, world_id, activation_epoch,
            profile_id, profile_head_revision, request_view_hash, profile_hash,
            binding_json, binding_hash, bound_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
-        storedBinding.binding_id,
-        storedBinding.request_view_id,
-        storedBinding.world_id,
-        storedBinding.activation_epoch,
-        storedBinding.profile_id,
-        storedBinding.profile_head_revision,
-        storedBinding.request_view_hash,
-        storedBinding.profile_hash,
-        storedBinding.binding_json,
-        storedBinding.binding_hash,
-        storedBinding.bound_at,
-      ),
+            storedBinding.binding_id,
+            storedBinding.request_view_id,
+            storedBinding.world_id,
+            storedBinding.activation_epoch,
+            storedBinding.profile_id,
+            storedBinding.profile_head_revision,
+            storedBinding.request_view_hash,
+            storedBinding.profile_hash,
+            storedBinding.binding_json,
+            storedBinding.binding_hash,
+            storedBinding.bound_at,
+          ),
       /binding lineage is invalid/,
     );
     value.database.exec(`
@@ -8081,32 +8104,32 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `INSERT OR REPLACE INTO context_system_profile_request_view_bindings(
+            `INSERT OR REPLACE INTO context_system_profile_request_view_bindings(
            binding_id, request_view_id, world_id, activation_epoch,
            profile_id, profile_head_revision, request_view_hash, profile_hash,
            binding_json, binding_hash, bound_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
-        storedBinding.binding_id,
-        storedBinding.request_view_id,
-        storedBinding.world_id,
-        storedBinding.activation_epoch,
-        storedBinding.profile_id,
-        storedBinding.profile_head_revision,
-        storedBinding.request_view_hash,
-        storedBinding.profile_hash,
-        storedBinding.binding_json,
-        storedBinding.binding_hash,
-        storedBinding.bound_at,
-      ),
+            storedBinding.binding_id,
+            storedBinding.request_view_id,
+            storedBinding.world_id,
+            storedBinding.activation_epoch,
+            storedBinding.profile_id,
+            storedBinding.profile_head_revision,
+            storedBinding.request_view_hash,
+            storedBinding.profile_hash,
+            storedBinding.binding_json,
+            storedBinding.binding_hash,
+            storedBinding.bound_at,
+          ),
       /binding identity already exists/,
     );
     assert.throws(
       () =>
         value.database
           .prepare(
-        `UPDATE context_system_profile_request_view_bindings
+            `UPDATE context_system_profile_request_view_bindings
          SET bound_at = bound_at + 1 WHERE binding_id = ?`,
           )
           .run(binding.bindingId),
@@ -8116,7 +8139,7 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `DELETE FROM context_system_profile_request_view_bindings
+            `DELETE FROM context_system_profile_request_view_bindings
          WHERE binding_id = ?`,
           )
           .run(binding.bindingId),
@@ -8126,22 +8149,22 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_local_branch_request_system_layers(
+            `INSERT INTO context_local_branch_request_system_layers(
            request_view_id, layer_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
           )
           .run(
-        assembly.requestView.requestViewId,
-        contract.layer.layerId,
-        world,
-      ),
+            assembly.requestView.requestViewId,
+            contract.layer.layerId,
+            world,
+          ),
       /bound request view system layers are sealed/,
     );
     assert.throws(
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_local_branch_request_messages(
+            `INSERT INTO context_local_branch_request_messages(
            request_view_id, projection_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
           )
@@ -8152,7 +8175,7 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_manifest_events(
+            `INSERT INTO context_manifest_events(
            manifest_id, event_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
           )
@@ -8163,7 +8186,7 @@ test('profile bindings seal one exact historical request view', () => {
       () =>
         value.database
           .prepare(
-        `INSERT INTO context_manifest_shares(
+            `INSERT INTO context_manifest_shares(
            manifest_id, grant_id, shared_event_id, destination_world_id, ordinal
          ) VALUES (?, 'share:sealed-fixture', ?, ?, 99)`,
           )
@@ -8508,7 +8531,9 @@ test('active social ingress queues every world and atomically admits only exact 
         );
       const sequence = (
         value.database
-          .prepare('SELECT sequence FROM context_world_events WHERE event_id = ?')
+          .prepare(
+            'SELECT sequence FROM context_world_events WHERE event_id = ?',
+          )
           .get(input.rawEventId) as { sequence: number }
       ).sequence;
       const messageJson = JSON.stringify({
@@ -8618,7 +8643,9 @@ test('active social ingress queues every world and atomically admits only exact 
         ?.message.content,
       '\ud800',
     );
-    assert.ok(value.store.getActiveHomeIngressAdmission(surrogateEvent.eventId));
+    assert.ok(
+      value.store.getActiveHomeIngressAdmission(surrogateEvent.eventId),
+    );
 
     const numericBotEvent = value.store.appendWorldEvent({
       eventId: eventId('event:active-home-numeric-bot'),
@@ -8638,7 +8665,7 @@ test('active social ingress queues every world and atomically admits only exact 
     });
     assert.throws(
       () => insertDirectAdmission(numericBotEvent, numericBotProjection, 162),
-      /active home ingress admission lineage is invalid/
+      /active home ingress admission lineage is invalid/,
     );
     assert.equal(
       value.store.getActiveHomeIngressAdmission(numericBotEvent.eventId),
@@ -8663,11 +8690,7 @@ test('active social ingress queues every world and atomically admits only exact 
     });
     assert.throws(
       () =>
-        insertDirectAdmission(
-          numericRouteEvent,
-          numericRouteProjection,
-          166,
-        ),
+        insertDirectAdmission(numericRouteEvent, numericRouteProjection, 166),
       /active home ingress admission lineage is invalid/,
     );
     assert.equal(
@@ -8675,7 +8698,9 @@ test('active social ingress queues every world and atomically admits only exact 
       null,
     );
 
-    const directOversizedEventId = eventId('event:active-home-direct-oversized');
+    const directOversizedEventId = eventId(
+      'event:active-home-direct-oversized',
+    );
     const directOversizedPayloadJson = JSON.stringify({
       ...homePayload,
       content: oversizedContent,
@@ -8773,7 +8798,7 @@ test('active social ingress queues every world and atomically admits only exact 
     });
     assert.throws(
       () => insertDirectAdmission(duplicateEvent, duplicateProjection, 172),
-      /active home ingress admission lineage is invalid/
+      /active home ingress admission lineage is invalid/,
     );
     assert.equal(
       value.store.getActiveHomeIngressAdmission(duplicateEvent.eventId),
@@ -8788,6 +8813,450 @@ test('active social ingress queues every world and atomically admits only exact 
           )
           .run(),
       /immutable/,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('active request views require same-transaction admission on dark-opened branches', () => {
+  const value = fixture();
+  try {
+    const targetWorld = worldId('world:active-view-obligation');
+    const sourceEvent = value.store.appendWorldEvent({
+      eventId: eventId('event:active-view-obligation'),
+      worldId: targetWorld,
+      kind: 'inbound:discord',
+      payload: { text: 'active view obligation' },
+      occurredAt: 1,
+      recordedAt: 1,
+    });
+    const opened = value.store.beginCoordinatedBranch({
+      branchId: branchId('branch:active-view-obligation'),
+      worldId: targetWorld,
+      expectedRevision: 0,
+      authorityEpoch: 1,
+      startedAt: 2,
+    });
+    const manifest = createViewManifest({
+      branchId: opened.branch.branchId,
+      worldId: targetWorld,
+      parentBranchId: null,
+      authorityEpoch: 1,
+      eventIds: [sourceEvent.eventId],
+      sharedEventIds: [],
+      policyGeneration: 1,
+    });
+    const storedManifest = value.store.createManifest({
+      manifestId: manifestId('manifest:active-view-obligation'),
+      branchId: opened.branch.branchId,
+      worldId: targetWorld,
+      manifest,
+      projectionGeneration: 1,
+      createdAt: 3,
+    });
+    assert.equal(value.store.getActivationState().mode, 'dark');
+    const view = {
+      schemaVersion: 1,
+      executionMode: 'active',
+      scope: 'local-only',
+      runnable: false,
+      toolMode: 'none',
+      branchId: opened.branch.branchId,
+      worldId: targetWorld,
+      manifestId: storedManifest.manifestId,
+      manifestHash: storedManifest.hash,
+      messageRendererGeneration: 1,
+      systemRendererGeneration: 1,
+      policyGeneration: 1,
+      systemLayerProjectionIds: [`system-layer:${'a'.repeat(64)}`],
+      messageProjectionIds: [],
+    };
+    const viewJson = JSON.stringify(view);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_local_branch_request_views(
+               request_view_id, branch_id, world_id, manifest_id, manifest_hash,
+               view_json, view_hash, message_renderer_generation,
+               system_renderer_generation, policy_generation, system_layer_count,
+               message_projection_count, tool_mode, runnable, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 0, 'none', 0, 5)`,
+          )
+          .run(
+            `branch-request-view:${hashContextBytes(viewJson)}`,
+            opened.branch.branchId,
+            targetWorld,
+            storedManifest.manifestId,
+            storedManifest.hash,
+            viewJson,
+            hashContextBytes(viewJson),
+          ),
+      /FOREIGN KEY constraint failed/,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_local_branch_request_views'),
+      0,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_active_home_branch_obligations'),
+      0,
+    );
+  } finally {
+    closeFixture(value);
+  }
+});
+
+test('active home request consumes one admission and rolls back late failure', () => {
+  const value = fixture();
+  try {
+    const soul = residentSoulSnapshot(value.directory, '# Active Aster\n');
+    const inspected = value.store.createResidentSourceInspectionCandidate({
+      soul,
+      provenance: residentRunProvenance('801'),
+      observedAt: 100,
+    });
+    const authorization = value.store.authorizeResidentSourceCandidate({
+      candidateId: inspected.candidate.candidateId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('802'),
+      authorizedAt: 200,
+    });
+    const derivation = value.store.deriveResidentIdentitySystemLayers({
+      authorizationId: authorization.authorizationId,
+      freshSoul: soul,
+      provenance: residentRunProvenance('803'),
+      derivedAt: 300,
+    });
+    const guildId = '8123';
+    const channelId = '8234';
+    const homeWorldId = worldId(`world:discord:guild:${guildId}`);
+    const bindingIngress = value.store.appendWorldEvent({
+      eventId: eventId('event:active-request-profile-ingress'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { text: 'profile binding' },
+      occurredAt: 50,
+      recordedAt: 50,
+    });
+    value.store.bindResidentCurrentWorldProfile({
+      derivationId: derivation.derivationId,
+      worldId: homeWorldId,
+      eventId: bindingIngress.eventId,
+      sequence: bindingIngress.sequence,
+      provenance: residentRunProvenance('804'),
+      boundAt: 400,
+    });
+    const scope = value.store.createHomeTextActivationScope({
+      expectedSourceActivationEpoch: 0,
+      expectedWorldId: homeWorldId,
+      guildId,
+      channelId,
+      maxOutputBytes: 1900,
+      authorizedAt: 410,
+    });
+    value.store.activate(0, 400);
+    const home = value.store.recordActiveSocialInbound({
+      eventId: eventId('event:active-request-home-1'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: {
+        schemaVersion: 1,
+        kind: 'discord',
+        source: null,
+        transport: null,
+        originWorldId: null,
+        forwarded: null,
+        content: 'ACTIVE_REQUEST_CANARY',
+        attachments: [],
+        bot: false,
+        wakeClass: 'wake',
+        guildId,
+        channelId,
+      },
+      occurredAt: 420,
+      recordedAt: 430,
+      admittedAt: 440,
+    });
+    assert.ok(home.admission);
+    const secondHome = value.store.recordActiveSocialInbound({
+      eventId: eventId('event:active-request-home-2'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: {
+        schemaVersion: 1,
+        kind: 'discord',
+        source: null,
+        transport: null,
+        originWorldId: null,
+        forwarded: null,
+        content: 'SECOND_ACTIVE_REQUEST_CANARY',
+        attachments: [],
+        bot: false,
+        wakeClass: 'wake',
+        guildId,
+        channelId,
+      },
+      occurredAt: 441,
+      recordedAt: 442,
+      admittedAt: 443,
+    });
+    assert.ok(secondHome.admission);
+    const target = {
+      schemaVersion: 1,
+      role: 'main',
+      targetRef: 'example/aster',
+      providerType: 'openai-compatible',
+      model: 'aster-1',
+      apiSurface: 'responses',
+      apiEndpoint: 'https://api.example.com/v1/responses',
+      gateway: null,
+      reasoningEffort: null,
+      reasoningSummary: null,
+      reasoningContext: null,
+      externalThinking: false,
+      toolContractVersion: 'fixture-v1',
+      wireContractGeneration: 1,
+    } as const;
+    const rollbackBranchId = branchId('branch:active-request-rollback');
+    const input = {
+      ingressEventId: home.event.eventId,
+      ingressSourceSequence: home.event.sequence,
+      branchId: rollbackBranchId,
+      target,
+      expectedActiveActivationEpoch: 1,
+      expectedActivationScopeHash: scope.scopeHash,
+      expectedHeadRevision: 0,
+      admittedAt: 500,
+    };
+    const skippedBranchId = branchId('branch:active-request-skipped-oldest');
+    assert.throws(
+      () =>
+        value.store.assembleActiveHomeRequest({
+          ...input,
+          ingressEventId: secondHome.event.eventId,
+          ingressSourceSequence: secondHome.event.sequence,
+          branchId: skippedBranchId,
+        }),
+      /must consume the oldest admission/,
+    );
+    assert.equal(value.store.getBranch(skippedBranchId), null);
+    value.database.exec(
+      `CREATE TEMP TRIGGER force_active_request_admission_failure BEFORE INSERT ON context_active_home_provider_invocation_admissions BEGIN SELECT RAISE(ABORT, 'forced active request admission failure'); END;`,
+    );
+    assert.throws(
+      () => value.store.assembleActiveHomeRequest(input),
+      /forced active request admission failure/,
+    );
+    value.database.exec('DROP TRIGGER force_active_request_admission_failure');
+    assert.equal(value.store.getBranch(rollbackBranchId), null);
+    assert.equal(tableCount(value.database, 'context_manifests'), 0);
+    assert.equal(
+      tableCount(value.database, 'context_local_branch_request_views'),
+      0,
+    );
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_system_profile_request_view_bindings',
+      ),
+      0,
+    );
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_active_home_provider_invocation_admissions',
+      ),
+      0,
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+
+    const admitted = value.store.assembleActiveHomeRequest({
+      ...input,
+      branchId: branchId('branch:active-request-success'),
+    });
+    assert.equal(admitted.admission.executionMode, 'active');
+    assert.equal(admitted.admission.runnable, false);
+    assert.equal(admitted.admission.networkAuthority, 'none');
+    assert.equal(admitted.admission.ingressEventId, home.event.eventId);
+    assert.equal(admitted.admission.sourceActivationEpoch, 0);
+    assert.equal(admitted.admission.activeActivationEpoch, 1);
+    assert.equal(admitted.admission.target.model, 'aster-1');
+    assert.equal(
+      value.store.getRootCoordinatorState().activeBranchId,
+      admitted.admission.branchId,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.throws(
+      () =>
+        value.store.prepareEffect({
+          effectId: effectId('effect:active-request-forbidden'),
+          branchId: admitted.admission.branchId,
+          worldId: admitted.admission.worldId,
+          destinationWorldId: admitted.admission.worldId,
+          kind: 'send',
+          authorityEpoch: admitted.admission.authorityEpoch,
+          payload: { text: 'must remain dormant' },
+          preparedAt: 501,
+        }),
+      /has no effect authority/,
+    );
+    assert.throws(
+      () =>
+        value.store.completeCoordinatedBranch({
+          branchId: admitted.admission.branchId,
+          viewManifestHash: admitted.admission.manifestHash,
+          privateCapsuleId: capsuleId(
+            'capsule:active-request-forbidden-private',
+          ),
+          rootReceiptCapsuleId: capsuleId(
+            'capsule:active-request-forbidden-root',
+          ),
+          sourceRootHash: hashContextBytes('forbidden active request return'),
+          privateContent: { summary: 'must not commit' },
+          outcome: 'completed',
+          commitments: [],
+          blockers: [],
+          artifactRefs: [],
+          endedAt: 502,
+        }),
+      /has no capsule authority/,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      value.store.getBranch(admitted.admission.branchId)?.status,
+      'running',
+    );
+
+    const raw = value.database
+      .prepare(
+        `SELECT * FROM context_active_home_provider_invocation_admissions
+         WHERE invocation_id = ?`,
+      )
+      .get(admitted.invocationId) as Record<
+      string,
+      string | number | null | Uint8Array
+    >;
+    const columns = Object.keys(raw);
+    const directInsert = value.database.prepare(
+      `INSERT INTO context_active_home_provider_invocation_admissions(
+         ${columns.join(', ')}
+       ) VALUES (${columns.map(() => '?').join(', ')})`,
+    );
+    const insertRaw = (
+      row: Record<string, string | number | null | Uint8Array>,
+    ) => directInsert.run(...columns.map((column) => row[column]));
+    value.database.exec(`
+      DROP TRIGGER context_active_home_provider_invocation_admissions_no_delete;
+      DROP TRIGGER context_active_home_branch_obligations_no_delete;
+      DELETE FROM context_active_home_branch_obligations
+        WHERE branch_id = '${admitted.admission.branchId}';
+    `);
+    value.database
+      .prepare(
+        'DELETE FROM context_active_home_provider_invocation_admissions WHERE invocation_id = ?',
+      )
+      .run(admitted.invocationId);
+
+    const forgedCandidateHash = hashContextBytes('forged candidate');
+    const forgedCandidateAdmission = JSON.parse(
+      raw.admission_json as string,
+    ) as Record<string, unknown>;
+    forgedCandidateAdmission.candidateHash = forgedCandidateHash;
+    forgedCandidateAdmission.candidateBytes = 1;
+    const forgedCandidateJson = JSON.stringify(forgedCandidateAdmission);
+    assert.throws(
+      () =>
+        insertRaw({
+          ...raw,
+          invocation_id: `active-home-provider-invocation:${hashContextBytes(forgedCandidateJson)}`,
+          candidate_hash: forgedCandidateHash,
+          candidate_bytes: 1,
+          admission_json: forgedCandidateJson,
+          admission_hash: hashContextBytes(forgedCandidateJson),
+        }),
+      /active home provider invocation admission lineage is invalid/,
+    );
+
+    assert.throws(
+      () =>
+        insertRaw({
+          ...raw,
+          manifest_cache_namespace: Buffer.from(
+            raw.manifest_cache_namespace as string,
+          ),
+        }),
+      /active home provider invocation admission lineage is invalid/,
+    );
+
+    const noncanonicalTarget = JSON.stringify({
+      ...(JSON.parse(raw.target_json as string) as Record<string, unknown>),
+      targetRef: 'Example/Aster',
+    });
+    assert.throws(
+      () =>
+        insertRaw({
+          ...raw,
+          target_json: noncanonicalTarget,
+          target_hash: hashContextBytes(noncanonicalTarget),
+        }),
+      /active home provider invocation admission lineage is invalid/,
+    );
+
+    const extendedAdmission = {
+      ...(JSON.parse(raw.admission_json as string) as Record<string, unknown>),
+      extraAuthority: 'none',
+    };
+    const extendedAdmissionJson = JSON.stringify(extendedAdmission);
+    assert.throws(
+      () =>
+        insertRaw({
+          ...raw,
+          invocation_id: `active-home-provider-invocation:${hashContextBytes(extendedAdmissionJson)}`,
+          admission_json: extendedAdmissionJson,
+          admission_hash: hashContextBytes(extendedAdmissionJson),
+        }),
+      /active home provider invocation admission lineage is invalid/,
+    );
+
+    insertRaw(raw);
+    value.database
+      .prepare(
+        'INSERT INTO context_active_home_branch_obligations(branch_id) VALUES (?)',
+      )
+      .run(admitted.admission.branchId);
+    value.database.exec(`
+      CREATE TRIGGER context_active_home_provider_invocation_admissions_no_delete
+        BEFORE DELETE ON context_active_home_provider_invocation_admissions BEGIN
+          SELECT RAISE(ABORT, 'active home provider invocation admissions are immutable');
+        END;
+      CREATE TRIGGER context_active_home_branch_obligations_no_delete
+        BEFORE DELETE ON context_active_home_branch_obligations BEGIN
+          SELECT RAISE(ABORT, 'active home branch obligations are immutable');
+        END;
+    `);
+    assert.deepEqual(
+      value.store.assembleActiveHomeRequest({
+        ...input,
+        branchId: admitted.admission.branchId,
+      }),
+      admitted,
+    );
+    assert.throws(
+      () =>
+        value.store.assembleActiveHomeRequest({
+          ...input,
+          branchId: admitted.admission.branchId,
+          target: { ...target, model: 'aster-2' },
+        }),
+      /conflict/,
+    );
+    assert.equal(tableCount(value.database, 'context_effects'), 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 0);
+    assert.equal(
+      tableCount(value.database, 'context_continuation_advances'),
+      0,
     );
   } finally {
     closeFixture(value);

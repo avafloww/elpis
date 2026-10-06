@@ -119,6 +119,89 @@ test('runMigrations registers schema authority functions on a raw connection', (
     active.message_json,
     JSON.stringify({ role: 'user', content: '\ud800' }),
   );
+  const targetJson = JSON.stringify({
+    schemaVersion: 1,
+    role: 'main',
+    targetRef: 'example/aster',
+    providerType: 'openai-compatible',
+    model: 'aster-1',
+    apiSurface: 'responses',
+    apiEndpoint: 'https://api.example.com/v1/responses',
+    gateway: null,
+    reasoningEffort: null,
+    reasoningSummary: null,
+    reasoningContext: null,
+    externalThinking: false,
+    toolContractVersion: 'fixture-v1',
+    wireContractGeneration: 1,
+  });
+  const requestViewJson = JSON.stringify({
+    schemaVersion: 1,
+    executionMode: 'active',
+    scope: 'local-only',
+    runnable: false,
+    toolMode: 'none',
+    branchId: 'branch:db-authority',
+    worldId: 'world:discord:guild:1',
+    manifestId: 'manifest:db-authority',
+    manifestHash: 'a'.repeat(64),
+    messageRendererGeneration: 1,
+    systemRendererGeneration: 1,
+    policyGeneration: 1,
+    systemLayerProjectionIds: [`system-layer:${'b'.repeat(64)}`],
+    messageProjectionIds: [],
+  });
+  const authority = db
+    .prepare(
+      `SELECT elpis_exact_provider_target_json(?) AS target_json,
+              elpis_local_request_view_json(?) AS request_view_json,
+              elpis_provider_neutral_candidate_json(?, ?) AS candidate_json`,
+    )
+    .get(
+      targetJson,
+      requestViewJson,
+      'SYSTEM',
+      JSON.stringify({ role: 'user', content: 'hello' }),
+    ) as {
+    target_json: string;
+    request_view_json: string;
+    candidate_json: string;
+  };
+  assert.equal(authority.target_json, targetJson);
+  assert.equal(authority.request_view_json, requestViewJson);
+  assert.equal(
+    authority.candidate_json,
+    JSON.stringify({
+      schemaVersion: 1,
+      surface: 'provider-neutral-messages',
+      messages: [
+        { role: 'system', content: 'SYSTEM' },
+        { role: 'user', content: 'hello' },
+      ],
+    }),
+  );
+  assert.equal(
+    (
+      db
+        .prepare('SELECT elpis_local_request_view_json(?) AS value')
+        .get(
+          requestViewJson.replace('"runnable":false', '"runnable":true'),
+        ) as {
+        value: string | null;
+      }
+    ).value,
+    null,
+  );
+  assert.equal(
+    (
+      db
+        .prepare('SELECT elpis_exact_provider_target_json(?) AS value')
+        .get(targetJson.replace('example/aster', 'Example/Aster')) as {
+        value: string | null;
+      }
+    ).value,
+    null,
+  );
   db.close();
 });
 
@@ -128,13 +211,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 55, 'user_version bumped to 55');
+  assert.equal(v1, 56, 'user_version bumped to 56');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 55);
+  assert.equal(v2, 56);
   db.close();
 });
 
@@ -171,11 +254,14 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.ok(tables.includes('context_system_layer_projections'));
   assert.ok(tables.includes('context_system_layer_approvals'));
   assert.ok(tables.includes('context_active_home_ingress_admissions'));
+  assert.ok(
+    tables.includes('context_active_home_provider_invocation_admissions'),
+  );
   runMigrations(db); // second run: no throw
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    55,
+    56,
   );
   db.close();
 });
@@ -261,7 +347,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 55, 'user_version upgraded to 55');
+  assert.equal(finalVersion, 56, 'user_version upgraded to 56');
 
   // Assert fleet tables exist
   const tableNames = (

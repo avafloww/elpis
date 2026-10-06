@@ -10,6 +10,7 @@
 
 import { createHash } from 'node:crypto';
 import { activeHomeIngressMessageJson } from '../context/active-home-ingress.js';
+import { providerNeutralCandidateJson } from '../context/candidate.js';
 import { isEventId } from '../context-graph.js';
 import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
@@ -18,6 +19,10 @@ import {
   SCOPED_RUNTIME_CONTRACT_MIGRATION,
   SCOPED_RUNTIME_CONTRACT_MIGRATION_CHECKSUM,
 } from '../context/scoped-system.js';
+import {
+  normalizeExactIsolatedProviderTarget,
+  normalizeLocalBranchRequestView,
+} from './context-graph.js';
 import { runComponentMigrations } from './migrations.js';
 import {
   migrateMindIds,
@@ -39,8 +44,10 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
     }
     return BigInt(`0x${value.slice(0, 20)}`).toString(10);
   });
-  db.function('elpis_context_event_id_valid', { deterministic: true }, (value) =>
-    isEventId(value) && value.length <= 128 ? 1 : 0,
+  db.function(
+    'elpis_context_event_id_valid',
+    { deterministic: true },
+    (value) => (isEventId(value) && value.length <= 128 ? 1 : 0),
   );
   db.function('elpis_json_is_roundtrip', { deterministic: true }, (value) => {
     if (typeof value !== 'string') return 0;
@@ -50,6 +57,70 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
       return 0;
     }
   });
+  db.function(
+    'elpis_local_request_view_json',
+    { deterministic: true },
+    (value) => {
+      if (typeof value !== 'string') return null;
+      try {
+        const normalized = JSON.stringify(
+          normalizeLocalBranchRequestView(JSON.parse(value)),
+        );
+        return normalized === value ? normalized : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  db.function(
+    'elpis_exact_provider_target_json',
+    { deterministic: true },
+    (value) => {
+      if (typeof value !== 'string') return null;
+      try {
+        const normalized = JSON.stringify(
+          normalizeExactIsolatedProviderTarget(JSON.parse(value)),
+        );
+        return normalized === value ? normalized : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  db.function(
+    'elpis_provider_neutral_candidate_json',
+    { deterministic: true },
+    (systemContent, messageJson) => {
+      if (
+        typeof systemContent !== 'string' ||
+        typeof messageJson !== 'string'
+      ) {
+        return null;
+      }
+      try {
+        const message = JSON.parse(messageJson) as unknown;
+        if (
+          typeof message !== 'object' ||
+          message === null ||
+          Array.isArray(message) ||
+          Object.keys(message).length !== 2 ||
+          !Object.hasOwn(message, 'role') ||
+          !Object.hasOwn(message, 'content') ||
+          (message as { role?: unknown }).role !== 'user' ||
+          typeof (message as { content?: unknown }).content !== 'string' ||
+          JSON.stringify(message) !== messageJson
+        ) {
+          return null;
+        }
+        return providerNeutralCandidateJson([
+          { role: 'system', content: systemContent },
+          { role: 'user', content: (message as { content: string }).content },
+        ]);
+      } catch {
+        return null;
+      }
+    },
+  );
   db.function(
     'elpis_active_home_message_json',
     { deterministic: true },
@@ -89,7 +160,7 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 55;
+const SCHEMA_VERSION = 56;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -5500,6 +5571,572 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_active_home_ingress_admissions_no_delete
           BEFORE DELETE ON context_active_home_ingress_admissions BEGIN
             SELECT RAISE(ABORT, 'active home ingress admissions are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0056-context-active-home-provider-invocation-admissions',
+      sql: `
+        DROP TRIGGER context_system_profile_request_view_bindings_lineage_guard;
+        CREATE TRIGGER context_system_profile_request_view_bindings_lineage_guard
+          BEFORE INSERT ON context_system_profile_request_view_bindings
+          WHEN NOT (
+            EXISTS (
+              SELECT 1
+              FROM context_local_branch_request_views AS views
+              JOIN context_branches AS branches
+                ON branches.branch_id = views.branch_id
+               AND branches.world_id = views.world_id
+              JOIN context_branch_starts AS starts
+                ON starts.branch_id = branches.branch_id
+               AND starts.world_id = branches.world_id
+              JOIN context_manifests AS manifests
+                ON manifests.manifest_id = views.manifest_id
+               AND manifests.world_id = views.world_id
+              JOIN context_root_coordinator AS coordinator
+                ON coordinator.singleton = 1
+              JOIN context_continuation_head AS head
+                ON head.singleton = 1
+              JOIN context_graph_activation AS activation
+                ON activation.singleton = 1
+              JOIN context_system_profiles AS profiles
+                ON profiles.profile_id = NEW.profile_id
+               AND profiles.world_id = NEW.world_id
+               AND profiles.activation_epoch = NEW.activation_epoch
+              JOIN context_system_profile_advances AS advances
+                ON advances.world_id = NEW.world_id
+               AND advances.activation_epoch = NEW.activation_epoch
+               AND advances.revision = NEW.profile_head_revision
+               AND advances.profile_id = NEW.profile_id
+              WHERE views.request_view_id = NEW.request_view_id
+                AND views.world_id = NEW.world_id
+                AND views.view_hash = NEW.request_view_hash
+                AND profiles.profile_hash = NEW.profile_hash
+                AND branches.status = 'running'
+                AND coordinator.active_branch_id = branches.branch_id
+                AND coordinator.active_world_id = branches.world_id
+                AND coordinator.base_revision = starts.base_revision
+                AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                AND head.revision = starts.base_revision
+                AND head.branch_id IS starts.predecessor_branch_id
+                AND head.world_id IS starts.predecessor_world_id
+                AND (
+                  (
+                    activation.mode = 'dark'
+                    AND activation.epoch = NEW.activation_epoch
+                  )
+                  OR (
+                    activation.mode = 'active'
+                    AND views.view_json = elpis_local_request_view_json(views.view_json)
+                    AND json_extract(views.view_json, '$.executionMode') = 'active'
+                    AND views.message_projection_count = 1
+                    AND EXISTS (
+                      SELECT 1
+                      FROM context_home_text_activation_scope AS scope
+                      JOIN context_local_branch_request_messages AS messages
+                        ON messages.request_view_id = views.request_view_id
+                       AND messages.world_id = views.world_id
+                       AND messages.ordinal = 0
+                      JOIN context_active_home_ingress_admissions AS ingress
+                        ON ingress.projection_id = messages.projection_id
+                       AND ingress.world_id = views.world_id
+                       AND ingress.activation_scope_hash = scope.scope_hash
+                       AND ingress.active_activation_epoch = scope.active_activation_epoch
+                      WHERE scope.source_activation_epoch = NEW.activation_epoch
+                        AND scope.active_activation_epoch = activation.epoch
+                        AND scope.world_id = NEW.world_id
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM context_active_home_ingress_admissions AS earlier
+                          LEFT JOIN context_active_home_provider_invocation_admissions AS consumed
+                            ON consumed.ingress_event_id = earlier.event_id
+                          WHERE earlier.source_sequence < ingress.source_sequence
+                            AND consumed.ingress_event_id IS NULL
+                        )
+                    )
+                  )
+                )
+                AND profiles.system_renderer_generation = views.system_renderer_generation
+                AND profiles.policy_generation = views.policy_generation
+                AND profiles.created_at <= advances.advanced_at
+                AND advances.advanced_at <= views.created_at
+                AND views.created_at <= NEW.bound_at
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_system_profile_advances AS later
+                  WHERE later.world_id = NEW.world_id
+                    AND later.activation_epoch = NEW.activation_epoch
+                    AND later.revision > NEW.profile_head_revision
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_dark_pending_branch_attempts
+                  WHERE request_view_id = NEW.request_view_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_effects WHERE branch_id = branches.branch_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_capsules WHERE branch_id = branches.branch_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM context_manifest_shares
+                  WHERE manifest_id = views.manifest_id
+                )
+                AND (
+                  SELECT COUNT(*) FROM context_manifest_events
+                  WHERE manifest_id = views.manifest_id
+                ) = views.message_projection_count
+                AND (
+                  SELECT COUNT(*) FROM context_local_branch_request_messages
+                  WHERE request_view_id = views.request_view_id
+                ) = views.message_projection_count
+                AND (
+                  SELECT COUNT(*) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = views.system_layer_count
+                AND (
+                  views.message_projection_count = 0
+                  OR (
+                    (
+                      SELECT MIN(ordinal) FROM context_manifest_events
+                      WHERE manifest_id = views.manifest_id
+                    ) = 0
+                    AND (
+                      SELECT MAX(ordinal) FROM context_manifest_events
+                      WHERE manifest_id = views.manifest_id
+                    ) = views.message_projection_count - 1
+                    AND (
+                      SELECT MIN(ordinal) FROM context_local_branch_request_messages
+                      WHERE request_view_id = views.request_view_id
+                    ) = 0
+                    AND (
+                      SELECT MAX(ordinal) FROM context_local_branch_request_messages
+                      WHERE request_view_id = views.request_view_id
+                    ) = views.message_projection_count - 1
+                  )
+                )
+                AND views.system_layer_count = 2
+                  + CASE WHEN profiles.integrated_self_approval_id IS NULL THEN 0 ELSE 1 END
+                  + CASE WHEN profiles.world_policy_approval_id IS NULL THEN 0 ELSE 1 END
+                AND (
+                  SELECT MIN(ordinal) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = 0
+                AND (
+                  SELECT MAX(ordinal) FROM context_local_branch_request_system_layers
+                  WHERE request_view_id = views.request_view_id
+                ) = views.system_layer_count - 1
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM context_local_branch_request_system_layers AS edges
+                  WHERE edges.request_view_id = views.request_view_id
+                    AND edges.layer_id IS NOT CASE edges.ordinal
+                      WHEN 0 THEN (
+                        SELECT layer_id FROM context_system_layer_approvals
+                        WHERE approval_id = profiles.scoped_runtime_contract_approval_id
+                      )
+                      WHEN 1 THEN (
+                        SELECT layer_id FROM context_system_layer_approvals
+                        WHERE approval_id = profiles.identity_approval_id
+                      )
+                      WHEN 2 THEN CASE
+                        WHEN profiles.integrated_self_approval_id IS NOT NULL THEN (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.integrated_self_approval_id
+                        )
+                        ELSE (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.world_policy_approval_id
+                        )
+                      END
+                      WHEN 3 THEN CASE
+                        WHEN profiles.integrated_self_approval_id IS NOT NULL
+                         AND profiles.world_policy_approval_id IS NOT NULL THEN (
+                          SELECT layer_id FROM context_system_layer_approvals
+                          WHERE approval_id = profiles.world_policy_approval_id
+                        )
+                        ELSE NULL
+                      END
+                      ELSE NULL
+                    END
+                )
+            )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'context system profile request view binding lineage is invalid');
+          END;
+        CREATE TABLE context_active_home_provider_invocation_admissions (
+          invocation_id                  TEXT PRIMARY KEY CHECK (length(invocation_id) BETWEEN 1 AND 128),
+          schema_version                 INTEGER NOT NULL CHECK (schema_version = 1),
+          admission_kind                 TEXT NOT NULL CHECK (admission_kind = 'active_home_provider_invocation'),
+          execution_mode                 TEXT NOT NULL CHECK (execution_mode = 'active'),
+          lane_kind                      TEXT NOT NULL CHECK (lane_kind = 'isolated-standalone'),
+          runnable                       INTEGER NOT NULL CHECK (runnable = 0),
+          network_authority              TEXT NOT NULL CHECK (network_authority = 'none'),
+          tool_mode                      TEXT NOT NULL CHECK (tool_mode = 'none'),
+          historical_tool_messages       INTEGER NOT NULL CHECK (historical_tool_messages = 0),
+          effect_authority               TEXT NOT NULL CHECK (effect_authority = 'none'),
+          capsule_authority              TEXT NOT NULL CHECK (capsule_authority = 'none'),
+          continuation_authority         TEXT NOT NULL CHECK (continuation_authority = 'none'),
+          max_attempts                   INTEGER NOT NULL CHECK (max_attempts = 1),
+          transport_retries              INTEGER NOT NULL CHECK (transport_retries = 0),
+          surface_fallback               INTEGER NOT NULL CHECK (surface_fallback = 0),
+          ingress_event_id               TEXT NOT NULL UNIQUE,
+          ingress_source_sequence        INTEGER NOT NULL UNIQUE CHECK (typeof(ingress_source_sequence) = 'integer' AND ingress_source_sequence BETWEEN 1 AND 9007199254740991),
+          ingress_projection_id          TEXT NOT NULL UNIQUE,
+          activation_scope_hash          TEXT NOT NULL CHECK (length(activation_scope_hash) = 64 AND activation_scope_hash NOT GLOB '*[^0-9a-f]*'),
+          source_activation_epoch        INTEGER NOT NULL CHECK (typeof(source_activation_epoch) = 'integer' AND source_activation_epoch BETWEEN 0 AND 9007199254740990),
+          active_activation_epoch        INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch = source_activation_epoch + 1),
+          resident_profile_binding_id    TEXT NOT NULL,
+          request_profile_binding_id     TEXT NOT NULL UNIQUE,
+          request_profile_binding_hash   TEXT NOT NULL CHECK (length(request_profile_binding_hash) = 64 AND request_profile_binding_hash NOT GLOB '*[^0-9a-f]*'),
+          branch_id                      TEXT NOT NULL UNIQUE,
+          world_id                       TEXT NOT NULL,
+          authority_epoch                INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch BETWEEN 1 AND 9007199254740991),
+          request_view_id                TEXT NOT NULL UNIQUE,
+          request_view_hash              TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_id                     TEXT NOT NULL,
+          profile_hash                   TEXT NOT NULL CHECK (length(profile_hash) = 64 AND profile_hash NOT GLOB '*[^0-9a-f]*'),
+          profile_head_revision          INTEGER NOT NULL CHECK (typeof(profile_head_revision) = 'integer' AND profile_head_revision BETWEEN 1 AND 9007199254740991),
+          manifest_id                    TEXT NOT NULL UNIQUE,
+          manifest_hash                  TEXT NOT NULL CHECK (length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+          manifest_cache_namespace       TEXT NOT NULL CHECK (length(manifest_cache_namespace) BETWEEN 16 AND 256),
+          candidate_hash                 TEXT NOT NULL CHECK (length(candidate_hash) = 64 AND candidate_hash NOT GLOB '*[^0-9a-f]*'),
+          candidate_bytes                INTEGER NOT NULL CHECK (typeof(candidate_bytes) = 'integer' AND candidate_bytes BETWEEN 1 AND 8388608),
+          target_json                    TEXT NOT NULL CHECK (length(target_json) >= 1 AND json_valid(target_json)),
+          target_hash                    TEXT NOT NULL CHECK (length(target_hash) = 64 AND target_hash NOT GLOB '*[^0-9a-f]*'),
+          cache_namespace                TEXT NOT NULL CHECK (length(cache_namespace) BETWEEN 16 AND 256),
+          admission_json                 TEXT NOT NULL CHECK (length(admission_json) >= 1 AND json_valid(admission_json)),
+          admission_hash                 TEXT NOT NULL CHECK (length(admission_hash) = 64 AND admission_hash NOT GLOB '*[^0-9a-f]*'),
+          admitted_at                    INTEGER NOT NULL CHECK (typeof(admitted_at) = 'integer' AND admitted_at BETWEEN 0 AND 9007199254740991),
+          UNIQUE (invocation_id, branch_id, world_id),
+          FOREIGN KEY (ingress_event_id) REFERENCES context_active_home_ingress_admissions(event_id) ON DELETE RESTRICT,
+          FOREIGN KEY (ingress_projection_id, world_id) REFERENCES context_event_message_projections(projection_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (resident_profile_binding_id) REFERENCES context_resident_world_profile_bindings(binding_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_profile_binding_id, request_view_id, world_id) REFERENCES context_system_profile_request_view_bindings(binding_id, request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id) REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id) REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (profile_id, world_id, source_activation_epoch) REFERENCES context_system_profiles(profile_id, world_id, activation_epoch) ON DELETE RESTRICT,
+          FOREIGN KEY (manifest_id, world_id) REFERENCES context_manifests(manifest_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_provider_invocation_admissions_lineage_guard
+          BEFORE INSERT ON context_active_home_provider_invocation_admissions
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_ingress_admissions AS ingress
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            JOIN context_resident_world_profile_bindings AS resident
+              ON resident.binding_id = NEW.resident_profile_binding_id
+            JOIN context_branches AS branches
+              ON branches.branch_id = NEW.branch_id
+             AND branches.world_id = NEW.world_id
+            JOIN context_branch_starts AS starts
+              ON starts.branch_id = branches.branch_id
+             AND starts.world_id = branches.world_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head ON head.singleton = 1
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = NEW.request_view_id
+             AND views.branch_id = branches.branch_id
+             AND views.world_id = branches.world_id
+            JOIN context_manifests AS manifests
+              ON manifests.manifest_id = NEW.manifest_id
+             AND manifests.branch_id = branches.branch_id
+             AND manifests.world_id = branches.world_id
+            JOIN context_system_profile_request_view_bindings AS request_binding
+              ON request_binding.binding_id = NEW.request_profile_binding_id
+             AND request_binding.request_view_id = views.request_view_id
+             AND request_binding.world_id = views.world_id
+            JOIN context_system_profiles AS profiles
+              ON profiles.profile_id = NEW.profile_id
+             AND profiles.world_id = NEW.world_id
+             AND profiles.activation_epoch = NEW.source_activation_epoch
+            WHERE ingress.event_id = NEW.ingress_event_id
+              AND ingress.world_id = NEW.world_id
+              AND ingress.source_sequence = NEW.ingress_source_sequence
+              AND ingress.projection_id = NEW.ingress_projection_id
+              AND ingress.activation_scope_hash = NEW.activation_scope_hash
+              AND ingress.active_activation_epoch = NEW.active_activation_epoch
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND scope.scope_hash = NEW.activation_scope_hash
+              AND scope.source_activation_epoch = NEW.source_activation_epoch
+              AND scope.active_activation_epoch = NEW.active_activation_epoch
+              AND scope.world_id = NEW.world_id
+              AND resident.activation_epoch = NEW.source_activation_epoch
+              AND resident.world_id = NEW.world_id
+              AND resident.profile_id = NEW.profile_id
+              AND resident.profile_hash = NEW.profile_hash
+              AND resident.profile_head_revision = NEW.profile_head_revision
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND starts.started_at = branches.started_at
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND coordinator.base_revision = starts.base_revision
+              AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+              AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+              AND head.revision = starts.base_revision
+              AND head.branch_id IS starts.predecessor_branch_id
+              AND head.world_id IS starts.predecessor_world_id
+              AND views.view_hash = NEW.request_view_hash
+              AND views.view_json = elpis_local_request_view_json(views.view_json)
+              AND json_extract(views.view_json, '$.executionMode') = 'active'
+              AND views.manifest_id = NEW.manifest_id
+              AND views.manifest_hash = NEW.manifest_hash
+              AND views.message_projection_count = 1
+              AND manifests.manifest_hash = NEW.manifest_hash
+              AND manifests.cache_namespace = NEW.manifest_cache_namespace
+              AND request_binding.binding_hash = NEW.request_profile_binding_hash
+              AND request_binding.activation_epoch = NEW.source_activation_epoch
+              AND request_binding.profile_id = NEW.profile_id
+              AND request_binding.profile_hash = NEW.profile_hash
+              AND request_binding.profile_head_revision = NEW.profile_head_revision
+              AND profiles.profile_hash = NEW.profile_hash
+              AND typeof(NEW.invocation_id) = 'text'
+              AND typeof(NEW.admission_kind) = 'text'
+              AND typeof(NEW.execution_mode) = 'text'
+              AND typeof(NEW.lane_kind) = 'text'
+              AND typeof(NEW.network_authority) = 'text'
+              AND typeof(NEW.tool_mode) = 'text'
+              AND typeof(NEW.effect_authority) = 'text'
+              AND typeof(NEW.capsule_authority) = 'text'
+              AND typeof(NEW.continuation_authority) = 'text'
+              AND typeof(NEW.ingress_event_id) = 'text'
+              AND typeof(NEW.ingress_projection_id) = 'text'
+              AND typeof(NEW.activation_scope_hash) = 'text'
+              AND typeof(NEW.resident_profile_binding_id) = 'text'
+              AND typeof(NEW.request_profile_binding_id) = 'text'
+              AND typeof(NEW.request_profile_binding_hash) = 'text'
+              AND typeof(NEW.branch_id) = 'text'
+              AND typeof(NEW.world_id) = 'text'
+              AND typeof(NEW.request_view_id) = 'text'
+              AND typeof(NEW.request_view_hash) = 'text'
+              AND typeof(NEW.profile_id) = 'text'
+              AND typeof(NEW.profile_hash) = 'text'
+              AND typeof(NEW.manifest_id) = 'text'
+              AND typeof(NEW.manifest_hash) = 'text'
+              AND typeof(NEW.manifest_cache_namespace) = 'text'
+              AND typeof(NEW.candidate_hash) = 'text'
+              AND typeof(NEW.target_json) = 'text'
+              AND typeof(NEW.target_hash) = 'text'
+              AND typeof(NEW.cache_namespace) = 'text'
+              AND typeof(NEW.admission_json) = 'text'
+              AND typeof(NEW.admission_hash) = 'text'
+              AND NEW.invocation_id = 'active-home-provider-invocation:' || elpis_sha256(NEW.admission_json)
+              AND NEW.target_hash = elpis_sha256(NEW.target_json)
+              AND NEW.admission_hash = elpis_sha256(NEW.admission_json)
+              AND elpis_json_is_roundtrip(NEW.target_json) = 1
+              AND elpis_json_is_roundtrip(NEW.admission_json) = 1
+              AND NEW.target_json = elpis_exact_provider_target_json(NEW.target_json)
+              AND NEW.candidate_hash = elpis_sha256(
+                elpis_provider_neutral_candidate_json(
+                  (
+                    SELECT group_concat(ordered.content_text, '')
+                    FROM (
+                      SELECT layers.content_text AS content_text
+                      FROM context_local_branch_request_system_layers AS edges
+                      JOIN context_system_layer_projections AS layers
+                        ON layers.layer_id = edges.layer_id
+                      WHERE edges.request_view_id = NEW.request_view_id
+                        AND edges.world_id = NEW.world_id
+                      ORDER BY edges.ordinal
+                    ) AS ordered
+                  ),
+                  (
+                    SELECT projections.message_json
+                    FROM context_event_message_projections AS projections
+                    WHERE projections.projection_id = NEW.ingress_projection_id
+                      AND projections.world_id = NEW.world_id
+                  )
+                )
+              )
+              AND NEW.candidate_bytes = length(CAST(
+                elpis_provider_neutral_candidate_json(
+                  (
+                    SELECT group_concat(ordered.content_text, '')
+                    FROM (
+                      SELECT layers.content_text AS content_text
+                      FROM context_local_branch_request_system_layers AS edges
+                      JOIN context_system_layer_projections AS layers
+                        ON layers.layer_id = edges.layer_id
+                      WHERE edges.request_view_id = NEW.request_view_id
+                        AND edges.world_id = NEW.world_id
+                      ORDER BY edges.ordinal
+                    ) AS ordered
+                  ),
+                  (
+                    SELECT projections.message_json
+                    FROM context_event_message_projections AS projections
+                    WHERE projections.projection_id = NEW.ingress_projection_id
+                      AND projections.world_id = NEW.world_id
+                  )
+                ) AS BLOB
+              ))
+              AND NEW.admission_json = json_object(
+                'schemaVersion', 1,
+                'admissionKind', 'active_home_provider_invocation',
+                'executionMode', 'active',
+                'laneKind', 'isolated-standalone',
+                'runnable', json('false'),
+                'networkAuthority', 'none',
+                'toolMode', 'none',
+                'historicalToolMessages', json('false'),
+                'effectAuthority', 'none',
+                'capsuleAuthority', 'none',
+                'continuationAuthority', 'none',
+                'maxAttempts', 1,
+                'transportRetries', 0,
+                'surfaceFallback', json('false'),
+                'ingressEventId', (NEW.ingress_event_id || ''),
+                'ingressSourceSequence', NEW.ingress_source_sequence,
+                'ingressProjectionId', (NEW.ingress_projection_id || ''),
+                'activationScopeHash', (NEW.activation_scope_hash || ''),
+                'sourceActivationEpoch', NEW.source_activation_epoch,
+                'activeActivationEpoch', NEW.active_activation_epoch,
+                'residentProfileBindingId', (NEW.resident_profile_binding_id || ''),
+                'requestProfileBindingId', (NEW.request_profile_binding_id || ''),
+                'requestProfileBindingHash', (NEW.request_profile_binding_hash || ''),
+                'branchId', (NEW.branch_id || ''),
+                'worldId', (NEW.world_id || ''),
+                'authorityEpoch', NEW.authority_epoch,
+                'requestViewId', (NEW.request_view_id || ''),
+                'requestViewHash', (NEW.request_view_hash || ''),
+                'profileId', (NEW.profile_id || ''),
+                'profileHash', (NEW.profile_hash || ''),
+                'profileHeadRevision', NEW.profile_head_revision,
+                'manifestId', (NEW.manifest_id || ''),
+                'manifestHash', (NEW.manifest_hash || ''),
+                'manifestCacheNamespace', (NEW.manifest_cache_namespace || ''),
+                'candidateHash', (NEW.candidate_hash || ''),
+                'candidateBytes', NEW.candidate_bytes,
+                'target', json(NEW.target_json),
+                'targetHash', (NEW.target_hash || ''),
+                'cacheNamespace', (NEW.cache_namespace || ''),
+                'admittedAt', NEW.admitted_at
+              )
+              AND NEW.cache_namespace = 'context-active-home:' || elpis_sha256(json_object(
+                'manifestCacheNamespace', (NEW.manifest_cache_namespace || ''),
+                'requestViewHash', (NEW.request_view_hash || ''),
+                'targetHash', (NEW.target_hash || '')
+              ))
+              AND (
+                SELECT COUNT(*) FROM context_local_branch_request_messages AS messages
+                WHERE messages.request_view_id = NEW.request_view_id
+                  AND messages.world_id = NEW.world_id
+                  AND messages.ordinal = 0
+                  AND messages.projection_id = NEW.ingress_projection_id
+              ) = 1
+              AND (
+                SELECT COUNT(*) FROM context_manifest_events AS events
+                WHERE events.manifest_id = NEW.manifest_id
+                  AND events.world_id = NEW.world_id
+                  AND events.ordinal = 0
+                  AND events.event_id = NEW.ingress_event_id
+              ) = 1
+              AND NOT EXISTS (
+                SELECT 1 FROM context_system_profile_advances AS later
+                WHERE later.world_id = NEW.world_id
+                  AND later.activation_epoch = NEW.source_activation_epoch
+                  AND later.revision > NEW.profile_head_revision
+              )
+              AND NOT EXISTS (SELECT 1 FROM context_effects WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_dark_pending_branch_attempts WHERE branch_id = NEW.branch_id)
+              AND NOT EXISTS (
+                SELECT 1
+                FROM context_active_home_ingress_admissions AS earlier
+                LEFT JOIN context_active_home_provider_invocation_admissions AS consumed
+                  ON consumed.ingress_event_id = earlier.event_id
+                WHERE earlier.source_sequence < NEW.ingress_source_sequence
+                  AND consumed.ingress_event_id IS NULL
+              )
+              AND ingress.admitted_at <= NEW.admitted_at
+              AND scope.authorized_at <= NEW.admitted_at
+              AND branches.started_at <= NEW.admitted_at
+              AND request_binding.bound_at <= NEW.admitted_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation admission lineage is invalid');
+          END;
+
+        CREATE TABLE context_active_home_branch_obligations (
+          branch_id TEXT PRIMARY KEY,
+          FOREIGN KEY (branch_id) REFERENCES context_branches(branch_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id) REFERENCES context_active_home_provider_invocation_admissions(branch_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_branch_obligations_after_request_view_insert
+          AFTER INSERT ON context_local_branch_request_views
+          WHEN NEW.view_json = elpis_local_request_view_json(NEW.view_json)
+            AND json_extract(NEW.view_json, '$.executionMode') = 'active'
+          BEGIN
+            INSERT INTO context_active_home_branch_obligations(branch_id)
+            VALUES (NEW.branch_id);
+          END;
+        CREATE TRIGGER context_active_home_branch_obligations_no_update
+          BEFORE UPDATE ON context_active_home_branch_obligations BEGIN
+            SELECT RAISE(ABORT, 'active home branch obligations are immutable');
+          END;
+        CREATE TRIGGER context_active_home_branch_obligations_no_delete
+          BEFORE DELETE ON context_active_home_branch_obligations BEGIN
+            SELECT RAISE(ABORT, 'active home branch obligations are immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_effect_guard
+          BEFORE INSERT ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no effect authority');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_capsule_guard
+          BEFORE INSERT ON context_capsules
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no capsule authority');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = OLD.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no transition authority');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_advance_guard
+          BEFORE INSERT ON context_continuation_advances
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no continuation authority');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_recovery_guard
+          BEFORE INSERT ON context_branch_recoveries
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no recovery authority');
+          END;
+
+        CREATE TRIGGER context_active_home_provider_invocation_admissions_no_update
+          BEFORE UPDATE ON context_active_home_provider_invocation_admissions BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation admissions are immutable');
+          END;
+        CREATE TRIGGER context_active_home_provider_invocation_admissions_no_delete
+          BEFORE DELETE ON context_active_home_provider_invocation_admissions BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation admissions are immutable');
           END;
       `,
     },

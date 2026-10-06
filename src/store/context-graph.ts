@@ -58,6 +58,8 @@ export type DarkIsolatedProviderBindingId =
   ContextId<'DarkIsolatedProviderBindingId'>;
 export type DarkIsolatedProviderInvocationId =
   ContextId<'DarkIsolatedProviderInvocationId'>;
+export type ActiveHomeProviderInvocationId =
+  ContextId<'ActiveHomeProviderInvocationId'>;
 export type IsolatedProviderExecutionAttemptId =
   ContextId<'IsolatedProviderExecutionAttemptId'>;
 export type HomeTextSpeechAttemptId = ContextId<'HomeTextSpeechAttemptId'>;
@@ -170,6 +172,14 @@ export const darkIsolatedProviderInvocationId = (
     'darkIsolatedProviderInvocationId',
     value,
     'dark-provider-invocation:',
+  );
+export const activeHomeProviderInvocationId = (
+  value: string,
+): ActiveHomeProviderInvocationId =>
+  branded<'ActiveHomeProviderInvocationId'>(
+    'activeHomeProviderInvocationId',
+    value,
+    'active-home-provider-invocation:',
   );
 export const isolatedProviderExecutionAttemptId = (
   value: string,
@@ -463,7 +473,7 @@ export interface SystemProfileRequestViewBindingRecord {
 
 export interface LocalBranchRequestViewV1 {
   readonly schemaVersion: 1;
-  readonly executionMode: 'dark';
+  readonly executionMode: 'dark' | 'active';
   readonly scope: 'local-only';
   readonly runnable: false;
   readonly toolMode: 'none';
@@ -897,6 +907,56 @@ export interface DarkIsolatedProviderInvocationAdmissionV1 {
 export interface DarkIsolatedProviderInvocationAdmissionRecord {
   readonly invocationId: DarkIsolatedProviderInvocationId;
   readonly admission: DarkIsolatedProviderInvocationAdmissionV1;
+  readonly admissionJson: string;
+  readonly admissionHash: string;
+}
+
+export interface ActiveHomeProviderInvocationAdmissionV1 {
+  readonly schemaVersion: 1;
+  readonly admissionKind: 'active_home_provider_invocation';
+  readonly executionMode: 'active';
+  readonly laneKind: 'isolated-standalone';
+  readonly runnable: false;
+  readonly networkAuthority: 'none';
+  readonly toolMode: 'none';
+  readonly historicalToolMessages: false;
+  readonly effectAuthority: 'none';
+  readonly capsuleAuthority: 'none';
+  readonly continuationAuthority: 'none';
+  readonly maxAttempts: 1;
+  readonly transportRetries: 0;
+  readonly surfaceFallback: false;
+  readonly ingressEventId: EventId;
+  readonly ingressSourceSequence: number;
+  readonly ingressProjectionId: EventMessageProjectionId;
+  readonly activationScopeHash: string;
+  readonly sourceActivationEpoch: number;
+  readonly activeActivationEpoch: number;
+  readonly residentProfileBindingId: ResidentWorldProfileBindingId;
+  readonly requestProfileBindingId: SystemProfileRequestViewBindingId;
+  readonly requestProfileBindingHash: string;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly authorityEpoch: number;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly profileId: SystemProfileId;
+  readonly profileHash: string;
+  readonly profileHeadRevision: number;
+  readonly manifestId: ManifestId;
+  readonly manifestHash: string;
+  readonly manifestCacheNamespace: string;
+  readonly candidateHash: string;
+  readonly candidateBytes: number;
+  readonly target: ExactIsolatedProviderTargetV1;
+  readonly targetHash: string;
+  readonly cacheNamespace: string;
+  readonly admittedAt: number;
+}
+
+export interface ActiveHomeProviderInvocationAdmissionRecord {
+  readonly invocationId: ActiveHomeProviderInvocationId;
+  readonly admission: ActiveHomeProviderInvocationAdmissionV1;
   readonly admissionJson: string;
   readonly admissionHash: string;
 }
@@ -1393,11 +1453,11 @@ export function normalizeExactIsolatedProviderTarget(
   const providerType = input.providerType;
   const apiSurface = input.apiSurface;
   if (!(
-      (providerType === 'openai-compatible' &&
-        ['responses', 'chat-completions'].includes(apiSurface)) ||
+    (providerType === 'openai-compatible' &&
+      ['responses', 'chat-completions'].includes(apiSurface)) ||
     (providerType === 'anthropic-oauth' &&
       apiSurface === 'anthropic-messages') ||
-      (providerType === 'codex-oauth' && apiSurface === 'codex-responses')
+    (providerType === 'codex-oauth' && apiSurface === 'codex-responses')
   )) {
     throw new Error('isolated provider target surface is incompatible');
   }
@@ -1572,6 +1632,81 @@ function darkIsolatedProviderInvocationAdmission(
     targetHash: binding.targetHash,
     cacheNamespace: binding.binding.cacheNamespace,
     admittedAt,
+  });
+}
+
+function activeHomeProviderInvocationIdentity(
+  admissionJson: string,
+): ActiveHomeProviderInvocationId {
+  return activeHomeProviderInvocationId(
+    `active-home-provider-invocation:${hashContextBytes(admissionJson)}`,
+  );
+}
+
+function activeHomeProviderCacheNamespace(input: {
+  manifestCacheNamespace: string;
+  requestViewHash: string;
+  targetHash: string;
+}): string {
+  return `context-active-home:${hashContextBytes(serialize(input))}`;
+}
+
+function activeHomeProviderInvocationAdmission(input: {
+  ingress: ActiveHomeIngressAdmissionRecord;
+  scope: HomeTextActivationScopeRecord;
+  residentProfileBinding: ResidentWorldProfileBindingV1;
+  assembly: DarkLocalBranchAssemblyRecord;
+  target: ExactIsolatedProviderTargetV1;
+  targetHash: string;
+  admittedAt: number;
+}): ActiveHomeProviderInvocationAdmissionV1 {
+  const binding = input.assembly.profileBinding.binding;
+  const cacheNamespace = activeHomeProviderCacheNamespace({
+    manifestCacheNamespace: input.assembly.manifest.cacheNamespace,
+    requestViewHash: input.assembly.requestView.viewHash,
+    targetHash: input.targetHash,
+  });
+  return Object.freeze({
+    schemaVersion: 1,
+    admissionKind: 'active_home_provider_invocation',
+    executionMode: 'active',
+    laneKind: 'isolated-standalone',
+    runnable: false,
+    networkAuthority: 'none',
+    toolMode: 'none',
+    historicalToolMessages: false,
+    effectAuthority: 'none',
+    capsuleAuthority: 'none',
+    continuationAuthority: 'none',
+    maxAttempts: 1,
+    transportRetries: 0,
+    surfaceFallback: false,
+    ingressEventId: input.ingress.eventId,
+    ingressSourceSequence: input.ingress.sourceSequence,
+    ingressProjectionId: input.ingress.projectionId,
+    activationScopeHash: input.scope.scopeHash,
+    sourceActivationEpoch: input.scope.scope.sourceActivationEpoch,
+    activeActivationEpoch: input.scope.scope.activeActivationEpoch,
+    residentProfileBindingId: input.residentProfileBinding.bindingId,
+    requestProfileBindingId: input.assembly.profileBinding.bindingId,
+    requestProfileBindingHash: input.assembly.profileBinding.bindingHash,
+    branchId: input.assembly.branch.branchId,
+    worldId: input.assembly.branch.worldId,
+    authorityEpoch: input.assembly.branch.authorityEpoch,
+    requestViewId: input.assembly.requestView.requestViewId,
+    requestViewHash: input.assembly.requestView.viewHash,
+    profileId: binding.profileId,
+    profileHash: binding.profileHash,
+    profileHeadRevision: binding.profileHeadRevision,
+    manifestId: input.assembly.manifest.manifestId,
+    manifestHash: input.assembly.manifest.hash,
+    manifestCacheNamespace: input.assembly.manifest.cacheNamespace,
+    candidateHash: input.assembly.request.candidateHash,
+    candidateBytes: input.assembly.request.candidateBytes,
+    target: input.target,
+    targetHash: input.targetHash,
+    cacheNamespace,
+    admittedAt: input.admittedAt,
   });
 }
 
@@ -1957,7 +2092,7 @@ function systemProfileRequestViewBindingIdentity(
   );
 }
 
-function normalizeLocalBranchRequestView(
+export function normalizeLocalBranchRequestView(
   value: unknown,
 ): LocalBranchRequestViewV1 {
   const view = shadowPlanObject(value, 'local branch request view');
@@ -1983,7 +2118,7 @@ function normalizeLocalBranchRequestView(
   );
   if (
     view.schemaVersion !== 1 ||
-    view.executionMode !== 'dark' ||
+    (view.executionMode !== 'dark' && view.executionMode !== 'active') ||
     view.scope !== 'local-only' ||
     view.runnable !== false ||
     view.toolMode !== 'none' ||
@@ -2035,7 +2170,7 @@ function normalizeLocalBranchRequestView(
   }
   return {
     schemaVersion: 1,
-    executionMode: 'dark',
+    executionMode: view.executionMode as 'dark' | 'active',
     scope: 'local-only',
     runnable: false,
     toolMode: 'none',
@@ -2610,6 +2745,52 @@ interface ActiveHomeIngressAdmissionRow {
   activation_scope_hash: string;
   projection_id: string;
   renderer_generation: number;
+  admitted_at: number;
+}
+
+interface ActiveHomeProviderInvocationAdmissionRow {
+  invocation_id: string;
+  schema_version: number;
+  admission_kind: string;
+  execution_mode: string;
+  lane_kind: string;
+  runnable: number;
+  network_authority: string;
+  tool_mode: string;
+  historical_tool_messages: number;
+  effect_authority: string;
+  capsule_authority: string;
+  continuation_authority: string;
+  max_attempts: number;
+  transport_retries: number;
+  surface_fallback: number;
+  ingress_event_id: string;
+  ingress_source_sequence: number;
+  ingress_projection_id: string;
+  activation_scope_hash: string;
+  source_activation_epoch: number;
+  active_activation_epoch: number;
+  resident_profile_binding_id: string;
+  request_profile_binding_id: string;
+  request_profile_binding_hash: string;
+  branch_id: string;
+  world_id: string;
+  authority_epoch: number;
+  request_view_id: string;
+  request_view_hash: string;
+  profile_id: string;
+  profile_hash: string;
+  profile_head_revision: number;
+  manifest_id: string;
+  manifest_hash: string;
+  manifest_cache_namespace: string;
+  candidate_hash: string;
+  candidate_bytes: number;
+  target_json: string;
+  target_hash: string;
+  cache_namespace: string;
+  admission_json: string;
+  admission_hash: string;
   admitted_at: number;
 }
 
@@ -4817,6 +4998,166 @@ export class ContextGraphStore {
     });
   }
 
+  getActiveHomeProviderInvocationAdmission(
+    id: ActiveHomeProviderInvocationId,
+  ): ActiveHomeProviderInvocationAdmissionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_active_home_provider_invocation_admissions
+         WHERE invocation_id = ?`,
+      )
+      .get(id) as ActiveHomeProviderInvocationAdmissionRow | undefined;
+    if (!row) return null;
+    let target: ExactIsolatedProviderTargetV1;
+    try {
+      target = normalizeExactIsolatedProviderTarget(
+        JSON.parse(row.target_json),
+      );
+    } catch (error) {
+      throw new Error('stored active home provider target is invalid', {
+        cause: error,
+      });
+    }
+    const targetJson = serialize(target);
+    const targetHash = hashContextBytes(targetJson);
+    const admittedAt = timestamp(
+      'active home provider invocation admittedAt',
+      row.admitted_at,
+    );
+    const ingress = this.getActiveHomeIngressAdmission(
+      eventId(row.ingress_event_id),
+    );
+    const scope = this.getHomeTextActivationScope();
+    const residentProfileBinding = this.getResidentWorldProfileBinding(
+      residentWorldProfileBindingId(row.resident_profile_binding_id),
+    );
+    const branch = this.getBranch(branchId(row.branch_id));
+    const start = this.getBranchStart(branchId(row.branch_id));
+    const manifest = this.getManifestProjection(manifestId(row.manifest_id), {
+      requireActiveShares: true,
+    });
+    const requestView = this.getLocalBranchRequestView(
+      localBranchRequestViewId(row.request_view_id),
+    );
+    const profileBinding = this.getSystemProfileRequestViewBinding(
+      systemProfileRequestViewBindingId(row.request_profile_binding_id),
+    );
+    if (
+      !ingress ||
+      !scope ||
+      !residentProfileBinding ||
+      !branch ||
+      !start ||
+      !manifest ||
+      !requestView ||
+      !profileBinding
+    ) {
+      throw new Error(
+        'stored active home provider invocation lineage is missing',
+      );
+    }
+    const request = this.materializeStoredLocalBranchRequest(requestView);
+    const admission = activeHomeProviderInvocationAdmission({
+      ingress,
+      scope,
+      residentProfileBinding,
+      assembly: {
+        branch,
+        start,
+        manifest: manifest.record,
+        requestView,
+        profileBinding,
+        request,
+      },
+      target,
+      targetHash,
+      admittedAt,
+    });
+    const admissionJson = serialize(admission);
+    const admissionHash = hashContextBytes(admissionJson);
+    const artifacts = this.database
+      .prepare(
+        `SELECT
+           EXISTS(SELECT 1 FROM context_effects WHERE branch_id = ?) AS effects,
+           EXISTS(SELECT 1 FROM context_capsules WHERE branch_id = ?) AS capsules,
+           EXISTS(SELECT 1 FROM context_continuation_advances WHERE branch_id = ?) AS advances,
+           EXISTS(SELECT 1 FROM context_branch_recoveries WHERE branch_id = ?) AS recoveries`,
+      )
+      .get(row.branch_id, row.branch_id, row.branch_id, row.branch_id) as {
+      effects: number;
+      capsules: number;
+      advances: number;
+      recoveries: number;
+    };
+    if (
+      row.schema_version !== 1 ||
+      row.admission_kind !== admission.admissionKind ||
+      row.execution_mode !== admission.executionMode ||
+      row.lane_kind !== admission.laneKind ||
+      row.runnable !== 0 ||
+      row.network_authority !== admission.networkAuthority ||
+      row.tool_mode !== admission.toolMode ||
+      row.historical_tool_messages !== 0 ||
+      row.effect_authority !== admission.effectAuthority ||
+      row.capsule_authority !== admission.capsuleAuthority ||
+      row.continuation_authority !== admission.continuationAuthority ||
+      row.max_attempts !== 1 ||
+      row.transport_retries !== 0 ||
+      row.surface_fallback !== 0 ||
+      row.ingress_source_sequence !== admission.ingressSourceSequence ||
+      row.ingress_projection_id !== admission.ingressProjectionId ||
+      row.activation_scope_hash !== admission.activationScopeHash ||
+      row.source_activation_epoch !== admission.sourceActivationEpoch ||
+      row.active_activation_epoch !== admission.activeActivationEpoch ||
+      row.request_profile_binding_hash !==
+        admission.requestProfileBindingHash ||
+      row.world_id !== admission.worldId ||
+      row.authority_epoch !== admission.authorityEpoch ||
+      row.request_view_hash !== admission.requestViewHash ||
+      row.profile_id !== admission.profileId ||
+      row.profile_hash !== admission.profileHash ||
+      row.profile_head_revision !== admission.profileHeadRevision ||
+      row.manifest_hash !== admission.manifestHash ||
+      row.manifest_cache_namespace !== admission.manifestCacheNamespace ||
+      row.candidate_hash !== admission.candidateHash ||
+      row.candidate_bytes !== admission.candidateBytes ||
+      row.target_json !== targetJson ||
+      row.target_hash !== targetHash ||
+      row.cache_namespace !== admission.cacheNamespace ||
+      row.admission_json !== admissionJson ||
+      row.admission_hash !== admissionHash ||
+      activeHomeProviderInvocationIdentity(admissionJson) !== id ||
+      requestView.view.executionMode !== 'active' ||
+      requestView.view.messageProjectionIds.length !== 1 ||
+      requestView.view.messageProjectionIds[0] !==
+        admission.ingressProjectionId ||
+      residentProfileBinding.activationEpoch !==
+        admission.sourceActivationEpoch ||
+      residentProfileBinding.worldId !== admission.worldId ||
+      residentProfileBinding.profileId !== admission.profileId ||
+      profileBinding.binding.activationEpoch !==
+        admission.sourceActivationEpoch ||
+      profileBinding.binding.worldId !== admission.worldId ||
+      profileBinding.binding.profileId !== admission.profileId ||
+      profileBinding.binding.profileHeadRevision !==
+        admission.profileHeadRevision ||
+      admission.activeActivationEpoch !== admission.sourceActivationEpoch + 1 ||
+      artifacts.effects !== 0 ||
+      artifacts.capsules !== 0 ||
+      artifacts.advances !== 0 ||
+      artifacts.recoveries !== 0 ||
+      admittedAt < ingress.admittedAt ||
+      admittedAt < scope.scope.authorizedAt ||
+      admittedAt < branch.startedAt ||
+      admittedAt < profileBinding.binding.boundAt
+    ) {
+      throw new Error(
+        `stored active home provider invocation admission is invalid: ${id}`,
+      );
+    }
+    return { invocationId: id, admission, admissionJson, admissionHash };
+  }
+
   getHomeTextActivationScope(): HomeTextActivationScopeRecord | null {
     const row = this.database
       .prepare(
@@ -5401,8 +5742,8 @@ export class ContextGraphStore {
     }
     const requestId =
       input.requestId === undefined
-      ? null
-      : boundedProviderText('requestId', input.requestId, 256);
+        ? null
+        : boundedProviderText('requestId', input.requestId, 256);
     const receivedAt = timestamp('receivedAt', input.receivedAt);
     const evidence = Object.freeze<IsolatedProviderResponseEvidenceV1>({
       schemaVersion: 1,
@@ -5513,7 +5854,9 @@ export class ContextGraphStore {
         )
         .all() as { attempt_id: string }[];
       if (rows.length > 1) {
-        throw new Error('active home text branch has ambiguous provider attempts');
+        throw new Error(
+          'active home text branch has ambiguous provider attempts',
+        );
       }
       const reconciled: IsolatedProviderOutcomeRecord[] = [];
       for (const row of rows) {
@@ -7767,7 +8110,7 @@ export class ContextGraphStore {
       if (activation.mode !== 'dark') {
         throw new Error(
           'resident world profile binding requires dark graph mode',
-      );
+        );
       }
       const derivation =
         this.getResidentIdentitySystemDerivation(derivationIdValue);
@@ -8231,6 +8574,254 @@ export class ContextGraphStore {
         throw new Error('active home ingress admission was not stored');
       }
       return { event, projection, admission };
+    });
+  }
+
+  assembleActiveHomeRequest(input: {
+    ingressEventId: EventId;
+    ingressSourceSequence: number;
+    branchId: BranchId;
+    target: ExactIsolatedProviderTargetV1;
+    expectedActiveActivationEpoch: number;
+    expectedActivationScopeHash: string;
+    expectedHeadRevision: number;
+    admittedAt: number;
+  }): ActiveHomeProviderInvocationAdmissionRecord {
+    const ingressEventId = eventId(input.ingressEventId);
+    const ingressSourceSequence = generation(
+      'active home ingressSourceSequence',
+      input.ingressSourceSequence,
+    );
+    if (ingressSourceSequence < 1) {
+      throw new Error('active home ingressSourceSequence must be positive');
+    }
+    const activeActivationEpoch = generation(
+      'active home expectedActiveActivationEpoch',
+      input.expectedActiveActivationEpoch,
+    );
+    const activationScopeHash = sha256(
+      'active home expectedActivationScopeHash',
+      input.expectedActivationScopeHash,
+    );
+    const expectedHeadRevision = generation(
+      'active home expectedHeadRevision',
+      input.expectedHeadRevision,
+    );
+    const admittedAt = timestamp(
+      'active home provider invocation admittedAt',
+      input.admittedAt,
+    );
+    const activeBranchId = branchId(input.branchId);
+    const target = normalizeExactIsolatedProviderTarget(input.target);
+    const targetJson = serialize(target);
+    const targetHash = hashContextBytes(targetJson);
+
+    return transaction(this.database, () => {
+      const prior = this.database
+        .prepare(
+          `SELECT invocation_id
+           FROM context_active_home_provider_invocation_admissions
+           WHERE ingress_event_id = ?`,
+        )
+        .get(ingressEventId) as { invocation_id: string } | undefined;
+      if (prior) {
+        const existing = this.getActiveHomeProviderInvocationAdmission(
+          activeHomeProviderInvocationId(prior.invocation_id),
+        );
+        const start = this.getBranchStart(activeBranchId);
+        if (
+          !existing ||
+          !start ||
+          existing.admission.ingressSourceSequence !== ingressSourceSequence ||
+          existing.admission.branchId !== activeBranchId ||
+          existing.admission.activeActivationEpoch !== activeActivationEpoch ||
+          existing.admission.activationScopeHash !== activationScopeHash ||
+          existing.admission.targetHash !== targetHash ||
+          serialize(existing.admission.target) !== targetJson ||
+          existing.admission.admittedAt !== admittedAt ||
+          start.baseRevision !== expectedHeadRevision
+        ) {
+          throw new Error(
+            `active home provider invocation admission conflict: ${ingressEventId}`,
+          );
+        }
+        return existing;
+      }
+
+      const activation = this.getActivationState();
+      const scope = this.getHomeTextActivationScope();
+      const head = this.getContinuationHead();
+      const coordinator = this.getRootCoordinatorState();
+      if (
+        activation.mode !== 'active' ||
+        !scope ||
+        activation.epoch !== activeActivationEpoch ||
+        scope.scope.activeActivationEpoch !== activeActivationEpoch ||
+        scope.scopeHash !== activationScopeHash ||
+        head.revision !== expectedHeadRevision ||
+        coordinator.activeBranchId !== null ||
+        coordinator.activeWorldId !== null ||
+        coordinator.baseRevision !== head.revision ||
+        coordinator.predecessorBranchId !== head.branchId ||
+        coordinator.predecessorWorldId !== head.worldId ||
+        admittedAt < activation.updatedAt ||
+        admittedAt < scope.scope.authorizedAt
+      ) {
+        throw new Error('active home request authority is not current');
+      }
+      const ingress = this.getActiveHomeIngressAdmission(ingressEventId);
+      if (
+        !ingress ||
+        ingress.sourceSequence !== ingressSourceSequence ||
+        ingress.worldId !== scope.scope.worldId ||
+        ingress.activeActivationEpoch !== activeActivationEpoch ||
+        ingress.activationScopeHash !== activationScopeHash ||
+        admittedAt < ingress.admittedAt
+      ) {
+        throw new Error('active home ingress admission is not current');
+      }
+      const oldest = this.database
+        .prepare(
+          `SELECT ingress.event_id, ingress.source_sequence
+           FROM context_active_home_ingress_admissions AS ingress
+           LEFT JOIN context_active_home_provider_invocation_admissions AS invoked
+             ON invoked.ingress_event_id = ingress.event_id
+           WHERE invoked.ingress_event_id IS NULL
+           ORDER BY ingress.source_sequence ASC
+           LIMIT 1`,
+        )
+        .get() as { event_id: string; source_sequence: number } | undefined;
+      if (
+        !oldest ||
+        oldest.event_id !== ingressEventId ||
+        oldest.source_sequence !== ingressSourceSequence
+      ) {
+        throw new Error(
+          'active home request must consume the oldest admission',
+        );
+      }
+      const residentRow = this.database
+        .prepare(
+          `SELECT binding_id
+           FROM context_resident_world_profile_bindings
+           WHERE activation_epoch = ? AND world_id = ?`,
+        )
+        .get(scope.scope.sourceActivationEpoch, scope.scope.worldId) as
+        { binding_id: string } | undefined;
+      if (!residentRow) {
+        throw new Error('active home source profile binding is missing');
+      }
+      const residentProfileBinding = this.getResidentWorldProfileBinding(
+        residentWorldProfileBindingId(residentRow.binding_id),
+      );
+      if (
+        !residentProfileBinding ||
+        residentProfileBinding.profileId === null ||
+        residentProfileBinding.activationEpoch !==
+          scope.scope.sourceActivationEpoch ||
+        residentProfileBinding.worldId !== scope.scope.worldId
+      ) {
+        throw new Error('active home source profile binding is invalid');
+      }
+      const assembly = this.assembleLocalBranchRecordsInTransaction(
+        {
+          executionMode: 'active',
+          profileActivationEpoch: scope.scope.sourceActivationEpoch,
+          expectedActivationEpoch: activeActivationEpoch,
+          expectedHeadRevision,
+          worldId: scope.scope.worldId,
+          branchId: activeBranchId,
+          messageProjectionIds: [ingress.projectionId],
+          assembledAt: admittedAt,
+        },
+        activeActivationEpoch,
+        expectedHeadRevision,
+        admittedAt,
+      );
+      if (
+        assembly.profileBinding.binding.profileId !==
+          residentProfileBinding.profileId ||
+        assembly.profileBinding.binding.profileHash !==
+          residentProfileBinding.profileHash ||
+        assembly.profileBinding.binding.profileHeadRevision !==
+          residentProfileBinding.profileHeadRevision
+      ) {
+        throw new Error('active home request profile binding changed');
+      }
+      const admission = activeHomeProviderInvocationAdmission({
+        ingress,
+        scope,
+        residentProfileBinding,
+        assembly,
+        target,
+        targetHash,
+        admittedAt,
+      });
+      const admissionJson = serialize(admission);
+      const admissionHash = hashContextBytes(admissionJson);
+      const invocationId = activeHomeProviderInvocationIdentity(admissionJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_active_home_provider_invocation_admissions(
+             invocation_id, schema_version, admission_kind, execution_mode,
+             lane_kind, runnable, network_authority, tool_mode,
+             historical_tool_messages, effect_authority, capsule_authority,
+             continuation_authority, max_attempts, transport_retries,
+             surface_fallback, ingress_event_id, ingress_source_sequence,
+             ingress_projection_id, activation_scope_hash,
+             source_activation_epoch, active_activation_epoch,
+             resident_profile_binding_id, request_profile_binding_id,
+             request_profile_binding_hash, branch_id, world_id,
+             authority_epoch, request_view_id, request_view_hash, profile_id,
+             profile_hash, profile_head_revision, manifest_id, manifest_hash,
+             manifest_cache_namespace, candidate_hash, candidate_bytes,
+             target_json, target_hash, cache_namespace, admission_json,
+             admission_hash, admitted_at
+           ) VALUES (
+             ?, 1, 'active_home_provider_invocation', 'active',
+             'isolated-standalone', 0, 'none', 'none',
+             0, 'none', 'none', 'none', 1, 0, 0,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?
+           )`,
+        )
+        .run(
+          invocationId,
+          admission.ingressEventId,
+          admission.ingressSourceSequence,
+          admission.ingressProjectionId,
+          admission.activationScopeHash,
+          admission.sourceActivationEpoch,
+          admission.activeActivationEpoch,
+          admission.residentProfileBindingId,
+          admission.requestProfileBindingId,
+          admission.requestProfileBindingHash,
+          admission.branchId,
+          admission.worldId,
+          admission.authorityEpoch,
+          admission.requestViewId,
+          admission.requestViewHash,
+          admission.profileId,
+          admission.profileHash,
+          admission.profileHeadRevision,
+          admission.manifestId,
+          admission.manifestHash,
+          admission.manifestCacheNamespace,
+          admission.candidateHash,
+          admission.candidateBytes,
+          targetJson,
+          admission.targetHash,
+          admission.cacheNamespace,
+          admissionJson,
+          admissionHash,
+          admittedAt,
+        );
+      const created =
+        this.getActiveHomeProviderInvocationAdmission(invocationId);
+      if (!created) {
+        throw new Error('active home provider invocation was not stored');
+      }
+      return created;
     });
   }
 
@@ -9231,140 +9822,146 @@ export class ContextGraphStore {
   }
 
   private createSystemProfileRequestViewBindingInTransaction(input: {
+    expectedExecutionMode?: 'dark' | 'active';
+    expectedProfileActivationEpoch?: number;
     requestViewId: LocalBranchRequestViewId;
     expectedProfileId: SystemProfileId;
     expectedProfileHeadRevision: number;
     boundAt: number;
   }): SystemProfileRequestViewBindingRecord {
-      const activation = this.getActivationState();
-      if (activation.mode !== 'dark') {
-        throw new StaleActivationStateError(activation.epoch);
-      }
-      const requestView = this.getLocalBranchRequestView(input.requestViewId);
-      if (!requestView) {
+    const activation = this.getActivationState();
+    if (activation.mode !== (input.expectedExecutionMode ?? 'dark')) {
+      throw new StaleActivationStateError(activation.epoch);
+    }
+    const requestView = this.getLocalBranchRequestView(input.requestViewId);
+    if (!requestView) {
       throw new Error(
         `local branch request view not found: ${input.requestViewId}`,
       );
-      }
-      const profileHeadRevision = generation(
-        'expectedProfileHeadRevision',
-        input.expectedProfileHeadRevision,
-      );
-      const expectedProfileId = systemProfileId(input.expectedProfileId);
-      const boundAt = timestamp('boundAt', input.boundAt);
+    }
+    const profileActivationEpoch = generation(
+      'expectedProfileActivationEpoch',
+      input.expectedProfileActivationEpoch ?? activation.epoch,
+    );
+    const profileHeadRevision = generation(
+      'expectedProfileHeadRevision',
+      input.expectedProfileHeadRevision,
+    );
+    const expectedProfileId = systemProfileId(input.expectedProfileId);
+    const boundAt = timestamp('boundAt', input.boundAt);
     const existingForView = this.getSystemProfileRequestViewBindingForView(
       requestView.requestViewId,
     );
-      if (existingForView) {
-        if (
-          existingForView.binding.worldId !== requestView.worldId ||
-          existingForView.binding.activationEpoch !== activation.epoch ||
-          existingForView.binding.profileId !== expectedProfileId ||
-          existingForView.binding.profileHeadRevision !== profileHeadRevision ||
-          existingForView.binding.boundAt !== boundAt
-        ) {
-          throw new Error(
-            `system profile request view binding identity conflict: ${existingForView.bindingId}`,
-          );
-        }
-        return existingForView;
-      }
-      const head = this.getSystemProfileHead(
-        requestView.worldId,
-        activation.epoch,
-      );
+    if (existingForView) {
       if (
-        !head ||
-        head.revision !== profileHeadRevision ||
-        head.profileId !== expectedProfileId
+        existingForView.binding.worldId !== requestView.worldId ||
+        existingForView.binding.activationEpoch !== profileActivationEpoch ||
+        existingForView.binding.profileId !== expectedProfileId ||
+        existingForView.binding.profileHeadRevision !== profileHeadRevision ||
+        existingForView.binding.boundAt !== boundAt
       ) {
-        throw new StaleSystemProfileHeadError(profileHeadRevision);
+        throw new Error(
+          `system profile request view binding identity conflict: ${existingForView.bindingId}`,
+        );
       }
-      const profile = this.getSystemProfile(head.profileId);
-      if (!profile) {
-        throw new Error('system profile request view binding profile is missing');
-      }
-      const layerIds = this.systemProfileLayerIds(profile.profile);
-      if (
-        profile.profile.systemRendererGeneration !==
-          requestView.view.systemRendererGeneration ||
-        profile.profile.policyGeneration !== requestView.view.policyGeneration ||
-        layerIds.length !== requestView.view.systemLayerProjectionIds.length ||
-        layerIds.some(
-          (layerId, ordinal) =>
-            layerId !== requestView.view.systemLayerProjectionIds[ordinal],
-        )
-      ) {
-        throw new Error('system profile request view binding layers are invalid');
-      }
-      if (
-        profile.createdAt > head.advancedAt ||
-        head.advancedAt > requestView.createdAt ||
-        requestView.createdAt > boundAt
-      ) {
+      return existingForView;
+    }
+    const head = this.getSystemProfileHead(
+      requestView.worldId,
+      profileActivationEpoch,
+    );
+    if (
+      !head ||
+      head.revision !== profileHeadRevision ||
+      head.profileId !== expectedProfileId
+    ) {
+      throw new StaleSystemProfileHeadError(profileHeadRevision);
+    }
+    const profile = this.getSystemProfile(head.profileId);
+    if (!profile) {
+      throw new Error('system profile request view binding profile is missing');
+    }
+    const layerIds = this.systemProfileLayerIds(profile.profile);
+    if (
+      profile.profile.systemRendererGeneration !==
+        requestView.view.systemRendererGeneration ||
+      profile.profile.policyGeneration !== requestView.view.policyGeneration ||
+      layerIds.length !== requestView.view.systemLayerProjectionIds.length ||
+      layerIds.some(
+        (layerId, ordinal) =>
+          layerId !== requestView.view.systemLayerProjectionIds[ordinal],
+      )
+    ) {
+      throw new Error('system profile request view binding layers are invalid');
+    }
+    if (
+      profile.createdAt > head.advancedAt ||
+      head.advancedAt > requestView.createdAt ||
+      requestView.createdAt > boundAt
+    ) {
       throw new Error(
         'system profile request view binding chronology is invalid',
       );
-      }
-      const binding = normalizeSystemProfileRequestViewBinding({
-        schemaVersion: 1,
-        requestViewId: requestView.requestViewId,
-        requestViewHash: requestView.viewHash,
-        worldId: requestView.worldId,
-        activationEpoch: activation.epoch,
-        profileId: profile.profileId,
-        profileHash: profile.profileHash,
-        profileHeadRevision: head.revision,
-        boundAt,
-      });
-      const bindingJson = serialize(binding);
-      const bindingHash = hashContextBytes(bindingJson);
-      const bindingId = systemProfileRequestViewBindingIdentity(binding);
-      const collision = this.database
-        .prepare(
-          `SELECT binding_id FROM context_system_profile_request_view_bindings
+    }
+    const binding = normalizeSystemProfileRequestViewBinding({
+      schemaVersion: 1,
+      requestViewId: requestView.requestViewId,
+      requestViewHash: requestView.viewHash,
+      worldId: requestView.worldId,
+      activationEpoch: profileActivationEpoch,
+      profileId: profile.profileId,
+      profileHash: profile.profileHash,
+      profileHeadRevision: head.revision,
+      boundAt,
+    });
+    const bindingJson = serialize(binding);
+    const bindingHash = hashContextBytes(bindingJson);
+    const bindingId = systemProfileRequestViewBindingIdentity(binding);
+    const collision = this.database
+      .prepare(
+        `SELECT binding_id FROM context_system_profile_request_view_bindings
            WHERE binding_id = ? OR request_view_id = ?`,
-        )
-        .get(bindingId, requestView.requestViewId) as unknown as
+      )
+      .get(bindingId, requestView.requestViewId) as unknown as
       { binding_id: string } | undefined;
-      if (collision) {
-        const existing = this.getSystemProfileRequestViewBinding(
-          systemProfileRequestViewBindingId(collision.binding_id),
+    if (collision) {
+      const existing = this.getSystemProfileRequestViewBinding(
+        systemProfileRequestViewBindingId(collision.binding_id),
+      );
+      if (
+        !existing ||
+        existing.bindingId !== bindingId ||
+        existing.bindingJson !== bindingJson ||
+        existing.bindingHash !== bindingHash
+      ) {
+        throw new Error(
+          `system profile request view binding identity conflict: ${collision.binding_id}`,
         );
-        if (
-          !existing ||
-          existing.bindingId !== bindingId ||
-          existing.bindingJson !== bindingJson ||
-          existing.bindingHash !== bindingHash
-        ) {
-          throw new Error(
-            `system profile request view binding identity conflict: ${collision.binding_id}`,
-          );
-        }
-        return existing;
       }
-      this.database
-        .prepare(
-          `INSERT INTO context_system_profile_request_view_bindings(
+      return existing;
+    }
+    this.database
+      .prepare(
+        `INSERT INTO context_system_profile_request_view_bindings(
              binding_id, request_view_id, world_id, activation_epoch,
              profile_id, profile_head_revision, request_view_hash, profile_hash,
              binding_json, binding_hash, bound_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          bindingId,
-          binding.requestViewId,
-          binding.worldId,
-          binding.activationEpoch,
-          binding.profileId,
-          binding.profileHeadRevision,
-          binding.requestViewHash,
-          binding.profileHash,
-          bindingJson,
-          bindingHash,
-          binding.boundAt,
-        );
-      return this.getSystemProfileRequestViewBinding(bindingId)!;
+      )
+      .run(
+        bindingId,
+        binding.requestViewId,
+        binding.worldId,
+        binding.activationEpoch,
+        binding.profileId,
+        binding.profileHeadRevision,
+        binding.requestViewHash,
+        binding.profileHash,
+        bindingJson,
+        bindingHash,
+        binding.boundAt,
+      );
+    return this.getSystemProfileRequestViewBinding(bindingId)!;
   }
 
   getSystemProfileRequestViewBinding(
@@ -9511,11 +10108,15 @@ export class ContextGraphStore {
     createdAt: number;
   }): LocalBranchRequestViewRecord {
     return transaction(this.database, () =>
-      this.createLocalBranchRequestViewInTransaction(input),
+      this.createLocalBranchRequestViewInTransaction({
+        ...input,
+        executionMode: 'dark',
+      }),
     );
   }
 
   private createLocalBranchRequestViewInTransaction(input: {
+    executionMode: 'dark' | 'active';
     branchId: BranchId;
     worldId: WorldId;
     manifestId: ManifestId;
@@ -9606,7 +10207,7 @@ export class ContextGraphStore {
     });
     const view = normalizeLocalBranchRequestView({
       schemaVersion: 1,
-      executionMode: 'dark',
+      executionMode: input.executionMode,
       scope: 'local-only',
       runnable: false,
       toolMode: 'none',
@@ -9785,6 +10386,7 @@ export class ContextGraphStore {
     });
     return buildMaterializedLocalBranchRequest({
       requestViewId: requestView.requestViewId,
+      executionMode: requestView.view.executionMode,
       messages: [
         {
           role: 'system',
@@ -10260,8 +10862,12 @@ export class ContextGraphStore {
     );
     const assembledAt = timestamp('assembledAt', input.assembledAt);
     return transaction(this.database, () =>
-      this.assembleDarkLocalBranchRecordsInTransaction(
-        input,
+      this.assembleLocalBranchRecordsInTransaction(
+        {
+          ...input,
+          executionMode: 'dark',
+          profileActivationEpoch: expectedActivationEpoch,
+        },
         expectedActivationEpoch,
         expectedHeadRevision,
         assembledAt,
@@ -10354,15 +10960,16 @@ export class ContextGraphStore {
     });
     const messageProjections = requestView.view.messageProjectionIds.map(
       (id) => {
-      const projection = this.getEventMessageProjection(id);
-      if (!projection) {
-        throw new Error(`resident dark request message disappeared: ${id}`);
-      }
-      return projection;
+        const projection = this.getEventMessageProjection(id);
+        if (!projection) {
+          throw new Error(`resident dark request message disappeared: ${id}`);
+        }
+        return projection;
       },
     );
     const request = buildMaterializedLocalBranchRequest({
       requestViewId: requestView.requestViewId,
+      executionMode: requestView.view.executionMode,
       messages: [
         {
           role: 'system',
@@ -10573,8 +11180,10 @@ export class ContextGraphStore {
         );
       }
       const head = this.getContinuationHead();
-      const assembly = this.assembleDarkLocalBranchRecordsInTransaction(
+      const assembly = this.assembleLocalBranchRecordsInTransaction(
         {
+          executionMode: 'dark',
+          profileActivationEpoch: activation.epoch,
           expectedActivationEpoch: activation.epoch,
           expectedHeadRevision: head.revision,
           worldId: targetWorldId,
@@ -10946,8 +11555,10 @@ export class ContextGraphStore {
           'dark pending inspection returned an empty ready batch',
         );
       }
-      const assembly = this.assembleDarkLocalBranchRecordsInTransaction(
+      const assembly = this.assembleLocalBranchRecordsInTransaction(
         {
+          executionMode: 'dark',
+          profileActivationEpoch: expectedActivationEpoch,
           expectedActivationEpoch,
           expectedHeadRevision,
           worldId: inspection.worldId,
@@ -10991,8 +11602,10 @@ export class ContextGraphStore {
     });
   }
 
-  private assembleDarkLocalBranchRecordsInTransaction(
+  private assembleLocalBranchRecordsInTransaction(
     input: {
+      executionMode: 'dark' | 'active';
+      profileActivationEpoch: number;
       expectedActivationEpoch: number;
       expectedHeadRevision: number;
       worldId: WorldId;
@@ -11006,7 +11619,7 @@ export class ContextGraphStore {
   ): DarkLocalBranchAssemblyRecord {
     const activation = this.getActivationState();
     if (
-      activation.mode !== 'dark' ||
+      activation.mode !== input.executionMode ||
       activation.epoch !== expectedActivationEpoch
     ) {
       throw new StaleActivationStateError(expectedActivationEpoch);
@@ -11014,7 +11627,7 @@ export class ContextGraphStore {
 
     const profileHead = this.getSystemProfileHead(
       input.worldId,
-      expectedActivationEpoch,
+      input.profileActivationEpoch,
     );
     if (!profileHead) {
       throw new Error(
@@ -11150,6 +11763,7 @@ export class ContextGraphStore {
       createdAt: assembledAt,
     });
     const requestView = this.createLocalBranchRequestViewInTransaction({
+      executionMode: input.executionMode,
       branchId: opened.branch.branchId,
       worldId: opened.branch.worldId,
       manifestId: manifest.manifestId,
@@ -11164,6 +11778,7 @@ export class ContextGraphStore {
     ]);
     const request = buildMaterializedLocalBranchRequest({
       requestViewId: requestView.requestViewId,
+      executionMode: requestView.view.executionMode,
       messages: [
         {
           role: 'system',
@@ -11177,6 +11792,8 @@ export class ContextGraphStore {
     });
     const profileBinding =
       this.createSystemProfileRequestViewBindingInTransaction({
+        expectedExecutionMode: input.executionMode,
+        expectedProfileActivationEpoch: input.profileActivationEpoch,
         requestViewId: requestView.requestViewId,
         expectedProfileId: profileHead.profileId,
         expectedProfileHeadRevision: profileHead.revision,
