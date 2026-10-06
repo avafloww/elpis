@@ -50,7 +50,7 @@ function codexConfig(): MaterializedConfig {
   } as MaterializedConfig;
 }
 
-function fixture() {
+function fixture(options: { scopeChannelId?: string } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'isolated-provider-executor-'));
   const database = openDatabase(directory);
   const store = new ContextGraphStore(database);
@@ -84,12 +84,14 @@ function fixture() {
     provenance: provenance('603'),
     derivedAt: 300,
   });
-  const expectedWorldId = worldId('world:signal:executor-fixture');
+  const guildId = '123456789012345678';
+  const channelId = '234567890123456789';
+  const expectedWorldId = worldId(`world:discord:guild:${guildId}`);
   const bindingIngress = store.appendWorldEvent({
     eventId: eventId('event:executor-binding-ingress'),
     worldId: expectedWorldId,
-    kind: 'inbound:signal',
-    payload: { text: 'binding' },
+    kind: 'inbound:discord',
+    payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
     occurredAt: 400,
     recordedAt: 400,
   });
@@ -104,8 +106,8 @@ function fixture() {
   const current = store.appendWorldEvent({
     eventId: eventId('event:executor-current-ingress'),
     worldId: expectedWorldId,
-    kind: 'inbound:signal',
-    payload: { text: 'EXECUTOR_PRIVATE_CANARY' },
+    kind: 'inbound:discord',
+    payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
     occurredAt: 600,
     recordedAt: 600,
   });
@@ -137,6 +139,14 @@ function fixture() {
     bindingId: binding.bindingId,
     expectedTarget: target,
     admittedAt: 730,
+  });
+  store.createHomeTextActivationScope({
+    expectedSourceActivationEpoch: 0,
+    expectedWorldId,
+    guildId,
+    channelId: options.scopeChannelId ?? channelId,
+    maxOutputBytes: 1900,
+    authorizedAt: 740,
   });
   store.activate(0, 800);
   return {
@@ -173,6 +183,31 @@ function clock() {
   return () => ++value;
 }
 
+test('isolated provider executor rejects another channel in the scoped guild before dispatch', async () => {
+  const value = fixture({ scopeChannelId: '345678901234567890' });
+  try {
+    let calls = 0;
+    const execute = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm: fakeLlm(async () => {
+        calls += 1;
+        throw new Error('provider must not run outside the scoped channel');
+      }),
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1024,
+      now: clock(),
+    });
+    await assert.rejects(
+      execute(value.invocationId),
+      /route is outside its home scope/,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    value.close();
+  }
+});
+
 test('isolated provider executor records one successful dispatch and never replays it', async () => {
   const value = fixture();
   try {
@@ -200,7 +235,7 @@ test('isolated provider executor records one successful dispatch and never repla
       config: value.config,
       llm,
       expectedWorldId: value.expectedWorldId,
-      maxOutputBytes: 4096,
+      maxOutputBytes: 1024,
       now: clock(),
     });
     const first = await execute(value.invocationId);
@@ -236,7 +271,7 @@ test('isolated provider executor records provable pre-dispatch rejection without
         throw new Error('credential unavailable before dispatch: PRIVATE_ERROR_CANARY');
       }),
       expectedWorldId: value.expectedWorldId,
-      maxOutputBytes: 4096,
+      maxOutputBytes: 1024,
       now: clock(),
     });
     const result = await execute(value.invocationId);
@@ -271,7 +306,7 @@ test('isolated provider executor freezes after a network-boundary error without 
         throw new Error('socket vanished after dispatch boundary: PRIVATE_NETWORK_CANARY');
       }),
       expectedWorldId: value.expectedWorldId,
-      maxOutputBytes: 4096,
+      maxOutputBytes: 1024,
       now: clock(),
     });
     const result = await execute(value.invocationId);
@@ -311,7 +346,7 @@ test('isolated provider executor recovers received responses without replay afte
       expectedTarget: value.target,
       callTimeoutMs: value.config.llm.callTimeoutMs,
       streamIdleTimeoutMs: value.config.llm.streamIdleTimeoutMs,
-      maxOutputBytes: 4096,
+      maxOutputBytes: 1024,
       authorizedAt: 900,
     });
     assert.equal(started.fresh, true);
@@ -364,7 +399,7 @@ test('isolated provider executor treats an error after a positive HTTP response 
         throw new Error('unauthorized response was not retried');
       }),
       expectedWorldId: value.expectedWorldId,
-      maxOutputBytes: 4096,
+      maxOutputBytes: 1024,
       now: clock(),
     });
     const result = await execute(value.invocationId);

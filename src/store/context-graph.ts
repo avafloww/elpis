@@ -900,6 +900,25 @@ export interface DarkIsolatedProviderInvocationAdmissionRecord {
   readonly admissionHash: string;
 }
 
+export interface HomeTextActivationScopeV1 {
+  readonly schemaVersion: 1;
+  readonly scopeKind: 'home_discord_text';
+  readonly sourceActivationEpoch: number;
+  readonly activeActivationEpoch: number;
+  readonly worldId: WorldId;
+  readonly guildId: string;
+  readonly channelId: string;
+  readonly transport: 'discord';
+  readonly maxOutputBytes: number;
+  readonly authorizedAt: number;
+}
+
+export interface HomeTextActivationScopeRecord {
+  readonly scope: HomeTextActivationScopeV1;
+  readonly scopeJson: string;
+  readonly scopeHash: string;
+}
+
 export interface IsolatedProviderExecutionAttemptV1 {
   readonly schemaVersion: 1;
   readonly executionMode: 'active';
@@ -2421,6 +2440,22 @@ interface DarkIsolatedProviderInvocationAdmissionRow {
   admitted_at: number;
 }
 
+interface HomeTextActivationScopeRow {
+  singleton: number;
+  schema_version: number;
+  scope_kind: string;
+  source_activation_epoch: number;
+  active_activation_epoch: number;
+  world_id: string;
+  guild_id: string;
+  channel_id: string;
+  transport: string;
+  max_output_bytes: number;
+  scope_json: string;
+  scope_hash: string;
+  authorized_at: number;
+}
+
 interface IsolatedProviderExecutionAttemptRow {
   attempt_id: string;
   invocation_id: string;
@@ -2651,6 +2686,40 @@ function mapWorldEvent(row: WorldEventRow): WorldEventRecord {
     occurredAt: row.occurred_at,
     recordedAt: row.recorded_at,
   };
+}
+
+function discordIngressRoute(
+  event: WorldEventRecord,
+): { readonly guildId: string; readonly channelId: string } | null {
+  if (
+    event.kind !== 'inbound:discord' ||
+    hashContextBytes(event.payloadJson) !== event.payloadHash
+  ) {
+    return null;
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(event.payloadJson);
+  } catch {
+    return null;
+  }
+  if (
+    !payload ||
+    typeof payload !== 'object' ||
+    Array.isArray(payload) ||
+    (payload as { schemaVersion?: unknown }).schemaVersion !== 1 ||
+    (payload as { kind?: unknown }).kind !== 'discord'
+  ) {
+    return null;
+  }
+  const guildId = (payload as { guildId?: unknown }).guildId;
+  const channelId = (payload as { channelId?: unknown }).channelId;
+  return typeof guildId === 'string' &&
+    /^[0-9]{1,32}$/.test(guildId) &&
+    typeof channelId === 'string' &&
+    /^[0-9]{1,32}$/.test(channelId)
+    ? { guildId, channelId }
+    : null;
 }
 
 function mapDarkIngressGeneration(
@@ -4434,6 +4503,145 @@ export class ContextGraphStore {
     });
   }
 
+  getHomeTextActivationScope(): HomeTextActivationScopeRecord | null {
+    const row = this.database
+      .prepare(
+        'SELECT * FROM context_home_text_activation_scope WHERE singleton = 1',
+      )
+      .get() as HomeTextActivationScopeRow | undefined;
+    if (!row) return null;
+    const scope = Object.freeze<HomeTextActivationScopeV1>({
+      schemaVersion: 1,
+      scopeKind: 'home_discord_text',
+      sourceActivationEpoch: generation(
+        'home text sourceActivationEpoch',
+        row.source_activation_epoch,
+      ),
+      activeActivationEpoch: generation(
+        'home text activeActivationEpoch',
+        row.active_activation_epoch,
+      ),
+      worldId: worldId(row.world_id),
+      guildId: row.guild_id,
+      channelId: row.channel_id,
+      transport: 'discord',
+      maxOutputBytes: generation(
+        'home text maxOutputBytes',
+        row.max_output_bytes,
+      ),
+      authorizedAt: timestamp('home text authorizedAt', row.authorized_at),
+    });
+    const scopeJson = serialize(scope);
+    const scopeHash = hashContextBytes(scopeJson);
+    if (
+      row.singleton !== 1 ||
+      row.schema_version !== 1 ||
+      row.scope_kind !== scope.scopeKind ||
+      row.transport !== scope.transport ||
+      scope.activeActivationEpoch !== scope.sourceActivationEpoch + 1 ||
+      scope.worldId !== `world:discord:guild:${scope.guildId}` ||
+      !/^[0-9]{1,32}$/.test(scope.guildId) ||
+      !/^[0-9]{1,32}$/.test(scope.channelId) ||
+      scope.maxOutputBytes < 1 ||
+      scope.maxOutputBytes > 1900 ||
+      row.scope_json !== scopeJson ||
+      row.scope_hash !== scopeHash
+    ) {
+      throw new Error('stored home text activation scope is invalid');
+    }
+    return { scope, scopeJson, scopeHash };
+  }
+
+  createHomeTextActivationScope(input: {
+    expectedSourceActivationEpoch: number;
+    expectedWorldId: WorldId;
+    guildId: string;
+    channelId: string;
+    maxOutputBytes: number;
+    authorizedAt: number;
+  }): HomeTextActivationScopeRecord {
+    const sourceActivationEpoch = generation(
+      'expectedSourceActivationEpoch',
+      input.expectedSourceActivationEpoch,
+    );
+    const expectedWorldId = worldId(input.expectedWorldId);
+    const guildId = input.guildId;
+    const channelId = input.channelId;
+    if (!/^[0-9]{1,32}$/.test(guildId))
+      throw new Error('guildId must be a Discord snowflake');
+    if (!/^[0-9]{1,32}$/.test(channelId))
+      throw new Error('channelId must be a Discord snowflake');
+    if (expectedWorldId !== `world:discord:guild:${guildId}`) {
+      throw new Error(
+        'home text activation scope world does not match its guild',
+      );
+    }
+    const maxOutputBytes = generation('maxOutputBytes', input.maxOutputBytes);
+    if (maxOutputBytes < 1 || maxOutputBytes > 1900) {
+      throw new Error('maxOutputBytes must be between 1 and 1900');
+    }
+    const authorizedAt = timestamp('authorizedAt', input.authorizedAt);
+    const scope = Object.freeze<HomeTextActivationScopeV1>({
+      schemaVersion: 1,
+      scopeKind: 'home_discord_text',
+      sourceActivationEpoch,
+      activeActivationEpoch: sourceActivationEpoch + 1,
+      worldId: expectedWorldId,
+      guildId,
+      channelId,
+      transport: 'discord',
+      maxOutputBytes,
+      authorizedAt,
+    });
+    const scopeJson = serialize(scope);
+    const scopeHash = hashContextBytes(scopeJson);
+    return transaction(this.database, () => {
+      const existing = this.getHomeTextActivationScope();
+      if (existing) {
+        if (
+          existing.scopeJson !== scopeJson ||
+          existing.scopeHash !== scopeHash
+        ) {
+          throw new Error(
+            'home text activation scope already exists with different authority',
+          );
+        }
+        return existing;
+      }
+      const activation = this.getActivationState();
+      if (
+        activation.mode !== 'dark' ||
+        activation.epoch !== sourceActivationEpoch ||
+        activation.updatedAt > authorizedAt
+      ) {
+        throw new Error('home text activation scope authority is not current');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO context_home_text_activation_scope(
+             singleton, schema_version, scope_kind, source_activation_epoch,
+             active_activation_epoch, world_id, guild_id, channel_id,
+             transport, max_output_bytes, scope_json, scope_hash, authorized_at
+           ) VALUES (1, 1, 'home_discord_text', ?, ?, ?, ?, ?, 'discord', ?, ?, ?, ?)`,
+        )
+        .run(
+          scope.sourceActivationEpoch,
+          scope.activeActivationEpoch,
+          scope.worldId,
+          scope.guildId,
+          scope.channelId,
+          scope.maxOutputBytes,
+          scopeJson,
+          scopeHash,
+          scope.authorizedAt,
+        );
+      const created = this.getHomeTextActivationScope();
+      if (!created)
+        throw new Error('home text activation scope was not stored');
+      return created;
+    });
+  }
+
   getIsolatedProviderExecutionAttempt(
     id: IsolatedProviderExecutionAttemptId,
   ): IsolatedProviderExecutionAttemptRecord | null {
@@ -4616,12 +4824,18 @@ export class ContextGraphStore {
         throw new Error('isolated provider execution requires direct Codex Responses');
       }
       const activation = this.getActivationState();
+      const scopeRecord = this.getHomeTextActivationScope();
       const admissionRecord = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
       if (!admissionRecord) throw new Error('isolated provider invocation admission is missing');
       const admission = admissionRecord.admission;
       if (
         activation.mode !== 'active' ||
         activation.epoch !== admission.activationEpoch + 1 ||
+        !scopeRecord ||
+        scopeRecord.scope.sourceActivationEpoch !== admission.activationEpoch ||
+        scopeRecord.scope.activeActivationEpoch !== activation.epoch ||
+        scopeRecord.scope.worldId !== admission.worldId ||
+        maxOutputBytes > scopeRecord.scope.maxOutputBytes ||
         admission.worldId !== expectedWorldId ||
         admission.targetHash !== targetHash ||
         serialize(admission.target) !== targetJson
@@ -4642,6 +4856,23 @@ export class ContextGraphStore {
       }
       const requestView = this.getLocalBranchRequestView(admission.requestViewId);
       if (!requestView) throw new Error('isolated provider execution request view is missing');
+      const terminalProjectionId = requestView.view.messageProjectionIds.at(-1);
+      const terminalProjection = terminalProjectionId
+        ? this.getEventMessageProjection(terminalProjectionId)
+        : null;
+      const terminalEvent = terminalProjection
+        ? this.getWorldEvent(terminalProjection.sourceEventId)
+        : null;
+      const terminalRoute = terminalEvent
+        ? discordIngressRoute(terminalEvent)
+        : null;
+      if (
+        !terminalRoute ||
+        terminalRoute.guildId !== scopeRecord.scope.guildId ||
+        terminalRoute.channelId !== scopeRecord.scope.channelId
+      ) {
+        throw new Error('isolated provider execution route is outside its home scope');
+      }
       const request = this.materializeStoredLocalBranchRequest(requestView);
       if (
         request.candidateHash !== admission.candidateHash ||

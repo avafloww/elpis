@@ -1526,12 +1526,14 @@ test('active provider execution is single-attempt and uses durable effect eviden
       provenance: residentRunProvenance('503'),
       derivedAt: 300,
     });
-    const targetWorldId = worldId('world:signal:active-provider-contact');
+    const guildId = '123456789012345678';
+    const channelId = '234567890123456789';
+    const targetWorldId = worldId(`world:discord:guild:${guildId}`);
     const bindingIngress = value.store.appendWorldEvent({
       eventId: eventId('event:active-provider-binding-ingress'),
       worldId: targetWorldId,
-      kind: 'inbound:signal',
-      payload: { text: 'binding' },
+      kind: 'inbound:discord',
+      payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
       occurredAt: 50,
       recordedAt: 50,
     });
@@ -1546,8 +1548,8 @@ test('active provider execution is single-attempt and uses durable effect eviden
     const current = value.store.appendWorldEvent({
       eventId: eventId('event:active-provider-current-ingress'),
       worldId: targetWorldId,
-      kind: 'inbound:signal',
-      payload: { text: 'ACTIVE_PROVIDER_CANARY' },
+      kind: 'inbound:discord',
+      payload: { schemaVersion: 1, kind: 'discord', channelId, guildId, attachments: [], forwarded: false },
       occurredAt: 600,
       recordedAt: 600,
     });
@@ -1611,12 +1613,59 @@ test('active provider execution is single-attempt and uses durable effect eviden
     );
     assert.equal(tableCount(value.database, 'context_isolated_provider_execution_attempts'), 0);
 
+    const scope = value.store.createHomeTextActivationScope({
+      expectedSourceActivationEpoch: 0,
+      expectedWorldId: targetWorldId,
+      guildId,
+      channelId,
+      maxOutputBytes: 1900,
+      authorizedAt: 745,
+    });
+    assert.equal(scope.scope.worldId, targetWorldId);
+    assert.equal(scope.scope.channelId, channelId);
+    assert.deepEqual(
+      value.store.createHomeTextActivationScope({
+        expectedSourceActivationEpoch: 0,
+        expectedWorldId: targetWorldId,
+        guildId,
+        channelId,
+        maxOutputBytes: 1900,
+        authorizedAt: 745,
+      }),
+      scope,
+    );
+    assert.throws(
+      () =>
+        value.store.createHomeTextActivationScope({
+          expectedSourceActivationEpoch: 0,
+          expectedWorldId: targetWorldId,
+          guildId,
+          channelId: '345678901234567890',
+          maxOutputBytes: 1900,
+          authorizedAt: 745,
+        }),
+      /different authority/,
+    );
+
     assert.deepEqual(value.store.activate(0, 750), {
       mode: 'active',
       epoch: 1,
       createdAt: 0,
       updatedAt: 750,
     });
+    assert.throws(
+      () =>
+        value.store.beginIsolatedProviderExecutionAttempt({
+          invocationId: invocation.invocationId,
+          expectedWorldId: targetWorldId,
+          expectedTarget: providerTarget,
+          callTimeoutMs: 120_000,
+          streamIdleTimeoutMs: 30_000,
+          maxOutputBytes: 1901,
+          authorizedAt: 759,
+        }),
+      /authority is not current/,
+    );
     const started = value.store.beginIsolatedProviderExecutionAttempt({
       invocationId: invocation.invocationId,
       expectedWorldId: targetWorldId,
@@ -1659,7 +1708,7 @@ test('active provider execution is single-attempt and uses durable effect eviden
       () =>
         value.store.beginIsolatedProviderExecutionAttempt({
           invocationId: invocation.invocationId,
-          expectedWorldId: worldId('world:signal:other-contact'),
+          expectedWorldId: worldId('world:discord:guild:345678901234567890'),
           expectedTarget: providerTarget,
           callTimeoutMs: 120_000,
           streamIdleTimeoutMs: 30_000,
@@ -5513,6 +5562,10 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DROP TRIGGER context_isolated_provider_execution_attempts_no_update;
       DROP TRIGGER context_isolated_provider_execution_attempts_no_delete;
       DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+      DROP TRIGGER context_home_text_activation_scope_lineage_guard;
+      DROP TRIGGER context_home_text_activation_scope_no_update;
+      DROP TRIGGER context_home_text_activation_scope_no_delete;
+      DROP TABLE context_home_text_activation_scope;
       DROP TABLE context_isolated_provider_execution_attempts;
       CREATE TRIGGER context_dark_pending_branch_effect_guard
         BEFORE INSERT ON context_effects
@@ -5600,7 +5653,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0047-context-dark-isolated-provider-bindings',
             '0048-context-dark-isolated-provider-binding-order',
             '0049-context-dark-isolated-provider-invocation-admissions',
-            '0050-context-isolated-provider-execution-ledger'
+            '0050-context-isolated-provider-execution-ledger',
+            '0051-context-home-text-activation-scope'
           );
       PRAGMA user_version = 40;
     `);

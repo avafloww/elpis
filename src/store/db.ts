@@ -30,7 +30,7 @@ export type Database = DatabaseSync;
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 50;
+const SCHEMA_VERSION = 51;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -4387,6 +4387,126 @@ export function runMigrations(db: DatabaseSync): void {
         CREATE TRIGGER context_isolated_provider_outcomes_no_delete
           BEFORE DELETE ON context_isolated_provider_outcomes BEGIN
             SELECT RAISE(ABORT, 'isolated provider outcomes are immutable');
+          END;
+      `,
+    },
+    {
+      name: '0051-context-home-text-activation-scope',
+      sql: `
+        CREATE TABLE context_home_text_activation_scope (
+          singleton                INTEGER PRIMARY KEY CHECK (singleton = 1),
+          schema_version           INTEGER NOT NULL CHECK (schema_version = 1),
+          scope_kind               TEXT NOT NULL CHECK (scope_kind = 'home_discord_text'),
+          source_activation_epoch  INTEGER NOT NULL CHECK (typeof(source_activation_epoch) = 'integer' AND source_activation_epoch >= 0),
+          active_activation_epoch  INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch = source_activation_epoch + 1),
+          world_id                 TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          guild_id                 TEXT NOT NULL CHECK (length(guild_id) BETWEEN 1 AND 32 AND guild_id NOT GLOB '*[^0-9]*'),
+          channel_id               TEXT NOT NULL CHECK (length(channel_id) BETWEEN 1 AND 32 AND channel_id NOT GLOB '*[^0-9]*'),
+          transport                TEXT NOT NULL CHECK (transport = 'discord'),
+          max_output_bytes         INTEGER NOT NULL CHECK (typeof(max_output_bytes) = 'integer' AND max_output_bytes BETWEEN 1 AND 1900),
+          scope_json               TEXT NOT NULL CHECK (length(scope_json) >= 1 AND json_valid(scope_json)),
+          scope_hash               TEXT NOT NULL CHECK (length(scope_hash) = 64 AND scope_hash NOT GLOB '*[^0-9a-f]*'),
+          authorized_at            INTEGER NOT NULL CHECK (typeof(authorized_at) = 'integer' AND authorized_at >= 0)
+        );
+        CREATE TRIGGER context_home_text_activation_scope_lineage_guard
+          BEFORE INSERT ON context_home_text_activation_scope
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_graph_activation AS activation
+            WHERE activation.singleton = 1
+              AND activation.mode = 'dark'
+              AND activation.epoch = NEW.source_activation_epoch
+              AND NEW.active_activation_epoch = activation.epoch + 1
+              AND NEW.world_id = 'world:discord:guild:' || NEW.guild_id
+              AND activation.updated_at <= NEW.authorized_at
+              AND NOT EXISTS (SELECT 1 FROM context_isolated_provider_execution_attempts)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text activation scope lineage is invalid');
+          END;
+        CREATE TRIGGER context_home_text_activation_scope_no_update
+          BEFORE UPDATE ON context_home_text_activation_scope BEGIN
+            SELECT RAISE(ABORT, 'home text activation scope is immutable');
+          END;
+        CREATE TRIGGER context_home_text_activation_scope_no_delete
+          BEFORE DELETE ON context_home_text_activation_scope BEGIN
+            SELECT RAISE(ABORT, 'home text activation scope is immutable');
+          END;
+
+        DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+        CREATE TRIGGER context_isolated_provider_execution_attempts_lineage_guard
+          BEFORE INSERT ON context_isolated_provider_execution_attempts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_dark_isolated_provider_invocation_admissions AS admissions
+            JOIN context_branches AS branches
+              ON branches.branch_id = admissions.branch_id
+             AND branches.world_id = admissions.world_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = admissions.request_view_id
+             AND views.world_id = admissions.world_id
+            JOIN context_local_branch_request_messages AS terminal_message
+              ON terminal_message.request_view_id = views.request_view_id
+             AND terminal_message.world_id = views.world_id
+             AND terminal_message.ordinal = views.message_projection_count - 1
+            JOIN context_event_message_projections AS terminal_projection
+              ON terminal_projection.projection_id = terminal_message.projection_id
+             AND terminal_projection.world_id = terminal_message.world_id
+            JOIN context_world_events AS terminal_event
+              ON terminal_event.event_id = terminal_projection.source_event_id
+             AND terminal_event.world_id = terminal_projection.world_id
+            WHERE admissions.invocation_id = NEW.invocation_id
+              AND admissions.admission_hash = NEW.admission_hash
+              AND admissions.activation_epoch = NEW.source_activation_epoch
+              AND admissions.branch_id = NEW.branch_id
+              AND admissions.world_id = NEW.world_id
+              AND admissions.authority_epoch = NEW.authority_epoch
+              AND admissions.request_view_id = NEW.request_view_id
+              AND admissions.request_view_hash = NEW.request_view_hash
+              AND admissions.candidate_hash = NEW.candidate_hash
+              AND admissions.candidate_bytes = NEW.candidate_bytes
+              AND admissions.target_hash = NEW.target_hash
+              AND admissions.cache_namespace = NEW.cache_namespace
+              AND admissions.runnable = 0
+              AND admissions.network_authority = 'none'
+              AND admissions.tool_mode = 'none'
+              AND admissions.historical_tool_messages = 0
+              AND admissions.max_attempts = 1
+              AND admissions.transport_retries = 0
+              AND admissions.surface_fallback = 0
+              AND json_extract(admissions.target_json, '$.providerType') = 'codex-oauth'
+              AND json_extract(admissions.target_json, '$.apiSurface') = 'codex-responses'
+              AND json_extract(admissions.target_json, '$.gateway') IS NULL
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND scope.source_activation_epoch = NEW.source_activation_epoch
+              AND scope.active_activation_epoch = NEW.active_activation_epoch
+              AND scope.world_id = NEW.world_id
+              AND views.message_projection_count >= 1
+              AND terminal_event.event_kind = 'inbound:discord'
+              AND json_type(terminal_event.payload_json, '$.schemaVersion') = 'integer'
+              AND json_extract(terminal_event.payload_json, '$.schemaVersion') = 1
+              AND json_extract(terminal_event.payload_json, '$.kind') = 'discord'
+              AND json_extract(terminal_event.payload_json, '$.guildId') = scope.guild_id
+              AND json_extract(terminal_event.payload_json, '$.channelId') = scope.channel_id
+              AND NEW.max_output_bytes <= scope.max_output_bytes
+              AND scope.authorized_at <= NEW.authorized_at
+              AND admissions.admitted_at <= NEW.authorized_at
+              AND NOT EXISTS (SELECT 1 FROM context_dark_pending_branch_abandonments a WHERE a.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules c WHERE c.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = NEW.branch_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'isolated provider execution attempt lineage is invalid');
           END;
       `,
     },

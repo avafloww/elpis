@@ -227,6 +227,10 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
     DROP TRIGGER context_isolated_provider_execution_attempts_no_update;
     DROP TRIGGER context_isolated_provider_execution_attempts_no_delete;
     DROP TRIGGER context_isolated_provider_execution_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_activation_scope_lineage_guard;
+    DROP TRIGGER context_home_text_activation_scope_no_update;
+    DROP TRIGGER context_home_text_activation_scope_no_delete;
+    DROP TABLE context_home_text_activation_scope;
     DROP TABLE context_isolated_provider_execution_attempts;
     CREATE TRIGGER context_dark_pending_branch_effect_guard
       BEFORE INSERT ON context_effects
@@ -379,7 +383,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0047-context-dark-isolated-provider-bindings',
           '0048-context-dark-isolated-provider-binding-order',
           '0049-context-dark-isolated-provider-invocation-admissions',
-          '0050-context-isolated-provider-execution-ledger'
+          '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;
