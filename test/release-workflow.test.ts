@@ -18,6 +18,38 @@ import {
 const execFileAsync = promisify(execFile);
 const canonical = (value: unknown): string =>
   `${JSON.stringify(value, null, 2)}\n`;
+const versionFiles = (version: string): Record<string, string> => ({
+  VERSION: `${version}\n`,
+  'package.json': canonical({
+    name: 'elpis',
+    version,
+    private: true,
+    workspaces: ['packages/*'],
+  }),
+  'packages/gateway/package.json': canonical({
+    name: '@elpis/gateway',
+    version,
+    private: true,
+  }),
+  'package-lock.json': canonical({
+    name: 'elpis',
+    version,
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'elpis',
+        version,
+        workspaces: ['packages/*'],
+      },
+      'packages/gateway': {
+        name: '@elpis/gateway',
+        version,
+      },
+    },
+  }),
+});
+
 const fixedEnvironment = {
   ...process.env,
   GIT_AUTHOR_NAME: 'Fixture',
@@ -357,6 +389,36 @@ test('exact later trailers recover malformed published subjects without relaxing
     prepareReleaseWorkflow(roots[3], unknownAlias),
     /alias must target an earlier commit in the release range/,
   );
+});
+
+test('release subject aliases recover an untagged manual release commit append-only', async (t) => {
+  const root = await fixture(true);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await addCommit(root, 'feat: add work', {
+    'src/work.ts': 'export const work = true;\n',
+  });
+  const manualRelease = await addCommit(
+    root,
+    'chore(release): v0.2.0',
+    versionFiles('0.2.0'),
+  );
+  const repaired = await addCommit(
+    root,
+    'fix(release): recover reserved release subject',
+    versionFiles('0.1.0'),
+    `Release-Subject-Alias: ${manualRelease} chore: stage version state manually`,
+  );
+
+  const release = await prepareReleaseWorkflow(root, repaired);
+  assert.equal(release.mode, 'release');
+  assert.equal(release.tag, 'v0.2.0');
+  const notes = await releaseNotesForResult(root, release);
+  assert.ok(
+    notes.includes(
+      `- \`${manualRelease.slice(0, 7)}\` chore: stage version state manually`,
+    ),
+  );
+  assert.doesNotMatch(notes, /chore\\\(release\\\): v0\.2\.0/);
 });
 
 test('release subject aliases allow a bounded recovery batch and reject overflow', async (t) => {

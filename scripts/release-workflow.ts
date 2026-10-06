@@ -571,10 +571,7 @@ async function applyReleaseSubjectAliases(
           'release subject alias must target an earlier commit in the release range',
         );
       const target = commits[targetIndex];
-      if (
-        target.subject.startsWith('chore(release):') ||
-        isOrdinaryReleaseSubject(target.subject)
-      )
+      if (isOrdinaryReleaseSubject(target.subject))
         throw new ReleaseWorkflowError(
           'release subject alias target already has a conventional subject',
         );
