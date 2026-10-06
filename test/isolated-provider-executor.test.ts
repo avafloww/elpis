@@ -5,8 +5,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MaterializedConfig } from '../src/config.js';
 import { createIsolatedProviderExecutor } from '../src/context/isolated-provider-executor.js';
-import { createHomeDiscordTextExecutor } from '../src/context/home-discord-text-executor.js';
-import { createHomeTextOrchestrator } from '../src/context/home-text-orchestrator.js';
+import {
+  createActiveHomeDiscordTextExecutor,
+  createHomeDiscordTextExecutor,
+} from '../src/context/home-discord-text-executor.js';
+import {
+  createActiveHomeTextOrchestrator,
+  createHomeTextOrchestrator,
+} from '../src/context/home-text-orchestrator.js';
 import {
   HomeDiscordTextTransportError,
   type HomeDiscordTextTransport,
@@ -362,6 +368,37 @@ async function produceSpeechAttempt(value: ReturnType<typeof fixture>) {
   return speech;
 }
 
+async function produceActiveSpeechAttempt(value: ReturnType<typeof fixture>) {
+  const execute = createIsolatedProviderExecutor({
+    store: value.store,
+    config: value.config,
+    llm: fakeLlm(async (_messages, options = {}) => {
+      options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+      options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 200 });
+      return {
+        content: 'ACTIVE_VISIBLE_EXECUTOR_RESULT',
+        usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+        model: value.target.model,
+        providerType: value.target.providerType,
+        apiSurface: value.target.apiSurface,
+        apiEndpoint: value.target.apiEndpoint,
+        toolContractVersion: value.target.toolContractVersion,
+        reasoningEffort: value.target.reasoningEffort ?? undefined,
+      };
+    }),
+    expectedWorldId: value.expectedWorldId,
+    maxOutputBytes: 1024,
+    now: clock(),
+  });
+  const result = await execute(value.invocationId);
+  assert.equal(result.state, 'succeeded');
+  const speech = value.store.getActiveHomeTextSpeechAttempt(
+    result.snapshot.attempt.attemptId,
+  );
+  assert.ok(speech);
+  return speech;
+}
+
 test('isolated provider executor rejects another channel in the scoped guild before dispatch', async () => {
   const value = fixture({ scopeChannelId: '345678901234567890' });
   try {
@@ -485,6 +522,7 @@ test('isolated provider executor records one successful dispatch and never repla
     });
     const first = await execute(value.invocationId);
     assert.equal(first.state, 'succeeded');
+    assert.equal(first.fresh, true);
     assert.equal(
       first.snapshot.outcome?.outcome.visibleText,
       'VISIBLE\u0000EXECUTOR_RESULT',
@@ -507,6 +545,7 @@ test('isolated provider executor records one successful dispatch and never repla
     assert.equal(seenOptions?.tools, undefined);
     const second = await execute(value.invocationId);
     assert.equal(second.state, 'succeeded');
+    assert.equal(second.fresh, false);
     assert.equal(calls, 1);
   } finally {
     value.close();
@@ -548,6 +587,7 @@ test('isolated provider executor atomically creates an active speech barrier', a
     });
     const first = await execute(value.invocationId);
     assert.equal(first.state, 'succeeded');
+    assert.equal(first.fresh, true);
     assert.equal(
       first.snapshot.outcome?.outcome.visibleText,
       'ACTIVE_EXECUTOR_RESULT',
@@ -575,7 +615,186 @@ test('isolated provider executor atomically creates an active speech barrier', a
     );
     const second = await execute(value.invocationId);
     assert.equal(second.state, 'succeeded');
+    assert.equal(second.fresh, false);
     assert.equal(calls, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('legacy home Discord executor rejects active speech authority', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const speech = await produceActiveSpeechAttempt(value);
+    let sends = 0;
+    const legacyDeliver = createHomeDiscordTextExecutor({
+      store: value.store,
+      now: clock(1_000),
+      transport: {
+        async send() {
+          sends += 1;
+          throw new Error('legacy executor must not receive active authority');
+        },
+      },
+    });
+    await assert.rejects(
+      legacyDeliver(speech.attempt.speechAttemptId),
+      /home text speech attempt is missing/,
+    );
+    assert.equal(sends, 0);
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+    assert.equal(
+      value.store.getActiveHomeTextSpeechReceipt(
+        speech.attempt.speechAttemptId,
+      ),
+      null,
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('active home Discord delivery observes one message and atomically returns the branch', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const speech = await produceActiveSpeechAttempt(value);
+    let sends = 0;
+    const deliver = createActiveHomeDiscordTextExecutor({
+      store: value.store,
+      now: clock(1_000),
+      transport: {
+        async send(request, beforeDispatch) {
+          sends += 1;
+          beforeDispatch();
+          return {
+            statusCode: 200,
+            messageId: '345678901234567890',
+            guildId: request.guildId,
+            channelId: request.channelId,
+            nonce: request.nonce,
+            textBytes: request.textBytes,
+            textHash: request.textHash,
+            observedAt: 1_010,
+          };
+        },
+      },
+    });
+    const first = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(first.state, 'observed');
+    assert.ok(first.completion);
+    assert.equal(first.completion.branch.status, 'yielded');
+    assert.equal(first.completion.head.revision, 1);
+    assert.equal(first.receipt.evidence?.messageId, '345678901234567890');
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_share_grants(
+               grant_id, shared_event_id, source_capsule_id, source_world_id,
+               destination_world_id, canonical_text, content_hash, status,
+               authority_epoch, created_at, revoked_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+          )
+          .run(
+            'share:forbidden-active-home-root',
+            'event:forbidden-active-home-root',
+            speech.attempt.rootReceiptCapsuleId,
+            speech.attempt.worldId,
+            'world:discord:guild:999999999999999999',
+            'forbidden',
+            '0'.repeat(64),
+            speech.attempt.authorityEpoch,
+            1_011,
+          ),
+      /world-private/,
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(
+      (await deliver(speech.attempt.speechAttemptId)).state,
+      'observed',
+    );
+    assert.equal(sends, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('active home Discord delivery freezes uncertain issuance without replay', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const speech = await produceActiveSpeechAttempt(value);
+    let sends = 0;
+    const deliver = createActiveHomeDiscordTextExecutor({
+      store: value.store,
+      now: clock(1_000),
+      transport: {
+        async send(_request, beforeDispatch) {
+          sends += 1;
+          beforeDispatch();
+          throw new HomeDiscordTextTransportError(
+            'issuance_uncertain',
+            'dispatch_uncertain',
+          );
+        },
+      },
+    });
+    const first = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(first.state, 'issuance_uncertain');
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'uncertain',
+    );
+    assert.equal(
+      (await deliver(speech.attempt.speechAttemptId)).state,
+      'issuance_uncertain',
+    );
+    assert.equal(sends, 1);
+    assert.deepEqual(
+      value.store.reconcileActiveHomeTextSpeechBeforeRecovery(1_020),
+      [first.receipt],
+    );
+    assert.ok(value.store.recoverCoordinatedBranch(1_030));
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    value.close();
+  }
+});
+
+test('active home Discord delivery records rejected pre-dispatch without an effect', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const speech = await produceActiveSpeechAttempt(value);
+    let sends = 0;
+    const deliver = createActiveHomeDiscordTextExecutor({
+      store: value.store,
+      now: clock(1_000),
+      transport: {
+        async send() {
+          sends += 1;
+          throw new HomeDiscordTextTransportError(
+            'pre_dispatch_rejected',
+            'invalid_request',
+          );
+        },
+      },
+    });
+    const first = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(first.state, 'pre_dispatch_rejected');
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+    assert.equal(
+      (await deliver(speech.attempt.speechAttemptId)).state,
+      'pre_dispatch_rejected',
+    );
+    assert.equal(sends, 1);
+    assert.ok(value.store.recoverCoordinatedBranch(1_030));
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
   } finally {
     value.close();
   }
@@ -1108,6 +1327,178 @@ test('isolated provider executor treats an error after a positive HTTP response 
     assert.equal(result.snapshot.effect?.status, 'failed');
     await execute(value.invocationId);
     assert.equal(calls, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('active home text orchestrator performs one exact provider and Discord lifecycle', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const now = clock();
+    let providerCalls = 0;
+    const executeProvider = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm: fakeLlm(async (_messages, options = {}) => {
+        providerCalls += 1;
+        options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+        options.dispatchLifecycle?.responseReceived({
+          attempt: 1,
+          status: 200,
+        });
+        return {
+          content: 'ACTIVE_ORCHESTRATED_VISIBLE_RESULT',
+          usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+          model: value.target.model,
+          providerType: value.target.providerType,
+          apiSurface: value.target.apiSurface,
+          apiEndpoint: value.target.apiEndpoint,
+          toolContractVersion: value.target.toolContractVersion,
+          reasoningEffort: value.target.reasoningEffort ?? undefined,
+        };
+      }),
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1024,
+      now,
+    });
+    let sends = 0;
+    const executeSpeech = createActiveHomeDiscordTextExecutor({
+      store: value.store,
+      now,
+      transport: {
+        async send(request, beforeDispatch) {
+          sends += 1;
+          beforeDispatch();
+          return {
+            statusCode: 200,
+            messageId: '345678901234567890',
+            guildId: request.guildId,
+            channelId: request.channelId,
+            nonce: request.nonce,
+            textBytes: request.textBytes,
+            textHash: request.textHash,
+            observedAt: now(),
+          };
+        },
+      },
+    });
+    const run = createActiveHomeTextOrchestrator({
+      store: value.store,
+      executeProvider,
+      executeSpeech,
+      now,
+    });
+    assert.equal((await run()).state, 'observed');
+    assert.equal(providerCalls, 1);
+    assert.equal(sends, 1);
+    assert.equal(value.store.getContinuationHead().revision, 1);
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal((await run()).state, 'not_authorized');
+    assert.equal(providerCalls, 1);
+    assert.equal(sends, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('active home text orchestrator never delays a preexisting speech barrier', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const speech = await produceActiveSpeechAttempt(value);
+    let providerCalls = 0;
+    let sends = 0;
+    const run = createActiveHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async () => {
+        providerCalls += 1;
+        throw new Error('preexisting provider attempts must not replay');
+      },
+      executeSpeech: async () => {
+        sends += 1;
+        throw new Error('preexisting speech barriers must not send later');
+      },
+      now: clock(1_000),
+    });
+    const result = await run();
+    assert.equal(result.state, 'speech_pre_dispatch_rejected');
+    assert.equal(providerCalls, 0);
+    assert.equal(sends, 0);
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    value.close();
+  }
+});
+
+test('active home text orchestrator rejects a provider attempt won during its await', async () => {
+  const value = fixture({ activeInvocation: true });
+  try {
+    const now = clock(1_000);
+    const providerExecutor = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm: fakeLlm(async (_messages, options = {}) => {
+        options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+        options.dispatchLifecycle?.responseReceived({
+          attempt: 1,
+          status: 200,
+        });
+        return {
+          content: 'RACED_ACTIVE_RESULT',
+          usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+          model: value.target.model,
+          providerType: value.target.providerType,
+          apiSurface: value.target.apiSurface,
+          apiEndpoint: value.target.apiEndpoint,
+          toolContractVersion: value.target.toolContractVersion,
+          reasoningEffort: value.target.reasoningEffort ?? undefined,
+        };
+      }),
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1024,
+      now,
+    });
+    let racedResult: Awaited<ReturnType<typeof providerExecutor>> | null = null;
+    let sends = 0;
+    const run = createActiveHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async (invocationId) => {
+        const winner = await providerExecutor(invocationId);
+        assert.equal(winner.fresh, true);
+        racedResult = await providerExecutor(invocationId);
+        return racedResult;
+      },
+      executeSpeech: async () => {
+        sends += 1;
+        throw new Error('a raced speech barrier must not be delivered');
+      },
+      now,
+    });
+    await assert.rejects(
+      run(),
+      /active provider attempt was not created by this orchestration/,
+    );
+    assert.ok(racedResult);
+    assert.equal(racedResult.fresh, false);
+    const speech = value.store.getActiveHomeTextSpeechAttempt(
+      racedResult.snapshot.attempt.attemptId,
+    );
+    assert.ok(speech);
+    assert.equal(sends, 0);
+    assert.equal(
+      value.store.getActiveHomeTextSpeechReceipt(speech.attempt.speechAttemptId)
+        ?.receipt.phase,
+      'pre_dispatch_rejected',
+    );
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
   } finally {
     value.close();
   }

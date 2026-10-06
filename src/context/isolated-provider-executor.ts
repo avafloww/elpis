@@ -22,7 +22,9 @@ export interface IsolatedProviderExecutionSnapshot {
   readonly outcome: IsolatedProviderOutcomeRecord | null;
 }
 
-export type IsolatedProviderExecutionResult =
+export type IsolatedProviderExecutionResult = {
+  readonly fresh: boolean;
+} & (
   | {
       readonly state: 'succeeded';
       readonly snapshot: IsolatedProviderExecutionSnapshot;
@@ -42,7 +44,8 @@ export type IsolatedProviderExecutionResult =
   | {
       readonly state: 'attempt_recorded';
       readonly snapshot: IsolatedProviderExecutionSnapshot;
-    };
+    }
+);
 
 export interface IsolatedProviderExecutorOptions {
   readonly store: ContextGraphStore;
@@ -86,30 +89,31 @@ function snapshot(
 
 function classifySnapshot(
   value: IsolatedProviderExecutionSnapshot,
+  fresh: boolean,
 ): IsolatedProviderExecutionResult {
   if (value.outcome?.outcome.outcomeKind === 'visible_success') {
-    return { state: 'succeeded', snapshot: value };
+    return { state: 'succeeded', snapshot: value, fresh };
   }
   if (value.outcome?.outcome.phase === 'issuance_uncertain') {
-    return { state: 'issuance_uncertain', snapshot: value };
+    return { state: 'issuance_uncertain', snapshot: value, fresh };
   }
   if (value.outcome?.outcome.outcomeKind === 'visible_error') {
-    return { state: 'failed', snapshot: value };
+    return { state: 'failed', snapshot: value, fresh };
   }
   if (
     value.response !== null ||
     value.effect?.status === 'observed' ||
     value.effect?.status === 'failed'
   ) {
-    return { state: 'issued_outcome_unknown', snapshot: value };
+    return { state: 'issued_outcome_unknown', snapshot: value, fresh };
   }
   if (
     value.effect?.status === 'prepared' ||
     value.effect?.status === 'uncertain'
   ) {
-    return { state: 'issuance_uncertain', snapshot: value };
+    return { state: 'issuance_uncertain', snapshot: value, fresh };
   }
-  return { state: 'attempt_recorded', snapshot: value };
+  return { state: 'attempt_recorded', snapshot: value, fresh };
 }
 
 export function createIsolatedProviderExecutor(
@@ -140,7 +144,7 @@ export function createIsolatedProviderExecutor(
           'isolated provider execution attempt belongs to another world',
         );
       }
-      return classifySnapshot(snapshot(options.store, existing));
+      return classifySnapshot(snapshot(options.store, existing), false);
     }
     const mainConfig = configForLlmRole(options.config, 'main');
     const directLlm = mainConfig.llm;
@@ -180,7 +184,7 @@ export function createIsolatedProviderExecutor(
           invocationId: darkIsolatedProviderInvocationId(invocationId),
         });
     if (!begun.fresh)
-      return classifySnapshot(snapshot(options.store, begun.attempt));
+      return classifySnapshot(snapshot(options.store, begun.attempt), false);
 
     let effectPrepared = false;
     try {
@@ -276,6 +280,6 @@ export function createIsolatedProviderExecutor(
         });
       }
     }
-    return classifySnapshot(snapshot(options.store, begun.attempt));
+    return classifySnapshot(snapshot(options.store, begun.attempt), true);
   };
 }

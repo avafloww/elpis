@@ -16,16 +16,18 @@ export interface HomeDiscordTextExecutionResult {
   readonly completion: HomeTextObservedCompletion | null;
 }
 
-export function createHomeDiscordTextExecutor(input: {
+function executeHomeDiscordText(input: {
   store: ContextGraphStore;
   transport: HomeDiscordTextTransport;
-  now?: () => number;
+  now: () => number;
+  active: boolean;
 }): (
   speechAttemptId: HomeTextSpeechAttemptId,
 ) => Promise<HomeDiscordTextExecutionResult> {
-  const now = input.now ?? Date.now;
   return async (speechAttemptId) => {
-    const existing = input.store.getHomeTextSpeechReceipt(speechAttemptId);
+    const existing = input.active
+      ? input.store.getActiveHomeTextSpeechReceipt(speechAttemptId)
+      : input.store.getHomeTextSpeechReceipt(speechAttemptId);
     if (existing) {
       return {
         state: existing.receipt.phase,
@@ -33,7 +35,9 @@ export function createHomeDiscordTextExecutor(input: {
         completion: null,
       };
     }
-    const speech = input.store.getHomeTextSpeechAttemptById(speechAttemptId);
+    const speech = input.active
+      ? input.store.getActiveHomeTextSpeechAttemptById(speechAttemptId)
+      : input.store.getHomeTextSpeechAttemptById(speechAttemptId);
     let evidence;
     try {
       evidence = await input.transport.send(
@@ -46,52 +50,96 @@ export function createHomeDiscordTextExecutor(input: {
           nonce: speech.attempt.discordNonce,
         },
         () => {
-          input.store.prepareHomeTextSpeechEffect({
+          const effectInput = {
             speechAttemptId,
-            preparedAt: now(),
-          });
+            preparedAt: input.now(),
+          };
+          if (input.active) {
+            input.store.prepareActiveHomeTextSpeechEffect(effectInput);
+          } else {
+            input.store.prepareHomeTextSpeechEffect(effectInput);
+          }
         },
       );
     } catch (error) {
       if (!(error instanceof HomeDiscordTextTransportError)) throw error;
       const phase = error.disposition;
-      const receipt = input.store.recordHomeTextSpeechFailure({
+      const failureInput = {
         speechAttemptId,
         phase,
-        resolvedAt: now(),
-      });
+        resolvedAt: input.now(),
+      };
+      const receipt = input.active
+        ? input.store.recordActiveHomeTextSpeechFailure(failureInput)
+        : input.store.recordHomeTextSpeechFailure(failureInput);
       return { state: phase, receipt, completion: null };
     }
 
     try {
-      const completion = input.store.completeObservedHomeTextSpeech({
+      const completionInput = {
         speechAttemptId,
         evidence: {
-          schemaVersion: 1,
+          schemaVersion: 1 as const,
           speechAttemptId,
           speechEffectId: speech.attempt.speechEffectId,
           messageId: evidence.messageId,
           guildId: evidence.guildId,
           channelId: evidence.channelId,
           discordNonce: evidence.nonce,
-          statusCode: evidence.statusCode,
+          statusCode: 200 as const,
           textBytes: evidence.textBytes,
           textHash: evidence.textHash,
           observedAt: evidence.observedAt,
         },
-      });
+      };
+      const completion = input.active
+        ? input.store.completeObservedActiveHomeTextSpeech(completionInput)
+        : input.store.completeObservedHomeTextSpeech(completionInput);
       return {
         state: 'observed',
         receipt: completion.speechReceipt,
         completion,
       };
     } catch {
-      const receipt = input.store.recordHomeTextSpeechFailure({
+      const failureInput = {
         speechAttemptId,
-        phase: 'issuance_uncertain',
-        resolvedAt: now(),
-      });
+        phase: 'issuance_uncertain' as const,
+        resolvedAt: input.now(),
+      };
+      const receipt = input.active
+        ? input.store.recordActiveHomeTextSpeechFailure(failureInput)
+        : input.store.recordHomeTextSpeechFailure(failureInput);
       return { state: 'issuance_uncertain', receipt, completion: null };
     }
   };
+}
+
+export function createHomeDiscordTextExecutor(input: {
+  store: ContextGraphStore;
+  transport: HomeDiscordTextTransport;
+  now?: () => number;
+}): (
+  speechAttemptId: HomeTextSpeechAttemptId,
+) => Promise<HomeDiscordTextExecutionResult> {
+  return executeHomeDiscordText({
+    store: input.store,
+    transport: input.transport,
+    now: input.now ?? Date.now,
+    active: false,
+  });
+}
+
+export function createActiveHomeDiscordTextExecutor(input: {
+  store: ContextGraphStore;
+  transport: HomeDiscordTextTransport;
+  now?: () => number;
+}): (
+  speechAttemptId: HomeTextSpeechAttemptId,
+) => Promise<HomeDiscordTextExecutionResult> {
+  return executeHomeDiscordText({
+    store: input.store,
+    transport: input.transport,
+    now: input.now ?? Date.now,
+    active: true,
+  });
 }

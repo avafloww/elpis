@@ -6456,6 +6456,18 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DROP TRIGGER context_active_home_text_result_capsules_no_share;
       DROP TRIGGER context_active_home_text_success_transition_guard;
       DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_effect_transition_guard;
+    DROP TRIGGER context_active_home_text_continuation_advance_guard;
+    DROP TRIGGER context_active_home_text_continuation_head_guard;
+    DROP TRIGGER context_active_home_text_coordinator_release_guard;
+    DROP TRIGGER context_active_home_text_speech_receipts_lineage_guard;
+    DROP TRIGGER context_active_home_text_speech_receipts_no_update;
+    DROP TRIGGER context_active_home_text_speech_receipts_no_delete;
+    DROP TRIGGER context_active_home_text_speech_finalizations_lineage_guard;
+    DROP TRIGGER context_active_home_text_speech_finalizations_no_update;
+    DROP TRIGGER context_active_home_text_speech_finalizations_no_delete;
+    DROP TABLE context_active_home_text_speech_finalizations;
+    DROP TABLE context_active_home_text_speech_receipts;
       DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
       DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
     DROP TRIGGER context_active_home_text_speech_attempts_no_update;
@@ -6636,7 +6648,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0055-context-active-home-ingress-admissions',
             '0056-context-active-home-provider-invocation-admissions',
             '0057-context-active-home-provider-execution-ledger',
-            '0058-context-active-home-text-speech-barrier'
+            '0058-context-active-home-text-speech-barrier',
+          '0059-context-active-home-text-speech-delivery'
           );
       PRAGMA user_version = 40;
     `);
@@ -9434,7 +9447,7 @@ test('active home request consumes one admission and rolls back late failure', (
     );
     assert.throws(
       () => value.store.recoverCoordinatedBranch(550),
-      /cannot transition before speech resolution/,
+      /(?:cannot transition before speech resolution|invalid active home provider invocation transition)/,
     );
     assert.equal(
       tableCount(value.database, 'context_continuation_advances'),

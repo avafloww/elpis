@@ -30,6 +30,18 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     DROP TRIGGER context_active_home_text_result_capsules_no_share;
     DROP TRIGGER context_active_home_text_success_transition_guard;
     DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_effect_transition_guard;
+    DROP TRIGGER context_active_home_text_continuation_advance_guard;
+    DROP TRIGGER context_active_home_text_continuation_head_guard;
+    DROP TRIGGER context_active_home_text_coordinator_release_guard;
+    DROP TRIGGER context_active_home_text_speech_receipts_lineage_guard;
+    DROP TRIGGER context_active_home_text_speech_receipts_no_update;
+    DROP TRIGGER context_active_home_text_speech_receipts_no_delete;
+    DROP TRIGGER context_active_home_text_speech_finalizations_lineage_guard;
+    DROP TRIGGER context_active_home_text_speech_finalizations_no_update;
+    DROP TRIGGER context_active_home_text_speech_finalizations_no_delete;
+    DROP TABLE context_active_home_text_speech_finalizations;
+    DROP TABLE context_active_home_text_speech_receipts;
     DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
     DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
     DROP TRIGGER context_active_home_text_speech_attempts_no_update;
@@ -288,7 +300,7 @@ function replaceWithV23Closure(db: ReturnType<typeof openDatabase>): void {
     PRAGMA user_version=23;
   `);
   db.prepare(
-    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings','0047-context-dark-isolated-provider-bindings','0048-context-dark-isolated-provider-binding-order','0049-context-dark-isolated-provider-invocation-admissions','0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier')",
+    "DELETE FROM elpis_migrations WHERE component='core' AND name IN ('0024-global-secretary-authority','0025-gateway-resident-state','0026-gateway-rotation-proposal-checkpoint','0027-discord-person-settings','0028-worker-completion-delivery','0029-context-graph-dark-store','0030-context-root-coordinator','0031-context-shadow-projections','0032-context-event-message-projections','0033-context-system-layer-projections','0034-context-local-branch-request-views','0035-context-dark-ingress-admissions','0036-context-dark-pending-branch-attempts','0037-context-system-layer-approvals','0038-context-system-layer-approval-sources','0039-context-system-profiles','0040-context-system-profile-request-view-bindings','0041-context-dark-pending-profile-binding','0042-context-scoped-runtime-contract-artifact','0043-context-resident-source-inspection-candidates','0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings','0047-context-dark-isolated-provider-bindings','0048-context-dark-isolated-provider-binding-order','0049-context-dark-isolated-provider-invocation-admissions','0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier', '0059-context-active-home-text-speech-delivery')",
   ).run();
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
 }
@@ -348,7 +360,7 @@ test('v24 preserves v23 session and turn history while converting root to option
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    58,
+    59,
   );
   assert.equal(
     (

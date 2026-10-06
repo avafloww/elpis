@@ -165,7 +165,7 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 58;
+const SCHEMA_VERSION = 59;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -7029,6 +7029,802 @@ export function runMigrations(db: DatabaseSync): void {
           BEGIN
             SELECT RAISE(ABORT, 'active home text success cannot recover before speech resolution');
           END;
+      `,
+    },
+    {
+      name: '0059-context-active-home-text-speech-delivery',
+      sql: `
+        CREATE TABLE context_active_home_text_speech_finalizations (
+          speech_attempt_id TEXT PRIMARY KEY,
+          branch_id TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK (phase IN ('pre_dispatch_rejected', 'issuance_uncertain', 'observed')),
+          continuation_revision INTEGER CHECK (continuation_revision IS NULL OR (typeof(continuation_revision) = 'integer' AND continuation_revision >= 1)),
+          receipt_hash TEXT NOT NULL CHECK (length(receipt_hash) = 64 AND receipt_hash NOT GLOB '*[^0-9a-f]*'),
+          finalization_json TEXT NOT NULL CHECK (length(finalization_json) >= 1 AND json_valid(finalization_json)),
+          finalization_hash TEXT NOT NULL CHECK (length(finalization_hash) = 64 AND finalization_hash NOT GLOB '*[^0-9a-f]*'),
+          finalized_at INTEGER NOT NULL CHECK (typeof(finalized_at) = 'integer' AND finalized_at BETWEEN 0 AND 9007199254740991),
+          CHECK ((phase = 'observed' AND continuation_revision IS NOT NULL) OR (phase != 'observed' AND continuation_revision IS NULL)),
+          FOREIGN KEY (speech_attempt_id) REFERENCES context_active_home_text_speech_attempts(speech_attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id) REFERENCES context_branches(branch_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+
+        CREATE TABLE context_active_home_text_speech_receipts (
+          speech_attempt_id TEXT PRIMARY KEY,
+          speech_effect_id TEXT UNIQUE,
+          branch_id TEXT,
+          root_receipt_capsule_id TEXT UNIQUE,
+          phase TEXT NOT NULL CHECK (phase IN ('pre_dispatch_rejected', 'issuance_uncertain', 'observed')),
+          message_id TEXT UNIQUE CHECK (message_id IS NULL OR (typeof(message_id) = 'text' AND instr(message_id, char(0)) = 0 AND length(CAST(message_id AS BLOB)) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*')),
+          guild_id TEXT CHECK (guild_id IS NULL OR (length(guild_id) BETWEEN 17 AND 20 AND guild_id NOT GLOB '*[^0-9]*')),
+          channel_id TEXT CHECK (channel_id IS NULL OR (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*')),
+          discord_nonce TEXT CHECK (discord_nonce IS NULL OR (length(discord_nonce) BETWEEN 1 AND 25 AND discord_nonce NOT GLOB '*[^0-9]*')),
+          status_code INTEGER CHECK (status_code IS NULL OR status_code = 200),
+          evidence_json TEXT CHECK (evidence_json IS NULL OR (length(evidence_json) >= 1 AND json_valid(evidence_json))),
+          evidence_hash TEXT CHECK (evidence_hash IS NULL OR (length(evidence_hash) = 64 AND evidence_hash NOT GLOB '*[^0-9a-f]*')),
+          root_content_json TEXT CHECK (root_content_json IS NULL OR (length(root_content_json) >= 1 AND json_valid(root_content_json))),
+          root_content_hash TEXT CHECK (root_content_hash IS NULL OR (length(root_content_hash) = 64 AND root_content_hash NOT GLOB '*[^0-9a-f]*')),
+          receipt_json TEXT NOT NULL CHECK (length(receipt_json) >= 1 AND json_valid(receipt_json)),
+          receipt_hash TEXT NOT NULL CHECK (length(receipt_hash) = 64 AND receipt_hash NOT GLOB '*[^0-9a-f]*'),
+          resolved_at INTEGER NOT NULL CHECK (typeof(resolved_at) = 'integer' AND resolved_at BETWEEN 0 AND 9007199254740991),
+          CHECK (
+            (phase = 'pre_dispatch_rejected' AND speech_effect_id IS NULL AND branch_id IS NULL AND root_receipt_capsule_id IS NULL AND message_id IS NULL AND guild_id IS NULL AND channel_id IS NULL AND discord_nonce IS NULL AND status_code IS NULL AND evidence_json IS NULL AND evidence_hash IS NULL AND root_content_json IS NULL AND root_content_hash IS NULL)
+            OR (phase = 'issuance_uncertain' AND speech_effect_id IS NOT NULL AND branch_id IS NULL AND root_receipt_capsule_id IS NULL AND message_id IS NULL AND guild_id IS NULL AND channel_id IS NULL AND discord_nonce IS NULL AND status_code IS NULL AND evidence_json IS NULL AND evidence_hash IS NULL AND root_content_json IS NULL AND root_content_hash IS NULL)
+            OR (phase = 'observed' AND speech_effect_id IS NOT NULL AND branch_id IS NOT NULL AND root_receipt_capsule_id IS NOT NULL AND message_id IS NOT NULL AND guild_id IS NOT NULL AND channel_id IS NOT NULL AND discord_nonce IS NOT NULL AND status_code = 200 AND evidence_json IS NOT NULL AND evidence_hash IS NOT NULL AND root_content_json IS NOT NULL AND root_content_hash IS NOT NULL)
+          ),
+          FOREIGN KEY (speech_attempt_id) REFERENCES context_active_home_text_speech_attempts(speech_attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (speech_attempt_id) REFERENCES context_active_home_text_speech_finalizations(speech_attempt_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+          FOREIGN KEY (speech_effect_id) REFERENCES context_effects(effect_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id) REFERENCES context_continuation_advances(branch_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+          FOREIGN KEY (root_receipt_capsule_id) REFERENCES context_capsules(capsule_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_active_home_text_speech_receipts_lineage_guard
+          BEFORE INSERT ON context_active_home_text_speech_receipts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_provider_execution_attempts AS provider_attempts ON provider_attempts.attempt_id = speech.provider_attempt_id
+            JOIN context_effects AS provider_effects ON provider_effects.effect_id = provider_attempts.effect_id
+            JOIN context_branches AS branches ON branches.branch_id = speech.branch_id AND branches.world_id = speech.world_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head ON head.singleton = 1
+            WHERE speech.speech_attempt_id = NEW.speech_attempt_id
+              AND branches.status = 'running'
+              AND branches.authority_epoch = speech.authority_epoch
+              AND coordinator.active_branch_id = speech.branch_id
+              AND coordinator.active_world_id = speech.world_id
+              AND coordinator.base_revision = starts.base_revision
+              AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+              AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+              AND head.revision = starts.base_revision
+              AND head.branch_id IS starts.predecessor_branch_id
+              AND head.world_id IS starts.predecessor_world_id
+              AND provider_effects.status = 'observed'
+              AND provider_effects.resolved_at IS NOT NULL
+              AND json_extract(provider_effects.observation_json, '$.providerOutcomeHash') = speech.provider_outcome_hash
+              AND NEW.resolved_at >= speech.created_at
+              AND (
+                (NEW.phase = 'observed' AND NEW.branch_id = speech.branch_id AND NEW.root_receipt_capsule_id = speech.root_receipt_capsule_id)
+                OR (NEW.phase != 'observed' AND NEW.branch_id IS NULL AND NEW.root_receipt_capsule_id IS NULL)
+              )
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = speech.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = speech.branch_id)
+              AND (
+                (NEW.phase = 'pre_dispatch_rejected' AND NEW.speech_effect_id IS NULL AND NOT EXISTS (SELECT 1 FROM context_effects e WHERE e.effect_id = speech.speech_effect_id))
+                OR
+                (NEW.phase IN ('issuance_uncertain', 'observed') AND NEW.speech_effect_id = speech.speech_effect_id AND EXISTS (
+                  SELECT 1 FROM context_effects e
+                  WHERE e.effect_id = speech.speech_effect_id
+                    AND e.branch_id = speech.branch_id
+                    AND e.world_id = speech.world_id
+                    AND e.destination_world_id = speech.world_id
+                    AND e.effect_kind = 'home_discord_text'
+                    AND e.authority_epoch = speech.authority_epoch
+                    AND e.payload_json = speech.effect_payload_json
+                    AND e.payload_hash = speech.effect_payload_hash
+                    AND e.idempotency_key = speech.speech_attempt_id
+                    AND e.status = 'prepared'
+                    AND e.prepared_at >= speech.created_at
+                    AND NEW.resolved_at >= e.prepared_at
+                ))
+              )
+              AND (
+                NEW.phase != 'observed'
+                OR (
+                  NEW.guild_id = speech.guild_id
+                  AND NEW.channel_id = speech.channel_id
+                  AND NEW.discord_nonce = speech.discord_nonce
+                  AND NEW.evidence_json = json_object(
+                    'schemaVersion', 1,
+                    'speechAttemptId', (speech.speech_attempt_id || ''),
+                    'speechEffectId', (speech.speech_effect_id || ''),
+                    'messageId', (NEW.message_id || ''),
+                    'guildId', (speech.guild_id || ''),
+                    'channelId', (speech.channel_id || ''),
+                    'discordNonce', (speech.discord_nonce || ''),
+                    'statusCode', 200,
+                    'textBytes', speech.visible_bytes,
+                    'textHash', (speech.visible_hash || ''),
+                    'observedAt', NEW.resolved_at
+                  )
+                  AND NEW.evidence_hash = elpis_sha256(NEW.evidence_json)
+                  AND NEW.root_content_json = json_object(
+                    'schemaVersion', 1,
+                    'branchId', (speech.branch_id || ''),
+                    'worldId', (speech.world_id || ''),
+                    'viewManifestHash', (speech.manifest_hash || ''),
+                    'outcome', 'completed',
+                    'authorityEpoch', speech.authority_epoch,
+                    'privateCapsuleId', (speech.result_capsule_id || ''),
+                    'effects', json_array(
+                      json_object('effectId', (provider_effects.effect_id || ''), 'destinationWorldId', (provider_effects.destination_world_id || ''), 'kind', (provider_effects.effect_kind || ''), 'authorityEpoch', provider_effects.authority_epoch, 'payloadHash', (provider_effects.payload_hash || ''), 'status', 'observed', 'preparedAt', provider_effects.prepared_at, 'resolvedAt', provider_effects.resolved_at),
+                      json_object('effectId', (speech.speech_effect_id || ''), 'destinationWorldId', (speech.world_id || ''), 'kind', 'home_discord_text', 'authorityEpoch', speech.authority_epoch, 'payloadHash', (speech.effect_payload_hash || ''), 'status', 'observed', 'preparedAt', (SELECT prepared_at FROM context_effects WHERE effect_id = speech.speech_effect_id), 'resolvedAt', NEW.resolved_at)
+                    ),
+                    'commitments', json_array(),
+                    'blockers', json_array(),
+                    'artifactRefs', json_array()
+                  )
+                  AND NEW.root_content_hash = elpis_sha256(NEW.root_content_json)
+                )
+              )
+              AND NEW.receipt_json = json_object(
+                'schemaVersion', 1,
+                'speechAttemptId', (speech.speech_attempt_id || ''),
+                'speechEffectId', NEW.speech_effect_id,
+                'phase', (NEW.phase || ''),
+                'evidenceHash', NEW.evidence_hash,
+                'rootContentHash', NEW.root_content_hash,
+                'resolvedAt', NEW.resolved_at
+              )
+              AND NEW.receipt_hash = elpis_sha256(NEW.receipt_json)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text speech receipt lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_text_speech_receipts_no_update
+          BEFORE UPDATE ON context_active_home_text_speech_receipts BEGIN
+            SELECT RAISE(ABORT, 'home text speech receipts are immutable');
+          END;
+        CREATE TRIGGER context_active_home_text_speech_receipts_no_delete
+          BEFORE DELETE ON context_active_home_text_speech_receipts BEGIN
+            SELECT RAISE(ABORT, 'home text speech receipts are immutable');
+          END;
+        CREATE TRIGGER context_active_home_text_speech_finalizations_lineage_guard
+          BEFORE INSERT ON context_active_home_text_speech_finalizations
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            JOIN context_branches AS branches ON branches.branch_id = speech.branch_id AND branches.world_id = speech.world_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head ON head.singleton = 1
+            WHERE speech.speech_attempt_id = NEW.speech_attempt_id
+              AND NEW.branch_id = speech.branch_id
+              AND NEW.phase = receipts.phase
+              AND NEW.receipt_hash = receipts.receipt_hash
+              AND NEW.finalized_at = receipts.resolved_at
+              AND NEW.finalization_json = json_object(
+                'schemaVersion', 1,
+                'speechAttemptId', (speech.speech_attempt_id || ''),
+                'phase', (receipts.phase || ''),
+                'branchId', (speech.branch_id || ''),
+                'receiptHash', (receipts.receipt_hash || ''),
+                'continuationRevision', NEW.continuation_revision,
+                'finalizedAt', receipts.resolved_at
+              )
+              AND NEW.finalization_hash = elpis_sha256(NEW.finalization_json)
+              AND (
+                (
+                  receipts.phase = 'pre_dispatch_rejected'
+                  AND NEW.continuation_revision IS NULL
+                  AND branches.status = 'running'
+                  AND coordinator.active_branch_id = speech.branch_id
+                  AND coordinator.active_world_id = speech.world_id
+                  AND coordinator.base_revision = starts.base_revision
+                  AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                  AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                  AND head.revision = starts.base_revision
+                  AND head.branch_id IS starts.predecessor_branch_id
+                  AND head.world_id IS starts.predecessor_world_id
+                  AND NOT EXISTS (SELECT 1 FROM context_effects effects WHERE effects.effect_id = speech.speech_effect_id)
+                  AND NOT EXISTS (SELECT 1 FROM context_continuation_advances advances WHERE advances.branch_id = speech.branch_id)
+                )
+                OR (
+                  receipts.phase = 'issuance_uncertain'
+                  AND NEW.continuation_revision IS NULL
+                  AND branches.status = 'running'
+                  AND coordinator.active_branch_id = speech.branch_id
+                  AND coordinator.active_world_id = speech.world_id
+                  AND coordinator.base_revision = starts.base_revision
+                  AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                  AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                  AND head.revision = starts.base_revision
+                  AND head.branch_id IS starts.predecessor_branch_id
+                  AND head.world_id IS starts.predecessor_world_id
+                  AND EXISTS (
+                    SELECT 1 FROM context_effects effects
+                    WHERE effects.effect_id = speech.speech_effect_id
+                      AND effects.status = 'uncertain'
+                      AND effects.resolved_at = receipts.resolved_at
+                      AND effects.observation_json = json_object('schemaVersion', 1, 'speechReceiptHash', (receipts.receipt_hash || ''))
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM context_continuation_advances advances WHERE advances.branch_id = speech.branch_id)
+                )
+                OR (
+                  receipts.phase = 'observed'
+                  AND receipts.branch_id = speech.branch_id
+                  AND receipts.root_receipt_capsule_id = speech.root_receipt_capsule_id
+                  AND NEW.continuation_revision = starts.base_revision + 1
+                  AND branches.status = 'yielded'
+                  AND branches.ended_at = receipts.resolved_at
+                  AND EXISTS (
+                    SELECT 1 FROM context_effects effects
+                    WHERE effects.effect_id = speech.speech_effect_id
+                      AND effects.status = 'observed'
+                      AND effects.resolved_at = receipts.resolved_at
+                      AND effects.observation_json = json_object('schemaVersion', 1, 'speechReceiptHash', (receipts.receipt_hash || ''), 'evidenceHash', (receipts.evidence_hash || ''), 'messageId', (receipts.message_id || ''))
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM context_capsules roots
+                    WHERE roots.capsule_id = speech.root_receipt_capsule_id
+                      AND roots.branch_id = speech.branch_id
+                      AND roots.world_id = speech.world_id
+                      AND roots.capsule_kind = 'root_receipt'
+                      AND roots.view_manifest_hash = speech.manifest_hash
+                      AND roots.source_root_hash = speech.provider_outcome_hash
+                      AND roots.policy_generation = speech.policy_generation
+                      AND roots.summarizer_model IS NULL
+                      AND roots.summarizer_prompt_hash IS NULL
+                      AND roots.content_json = receipts.root_content_json
+                      AND roots.content_hash = receipts.root_content_hash
+                      AND roots.created_at = receipts.resolved_at
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM context_continuation_advances advances
+                    WHERE advances.branch_id = speech.branch_id
+                      AND advances.world_id = speech.world_id
+                      AND advances.revision = NEW.continuation_revision
+                      AND advances.predecessor_branch_id IS starts.predecessor_branch_id
+                      AND advances.predecessor_world_id IS starts.predecessor_world_id
+                      AND advances.advanced_at = receipts.resolved_at
+                  )
+                  AND head.revision = NEW.continuation_revision
+                  AND head.branch_id = speech.branch_id
+                  AND head.world_id = speech.world_id
+                  AND head.updated_at = receipts.resolved_at
+                  AND coordinator.active_branch_id IS NULL
+                  AND coordinator.active_world_id IS NULL
+                  AND coordinator.base_revision = NEW.continuation_revision
+                  AND coordinator.predecessor_branch_id = speech.branch_id
+                  AND coordinator.predecessor_world_id = speech.world_id
+                  AND coordinator.updated_at = receipts.resolved_at
+                )
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text speech finalization lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_text_speech_finalizations_no_update
+          BEFORE UPDATE ON context_active_home_text_speech_finalizations BEGIN
+            SELECT RAISE(ABORT, 'home text speech finalizations are immutable');
+          END;
+        CREATE TRIGGER context_active_home_text_speech_finalizations_no_delete
+          BEFORE DELETE ON context_active_home_text_speech_finalizations BEGIN
+            SELECT RAISE(ABORT, 'home text speech finalizations are immutable');
+          END;
+
+        CREATE TRIGGER context_active_home_text_speech_effect_transition_guard
+          BEFORE UPDATE OF status, resolved_at, observation_json ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_attempts
+            WHERE speech_effect_id = OLD.effect_id
+          ) AND NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            WHERE speech.speech_effect_id = OLD.effect_id
+              AND OLD.status = 'prepared'
+              AND OLD.prepared_at BETWEEN speech.created_at AND 9007199254740991
+              AND NEW.resolved_at = receipts.resolved_at
+              AND NEW.resolved_at BETWEEN OLD.prepared_at AND 9007199254740991
+              AND (
+                (
+                  receipts.phase = 'issuance_uncertain'
+                  AND NEW.status = 'uncertain'
+                  AND NEW.observation_json = json_object('schemaVersion', 1, 'speechReceiptHash', (receipts.receipt_hash || ''))
+                )
+                OR (
+                  receipts.phase = 'observed'
+                  AND NEW.status = 'observed'
+                  AND NEW.observation_json = json_object('schemaVersion', 1, 'speechReceiptHash', (receipts.receipt_hash || ''), 'evidenceHash', (receipts.evidence_hash || ''), 'messageId', (receipts.message_id || ''))
+                )
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text speech effect transition lacks its receipt');
+          END;
+
+        CREATE TRIGGER context_active_home_text_continuation_advance_guard
+          BEFORE INSERT ON context_continuation_advances
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_receipts
+            WHERE phase = 'observed' AND branch_id = NEW.branch_id
+          ) AND NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            WHERE speech.branch_id = NEW.branch_id
+              AND receipts.phase = 'observed'
+              AND receipts.branch_id = speech.branch_id
+              AND NEW.world_id = speech.world_id
+              AND NEW.revision = starts.base_revision + 1
+              AND NEW.predecessor_branch_id IS starts.predecessor_branch_id
+              AND NEW.predecessor_world_id IS starts.predecessor_world_id
+              AND NEW.advanced_at = receipts.resolved_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text continuation advance does not match its receipt');
+          END;
+        CREATE TRIGGER context_active_home_text_continuation_head_guard
+          BEFORE UPDATE ON context_continuation_head
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_receipts
+            WHERE phase = 'observed' AND branch_id = NEW.branch_id
+          ) AND NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            JOIN context_continuation_advances AS advances ON advances.branch_id = speech.branch_id
+            WHERE speech.branch_id = NEW.branch_id
+              AND receipts.phase = 'observed'
+              AND OLD.revision = starts.base_revision
+              AND NEW.revision = starts.base_revision + 1
+              AND NEW.world_id = speech.world_id
+              AND NEW.updated_at = receipts.resolved_at
+              AND advances.revision = NEW.revision
+              AND advances.world_id = NEW.world_id
+              AND advances.advanced_at = NEW.updated_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text continuation head does not match its receipt');
+          END;
+        CREATE TRIGGER context_active_home_text_coordinator_release_guard
+          BEFORE UPDATE ON context_root_coordinator
+          WHEN OLD.active_branch_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_receipts
+            WHERE phase = 'observed' AND branch_id = OLD.active_branch_id
+          ) AND NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            JOIN context_continuation_head AS head ON head.singleton = 1
+            WHERE speech.branch_id = OLD.active_branch_id
+              AND speech.world_id = OLD.active_world_id
+              AND receipts.phase = 'observed'
+              AND NEW.active_branch_id IS NULL
+              AND NEW.active_world_id IS NULL
+              AND NEW.base_revision = starts.base_revision + 1
+              AND NEW.predecessor_branch_id = speech.branch_id
+              AND NEW.predecessor_world_id = speech.world_id
+              AND NEW.updated_at = receipts.resolved_at
+              AND head.revision = NEW.base_revision
+              AND head.branch_id = NEW.predecessor_branch_id
+              AND head.world_id = NEW.predecessor_world_id
+              AND head.updated_at = NEW.updated_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text coordinator release does not match its receipt');
+          END;
+        DROP TRIGGER context_active_home_provider_invocation_effect_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_effect_guard
+          BEFORE INSERT ON context_effects
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT (
+              EXISTS (
+                SELECT 1
+                FROM context_active_home_provider_execution_attempts AS attempts
+                JOIN context_graph_activation AS activation ON activation.singleton = 1
+                WHERE attempts.effect_id = NEW.effect_id
+                  AND attempts.branch_id = NEW.branch_id
+                  AND attempts.world_id = NEW.world_id
+                  AND attempts.world_id = NEW.destination_world_id
+                  AND attempts.authority_epoch = NEW.authority_epoch
+                  AND attempts.effect_payload_json = NEW.payload_json
+                  AND attempts.effect_payload_hash = NEW.payload_hash
+                  AND NEW.effect_kind = 'isolated_provider_completion'
+                  AND NEW.idempotency_key = attempts.attempt_id
+                  AND NEW.status = 'prepared'
+                  AND NEW.resolved_at IS NULL
+                  AND NEW.observation_json IS NULL
+                  AND NEW.prepared_at >= attempts.authorized_at
+                  AND activation.mode = 'active'
+                  AND activation.epoch = attempts.active_activation_epoch
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM context_active_home_text_speech_attempts AS speech
+                JOIN context_branches AS branches ON branches.branch_id = speech.branch_id AND branches.world_id = speech.world_id
+                JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+                JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+                JOIN context_continuation_head AS head ON head.singleton = 1
+                JOIN context_graph_activation AS activation ON activation.singleton = 1
+                WHERE speech.speech_effect_id = NEW.effect_id
+                  AND speech.branch_id = NEW.branch_id
+                  AND speech.world_id = NEW.world_id
+                  AND speech.world_id = NEW.destination_world_id
+                  AND speech.authority_epoch = NEW.authority_epoch
+                  AND speech.effect_payload_json = NEW.payload_json
+                  AND speech.effect_payload_hash = NEW.payload_hash
+                  AND NEW.effect_kind = 'home_discord_text'
+                  AND NEW.idempotency_key = speech.speech_attempt_id
+                  AND NEW.status = 'prepared'
+                  AND NEW.resolved_at IS NULL
+                  AND NEW.observation_json IS NULL
+                  AND NEW.prepared_at >= speech.created_at
+                  AND branches.status = 'running'
+                  AND branches.authority_epoch = speech.authority_epoch
+                  AND coordinator.active_branch_id = speech.branch_id
+                  AND coordinator.active_world_id = speech.world_id
+                  AND coordinator.base_revision = starts.base_revision
+                  AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+                  AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+                  AND head.revision = starts.base_revision
+                  AND head.branch_id IS starts.predecessor_branch_id
+                  AND head.world_id IS starts.predecessor_world_id
+                  AND activation.mode = 'active'
+                  AND activation.epoch = speech.active_activation_epoch
+                  AND NOT EXISTS (SELECT 1 FROM context_active_home_text_speech_receipts r WHERE r.speech_attempt_id = speech.speech_attempt_id)
+                  AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = speech.branch_id)
+                  AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = speech.branch_id)
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation effect is not authorized');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_capsule_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_capsule_guard
+          BEFORE INSERT ON context_capsules
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT (
+              EXISTS (
+                SELECT 1
+                FROM context_active_home_text_speech_attempts AS speech
+                WHERE speech.result_capsule_id = NEW.capsule_id
+                  AND speech.branch_id = NEW.branch_id
+                  AND speech.world_id = NEW.world_id
+                  AND NEW.capsule_kind = 'private'
+                  AND NEW.view_manifest_hash = speech.manifest_hash
+                  AND NEW.source_root_hash = speech.provider_outcome_hash
+                  AND NEW.policy_generation = speech.policy_generation
+                  AND NEW.summarizer_model IS NULL
+                  AND NEW.summarizer_prompt_hash IS NULL
+                  AND NEW.content_json = speech.capsule_content_json
+                  AND NEW.content_hash = speech.capsule_content_hash
+                  AND NEW.created_at = speech.created_at
+                  AND NOT EXISTS (
+                    SELECT 1 FROM context_share_grants AS shares
+                    WHERE shares.source_capsule_id = NEW.capsule_id
+                  )
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM context_active_home_text_speech_attempts AS speech
+                JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+                JOIN context_effects AS effect ON effect.effect_id = speech.speech_effect_id
+                WHERE speech.root_receipt_capsule_id = NEW.capsule_id
+                  AND speech.branch_id = NEW.branch_id
+                  AND speech.world_id = NEW.world_id
+                  AND receipts.phase = 'observed'
+                  AND receipts.branch_id = speech.branch_id
+                  AND receipts.root_receipt_capsule_id = speech.root_receipt_capsule_id
+                  AND receipts.speech_effect_id = speech.speech_effect_id
+                  AND effect.status = 'observed'
+                  AND effect.resolved_at = receipts.resolved_at
+                  AND effect.observation_json = (json_object(
+                    'schemaVersion', 1,
+                    'speechReceiptHash', (receipts.receipt_hash || ''),
+                    'evidenceHash', (receipts.evidence_hash || ''),
+                    'messageId', (receipts.message_id || '')
+                  ) || '')
+                  AND NEW.capsule_kind = 'root_receipt'
+                  AND NEW.view_manifest_hash = speech.manifest_hash
+                  AND NEW.source_root_hash = speech.provider_outcome_hash
+                  AND NEW.policy_generation = speech.policy_generation
+                  AND NEW.summarizer_model IS NULL
+                  AND NEW.summarizer_prompt_hash IS NULL
+                  AND NEW.content_json = receipts.root_content_json
+                  AND NEW.content_hash = receipts.root_content_hash
+                  AND NEW.created_at = receipts.resolved_at
+                  AND NOT EXISTS (
+                    SELECT 1 FROM context_share_grants AS shares
+                    WHERE shares.source_capsule_id = NEW.capsule_id
+                  )
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home provider invocation has no capsule authority');
+          END;
+
+        DROP TRIGGER context_active_home_text_success_transition_guard;
+        CREATE TRIGGER context_active_home_text_success_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_attempts
+            WHERE branch_id = OLD.branch_id
+          )
+            AND NOT (
+              (
+                OLD.status = 'running'
+                AND NEW.status = 'yielded'
+                AND NEW.ended_at IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM context_active_home_text_speech_attempts AS speech
+                  JOIN context_active_home_text_speech_receipts AS receipts
+                    ON receipts.speech_attempt_id = speech.speech_attempt_id
+                  JOIN context_effects AS effects
+                    ON effects.effect_id = speech.speech_effect_id
+                  JOIN context_capsules AS roots
+                    ON roots.capsule_id = speech.root_receipt_capsule_id
+                  WHERE speech.branch_id = OLD.branch_id
+                    AND speech.world_id = OLD.world_id
+                    AND receipts.phase = 'observed'
+                    AND receipts.branch_id = speech.branch_id
+                    AND receipts.root_receipt_capsule_id = speech.root_receipt_capsule_id
+                    AND effects.status = 'observed'
+                    AND effects.resolved_at = NEW.ended_at
+                    AND receipts.resolved_at = NEW.ended_at
+                    AND roots.branch_id = speech.branch_id
+                    AND roots.world_id = speech.world_id
+                    AND roots.capsule_kind = 'root_receipt'
+                    AND roots.view_manifest_hash = speech.manifest_hash
+                    AND roots.source_root_hash = speech.provider_outcome_hash
+                    AND roots.policy_generation = speech.policy_generation
+                    AND roots.summarizer_model IS NULL
+                    AND roots.summarizer_prompt_hash IS NULL
+                    AND roots.content_json = receipts.root_content_json
+                    AND roots.content_hash = receipts.root_content_hash
+                    AND roots.created_at = NEW.ended_at
+                )
+              )
+              OR (
+                OLD.status = 'running'
+                AND NEW.status = 'crashed'
+                AND NEW.ended_at IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM context_active_home_text_speech_attempts AS speech
+                  JOIN context_active_home_text_speech_receipts AS receipts
+                    ON receipts.speech_attempt_id = speech.speech_attempt_id
+                  JOIN context_active_home_text_speech_finalizations AS finalizations
+                    ON finalizations.speech_attempt_id = speech.speech_attempt_id
+                  WHERE speech.branch_id = OLD.branch_id
+                    AND speech.world_id = OLD.world_id
+                    AND receipts.phase IN ('pre_dispatch_rejected', 'issuance_uncertain')
+                    AND receipts.resolved_at <= NEW.ended_at
+                    AND finalizations.phase = receipts.phase
+                    AND finalizations.branch_id = speech.branch_id
+                    AND finalizations.continuation_revision IS NULL
+                    AND finalizations.receipt_hash = receipts.receipt_hash
+                    AND finalizations.finalized_at = receipts.resolved_at
+                    AND NOT EXISTS (
+                      SELECT 1 FROM context_effects AS pending
+                      WHERE pending.branch_id = OLD.branch_id
+                        AND pending.status = 'prepared'
+                    )
+                )
+              )
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home text success cannot transition before speech resolution');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_transition_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_transition_guard
+          BEFORE UPDATE OF status, ended_at ON context_branches
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_provider_invocation_admissions
+            WHERE branch_id = OLD.branch_id
+          )
+            AND NOT (
+              OLD.status = 'running'
+              AND NEW.status = 'crashed'
+              AND NEW.ended_at IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM context_active_home_provider_execution_attempts AS attempts
+                WHERE attempts.branch_id = OLD.branch_id
+                  AND attempts.world_id = OLD.world_id
+                  AND attempts.authority_epoch = OLD.authority_epoch
+                  AND NEW.ended_at >= attempts.authorized_at
+                  AND EXISTS (
+                    SELECT 1
+                    FROM context_active_home_provider_outcomes AS outcomes
+                    LEFT JOIN context_effects AS effect
+                      ON effect.effect_id = attempts.effect_id
+                    WHERE outcomes.attempt_id = attempts.attempt_id
+                      AND outcomes.completed_at <= NEW.ended_at
+                      AND (
+                        (outcomes.phase = 'pre_dispatch_rejected'
+                          AND outcomes.effect_id IS NULL
+                          AND effect.effect_id IS NULL)
+                        OR
+                        (outcomes.phase = 'issuance_uncertain'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND effect.status = 'uncertain'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                        OR
+                        (outcomes.phase = 'issued'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND outcomes.outcome_kind = 'visible_success'
+                          AND effect.status = 'observed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                        OR
+                        (outcomes.phase = 'issued'
+                          AND outcomes.effect_id = attempts.effect_id
+                          AND outcomes.outcome_kind = 'visible_error'
+                          AND effect.status = 'failed'
+                          AND effect.resolved_at = outcomes.completed_at
+                          AND effect.observation_json = (json_object(
+                            'schemaVersion', 1,
+                            'providerOutcomeHash', (outcomes.outcome_hash || '')
+                          ) || ''))
+                      )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM context_effects AS effects
+                    WHERE effects.branch_id = OLD.branch_id
+                      AND effects.status = 'prepared'
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM context_active_home_text_speech_attempts AS speech
+                      WHERE speech.branch_id = OLD.branch_id
+                    )
+                    OR EXISTS (
+                      SELECT 1
+                      FROM context_active_home_text_speech_attempts AS speech
+                      JOIN context_active_home_text_speech_receipts AS receipts
+                        ON receipts.speech_attempt_id = speech.speech_attempt_id
+                      JOIN context_active_home_text_speech_finalizations AS finalizations
+                        ON finalizations.speech_attempt_id = speech.speech_attempt_id
+                      WHERE speech.branch_id = OLD.branch_id
+                        AND speech.world_id = OLD.world_id
+                        AND receipts.phase IN ('pre_dispatch_rejected', 'issuance_uncertain')
+                        AND receipts.resolved_at <= NEW.ended_at
+                        AND finalizations.phase = receipts.phase
+                        AND finalizations.branch_id = speech.branch_id
+                        AND finalizations.continuation_revision IS NULL
+                        AND finalizations.receipt_hash = receipts.receipt_hash
+                        AND finalizations.finalized_at = receipts.resolved_at
+                    )
+                  )
+              )
+              OR (
+                OLD.status = 'running'
+                AND NEW.status = 'yielded'
+                AND NEW.ended_at IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM context_active_home_text_speech_attempts AS speech
+                  JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+                  JOIN context_effects AS effects ON effects.effect_id = speech.speech_effect_id
+                  JOIN context_capsules AS roots ON roots.capsule_id = speech.root_receipt_capsule_id
+                  WHERE speech.branch_id = OLD.branch_id
+                    AND speech.world_id = OLD.world_id
+                    AND receipts.phase = 'observed'
+                    AND receipts.branch_id = speech.branch_id
+                    AND receipts.root_receipt_capsule_id = speech.root_receipt_capsule_id
+                    AND effects.status = 'observed'
+                    AND effects.resolved_at = NEW.ended_at
+                    AND receipts.resolved_at = NEW.ended_at
+                    AND roots.branch_id = speech.branch_id
+                    AND roots.world_id = speech.world_id
+                    AND roots.capsule_kind = 'root_receipt'
+                    AND roots.view_manifest_hash = speech.manifest_hash
+                    AND roots.source_root_hash = speech.provider_outcome_hash
+                    AND roots.policy_generation = speech.policy_generation
+                    AND roots.summarizer_model IS NULL
+                    AND roots.summarizer_prompt_hash IS NULL
+                    AND roots.content_json = receipts.root_content_json
+                    AND roots.content_hash = receipts.root_content_hash
+                    AND roots.created_at = NEW.ended_at
+                )
+              )
+            )
+          BEGIN
+
+            SELECT RAISE(ABORT, 'invalid active home provider invocation transition');
+          END;
+
+        DROP TRIGGER context_active_home_provider_invocation_advance_guard;
+        CREATE TRIGGER context_active_home_provider_invocation_advance_guard
+          BEFORE INSERT ON context_continuation_advances
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_receipts
+            WHERE phase = 'observed' AND branch_id = NEW.branch_id
+          ) AND NOT EXISTS (
+            SELECT 1
+            FROM context_active_home_text_speech_attempts AS speech
+            JOIN context_active_home_text_speech_receipts AS receipts ON receipts.speech_attempt_id = speech.speech_attempt_id
+            JOIN context_branch_starts AS starts ON starts.branch_id = speech.branch_id
+            WHERE speech.branch_id = NEW.branch_id
+              AND receipts.phase = 'observed'
+              AND receipts.branch_id = speech.branch_id
+              AND NEW.world_id = speech.world_id
+              AND NEW.revision = starts.base_revision + 1
+              AND NEW.predecessor_branch_id IS starts.predecessor_branch_id
+              AND NEW.predecessor_world_id IS starts.predecessor_world_id
+              AND NEW.advanced_at = receipts.resolved_at
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text continuation advance does not match its receipt');
+          END;
+
+        DROP TRIGGER context_active_home_text_success_recovery_guard;
+        CREATE TRIGGER context_active_home_text_success_recovery_guard
+          BEFORE INSERT ON context_branch_recoveries
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_attempts
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_active_home_text_speech_attempts AS speech
+              JOIN context_active_home_text_speech_receipts AS receipts
+                ON receipts.speech_attempt_id = speech.speech_attempt_id
+              JOIN context_active_home_text_speech_finalizations AS finalizations
+                ON finalizations.speech_attempt_id = speech.speech_attempt_id
+              JOIN context_branches AS branches ON branches.branch_id = speech.branch_id
+              WHERE speech.branch_id = NEW.branch_id
+                AND speech.world_id = NEW.world_id
+                AND branches.status = 'crashed'
+                AND branches.ended_at IS NOT NULL
+                AND receipts.phase IN ('pre_dispatch_rejected', 'issuance_uncertain')
+                AND receipts.resolved_at <= branches.ended_at
+                AND branches.ended_at <= NEW.recovered_at
+                AND finalizations.phase = receipts.phase
+                AND finalizations.branch_id = speech.branch_id
+                AND finalizations.continuation_revision IS NULL
+                AND finalizations.receipt_hash = receipts.receipt_hash
+                AND finalizations.finalized_at = receipts.resolved_at
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home text success cannot recover before speech resolution');
+          END;
+
+        DROP TRIGGER context_active_home_text_result_capsules_no_share;
+        CREATE TRIGGER context_active_home_text_result_capsules_no_share
+          BEFORE INSERT ON context_share_grants
+          WHEN EXISTS (
+            SELECT 1 FROM context_active_home_text_speech_attempts
+            WHERE result_capsule_id = NEW.source_capsule_id
+               OR root_receipt_capsule_id = NEW.source_capsule_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home text capsules are world-private');
+          END;
+
       `,
     },
   ]);
