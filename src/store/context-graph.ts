@@ -58,6 +58,7 @@ export type DarkIsolatedProviderInvocationId =
   ContextId<'DarkIsolatedProviderInvocationId'>;
 export type IsolatedProviderExecutionAttemptId =
   ContextId<'IsolatedProviderExecutionAttemptId'>;
+export type HomeTextSpeechAttemptId = ContextId<'HomeTextSpeechAttemptId'>;
 export type SystemProfileId = ContextId<'SystemProfileId'>;
 export type SystemProfileRequestViewBindingId =
   ContextId<'SystemProfileRequestViewBindingId'>;
@@ -177,6 +178,14 @@ export const isolatedProviderExecutionAttemptId = (
     'isolatedProviderExecutionAttemptId',
     value,
     'isolated-provider-attempt:',
+  );
+export const homeTextSpeechAttemptId = (
+  value: string,
+): HomeTextSpeechAttemptId =>
+  branded<'HomeTextSpeechAttemptId'>(
+    'homeTextSpeechAttemptId',
+    value,
+    'home-text-speech:',
   );
 export const systemProfileId = (value: string): SystemProfileId =>
   branded<'SystemProfileId'>('systemProfileId', value, 'system-profile:');
@@ -996,6 +1005,50 @@ export interface IsolatedProviderOutcomeRecord {
   readonly outcomeHash: string;
 }
 
+export interface HomeTextSpeechAttemptV1 {
+  readonly schemaVersion: 1;
+  readonly speechAttemptId: HomeTextSpeechAttemptId;
+  readonly providerAttemptId: IsolatedProviderExecutionAttemptId;
+  readonly providerOutcomeHash: string;
+  readonly resultCapsuleId: CapsuleId;
+  readonly speechEffectId: EffectId;
+  readonly rootReceiptCapsuleId: CapsuleId;
+  readonly sourceActivationEpoch: number;
+  readonly activeActivationEpoch: number;
+  readonly branchId: BranchId;
+  readonly worldId: WorldId;
+  readonly authorityEpoch: number;
+  readonly requestViewId: LocalBranchRequestViewId;
+  readonly requestViewHash: string;
+  readonly manifestHash: string;
+  readonly policyGeneration: number;
+  readonly activationScopeHash: string;
+  readonly guildId: string;
+  readonly channelId: string;
+  readonly visibleText: string;
+  readonly visibleBytes: number;
+  readonly visibleHash: string;
+  readonly discordNonce: string;
+  readonly capsuleContentHash: string;
+  readonly effectPayloadHash: string;
+  readonly createdAt: number;
+}
+
+export interface HomeTextSpeechAttemptRecord {
+  readonly attempt: HomeTextSpeechAttemptV1;
+  readonly capsuleContentJson: string;
+  readonly effectPayloadJson: string;
+  readonly attemptJson: string;
+  readonly attemptHash: string;
+}
+
+export interface HomeTextProviderSuccessRecord {
+  readonly fresh: boolean;
+  readonly outcome: IsolatedProviderOutcomeRecord;
+  readonly speech: HomeTextSpeechAttemptRecord;
+  readonly resultCapsule: CapsuleRecord;
+}
+
 export interface RecoveredIsolatedProviderBindingVerificationV1 {
   readonly schemaVersion: 1;
   readonly verificationKind: 'latest_recovered_dark_isolated_provider_binding';
@@ -1083,6 +1136,28 @@ function serialize(value: unknown): string {
 
 export function hashContextBytes(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function homeTextSpeechIdentities(
+  providerAttemptId: IsolatedProviderExecutionAttemptId,
+  providerOutcomeHash: string,
+): {
+  speechAttemptId: HomeTextSpeechAttemptId;
+  resultCapsuleId: CapsuleId;
+  speechEffectId: EffectId;
+  rootReceiptCapsuleId: CapsuleId;
+  discordNonce: string;
+} {
+  const digest = hashContextBytes(
+    serialize({ schemaVersion: 1, providerAttemptId, providerOutcomeHash }),
+  );
+  return {
+    speechAttemptId: homeTextSpeechAttemptId(`home-text-speech:${digest}`),
+    resultCapsuleId: capsuleId(`capsule:home-text-result:${digest}`),
+    speechEffectId: effectId(`effect:home-text-speech:${digest}`),
+    rootReceiptCapsuleId: capsuleId(`capsule:home-text-root:${digest}`),
+    discordNonce: BigInt(`0x${digest.slice(0, 20)}`).toString(10),
+  };
 }
 
 function residentSoulSnapshotId(input: {
@@ -2503,6 +2578,38 @@ interface IsolatedProviderOutcomeRow {
   outcome_json: string;
   outcome_hash: string;
   completed_at: number;
+}
+
+interface HomeTextSpeechAttemptRow {
+  speech_attempt_id: string;
+  provider_attempt_id: string;
+  provider_outcome_hash: string;
+  result_capsule_id: string;
+  speech_effect_id: string;
+  root_receipt_capsule_id: string;
+  source_activation_epoch: number;
+  active_activation_epoch: number;
+  branch_id: string;
+  world_id: string;
+  authority_epoch: number;
+  request_view_id: string;
+  request_view_hash: string;
+  manifest_hash: string;
+  policy_generation: number;
+  activation_scope_hash: string;
+  guild_id: string;
+  channel_id: string;
+  visible_text: string;
+  visible_bytes: number;
+  visible_hash: string;
+  discord_nonce: string;
+  capsule_content_json: string;
+  capsule_content_hash: string;
+  effect_payload_json: string;
+  effect_payload_hash: string;
+  attempt_json: string;
+  attempt_hash: string;
+  created_at: number;
 }
 
 interface ScopedRuntimeContractArtifactRow {
@@ -5079,6 +5186,70 @@ export class ContextGraphStore {
     visibleText: string;
     completedAt: number;
   }): IsolatedProviderOutcomeRecord {
+    if (input.outcomeKind === 'visible_success') {
+      if (input.phase !== 'issued') {
+        throw new Error('successful isolated provider outcome must be issued');
+      }
+      return this.recordHomeTextProviderSuccess({
+        attemptId: input.attemptId,
+        visibleText: input.visibleText,
+        completedAt: input.completedAt,
+      }).outcome;
+    }
+    return transaction(this.database, () =>
+      this.insertIsolatedProviderOutcomeInTransaction(input),
+    );
+  }
+
+  recordHomeTextProviderSuccess(input: {
+    attemptId: IsolatedProviderExecutionAttemptId;
+    visibleText: string;
+    completedAt: number;
+  }): HomeTextProviderSuccessRecord {
+    const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
+    const completedAt = timestamp('completedAt', input.completedAt);
+    if (typeof input.visibleText !== 'string' || Buffer.byteLength(input.visibleText) < 1) {
+      throw new Error('home text provider result must be nonempty text');
+    }
+    return transaction(this.database, () => {
+      const existingOutcome = this.getIsolatedProviderOutcome(attemptId);
+      if (existingOutcome) {
+        if (
+          existingOutcome.outcome.outcomeKind !== 'visible_success' ||
+          existingOutcome.outcome.phase !== 'issued' ||
+          existingOutcome.outcome.visibleText !== input.visibleText ||
+          existingOutcome.outcome.completedAt !== completedAt
+        ) {
+          throw new Error('home text provider success already exists with different content');
+        }
+        const speech = this.getHomeTextSpeechAttempt(attemptId);
+        if (!speech) throw new Error('home text provider success has no speech barrier');
+        return {
+          fresh: false,
+          outcome: existingOutcome,
+          speech,
+          resultCapsule: this.requireHomeTextResultCapsule(speech),
+        };
+      }
+      const outcome = this.insertIsolatedProviderOutcomeInTransaction({
+        attemptId,
+        outcomeKind: 'visible_success',
+        phase: 'issued',
+        visibleText: input.visibleText,
+        completedAt,
+      });
+      const created = this.insertHomeTextSpeechAttemptInTransaction(outcome);
+      return { fresh: true, outcome, ...created };
+    });
+  }
+
+  private insertIsolatedProviderOutcomeInTransaction(input: {
+    attemptId: IsolatedProviderExecutionAttemptId;
+    outcomeKind: 'visible_success' | 'visible_error';
+    phase: IsolatedProviderOutcomePhase;
+    visibleText: string;
+    completedAt: number;
+  }): IsolatedProviderOutcomeRecord {
     const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
     const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
     if (!attempt) throw new Error('isolated provider execution attempt is missing');
@@ -5113,50 +5284,433 @@ export class ContextGraphStore {
     });
     const outcomeJson = serialize(outcome);
     const outcomeHash = hashContextBytes(outcomeJson);
-    return transaction(this.database, () => {
-      this.database
+    this.database
+      .prepare(
+        `INSERT INTO context_isolated_provider_outcomes(
+           attempt_id, effect_id, outcome_kind, phase, visible_text,
+           visible_bytes, visible_hash, outcome_json, outcome_hash, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        attemptId,
+        effectIdValue,
+        input.outcomeKind,
+        input.phase,
+        input.visibleText,
+        visibleBytes,
+        visibleHash,
+        outcomeJson,
+        outcomeHash,
+        completedAt,
+      );
+    if (effectIdValue !== null) {
+      const status: Exclude<EffectStatus, 'prepared'> =
+        input.phase === 'issuance_uncertain'
+          ? 'uncertain'
+          : input.outcomeKind === 'visible_success'
+            ? 'observed'
+            : 'failed';
+      const observationJson = serialize({
+        schemaVersion: 1,
+        providerOutcomeHash: outcomeHash,
+      });
+      const update = this.database
         .prepare(
-          `INSERT INTO context_isolated_provider_outcomes(
-             attempt_id, effect_id, outcome_kind, phase, visible_text,
-             visible_bytes, visible_hash, outcome_json, outcome_hash, completed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `UPDATE context_effects
+           SET status = ?, resolved_at = ?, observation_json = ?
+           WHERE effect_id = ? AND status = 'prepared'`,
         )
-        .run(
-          attemptId,
-          effectIdValue,
-          input.outcomeKind,
-          input.phase,
-          input.visibleText,
-          visibleBytes,
-          visibleHash,
-          outcomeJson,
-          outcomeHash,
-          completedAt,
-        );
-      if (effectIdValue !== null) {
-        const status: Exclude<EffectStatus, 'prepared'> =
-          input.phase === 'issuance_uncertain'
-            ? 'uncertain'
-            : input.outcomeKind === 'visible_success'
-              ? 'observed'
-              : 'failed';
-        const observationJson = serialize({
-          schemaVersion: 1,
-          providerOutcomeHash: outcomeHash,
-        });
-        const update = this.database
-          .prepare(
-            `UPDATE context_effects
-             SET status = ?, resolved_at = ?, observation_json = ?
-             WHERE effect_id = ? AND status = 'prepared'`,
-          )
-          .run(status, completedAt, observationJson, effectIdValue);
-        if (update.changes !== 1) {
-          throw new Error('isolated provider execution effect is not prepared');
-        }
+        .run(status, completedAt, observationJson, effectIdValue);
+      if (update.changes !== 1) {
+        throw new Error('isolated provider execution effect is not prepared');
       }
-      return { outcome, outcomeJson, outcomeHash };
+    }
+    return { outcome, outcomeJson, outcomeHash };
+  }
+
+  private insertHomeTextSpeechAttemptInTransaction(
+    outcomeRecord: IsolatedProviderOutcomeRecord,
+  ): {
+    speech: HomeTextSpeechAttemptRecord;
+    resultCapsule: CapsuleRecord;
+  } {
+    const outcome = outcomeRecord.outcome;
+    if (outcome.outcomeKind !== 'visible_success' || outcome.phase !== 'issued') {
+      throw new Error('home text speech requires an issued successful provider outcome');
+    }
+    const providerAttempt = this.getIsolatedProviderExecutionAttempt(outcome.attemptId);
+    const scopeRecord = this.getHomeTextActivationScope();
+    if (!providerAttempt || !scopeRecord) {
+      throw new Error('home text speech authority is incomplete');
+    }
+    const requestView = this.getLocalBranchRequestView(
+      providerAttempt.attempt.requestViewId,
+    );
+    if (!requestView || requestView.view.messageProjectionIds.length < 1) {
+      throw new Error('home text speech request view is missing');
+    }
+    const routes = requestView.view.messageProjectionIds.map((projectionId) => {
+      const projection = this.getEventMessageProjection(projectionId);
+      const event = projection ? this.getWorldEvent(projection.sourceEventId) : null;
+      const route = event ? directDiscordTextIngressRoute(event) : null;
+      if (!projection || !event || !route) {
+        throw new Error('home text speech request contains non-direct text');
+      }
+      return route;
     });
+    const terminalRoute = routes[routes.length - 1]!;
+    if (
+      routes.some(
+        (route) =>
+          route.guildId !== scopeRecord.scope.guildId ||
+          route.channelId !== scopeRecord.scope.channelId,
+      ) ||
+      terminalRoute.guildId !== scopeRecord.scope.guildId ||
+      terminalRoute.channelId !== scopeRecord.scope.channelId
+    ) {
+      throw new Error('home text speech request route does not match its scope');
+    }
+    const provider = providerAttempt.attempt;
+    const branch = this.getBranch(provider.branchId);
+    const coordinator = this.getRootCoordinatorState();
+    const activation = this.getActivationState();
+    if (
+      !branch ||
+      branch.status !== 'running' ||
+      branch.worldId !== provider.worldId ||
+      branch.authorityEpoch !== provider.authorityEpoch ||
+      coordinator.activeBranchId !== provider.branchId ||
+      coordinator.activeWorldId !== provider.worldId ||
+      activation.mode !== 'active' ||
+      activation.epoch !== provider.activeActivationEpoch ||
+      scopeRecord.scope.sourceActivationEpoch !== provider.sourceActivationEpoch ||
+      scopeRecord.scope.activeActivationEpoch !== provider.activeActivationEpoch ||
+      scopeRecord.scope.worldId !== provider.worldId ||
+      scopeRecord.scopeHash.length !== 64 ||
+      requestView.viewHash !== provider.requestViewHash ||
+      requestView.branchId !== provider.branchId ||
+      requestView.worldId !== provider.worldId ||
+      outcome.visibleBytes < 1 ||
+      outcome.visibleBytes > scopeRecord.scope.maxOutputBytes
+    ) {
+      throw new Error('home text speech authority is not current');
+    }
+    const ids = homeTextSpeechIdentities(
+      providerAttempt.attemptId,
+      outcomeRecord.outcomeHash,
+    );
+    const capsuleContent = Object.freeze({
+      schemaVersion: 1,
+      kind: 'home_text_provider_result',
+      providerAttemptId: providerAttempt.attemptId,
+      providerOutcomeHash: outcomeRecord.outcomeHash,
+      visibleText: outcome.visibleText,
+      visibleBytes: outcome.visibleBytes,
+      visibleHash: outcome.visibleHash,
+    });
+    const capsuleContentJson = serialize(capsuleContent);
+    const capsuleContentHash = hashContextBytes(capsuleContentJson);
+    const effectPayload = Object.freeze({
+      schemaVersion: 1,
+      kind: 'home_discord_text',
+      speechAttemptId: ids.speechAttemptId,
+      providerAttemptId: providerAttempt.attemptId,
+      providerOutcomeHash: outcomeRecord.outcomeHash,
+      resultCapsuleId: ids.resultCapsuleId,
+      worldId: provider.worldId,
+      guildId: terminalRoute.guildId,
+      channelId: terminalRoute.channelId,
+      textHash: outcome.visibleHash,
+      textBytes: outcome.visibleBytes,
+      discordNonce: ids.discordNonce,
+    });
+    const effectPayloadJson = serialize(effectPayload);
+    const effectPayloadHash = hashContextBytes(effectPayloadJson);
+    const speechAttempt = Object.freeze<HomeTextSpeechAttemptV1>({
+      schemaVersion: 1,
+      speechAttemptId: ids.speechAttemptId,
+      providerAttemptId: providerAttempt.attemptId,
+      providerOutcomeHash: outcomeRecord.outcomeHash,
+      resultCapsuleId: ids.resultCapsuleId,
+      speechEffectId: ids.speechEffectId,
+      rootReceiptCapsuleId: ids.rootReceiptCapsuleId,
+      sourceActivationEpoch: provider.sourceActivationEpoch,
+      activeActivationEpoch: provider.activeActivationEpoch,
+      branchId: provider.branchId,
+      worldId: provider.worldId,
+      authorityEpoch: provider.authorityEpoch,
+      requestViewId: provider.requestViewId,
+      requestViewHash: provider.requestViewHash,
+      manifestHash: requestView.manifestHash,
+      policyGeneration: requestView.view.policyGeneration,
+      activationScopeHash: scopeRecord.scopeHash,
+      guildId: terminalRoute.guildId,
+      channelId: terminalRoute.channelId,
+      visibleText: outcome.visibleText,
+      visibleBytes: outcome.visibleBytes,
+      visibleHash: outcome.visibleHash,
+      discordNonce: ids.discordNonce,
+      capsuleContentHash,
+      effectPayloadHash,
+      createdAt: outcome.completedAt,
+    });
+    const attemptJson = serialize(speechAttempt);
+    const attemptHash = hashContextBytes(attemptJson);
+    this.database
+      .prepare(
+        `INSERT INTO context_home_text_speech_attempts(
+           speech_attempt_id, provider_attempt_id, provider_outcome_hash,
+           result_capsule_id, speech_effect_id, root_receipt_capsule_id,
+           source_activation_epoch, active_activation_epoch, branch_id, world_id,
+           authority_epoch, request_view_id, request_view_hash, manifest_hash,
+           policy_generation, activation_scope_hash, guild_id, channel_id,
+           visible_text, visible_bytes, visible_hash, discord_nonce,
+           capsule_content_json, capsule_content_hash,
+           effect_payload_json, effect_payload_hash,
+           attempt_json, attempt_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        speechAttempt.speechAttemptId,
+        speechAttempt.providerAttemptId,
+        speechAttempt.providerOutcomeHash,
+        speechAttempt.resultCapsuleId,
+        speechAttempt.speechEffectId,
+        speechAttempt.rootReceiptCapsuleId,
+        speechAttempt.sourceActivationEpoch,
+        speechAttempt.activeActivationEpoch,
+        speechAttempt.branchId,
+        speechAttempt.worldId,
+        speechAttempt.authorityEpoch,
+        speechAttempt.requestViewId,
+        speechAttempt.requestViewHash,
+        speechAttempt.manifestHash,
+        speechAttempt.policyGeneration,
+        speechAttempt.activationScopeHash,
+        speechAttempt.guildId,
+        speechAttempt.channelId,
+        speechAttempt.visibleText,
+        speechAttempt.visibleBytes,
+        speechAttempt.visibleHash,
+        speechAttempt.discordNonce,
+        capsuleContentJson,
+        capsuleContentHash,
+        effectPayloadJson,
+        effectPayloadHash,
+        attemptJson,
+        attemptHash,
+        speechAttempt.createdAt,
+      );
+    const resultCapsule = this.insertCapsuleInTransaction({
+      capsuleId: speechAttempt.resultCapsuleId,
+      branchId: speechAttempt.branchId,
+      worldId: speechAttempt.worldId,
+      kind: 'private',
+      viewManifestHash: speechAttempt.manifestHash,
+      sourceRootHash: speechAttempt.providerOutcomeHash,
+      policyGeneration: speechAttempt.policyGeneration,
+      content: capsuleContent,
+      createdAt: speechAttempt.createdAt,
+    });
+    const speech = this.getHomeTextSpeechAttempt(providerAttempt.attemptId);
+    if (!speech) throw new Error('home text speech attempt was not stored');
+    return { speech, resultCapsule };
+  }
+
+  getHomeTextSpeechAttempt(
+    providerAttemptIdValue: IsolatedProviderExecutionAttemptId,
+  ): HomeTextSpeechAttemptRecord | null {
+    const providerAttemptId = isolatedProviderExecutionAttemptId(providerAttemptIdValue);
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_home_text_speech_attempts
+         WHERE provider_attempt_id = ?`,
+      )
+      .get(providerAttemptId) as HomeTextSpeechAttemptRow | undefined;
+    if (!row) return null;
+    const attempt = Object.freeze<HomeTextSpeechAttemptV1>({
+      schemaVersion: 1,
+      speechAttemptId: homeTextSpeechAttemptId(row.speech_attempt_id),
+      providerAttemptId: isolatedProviderExecutionAttemptId(row.provider_attempt_id),
+      providerOutcomeHash: sha256('providerOutcomeHash', row.provider_outcome_hash),
+      resultCapsuleId: capsuleId(row.result_capsule_id),
+      speechEffectId: effectId(row.speech_effect_id),
+      rootReceiptCapsuleId: capsuleId(row.root_receipt_capsule_id),
+      sourceActivationEpoch: generation('sourceActivationEpoch', row.source_activation_epoch),
+      activeActivationEpoch: generation('activeActivationEpoch', row.active_activation_epoch),
+      branchId: branchId(row.branch_id),
+      worldId: worldId(row.world_id),
+      authorityEpoch: generation('authorityEpoch', row.authority_epoch),
+      requestViewId: localBranchRequestViewId(row.request_view_id),
+      requestViewHash: sha256('requestViewHash', row.request_view_hash),
+      manifestHash: sha256('manifestHash', row.manifest_hash),
+      policyGeneration: generation('policyGeneration', row.policy_generation),
+      activationScopeHash: sha256('activationScopeHash', row.activation_scope_hash),
+      guildId: row.guild_id,
+      channelId: row.channel_id,
+      visibleText: row.visible_text,
+      visibleBytes: generation('visibleBytes', row.visible_bytes),
+      visibleHash: sha256('visibleHash', row.visible_hash),
+      discordNonce: row.discord_nonce,
+      capsuleContentHash: sha256('capsuleContentHash', row.capsule_content_hash),
+      effectPayloadHash: sha256('effectPayloadHash', row.effect_payload_hash),
+      createdAt: timestamp('createdAt', row.created_at),
+    });
+    const outcome = this.getIsolatedProviderOutcome(attempt.providerAttemptId);
+    const providerAttempt = this.getIsolatedProviderExecutionAttempt(
+      attempt.providerAttemptId,
+    );
+    const scope = this.getHomeTextActivationScope();
+    const requestView = this.getLocalBranchRequestView(attempt.requestViewId);
+    if (!outcome || !providerAttempt || !scope || !requestView) {
+      throw new Error('stored home text speech attempt lineage is incomplete');
+    }
+    if (requestView.view.messageProjectionIds.length < 1) {
+      throw new Error('stored home text speech request view is empty');
+    }
+    const routes = requestView.view.messageProjectionIds.map((projectionId) => {
+      const projection = this.getEventMessageProjection(projectionId);
+      const event = projection ? this.getWorldEvent(projection.sourceEventId) : null;
+      const route = event ? directDiscordTextIngressRoute(event) : null;
+      if (!projection || !event || !route) {
+        throw new Error('stored home text speech request contains non-direct text');
+      }
+      return route;
+    });
+    const terminalRoute = routes[routes.length - 1]!;
+    const ids = homeTextSpeechIdentities(
+      attempt.providerAttemptId,
+      outcome.outcomeHash,
+    );
+    const capsuleContentJson = serialize({
+      schemaVersion: 1,
+      kind: 'home_text_provider_result',
+      providerAttemptId: attempt.providerAttemptId,
+      providerOutcomeHash: outcome.outcomeHash,
+      visibleText: outcome.outcome.visibleText,
+      visibleBytes: outcome.outcome.visibleBytes,
+      visibleHash: outcome.outcome.visibleHash,
+    });
+    const effectPayloadJson = serialize({
+      schemaVersion: 1,
+      kind: 'home_discord_text',
+      speechAttemptId: ids.speechAttemptId,
+      providerAttemptId: attempt.providerAttemptId,
+      providerOutcomeHash: outcome.outcomeHash,
+      resultCapsuleId: ids.resultCapsuleId,
+      worldId: providerAttempt.attempt.worldId,
+      guildId: terminalRoute.guildId,
+      channelId: terminalRoute.channelId,
+      textHash: outcome.outcome.visibleHash,
+      textBytes: outcome.outcome.visibleBytes,
+      discordNonce: ids.discordNonce,
+    });
+    const attemptJson = serialize(attempt);
+    const attemptHash = hashContextBytes(attemptJson);
+    if (
+      outcome.outcome.outcomeKind !== 'visible_success' ||
+      outcome.outcome.phase !== 'issued' ||
+      attempt.providerOutcomeHash !== outcome.outcomeHash ||
+      attempt.speechAttemptId !== ids.speechAttemptId ||
+      attempt.resultCapsuleId !== ids.resultCapsuleId ||
+      attempt.speechEffectId !== ids.speechEffectId ||
+      attempt.rootReceiptCapsuleId !== ids.rootReceiptCapsuleId ||
+      attempt.discordNonce !== ids.discordNonce ||
+      attempt.branchId !== providerAttempt.attempt.branchId ||
+      attempt.worldId !== providerAttempt.attempt.worldId ||
+      attempt.authorityEpoch !== providerAttempt.attempt.authorityEpoch ||
+      attempt.requestViewId !== providerAttempt.attempt.requestViewId ||
+      attempt.requestViewHash !== providerAttempt.attempt.requestViewHash ||
+      attempt.manifestHash !== requestView.manifestHash ||
+      attempt.policyGeneration !== requestView.view.policyGeneration ||
+      attempt.sourceActivationEpoch !== scope.scope.sourceActivationEpoch ||
+      attempt.activeActivationEpoch !== scope.scope.activeActivationEpoch ||
+      attempt.activationScopeHash !== scope.scopeHash ||
+      routes.some(
+        (route) =>
+          route.guildId !== scope.scope.guildId ||
+          route.channelId !== scope.scope.channelId,
+      ) ||
+      attempt.guildId !== terminalRoute.guildId ||
+      attempt.channelId !== terminalRoute.channelId ||
+      attempt.visibleText !== outcome.outcome.visibleText ||
+      attempt.visibleBytes !== outcome.outcome.visibleBytes ||
+      attempt.visibleHash !== outcome.outcome.visibleHash ||
+      attempt.createdAt !== outcome.outcome.completedAt ||
+      row.capsule_content_json !== capsuleContentJson ||
+      attempt.capsuleContentHash !== hashContextBytes(capsuleContentJson) ||
+      row.effect_payload_json !== effectPayloadJson ||
+      attempt.effectPayloadHash !== hashContextBytes(effectPayloadJson) ||
+      row.attempt_json !== attemptJson ||
+      row.attempt_hash !== attemptHash
+    ) {
+      throw new Error('stored home text speech attempt is invalid');
+    }
+    return {
+      attempt,
+      capsuleContentJson,
+      effectPayloadJson,
+      attemptJson,
+      attemptHash,
+    };
+  }
+
+  private requireHomeTextResultCapsule(
+    speech: HomeTextSpeechAttemptRecord,
+  ): CapsuleRecord {
+    const row = this.database
+      .prepare(
+        `SELECT branch_id, world_id, capsule_kind, view_manifest_hash,
+           source_root_hash, policy_generation, summarizer_model,
+           summarizer_prompt_hash, content_json, content_hash, created_at
+         FROM context_capsules WHERE capsule_id = ?`,
+      )
+      .get(speech.attempt.resultCapsuleId) as
+      | {
+          branch_id: string;
+          world_id: string;
+          capsule_kind: CapsuleKind;
+          view_manifest_hash: string | null;
+          source_root_hash: string;
+          policy_generation: number;
+          summarizer_model: string | null;
+          summarizer_prompt_hash: string | null;
+          content_json: string;
+          content_hash: string;
+          created_at: number;
+        }
+      | undefined;
+    if (!row) throw new Error('home text result capsule is missing');
+    const capsule: CapsuleRecord = {
+      capsuleId: speech.attempt.resultCapsuleId,
+      branchId: branchId(row.branch_id),
+      worldId: worldId(row.world_id),
+      kind: row.capsule_kind,
+      viewManifestHash: row.view_manifest_hash,
+      sourceRootHash: row.source_root_hash,
+      policyGeneration: generation('policyGeneration', row.policy_generation),
+      summarizerModel: row.summarizer_model,
+      summarizerPromptHash: row.summarizer_prompt_hash,
+      contentJson: row.content_json,
+      contentHash: row.content_hash,
+      createdAt: timestamp('createdAt', row.created_at),
+    };
+    if (
+      capsule.branchId !== speech.attempt.branchId ||
+      capsule.worldId !== speech.attempt.worldId ||
+      capsule.kind !== 'private' ||
+      capsule.viewManifestHash !== speech.attempt.manifestHash ||
+      capsule.sourceRootHash !== speech.attempt.providerOutcomeHash ||
+      capsule.policyGeneration !== speech.attempt.policyGeneration ||
+      capsule.summarizerModel !== null ||
+      capsule.summarizerPromptHash !== null ||
+      capsule.contentJson !== speech.capsuleContentJson ||
+      capsule.contentHash !== speech.attempt.capsuleContentHash ||
+      capsule.createdAt !== speech.attempt.createdAt
+    ) {
+      throw new Error('stored home text result capsule is invalid');
+    }
+    return capsule;
   }
 
   getIsolatedProviderOutcome(

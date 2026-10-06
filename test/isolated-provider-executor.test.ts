@@ -338,7 +338,7 @@ test('isolated provider executor records one successful dispatch and never repla
       options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
       options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 200 });
       return {
-        content: 'VISIBLE_EXECUTOR_RESULT',
+        content: 'VISIBLE\u0000EXECUTOR_RESULT',
         usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
         model: value.target.model,
         providerType: value.target.providerType,
@@ -358,7 +358,12 @@ test('isolated provider executor records one successful dispatch and never repla
     });
     const first = await execute(value.invocationId);
     assert.equal(first.state, 'succeeded');
-    assert.equal(first.snapshot.outcome?.outcome.visibleText, 'VISIBLE_EXECUTOR_RESULT');
+    assert.equal(first.snapshot.outcome?.outcome.visibleText, 'VISIBLE\u0000EXECUTOR_RESULT');
+    assert.equal(
+      value.store.getHomeTextSpeechAttempt(first.snapshot.attempt.attemptId)?.attempt.visibleText,
+      'VISIBLE\u0000EXECUTOR_RESULT',
+    );
+
     assert.equal(first.snapshot.effect?.status, 'observed');
     assert.equal(first.snapshot.response?.evidence.statusCode, 200);
     assert.equal(seenOptions?.retryUnauthorized, false);

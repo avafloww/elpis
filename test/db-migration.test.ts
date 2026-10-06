@@ -166,7 +166,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    52,
+    53,
   );
   assert.deepEqual(
     (
@@ -258,6 +258,10 @@ test('current migration prefix preserves fleet history and creates resident stat
         component: 'core',
         name: '0052-context-home-text-request-scope',
       },
+      {
+        component: 'core',
+        name: '0053-context-home-text-speech-attempts',
+      },
     ],
   );
   db.close();
@@ -268,7 +272,23 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
   const db = openDatabase(dir);
   db.exec('PRAGMA foreign_keys = OFF');
   db.exec(`
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -412,7 +432,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -601,7 +621,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    52,
+    53,
   );
   assert.deepEqual(
     (
@@ -651,6 +671,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0050-context-isolated-provider-execution-ledger',
       '0051-context-home-text-activation-scope',
       '0052-context-home-text-request-scope',
+      '0053-context-home-text-speech-attempts',
     ],
   );
   runMigrations(db);
@@ -682,7 +703,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    39,
+    40,
   );
   db.close();
 });
@@ -722,7 +743,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 52);
+  assert.equal(version, 53);
   assert.equal(
     (
       reopened
@@ -754,7 +775,23 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
   db.exec(`
     DROP TRIGGER context_branches_coordinated_return_guard;
     DROP TRIGGER context_continuation_head_advance_guard;
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -879,7 +916,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,
@@ -953,7 +990,23 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
     'a'.repeat(64),
   );
   db.exec(`
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -1046,7 +1099,8 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
           '0049-context-dark-isolated-provider-invocation-admissions',
           '0050-context-isolated-provider-execution-ledger',
           '0051-context-home-text-activation-scope',
-          '0052-context-home-text-request-scope'
+          '0052-context-home-text-request-scope',
+          '0053-context-home-text-speech-attempts'
         );
     PRAGMA user_version = 37;
   `);
@@ -1084,7 +1138,23 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   }
   db.exec(`
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -1187,7 +1257,7 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
   );
   db.exec(`
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope');
+      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts');
     PRAGMA user_version = 38;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1238,7 +1308,23 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
   }
   db.exec(`
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -1350,7 +1436,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope');
+      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts');
     PRAGMA user_version = 34;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1427,7 +1513,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    52,
+    53,
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
@@ -1438,7 +1524,23 @@ test('migration v47→v48 rejects ambiguous historical binding order', () => {
   const db = openDatabase(dir);
   db.exec(`
     PRAGMA foreign_keys = OFF;
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_dark_pending_branch_capsule_guard;
+    DROP TABLE context_home_text_speech_attempts;
+    CREATE TRIGGER context_dark_pending_branch_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_dark_pending_branch_attempts
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+      END;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -1553,7 +1655,7 @@ test('migration v47→v48 rejects ambiguous historical binding order', () => {
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope');
+        AND name IN ('0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts');
     PRAGMA user_version = 47;
   `);
   assert.throws(

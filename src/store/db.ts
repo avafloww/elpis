@@ -8,6 +8,7 @@
 // pragma_table_info checks before ALTER TABLE ADD COLUMN) — there is no
 // version-gated early return. See docs/persistence.md.
 
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
 import {
@@ -24,16 +25,30 @@ import { MIND_PROPOSAL_STATUS_MIGRATION } from './mind-proposal-migration.js';
 
 export type Database = DatabaseSync;
 
+function registerContextGraphSqlFunctions(db: DatabaseSync): void {
+  db.function('elpis_sha256', { deterministic: true }, (value) => {
+    if (typeof value !== 'string') throw new Error('elpis_sha256 requires text');
+    return createHash('sha256').update(value).digest('hex');
+  });
+  db.function('elpis_discord_nonce', { deterministic: true }, (value) => {
+    if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+      throw new Error('elpis_discord_nonce requires a sha256 digest');
+    }
+    return BigInt(`0x${value.slice(0, 20)}`).toString(10);
+  });
+}
+
 /** The current schema level. Every migration block runs on every boot
  * regardless of this value — runMigrations never reads user_version back
  * to decide what to skip, only writes it at the end (see below) so
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 52;
+const SCHEMA_VERSION = 53;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
+  registerContextGraphSqlFunctions(db);
   // v0 ->
   db.exec(`
     CREATE TABLE IF NOT EXISTS channels (
@@ -4565,6 +4580,261 @@ export function runMigrations(db: DatabaseSync): void {
           )
           BEGIN
             SELECT RAISE(ABORT, 'isolated provider execution request is outside its home text scope');
+          END;
+      `,
+    },
+    {
+      name: '0053-context-home-text-speech-attempts',
+      sql: `
+        CREATE TABLE context_home_text_speech_attempts (
+          speech_attempt_id        TEXT PRIMARY KEY
+            CHECK (length(speech_attempt_id) = 81
+              AND speech_attempt_id GLOB 'home-text-speech:*'
+              AND substr(speech_attempt_id, 18) NOT GLOB '*[^0-9a-f]*'),
+          provider_attempt_id      TEXT NOT NULL UNIQUE,
+          provider_outcome_hash   TEXT NOT NULL UNIQUE
+            CHECK (length(provider_outcome_hash) = 64 AND provider_outcome_hash NOT GLOB '*[^0-9a-f]*'),
+          result_capsule_id       TEXT NOT NULL UNIQUE
+            CHECK (length(result_capsule_id) = 89 AND result_capsule_id GLOB 'capsule:home-text-result:*'),
+          speech_effect_id        TEXT NOT NULL UNIQUE
+            CHECK (length(speech_effect_id) = 88 AND speech_effect_id GLOB 'effect:home-text-speech:*'),
+          root_receipt_capsule_id TEXT NOT NULL UNIQUE
+            CHECK (length(root_receipt_capsule_id) = 87 AND root_receipt_capsule_id GLOB 'capsule:home-text-root:*'),
+          source_activation_epoch INTEGER NOT NULL CHECK (typeof(source_activation_epoch) = 'integer' AND source_activation_epoch >= 0),
+          active_activation_epoch INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch = source_activation_epoch + 1),
+          branch_id               TEXT NOT NULL,
+          world_id                TEXT NOT NULL,
+          authority_epoch        INTEGER NOT NULL CHECK (typeof(authority_epoch) = 'integer' AND authority_epoch >= 1),
+          request_view_id         TEXT NOT NULL,
+          request_view_hash       TEXT NOT NULL CHECK (length(request_view_hash) = 64 AND request_view_hash NOT GLOB '*[^0-9a-f]*'),
+          manifest_hash           TEXT NOT NULL CHECK (length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+          policy_generation       INTEGER NOT NULL CHECK (typeof(policy_generation) = 'integer' AND policy_generation >= 1),
+          activation_scope_hash   TEXT NOT NULL CHECK (length(activation_scope_hash) = 64 AND activation_scope_hash NOT GLOB '*[^0-9a-f]*'),
+          guild_id                TEXT NOT NULL CHECK (length(guild_id) BETWEEN 1 AND 32 AND guild_id NOT GLOB '*[^0-9]*'),
+          channel_id              TEXT NOT NULL CHECK (length(channel_id) BETWEEN 1 AND 32 AND channel_id NOT GLOB '*[^0-9]*'),
+          visible_text            TEXT NOT NULL,
+          visible_bytes           INTEGER NOT NULL CHECK (typeof(visible_bytes) = 'integer' AND visible_bytes BETWEEN 1 AND 1900),
+          visible_hash            TEXT NOT NULL CHECK (length(visible_hash) = 64 AND visible_hash NOT GLOB '*[^0-9a-f]*'),
+          discord_nonce           TEXT NOT NULL CHECK (length(discord_nonce) BETWEEN 1 AND 25 AND discord_nonce NOT GLOB '*[^0-9]*'),
+          capsule_content_json    TEXT NOT NULL CHECK (length(capsule_content_json) >= 1 AND json_valid(capsule_content_json)),
+          capsule_content_hash    TEXT NOT NULL CHECK (length(capsule_content_hash) = 64 AND capsule_content_hash NOT GLOB '*[^0-9a-f]*'),
+          effect_payload_json     TEXT NOT NULL CHECK (length(effect_payload_json) >= 1 AND json_valid(effect_payload_json)),
+          effect_payload_hash     TEXT NOT NULL CHECK (length(effect_payload_hash) = 64 AND effect_payload_hash NOT GLOB '*[^0-9a-f]*'),
+          attempt_json            TEXT NOT NULL CHECK (length(attempt_json) >= 1 AND json_valid(attempt_json)),
+          attempt_hash            TEXT NOT NULL CHECK (length(attempt_hash) = 64 AND attempt_hash NOT GLOB '*[^0-9a-f]*'),
+          created_at              INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+          CHECK (result_capsule_id != root_receipt_capsule_id),
+          FOREIGN KEY (provider_attempt_id) REFERENCES context_isolated_provider_execution_attempts(attempt_id) ON DELETE RESTRICT,
+          FOREIGN KEY (branch_id, world_id) REFERENCES context_branches(branch_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (request_view_id, world_id) REFERENCES context_local_branch_request_views(request_view_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (result_capsule_id, world_id) REFERENCES context_capsules(capsule_id, world_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+        ) WITHOUT ROWID;
+
+        CREATE TRIGGER context_home_text_speech_attempts_lineage_guard
+          BEFORE INSERT ON context_home_text_speech_attempts
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_isolated_provider_execution_attempts AS attempts
+            JOIN context_isolated_provider_outcomes AS outcomes
+              ON outcomes.attempt_id = attempts.attempt_id
+            JOIN context_effects AS provider_effects
+              ON provider_effects.effect_id = attempts.effect_id
+            JOIN context_local_branch_request_views AS views
+              ON views.request_view_id = attempts.request_view_id
+             AND views.world_id = attempts.world_id
+            JOIN context_manifests AS manifests
+              ON manifests.manifest_id = views.manifest_id
+             AND manifests.world_id = views.world_id
+            JOIN context_local_branch_request_messages AS messages
+              ON messages.request_view_id = views.request_view_id
+             AND messages.world_id = views.world_id
+             AND messages.ordinal = views.message_projection_count - 1
+            JOIN context_event_message_projections AS projections
+              ON projections.projection_id = messages.projection_id
+             AND projections.world_id = messages.world_id
+            JOIN context_world_events AS events
+              ON events.event_id = projections.source_event_id
+             AND events.world_id = projections.world_id
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            JOIN context_branches AS branches
+              ON branches.branch_id = attempts.branch_id
+             AND branches.world_id = attempts.world_id
+            JOIN context_branch_starts AS starts
+              ON starts.branch_id = attempts.branch_id
+            JOIN context_root_coordinator AS coordinator ON coordinator.singleton = 1
+            JOIN context_continuation_head AS head ON head.singleton = 1
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            WHERE attempts.attempt_id = NEW.provider_attempt_id
+              AND outcomes.outcome_kind = 'visible_success'
+              AND outcomes.phase = 'issued'
+              AND outcomes.outcome_hash = NEW.provider_outcome_hash
+              AND NEW.speech_attempt_id = 'home-text-speech:' || elpis_sha256(json_object(
+                'schemaVersion', 1,
+                'providerAttemptId', (NEW.provider_attempt_id || ''),
+                'providerOutcomeHash', (NEW.provider_outcome_hash || '')
+              ))
+              AND NEW.result_capsule_id = 'capsule:home-text-result:' || substr(NEW.speech_attempt_id, 18)
+              AND NEW.speech_effect_id = 'effect:home-text-speech:' || substr(NEW.speech_attempt_id, 18)
+              AND NEW.root_receipt_capsule_id = 'capsule:home-text-root:' || substr(NEW.speech_attempt_id, 18)
+              AND NEW.discord_nonce = elpis_discord_nonce(substr(NEW.speech_attempt_id, 18))
+              AND outcomes.visible_text = NEW.visible_text
+              AND outcomes.visible_bytes = NEW.visible_bytes
+              AND outcomes.visible_hash = NEW.visible_hash
+              AND outcomes.completed_at = NEW.created_at
+              AND NEW.capsule_content_json = json_object(
+                'schemaVersion', 1,
+                'kind', 'home_text_provider_result',
+                'providerAttemptId', (NEW.provider_attempt_id || ''),
+                'providerOutcomeHash', (NEW.provider_outcome_hash || ''),
+                'visibleText', (NEW.visible_text || ''),
+                'visibleBytes', NEW.visible_bytes,
+                'visibleHash', (NEW.visible_hash || '')
+              )
+              AND NEW.capsule_content_hash = elpis_sha256(NEW.capsule_content_json)
+              AND NEW.effect_payload_json = json_object(
+                'schemaVersion', 1,
+                'kind', 'home_discord_text',
+                'speechAttemptId', (NEW.speech_attempt_id || ''),
+                'providerAttemptId', (NEW.provider_attempt_id || ''),
+                'providerOutcomeHash', (NEW.provider_outcome_hash || ''),
+                'resultCapsuleId', (NEW.result_capsule_id || ''),
+                'worldId', (NEW.world_id || ''),
+                'guildId', (NEW.guild_id || ''),
+                'channelId', (NEW.channel_id || ''),
+                'textHash', (NEW.visible_hash || ''),
+                'textBytes', NEW.visible_bytes,
+                'discordNonce', (NEW.discord_nonce || '')
+              )
+              AND NEW.effect_payload_hash = elpis_sha256(NEW.effect_payload_json)
+              AND NEW.attempt_json = json_object(
+                'schemaVersion', 1,
+                'speechAttemptId', (NEW.speech_attempt_id || ''),
+                'providerAttemptId', (NEW.provider_attempt_id || ''),
+                'providerOutcomeHash', (NEW.provider_outcome_hash || ''),
+                'resultCapsuleId', (NEW.result_capsule_id || ''),
+                'speechEffectId', (NEW.speech_effect_id || ''),
+                'rootReceiptCapsuleId', (NEW.root_receipt_capsule_id || ''),
+                'sourceActivationEpoch', NEW.source_activation_epoch,
+                'activeActivationEpoch', NEW.active_activation_epoch,
+                'branchId', (NEW.branch_id || ''),
+                'worldId', (NEW.world_id || ''),
+                'authorityEpoch', NEW.authority_epoch,
+                'requestViewId', (NEW.request_view_id || ''),
+                'requestViewHash', (NEW.request_view_hash || ''),
+                'manifestHash', (NEW.manifest_hash || ''),
+                'policyGeneration', NEW.policy_generation,
+                'activationScopeHash', (NEW.activation_scope_hash || ''),
+                'guildId', (NEW.guild_id || ''),
+                'channelId', (NEW.channel_id || ''),
+                'visibleText', (NEW.visible_text || ''),
+                'visibleBytes', NEW.visible_bytes,
+                'visibleHash', (NEW.visible_hash || ''),
+                'discordNonce', (NEW.discord_nonce || ''),
+                'capsuleContentHash', (NEW.capsule_content_hash || ''),
+                'effectPayloadHash', (NEW.effect_payload_hash || ''),
+                'createdAt', NEW.created_at
+              )
+              AND NEW.attempt_hash = elpis_sha256(NEW.attempt_json)
+              AND provider_effects.branch_id = attempts.branch_id
+              AND provider_effects.world_id = attempts.world_id
+              AND provider_effects.destination_world_id = attempts.world_id
+              AND provider_effects.effect_kind = 'isolated_provider_completion'
+              AND provider_effects.status = 'observed'
+              AND json_extract(provider_effects.observation_json, '$.providerOutcomeHash') = outcomes.outcome_hash
+              AND attempts.source_activation_epoch = NEW.source_activation_epoch
+              AND attempts.active_activation_epoch = NEW.active_activation_epoch
+              AND attempts.branch_id = NEW.branch_id
+              AND attempts.world_id = NEW.world_id
+              AND attempts.authority_epoch = NEW.authority_epoch
+              AND attempts.request_view_id = NEW.request_view_id
+              AND views.view_hash = NEW.request_view_hash
+              AND views.manifest_hash = NEW.manifest_hash
+              AND manifests.manifest_hash = NEW.manifest_hash
+              AND manifests.policy_generation = NEW.policy_generation
+              AND scope.source_activation_epoch = NEW.source_activation_epoch
+              AND scope.active_activation_epoch = NEW.active_activation_epoch
+              AND scope.world_id = NEW.world_id
+              AND scope.scope_hash = NEW.activation_scope_hash
+              AND scope.guild_id = NEW.guild_id
+              AND scope.channel_id = NEW.channel_id
+              AND scope.max_output_bytes >= NEW.visible_bytes
+              AND events.event_kind = 'inbound:discord'
+              AND json_extract(events.payload_json, '$.schemaVersion') = 1
+              AND json_extract(events.payload_json, '$.kind') = 'discord'
+              AND json_type(events.payload_json, '$.source') = 'null'
+              AND json_type(events.payload_json, '$.transport') = 'null'
+              AND json_type(events.payload_json, '$.forwarded') = 'null'
+              AND json_type(events.payload_json, '$.content') = 'text'
+              AND length(json_extract(events.payload_json, '$.content')) > 0
+              AND json_type(events.payload_json, '$.attachments') = 'array'
+              AND json_array_length(events.payload_json, '$.attachments') = 0
+              AND json_extract(events.payload_json, '$.guildId') = NEW.guild_id
+              AND json_extract(events.payload_json, '$.channelId') = NEW.channel_id
+              AND branches.status = 'running'
+              AND branches.authority_epoch = NEW.authority_epoch
+              AND coordinator.active_branch_id = NEW.branch_id
+              AND coordinator.active_world_id = NEW.world_id
+              AND coordinator.base_revision = starts.base_revision
+              AND coordinator.predecessor_branch_id IS starts.predecessor_branch_id
+              AND coordinator.predecessor_world_id IS starts.predecessor_world_id
+              AND head.revision = starts.base_revision
+              AND head.branch_id IS starts.predecessor_branch_id
+              AND head.world_id IS starts.predecessor_world_id
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND NEW.speech_effect_id != attempts.effect_id
+              AND NOT EXISTS (SELECT 1 FROM context_dark_pending_branch_abandonments a WHERE a.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_branch_recoveries r WHERE r.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_capsules c WHERE c.branch_id = NEW.branch_id)
+              AND NOT EXISTS (SELECT 1 FROM context_continuation_advances a WHERE a.branch_id = NEW.branch_id)
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text speech attempt lineage is invalid');
+          END;
+        CREATE TRIGGER context_home_text_speech_attempts_no_update
+          BEFORE UPDATE ON context_home_text_speech_attempts BEGIN
+            SELECT RAISE(ABORT, 'home text speech attempts are immutable');
+          END;
+        CREATE TRIGGER context_home_text_speech_attempts_no_delete
+          BEFORE DELETE ON context_home_text_speech_attempts BEGIN
+            SELECT RAISE(ABORT, 'home text speech attempts are immutable');
+          END;
+
+        DROP TRIGGER context_dark_pending_branch_capsule_guard;
+        CREATE TRIGGER context_dark_pending_branch_capsule_guard
+          BEFORE INSERT ON context_capsules
+          WHEN EXISTS (
+            SELECT 1 FROM context_dark_pending_branch_attempts
+            WHERE branch_id = NEW.branch_id
+          )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM context_home_text_speech_attempts AS speech
+              WHERE speech.result_capsule_id = NEW.capsule_id
+                AND speech.branch_id = NEW.branch_id
+                AND speech.world_id = NEW.world_id
+                AND NEW.capsule_kind = 'private'
+                AND NEW.view_manifest_hash = speech.manifest_hash
+                AND NEW.source_root_hash = speech.provider_outcome_hash
+                AND NEW.policy_generation = speech.policy_generation
+                AND NEW.summarizer_model IS NULL
+                AND NEW.summarizer_prompt_hash IS NULL
+                AND NEW.content_json = speech.capsule_content_json
+                AND NEW.content_hash = speech.capsule_content_hash
+                AND NEW.created_at = speech.created_at
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'context dark pending branch cannot create this capsule');
+          END;
+
+        CREATE TRIGGER context_home_text_result_capsules_no_share
+          BEFORE INSERT ON context_share_grants
+          WHEN EXISTS (
+            SELECT 1 FROM context_home_text_speech_attempts
+            WHERE result_capsule_id = NEW.source_capsule_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'home text result capsules are world-private');
           END;
       `,
     },

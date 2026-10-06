@@ -1780,17 +1780,162 @@ test('active provider execution is single-attempt and uses durable effect eviden
       /response evidence is newer than the provider outcome/,
     );
     assert.equal(value.store.getIsolatedProviderOutcome(started.attempt.attemptId), null);
+    assert.throws(
+      () =>
+        value.store.recordIsolatedProviderOutcome({
+          attemptId: started.attempt.attemptId,
+          outcomeKind: 'visible_success',
+          phase: 'issued',
+          visibleText: '',
+          completedAt: 790,
+        }),
+      /nonempty text/,
+    );
+    value.database.exec(`
+      CREATE TRIGGER fixture_reject_home_text_speech_attempt
+      BEFORE INSERT ON context_home_text_speech_attempts BEGIN
+        SELECT RAISE(ABORT, 'fixture late speech barrier failure');
+      END;
+    `);
+    assert.throws(
+      () =>
+        value.store.recordIsolatedProviderOutcome({
+          attemptId: started.attempt.attemptId,
+          outcomeKind: 'visible_success',
+          phase: 'issued',
+          visibleText: '{"done":"✓"}',
+          completedAt: 790,
+        }),
+      /fixture late speech barrier failure/,
+    );
+    value.database.exec('DROP TRIGGER fixture_reject_home_text_speech_attempt');
+    assert.equal(value.store.getIsolatedProviderOutcome(started.attempt.attemptId), null);
+    assert.equal(value.store.getEffect(started.attempt.attempt.effectId)?.status, 'prepared');
+    assert.equal(tableCount(value.database, 'context_home_text_speech_attempts'), 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 0);
     const outcome = value.store.recordIsolatedProviderOutcome({
       attemptId: started.attempt.attemptId,
       outcomeKind: 'visible_success',
       phase: 'issued',
-      visibleText: 'done ✓',
+      visibleText: '{"done":"✓"}',
       completedAt: 790,
     });
-    assert.equal(outcome.outcome.visibleBytes, Buffer.byteLength('done ✓'));
+    assert.equal(outcome.outcome.visibleBytes, Buffer.byteLength('{"done":"✓"}'));
     assert.deepEqual(
       value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
       outcome,
+    );
+    const speech = value.store.getHomeTextSpeechAttempt(started.attempt.attemptId);
+    assert.ok(speech);
+    assert.equal(speech.attempt.visibleText, '{"done":"✓"}');
+    assert.equal(speech.attempt.channelId, channelId);
+    assert.equal(speech.attempt.providerOutcomeHash, outcome.outcomeHash);
+    const speechRow = value.database
+      .prepare('SELECT * FROM context_home_text_speech_attempts WHERE provider_attempt_id = ?')
+      .get(started.attempt.attemptId) as Record<string, string | number | null>;
+    const poisonedEffectPayload = JSON.stringify({
+      ...(JSON.parse(speechRow.effect_payload_json as string) as Record<string, unknown>),
+      channelId: '999999999999999999',
+    });
+    const poisonedRow = {
+      ...speechRow,
+      effect_payload_json: poisonedEffectPayload,
+      effect_payload_hash: hashContextBytes(poisonedEffectPayload),
+    };
+    const poisonedColumns = Object.keys(poisonedRow);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_attempts(${poisonedColumns.join(',')})
+             VALUES (${poisonedColumns.map(() => '?').join(',')})`,
+          )
+          .run(...poisonedColumns.map((column) => poisonedRow[column]!)),
+      /home text speech attempt lineage is invalid/,
+    );
+    const subtypeCapsuleContent = JSON.stringify({
+      ...(JSON.parse(speechRow.capsule_content_json as string) as Record<string, unknown>),
+      visibleText: JSON.parse(speechRow.visible_text as string),
+    });
+    const subtypeCapsuleHash = hashContextBytes(subtypeCapsuleContent);
+    const subtypeAttemptJson = JSON.stringify({
+      ...(JSON.parse(speechRow.attempt_json as string) as Record<string, unknown>),
+      visibleText: JSON.parse(speechRow.visible_text as string),
+      capsuleContentHash: subtypeCapsuleHash,
+    });
+    const subtypeRow = {
+      ...speechRow,
+      capsule_content_json: subtypeCapsuleContent,
+      capsule_content_hash: subtypeCapsuleHash,
+      attempt_json: subtypeAttemptJson,
+      attempt_hash: hashContextBytes(subtypeAttemptJson),
+    };
+    const subtypeColumns = Object.keys(subtypeRow);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_attempts(${subtypeColumns.join(',')})
+             VALUES (${subtypeColumns
+               .map((column) => (column === 'visible_text' ? 'json(?)' : '?'))
+               .join(',')})`,
+          )
+          .run(...subtypeColumns.map((column) => subtypeRow[column]!)),
+      /home text speech attempt lineage is invalid/,
+    );
+    const successReplay = value.store.recordHomeTextProviderSuccess({
+      attemptId: started.attempt.attemptId,
+      visibleText: '{"done":"✓"}',
+      completedAt: 790,
+    });
+    assert.equal(successReplay.fresh, false);
+    assert.deepEqual(successReplay.speech, speech);
+    assert.throws(
+      () =>
+        value.store.createCapsule({
+          capsuleId: capsuleId('capsule:unexpected-home-text-result'),
+          branchId: started.attempt.attempt.branchId,
+          worldId: started.attempt.attempt.worldId,
+          kind: 'private',
+          viewManifestHash: speech.attempt.manifestHash,
+          sourceRootHash: outcome.outcomeHash,
+          policyGeneration: speech.attempt.policyGeneration,
+          content: { text: 'substitute' },
+          createdAt: 791,
+        }),
+      /cannot create this capsule/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_share_grants(
+               grant_id, shared_event_id, source_capsule_id, source_world_id,
+               destination_world_id, canonical_text, content_hash, status,
+               authority_epoch, created_at, revoked_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+          )
+          .run(
+            'share:forbidden-home-text-result',
+            'event:forbidden-home-text-result',
+            speech.attempt.resultCapsuleId,
+            speech.attempt.worldId,
+            'world:discord:guild:999999999999999999',
+            'forbidden',
+            '0'.repeat(64),
+            speech.attempt.authorityEpoch,
+            791,
+          ),
+      /world-private/,
+    );
+    assert.throws(
+      () =>
+        value.store.recordHomeTextProviderSuccess({
+          attemptId: started.attempt.attemptId,
+          visibleText: 'changed',
+          completedAt: 790,
+        }),
+      /different content/,
     );
     assert.equal(value.store.getEffect(started.attempt.attempt.effectId)?.status, 'observed');
     assert.throws(
@@ -1801,6 +1946,7 @@ test('active provider execution is single-attempt and uses durable effect eviden
       'context_isolated_provider_execution_attempts',
       'context_isolated_provider_response_evidence',
       'context_isolated_provider_outcomes',
+      'context_home_text_speech_attempts',
     ]) {
       assert.throws(
         () => value.database.prepare(`DELETE FROM ${table}`).run(),
@@ -1808,7 +1954,7 @@ test('active provider execution is single-attempt and uses durable effect eviden
       );
     }
     assert.equal(value.store.getContinuationHead().revision, 0);
-    assert.equal(tableCount(value.database, 'context_capsules'), 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 1);
     assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
   } finally {
     closeFixture(value);
@@ -5549,6 +5695,21 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_home_text_result_capsules_no_share;
+      DROP TRIGGER context_home_text_speech_attempts_no_update;
+      DROP TRIGGER context_home_text_speech_attempts_no_delete;
+      DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+      DROP TRIGGER context_dark_pending_branch_capsule_guard;
+      DROP TABLE context_home_text_speech_attempts;
+      CREATE TRIGGER context_dark_pending_branch_capsule_guard
+        BEFORE INSERT ON context_capsules
+        WHEN EXISTS (
+          SELECT 1 FROM context_dark_pending_branch_attempts
+          WHERE branch_id = NEW.branch_id
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'context dark pending branch cannot create capsules');
+        END;
       DROP TRIGGER context_isolated_provider_outcomes_no_update;
       DROP TRIGGER context_isolated_provider_outcomes_no_delete;
       DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
@@ -5656,7 +5817,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0049-context-dark-isolated-provider-invocation-admissions',
             '0050-context-isolated-provider-execution-ledger',
             '0051-context-home-text-activation-scope',
-            '0052-context-home-text-request-scope'
+            '0052-context-home-text-request-scope',
+            '0053-context-home-text-speech-attempts'
           );
       PRAGMA user_version = 40;
     `);

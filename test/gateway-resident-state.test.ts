@@ -214,7 +214,13 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
   // Recreate the exact pre-checkpoint schema while preserving this in-flight row.
   // Reopening must interpret every legacy rotation as not yet proposed.
   db.exec(`
+    DROP TRIGGER context_home_text_result_capsules_no_share;
+    DROP TRIGGER context_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_home_text_speech_attempts_lineage_guard;
+    DROP TABLE context_home_text_speech_attempts;
     DROP TRIGGER context_isolated_provider_outcomes_no_update;
+
     DROP TRIGGER context_isolated_provider_outcomes_no_delete;
     DROP TRIGGER context_isolated_provider_outcomes_lineage_guard;
     DROP TABLE context_isolated_provider_outcomes;
@@ -384,7 +390,7 @@ test('rotation keeps old auth until exact activation then deletes its DB secret'
           '0047-context-dark-isolated-provider-bindings',
           '0048-context-dark-isolated-provider-binding-order',
           '0049-context-dark-isolated-provider-invocation-admissions',
-          '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope'
+          '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts'
         );
     DROP TABLE discord_person_settings;
     ALTER TABLE gateway_resident_state DROP COLUMN rotation_proposed_at;

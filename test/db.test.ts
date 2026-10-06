@@ -72,19 +72,30 @@ test('openDatabase creates elpis.db with the expected tables', () => {
   db.close();
 });
 
+test('runMigrations registers schema authority functions on a raw connection', () => {
+  const db = new DatabaseSync(':memory:');
+  runMigrations(db);
+  const row = db
+    .prepare("SELECT elpis_sha256('abc') AS hash, elpis_discord_nonce(elpis_sha256('abc')) AS nonce")
+    .get() as { hash: string; nonce: string };
+  assert.equal(row.hash, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(row.nonce, BigInt(`0x${row.hash.slice(0, 20)}`).toString(10));
+  db.close();
+});
+
 test('runMigrations is idempotent and sets user_version', () => {
   const dir = tmpDir();
   const db = openDatabase(dir);
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 52, 'user_version bumped to 52');
+  assert.equal(v1, 53, 'user_version bumped to 53');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 52);
+  assert.equal(v2, 53);
   db.close();
 });
 
@@ -124,7 +135,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    52,
+    53,
   );
   db.close();
 });
@@ -210,7 +221,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 52, 'user_version upgraded to 52');
+  assert.equal(finalVersion, 53, 'user_version upgraded to 53');
 
   // Assert fleet tables exist
   const tableNames = (
