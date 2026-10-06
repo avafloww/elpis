@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import type { MaterializedConfig } from '../src/config.js';
 import { createIsolatedProviderExecutor } from '../src/context/isolated-provider-executor.js';
 import { createHomeDiscordTextExecutor } from '../src/context/home-discord-text-executor.js';
+import { createHomeTextOrchestrator } from '../src/context/home-text-orchestrator.js';
 import {
   HomeDiscordTextTransportError,
   type HomeDiscordTextTransport,
@@ -850,6 +851,350 @@ test('isolated provider executor treats an error after a positive HTTP response 
     assert.equal(result.snapshot.effect?.status, 'failed');
     await execute(value.invocationId);
     assert.equal(calls, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('home text orchestrator performs one exact provider and Discord lifecycle', async () => {
+  const value = fixture();
+  try {
+    const now = clock();
+    let providerCalls = 0;
+    const executeProvider = createIsolatedProviderExecutor({
+      store: value.store,
+      config: value.config,
+      llm: fakeLlm(async (_messages, options = {}) => {
+        providerCalls += 1;
+        options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+        options.dispatchLifecycle?.responseReceived({
+          attempt: 1,
+          status: 200,
+        });
+        return {
+          content: 'ORCHESTRATED_VISIBLE_RESULT',
+          usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+          model: value.target.model,
+          providerType: value.target.providerType,
+          apiSurface: value.target.apiSurface,
+          apiEndpoint: value.target.apiEndpoint,
+          toolContractVersion: value.target.toolContractVersion,
+          reasoningEffort: value.target.reasoningEffort ?? undefined,
+        };
+      }),
+      expectedWorldId: value.expectedWorldId,
+      maxOutputBytes: 1024,
+      now,
+    });
+    let sends = 0;
+    const executeSpeech = createHomeDiscordTextExecutor({
+      store: value.store,
+      now,
+      transport: {
+        async send(request, beforeDispatch) {
+          sends += 1;
+          beforeDispatch();
+          return {
+            statusCode: 200,
+            messageId: '345678901234567890',
+            guildId: request.guildId,
+            channelId: request.channelId,
+            nonce: request.nonce,
+            textBytes: request.textBytes,
+            textHash: request.textHash,
+            observedAt: now(),
+          };
+        },
+      },
+    });
+    const run = createHomeTextOrchestrator({
+      store: value.store,
+      executeProvider,
+      executeSpeech,
+      now,
+    });
+
+    const result = await run();
+    assert.equal(result.state, 'observed');
+    assert.equal(providerCalls, 1);
+    assert.equal(sends, 1);
+    assert.equal(value.store.getContinuationHead().revision, 1);
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal((await run()).state, 'not_authorized');
+    assert.equal(providerCalls, 1);
+    assert.equal(sends, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('home text orchestrator never turns a preexisting provider success into a delayed send', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    let providerCalls = 0;
+    let sends = 0;
+    const run = createHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async () => {
+        providerCalls += 1;
+        throw new Error('preexisting provider attempts must not replay');
+      },
+      executeSpeech: async () => {
+        sends += 1;
+        throw new Error('preexisting success must not become a delayed send');
+      },
+      now: clock(1_000),
+    });
+
+    const result = await run();
+    assert.equal(result.state, 'speech_pre_dispatch_rejected');
+    assert.equal(providerCalls, 0);
+    assert.equal(sends, 0);
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId)
+        ?.receipt.phase,
+      'pre_dispatch_rejected',
+    );
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    value.close();
+  }
+});
+
+test('home text orchestrator records provider evidence before generic recovery', async (t) => {
+  const cases = [
+    {
+      name: 'attempt without effect',
+      effect: false,
+      response: false,
+      phase: 'pre_dispatch_rejected',
+    },
+    {
+      name: 'prepared effect without response',
+      effect: true,
+      response: false,
+      phase: 'issuance_uncertain',
+    },
+    {
+      name: 'received response without outcome',
+      effect: true,
+      response: true,
+      phase: 'issued',
+    },
+  ] as const;
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const value = fixture();
+      try {
+        const started = value.store.beginIsolatedProviderExecutionAttempt({
+          invocationId: value.invocationId,
+          expectedWorldId: value.expectedWorldId,
+          expectedTarget: value.target,
+          callTimeoutMs: value.config.llm.callTimeoutMs,
+          streamIdleTimeoutMs: value.config.llm.streamIdleTimeoutMs,
+          maxOutputBytes: 1024,
+          authorizedAt: 900,
+        });
+        if (entry.effect) {
+          value.store.prepareIsolatedProviderExecutionEffect(
+            started.attempt.attemptId,
+            901,
+          );
+        }
+        if (entry.response) {
+          value.store.recordIsolatedProviderResponse({
+            attemptId: started.attempt.attemptId,
+            statusCode: 200,
+            receivedAt: 902,
+          });
+        }
+        let providerCalls = 0;
+        let sends = 0;
+        const run = createHomeTextOrchestrator({
+          store: value.store,
+          executeProvider: async () => {
+            providerCalls += 1;
+            throw new Error('recovery must not dispatch provider');
+          },
+          executeSpeech: async () => {
+            sends += 1;
+            throw new Error('provider recovery must not send speech');
+          },
+          now: clock(1_000),
+        });
+
+        const result = await run();
+        assert.equal(result.state, 'provider_failed');
+        if (result.state === 'provider_failed') {
+          assert.equal(result.phase, entry.phase);
+        }
+        assert.equal(providerCalls, 0);
+        assert.equal(sends, 0);
+        assert.equal(
+          value.store.getIsolatedProviderOutcome(started.attempt.attemptId)
+            ?.outcome.phase,
+          entry.phase,
+        );
+        assert.equal(
+          value.store.getBranch(started.attempt.attempt.branchId)?.status,
+          'crashed',
+        );
+      } finally {
+        value.close();
+      }
+    });
+  }
+});
+
+test('home text orchestrator reuses one reconciliation timestamp for recovery', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    const times = [1_000, 950];
+    let clockCalls = 0;
+    const run = createHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async () => {
+        throw new Error('preexisting provider attempts must not replay');
+      },
+      executeSpeech: async () => {
+        throw new Error('preexisting success must not become a delayed send');
+      },
+      now: () => {
+        clockCalls += 1;
+        const value = times.shift();
+        if (value === undefined) throw new Error('unexpected clock read');
+        return value;
+      },
+    });
+
+    const result = await run();
+    assert.equal(result.state, 'speech_pre_dispatch_rejected');
+    assert.equal(clockCalls, 1);
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId)
+        ?.receipt.resolvedAt,
+      1_000,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT recovered_at FROM context_branch_recoveries WHERE branch_id = ?',
+          )
+          .get(speech.attempt.branchId) as { recovered_at: number }
+      ).recovered_at,
+      1_000,
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('home text orchestrator rejects recovery before durable terminal evidence', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    value.store.recordHomeTextSpeechFailure({
+      speechAttemptId: speech.attempt.speechAttemptId,
+      phase: 'pre_dispatch_rejected',
+      resolvedAt: 1_100,
+    });
+    const run = createHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async () => {
+        throw new Error('preexisting provider attempts must not replay');
+      },
+      executeSpeech: async () => {
+        throw new Error('preexisting success must not become a delayed send');
+      },
+      now: () => 1_050,
+    });
+
+    await assert.rejects(run(), /recovery timestamp precedes durable state/);
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'running',
+    );
+    assert.equal(
+      value.store.getRootCoordinatorState().activeBranchId,
+      speech.attempt.branchId,
+    );
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT COUNT(*) AS n FROM context_branch_recoveries WHERE branch_id = ?',
+          )
+          .get(speech.attempt.branchId) as { n: number }
+      ).n,
+      0,
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('home text recovery preflights a future prepared provider effect before mutation', async () => {
+  const value = fixture();
+  try {
+    const started = value.store.beginIsolatedProviderExecutionAttempt({
+      invocationId: value.invocationId,
+      expectedWorldId: value.expectedWorldId,
+      expectedTarget: value.target,
+      callTimeoutMs: value.config.llm.callTimeoutMs,
+      streamIdleTimeoutMs: value.config.llm.streamIdleTimeoutMs,
+      maxOutputBytes: 1024,
+      authorizedAt: 900,
+    });
+    value.store.prepareIsolatedProviderExecutionEffect(
+      started.attempt.attemptId,
+      1_100,
+    );
+    assert.throws(
+      () =>
+        value.store.recordIsolatedProviderOutcome({
+          attemptId: started.attempt.attemptId,
+          outcomeKind: 'visible_error',
+          phase: 'issuance_uncertain',
+          visibleText: 'provider request outcome is uncertain',
+          completedAt: 1_050,
+        }),
+      /outcome predates its prepared effect/,
+    );
+
+    const run = createHomeTextOrchestrator({
+      store: value.store,
+      executeProvider: async () => {
+        throw new Error('preexisting provider attempts must not replay');
+      },
+      executeSpeech: async () => {
+        throw new Error('provider recovery must not send speech');
+      },
+      now: () => 1_050,
+    });
+    await assert.rejects(run(), /recovery timestamp precedes durable state/);
+    assert.equal(
+      value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(started.attempt.attempt.effectId)?.status,
+      'prepared',
+    );
+    assert.equal(
+      value.store.getEffect(started.attempt.attempt.effectId)?.resolvedAt,
+      null,
+    );
+    assert.equal(
+      value.store.getBranch(started.attempt.attempt.branchId)?.status,
+      'running',
+    );
   } finally {
     value.close();
   }

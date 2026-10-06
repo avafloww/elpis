@@ -918,6 +918,13 @@ export interface HomeTextActivationScopeRecord {
   readonly scopeHash: string;
 }
 
+export interface ActiveHomeTextInvocationRecord {
+  readonly activation: ContextGraphActivation;
+  readonly scope: HomeTextActivationScopeRecord;
+  readonly invocation: DarkIsolatedProviderInvocationAdmissionRecord;
+  readonly attempt: IsolatedProviderExecutionAttemptRecord | null;
+}
+
 export interface IsolatedProviderExecutionAttemptV1 {
   readonly schemaVersion: 1;
   readonly executionMode: 'active';
@@ -4796,6 +4803,66 @@ export class ContextGraphStore {
     return { scope, scopeJson, scopeHash };
   }
 
+  getActiveHomeTextInvocation(): ActiveHomeTextInvocationRecord | null {
+    const activation = this.getActivationState();
+    if (activation.mode !== 'active') return null;
+    const scope = this.getHomeTextActivationScope();
+    if (!scope || scope.scope.activeActivationEpoch !== activation.epoch) {
+      return null;
+    }
+    const coordinator = this.getRootCoordinatorState();
+    if (
+      coordinator.activeBranchId === null ||
+      coordinator.activeWorldId === null
+    ) {
+      return null;
+    }
+    if (coordinator.activeWorldId !== scope.scope.worldId) {
+      throw new Error('active home text coordinator belongs to another world');
+    }
+    const rows = this.database
+      .prepare(
+        `SELECT invocation_id
+         FROM context_dark_isolated_provider_invocation_admissions
+         WHERE branch_id = ?
+         ORDER BY invocation_id`,
+      )
+      .all(coordinator.activeBranchId) as { invocation_id: string }[];
+    if (rows.length === 0) return null;
+    if (rows.length !== 1) {
+      throw new Error(
+        'active home text branch has ambiguous invocation authority',
+      );
+    }
+    const invocation = this.getDarkIsolatedProviderInvocationAdmission(
+      darkIsolatedProviderInvocationId(rows[0]!.invocation_id),
+    );
+    if (!invocation) {
+      throw new Error('active home text invocation disappeared');
+    }
+    const branch = this.getBranch(invocation.admission.branchId);
+    if (
+      invocation.admission.activationEpoch !==
+        scope.scope.sourceActivationEpoch ||
+      invocation.admission.branchId !== coordinator.activeBranchId ||
+      invocation.admission.worldId !== scope.scope.worldId ||
+      !branch ||
+      branch.status !== 'running' ||
+      branch.worldId !== scope.scope.worldId ||
+      branch.authorityEpoch !== invocation.admission.authorityEpoch
+    ) {
+      throw new Error('active home text invocation lineage is invalid');
+    }
+    return {
+      activation,
+      scope,
+      invocation,
+      attempt: this.getIsolatedProviderExecutionAttemptForInvocation(
+        invocation.invocationId,
+      ),
+    };
+  }
+
   createHomeTextActivationScope(input: {
     expectedSourceActivationEpoch: number;
     expectedWorldId: WorldId;
@@ -5354,6 +5421,84 @@ export class ContextGraphStore {
     );
   }
 
+  reconcileIsolatedProviderBeforeRecovery(
+    recoveredAtValue: number,
+  ): readonly IsolatedProviderOutcomeRecord[] {
+    const recoveredAt = timestamp('recoveredAt', recoveredAtValue);
+    if (this.getActivationState().mode !== 'active') return [];
+    return transaction(this.database, () => {
+      const rows = this.database
+        .prepare(
+          `SELECT attempts.attempt_id
+           FROM context_isolated_provider_execution_attempts AS attempts
+           JOIN context_branches AS branches
+             ON branches.branch_id = attempts.branch_id
+            AND branches.status = 'running'
+           JOIN context_root_coordinator AS coordinator
+             ON coordinator.singleton = 1
+            AND coordinator.active_branch_id = attempts.branch_id
+            AND coordinator.active_world_id = attempts.world_id
+           JOIN context_home_text_activation_scope AS scope
+             ON scope.singleton = 1
+            AND scope.world_id = attempts.world_id
+            AND scope.active_activation_epoch = attempts.active_activation_epoch
+           JOIN context_graph_activation AS activation
+             ON activation.singleton = 1
+            AND activation.mode = 'active'
+            AND activation.epoch = attempts.active_activation_epoch
+           ORDER BY attempts.authorized_at, attempts.attempt_id`,
+        )
+        .all() as { attempt_id: string }[];
+      if (rows.length > 1) {
+        throw new Error('active home text branch has ambiguous provider attempts');
+      }
+      const reconciled: IsolatedProviderOutcomeRecord[] = [];
+      for (const row of rows) {
+        const attemptId = isolatedProviderExecutionAttemptId(row.attempt_id);
+        const existing = this.getIsolatedProviderOutcome(attemptId);
+        if (existing) {
+          reconciled.push(existing);
+          continue;
+        }
+        const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
+        if (!attempt) {
+          throw new Error(
+            'isolated provider reconciliation attempt disappeared',
+          );
+        }
+        const effect = this.getEffect(attempt.attempt.effectId);
+        const response = this.getIsolatedProviderResponse(attemptId);
+        if (effect === null && response !== null) {
+          throw new Error('isolated provider response has no prepared effect');
+        }
+        if (effect !== null && effect.status !== 'prepared') {
+          throw new Error('isolated provider effect has no terminal outcome');
+        }
+        const phase: IsolatedProviderOutcomePhase =
+          effect === null
+            ? 'pre_dispatch_rejected'
+            : response === null
+              ? 'issuance_uncertain'
+              : 'issued';
+        reconciled.push(
+          this.insertIsolatedProviderOutcomeInTransaction({
+            attemptId,
+            outcomeKind: 'visible_error',
+            phase,
+            visibleText:
+              phase === 'pre_dispatch_rejected'
+                ? 'provider request rejected before dispatch'
+                : phase === 'issuance_uncertain'
+                  ? 'provider request outcome is uncertain'
+                  : 'provider response was received but its result was lost',
+            completedAt: recoveredAt,
+          }),
+        );
+      }
+      return reconciled;
+    });
+  }
+
   recordHomeTextProviderSuccess(input: {
     attemptId: IsolatedProviderExecutionAttemptId;
     visibleText: string;
@@ -5431,6 +5576,14 @@ export class ContextGraphStore {
     }
     const effectIdValue =
       input.phase === 'pre_dispatch_rejected' ? null : attempt.attempt.effectId;
+    const effect =
+      effectIdValue === null ? null : this.getEffect(effectIdValue);
+    if (
+      effectIdValue !== null &&
+      (effect === null || completedAt < effect.preparedAt)
+    ) {
+      throw new Error('provider outcome predates its prepared effect');
+    }
     const outcome = Object.freeze<IsolatedProviderOutcomeV1>({
       schemaVersion: 1,
       attemptId,
@@ -6613,6 +6766,7 @@ export class ContextGraphStore {
         : effect === null ||
           outcome.effectId !== attempt.attempt.effectId ||
           effect.status !== expectedEffectStatus ||
+          outcome.completedAt < effect.preparedAt ||
           effect.resolvedAt !== outcome.completedAt ||
           effect.observationJson !== expectedObservationJson) ||
       row.outcome_json !== outcomeJson ||
