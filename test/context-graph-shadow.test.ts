@@ -142,6 +142,151 @@ test('Agent.enqueue attaches the durable graph identity before FIFO drain', () =
   }
 });
 
+test('active graph ingress keeps Discord and Signal out of the legacy FIFO', () => {
+  const accepted: InboundMessage[] = [];
+  const muteRows = new Map<string, any>();
+  let runWakeRecoveryCalls = 0;
+  let providerCalls = 0;
+  const built = buildTestAgent({
+    llm: makeStubLLM({
+      complete: async () => {
+        providerCalls++;
+        return EMPTY_WAKE;
+      },
+    }),
+    agentDeps: {
+      scheduler: {
+        create: () => {
+          throw new Error('active Agent cannot create legacy run wakes');
+        },
+        list: () => {
+          runWakeRecoveryCalls++;
+          return [];
+        },
+        update: () => {
+          throw new Error('active Agent cannot update legacy run wakes');
+        },
+        markDone: () => {
+          throw new Error('active Agent cannot complete legacy run wakes');
+        },
+        getById: () => null,
+      },
+      mutes: {
+        get: (channelId) => muteRows.get(channelId) ?? null,
+        set: (channelId, type, setBy, reason = null) =>
+          muteRows.set(channelId, {
+            channelId,
+            type,
+            setBy,
+            reason,
+            createdAt: '2026-01-02T03:04:05.000Z',
+          }),
+        clear: (channelId) => muteRows.delete(channelId),
+        all: () => [...muteRows.values()],
+      },
+      contextGraphActive: {
+        recordInbound(message) {
+          accepted.push(message);
+        },
+      },
+    },
+  });
+  try {
+    assert.equal(runWakeRecoveryCalls, 0);
+    void built.agent.loop();
+    const before = built.agent.contextSnapshot().messages;
+    const discord = inbound();
+    const signal = inbound({
+      id: 'signal-1',
+      channelId: 'signal:bramble',
+      channelName: 'bramble',
+      guildId: undefined,
+      guildSlug: undefined,
+      kind: 'signal',
+      transport: 'signal',
+    });
+    let internalDropped = false;
+    const internal = inbound({
+      id: 'internal-1',
+      channelId: '__internal__',
+      channelName: 'harness',
+      kind: 'harness',
+      onDropped: () => {
+        internalDropped = true;
+      },
+    });
+    built.agent.enqueue(discord);
+    built.agent.enqueue(signal);
+    assert.throws(
+      () => built.agent.enqueue(internal),
+      /active context graph does not accept harness ingress/,
+    );
+    assert.deepEqual(accepted, [discord, signal]);
+    assert.equal(internalDropped, true);
+    const consoleMessage = inbound({
+      id: 'console-1',
+      channelId: 'console',
+      channelName: 'console',
+      kind: 'discord',
+    });
+    assert.throws(
+      () => built.agent.enqueue(consoleMessage),
+      /active context graph does not accept discord ingress/,
+    );
+    assert.deepEqual(accepted, [discord, signal]);
+    const muted = built.agent.moderateChannel(
+      '100',
+      'deafen',
+      'operator',
+      'active transport stop',
+    );
+    assert.equal(muted.ok, true);
+    assert.equal(muteRows.get('100')?.type, 'deafen');
+    assert.deepEqual(built.agent.contextSnapshot().messages, before);
+    assert.equal(providerCalls, 0);
+  } finally {
+    built.agent.stop();
+    built.scheduler.stop();
+    built.db.close();
+    built.cleanup();
+  }
+});
+
+test('active graph ingress failure cannot fall through to shadow or legacy input', () => {
+  let shadowCalls = 0;
+  const built = buildTestAgent({
+    agentDeps: {
+      contextGraphActive: {
+        recordInbound() {
+          throw new Error('durable active ingress failed');
+        },
+      },
+      contextGraphShadow: {
+        recordInbound() {
+          shadowCalls++;
+          throw new Error('shadow must not run');
+        },
+        prepareRequestObservation() {
+          return undefined;
+        },
+      },
+    },
+  });
+  try {
+    const before = built.agent.contextSnapshot().messages;
+    assert.throws(
+      () => built.agent.enqueue(inbound()),
+      /durable active ingress failed/,
+    );
+    assert.equal(shadowCalls, 0);
+    assert.deepEqual(built.agent.contextSnapshot().messages, before);
+  } finally {
+    built.scheduler.stop();
+    built.db.close();
+    built.cleanup();
+  }
+});
+
 test('shadow projection plans retain lineage and blockers without request content', () => {
   const privateSystem = 'PRIVATE_SYSTEM_CANARY';
   const localContent = 'LOCAL_CONTENT_CANARY';
@@ -303,7 +448,9 @@ test('shadow recorder keeps content in world-bound projections, not plans or obs
     assert.deepEqual(parsedPlan.localMessageProjectionIds, [
       rendered.projection_id,
     ]);
-    assert.deepEqual(parsedPlan.systemLayerProjectionIds, [systemLayer.layer_id]);
+    assert.deepEqual(parsedPlan.systemLayerProjectionIds, [
+      systemLayer.layer_id,
+    ]);
     assert.deepEqual(
       {
         layer_kind: systemLayer.layer_kind,
@@ -535,7 +682,9 @@ test('Agent installs one shadow observer for the frozen request projection', asy
     assert.equal(prepared.messages, llmMessages);
     assert.ok(Object.isFrozen(prepared.systemLayers));
     assert.equal(
-      prepared.systemLayers.map((layer: { content: string }) => layer.content).join(''),
+      prepared.systemLayers
+        .map((layer: { content: string }) => layer.content)
+        .join(''),
       prepared.messages[0].content,
     );
     for (const layer of prepared.systemLayers) {

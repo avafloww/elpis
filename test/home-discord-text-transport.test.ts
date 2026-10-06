@@ -117,6 +117,34 @@ test('home Discord text transport rejects invalid input before preparation or ne
   assert.equal(fetched, 0);
 });
 
+test('home Discord text transport rejects revoked channel authority before preparation', async () => {
+  let prepared = 0;
+  let fetched = 0;
+  const transport = createHomeDiscordTextTransport({
+    botToken: 'synthetic-token',
+    callTimeoutMs: 1_000,
+    authorize: () => {
+      throw new Error('channel is muted');
+    },
+    fetchImpl: (async () => {
+      fetched += 1;
+      return responseFor(request());
+    }) as typeof fetch,
+  });
+
+  await assert.rejects(
+    transport.send(request(), () => {
+      prepared += 1;
+    }),
+    (error) =>
+      error instanceof HomeDiscordTextTransportError &&
+      error.disposition === 'pre_dispatch_rejected' &&
+      error.code === 'prepare_rejected',
+  );
+  assert.equal(prepared, 0);
+  assert.equal(fetched, 0);
+});
+
 test('home Discord text transport does not dispatch when durable preparation rejects', async () => {
   let fetched = 0;
   const transport = createHomeDiscordTextTransport({

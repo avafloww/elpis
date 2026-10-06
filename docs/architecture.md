@@ -8,9 +8,9 @@ Elpis is one long-lived Node.js process hosting one agent, one ordered conversat
 
 1. loads and validates `config.yaml`;
 2. creates the data directory, migrates known legacy state into `elpis-data/`, and opens `elpis-data/elpis.db`;
-3. initializes the inactive scoped-context graph store and refuses to run a monocontext binary against an already-active graph;
+3. initializes the scoped-context graph store; dark mode performs generic crash recovery, while active mode validates its preauthorized home-text scope and recovers provider/speech state before generic effects;
 4. ensures `SOUL.md` and `MEMORY.md` exist;
-5. restores the newest transcript with opaque-replay provenance checks;
+5. restores the newest transcript with opaque-replay provenance checks only in dark mode; active mode starts with no legacy transcript history;
 6. constructs the provider, context tracker, compactor, sandbox, scheduler, Mind, channel directory, optional worker broker, console, Discord adapter, and any enabled external transport;
 7. starts the agent loop;
 8. delivers restart or optional harness-update notices through the same inbound queue.
@@ -51,6 +51,8 @@ Explicit channel sends and eligible resident speech headers produce outward spee
 ```
 
 The loop is sequential. New messages can queue while work is active, but a second model turn never runs concurrently with the first.
+
+When the context graph is already active, supported Discord and Signal ingress is synchronously appended to the durable graph before returning from `Agent.enqueue`. Exact scoped home Discord text is drained through one serialized tool-free provider request and the exact one-message Discord transport. Other social worlds remain durable events only. Active mode never appends social or internal ingress to the legacy FIFO, transcript, or mixed prompt. Unsupported internal producers such as Scheduler and background-job notification stay inactive, legacy run-wake recovery is withheld, `/exec` and console/MCP ingress are unavailable, restart and changelog markers remain unconsumed, and direct unsupported enqueue attempts reject instead of acknowledging a lost wake. Active delivery rechecks persistent mute/deafen state for the exact channel and any known thread parent before durable preparation or network dispatch.
 
 A resident speech header is committed with the assistant message, delivered through the shared channel-send path before tools, and receipted after the tool batch. Context-epoch checks precede tool effects and receipt insertion. See [explicit resident speech](context.md#explicit-resident-speech) for eligibility, clear, and replay behavior.
 

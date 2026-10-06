@@ -110,6 +110,69 @@ for (const scenario of [
   });
 }
 
+test('/exec rejects before sandbox execution when runtime effects are disabled', async () => {
+  const base = makeConfig();
+  const fixture = buildTestAgent({
+    config: {
+      operator: { ...base.operator, discordId: '2001' },
+      discord: {
+        ...base.discord,
+        guilds: [
+          {
+            id: '3001',
+            slug: 'home',
+            slashCommands: true,
+            quietHours: null,
+            timezone: null,
+            channels: { '1001': 'direct' },
+          },
+        ],
+      },
+    },
+  });
+  let executions = 0;
+  fixture.agent.execSandbox = async () => {
+    executions++;
+    throw new Error('sandbox execution must remain disabled');
+  };
+  const voice: DiscordVoiceController = {
+    channelId: null,
+    join: async () => {},
+    leave: () => {},
+    speak: async () => ({ status: 'played', transcript: '', playedMs: 0 }),
+    captureSpeech: () => null,
+  };
+  const { client } = createDiscord(fixture.config, fixture.agent, {
+    voice,
+    execEnabled: false,
+  });
+  const replies: string[] = [];
+  const interaction = {
+    isChatInputCommand: () => true,
+    guildId: '3001',
+    commandName: 'exec',
+    user: { id: '2001' },
+    options: { getString: () => 'await Promise.resolve()' },
+    reply: async ({ content }: { content: string }) => {
+      replies.push(content);
+    },
+  };
+  try {
+    const handler = client.listeners(Events.InteractionCreate)[0] as (
+      input: unknown,
+    ) => Promise<void>;
+    await handler(interaction);
+    assert.equal(executions, 0);
+    assert.deepEqual(replies, [
+      'Sandbox execution is unavailable while the context graph is active.',
+    ]);
+  } finally {
+    fixture.agent.stop();
+    client.destroy();
+    fixture.cleanup();
+  }
+});
+
 test('voice send preserves readable delivery and returns truthful failed audio receipt', async () => {
   const fixture = buildTestAgent({
     config: {

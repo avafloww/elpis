@@ -1,0 +1,7 @@
+# Wire the preauthorized active-home runtime
+
+An already-active context graph now boots into the narrow home-text path instead of falling back to or refusing in favor of the legacy mixed loop. Supported Discord and Signal ingress is durably recorded first; only the exact authorized home Discord scope can assemble a serialized tool-free provider request and one-message Discord delivery. Other social worlds remain queued as graph events. Unsupported internal wakes neither enter legacy history nor disappear: Scheduler and background-job notification stay inactive, legacy run-wake recovery is withheld, `/exec` and console/MCP ingress reject, and restart/changelog markers remain unconsumed until an internal-wake projection exists. Active Discord delivery rechecks persistent mute/deafen state for the exact channel and any known thread parent before preparation or network dispatch.
+
+Boot skips legacy transcript restoration in active mode, requires the preexisting home scope and a direct Codex Responses main target, reconciles provider and speech state before generic crash recovery, and never creates or activates authority. Existing speech barriers and uncertain issuance are not replayed. Dark mode is unchanged.
+
+Focused graph, runtime, routing, recovery, and boot tests plus the deterministic suite and build validate the change. Deployment and graph activation remain separate operator decisions.

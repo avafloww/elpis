@@ -9045,6 +9045,10 @@ test('active home request consumes one admission and rolls back late failure', (
       admittedAt: 443,
     });
     assert.ok(secondHome.admission);
+    assert.deepEqual(
+      value.store.getOldestPendingActiveHomeIngressAdmission(),
+      home.admission,
+    );
     const target = {
       schemaVersion: 1,
       role: 'main',
@@ -9118,6 +9122,10 @@ test('active home request consumes one admission and rolls back late failure', (
       ...input,
       branchId: branchId('branch:active-request-success'),
     });
+    assert.deepEqual(
+      value.store.getOldestPendingActiveHomeIngressAdmission(),
+      secondHome.admission,
+    );
     assert.equal(admitted.admission.executionMode, 'active');
     assert.equal(admitted.admission.runnable, false);
     assert.equal(admitted.admission.networkAuthority, 'none');

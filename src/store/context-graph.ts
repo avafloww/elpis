@@ -9408,6 +9408,28 @@ export class ContextGraphStore {
     return admission;
   }
 
+  getOldestPendingActiveHomeIngressAdmission(): ActiveHomeIngressAdmissionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT ingress.event_id, ingress.source_sequence
+         FROM context_active_home_ingress_admissions AS ingress
+         LEFT JOIN context_active_home_provider_invocation_admissions AS invoked
+           ON invoked.ingress_event_id = ingress.event_id
+         WHERE invoked.ingress_event_id IS NULL
+         ORDER BY ingress.source_sequence ASC
+         LIMIT 1`,
+      )
+      .get() as { event_id: string; source_sequence: number } | undefined;
+    if (!row) return null;
+    const admission = this.getActiveHomeIngressAdmission(eventId(row.event_id));
+    if (!admission || admission.sourceSequence !== row.source_sequence) {
+      throw new Error(
+        `stored oldest active home ingress admission is invalid: ${row.event_id}`,
+      );
+    }
+    return admission;
+  }
+
   recordActiveSocialInbound(input: {
     eventId: EventId;
     worldId: WorldId;

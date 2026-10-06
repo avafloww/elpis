@@ -1294,6 +1294,8 @@ export function createDiscord(
     emotes?: EmoteRegistry;
     /** Injected voice bridge for deterministic gateway tests. */
     voice?: DiscordVoiceController;
+    /** Operator sandbox execution is disabled when no internal-wake lane exists. */
+    execEnabled?: boolean;
   },
 ): DiscordWiring {
   const log = config.logger;
@@ -2410,6 +2412,16 @@ export function createDiscord(
     }
 
     if (name === 'exec') {
+      if (deps?.execEnabled === false) {
+        await safeReply(log, name, () =>
+          interaction.reply({
+            content:
+              'Sandbox execution is unavailable while the context graph is active.',
+            flags: MessageFlags.Ephemeral,
+          }),
+        );
+        return;
+      }
       const code = interaction.options.getString('code') ?? '';
       if (!code.trim()) {
         await safeReply(log, name, () =>

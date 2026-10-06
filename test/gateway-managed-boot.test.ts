@@ -613,7 +613,7 @@ test('dark startup records an interrupted branch without advancing or replaying 
   }
 });
 
-test('active graph refusal happens before any dark-mode recovery mutation', async () => {
+test('active graph scope preflight happens before any recovery mutation', async () => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'elpis-context-active-refusal-'),
   );
@@ -648,7 +648,7 @@ test('active graph refusal happens before any dark-mode recovery mutation', asyn
         loadConfigFile: () => config,
         resolveBuildIdentity: async () => buildIdentity,
       }),
-      /context graph is active but this runtime supports shadow mode only/,
+      /active context graph has no home text activation scope/,
     );
     const unchanged = openDatabase(runtimeRoot);
     const unchangedStore = new ContextGraphStore(unchanged);
@@ -664,6 +664,46 @@ test('active graph refusal happens before any dark-mode recovery mutation', asyn
       unchangedStore.getRootCoordinatorState().activeBranchId,
       opened.branch.branchId,
     );
+    unchanged.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('active graph rejects an unsupported main target before runtime recovery', async () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'elpis-context-active-target-'),
+  );
+  const runtimeRoot = path.join(directory, 'elpis-data');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const seeded = openDatabase(runtimeRoot);
+  const seededStore = new ContextGraphStore(seeded);
+  seededStore.createHomeTextActivationScope({
+    expectedSourceActivationEpoch: 0,
+    expectedWorldId: worldId('world:discord:guild:12345678901234567'),
+    guildId: '12345678901234567',
+    channelId: '23456789012345678',
+    maxOutputBytes: 1900,
+    authorizedAt: 10,
+  });
+  seededStore.activate(0, 20);
+  seeded.close();
+
+  const config = directConfig(directory, false, false);
+  try {
+    await assert.rejects(
+      createElpisRuntime({
+        loadConfigFile: () => config,
+        resolveBuildIdentity: async () => buildIdentity,
+        fetchContextWindow: async () => 128_000,
+      }),
+      /active home runtime requires direct Codex Responses/,
+    );
+    const unchanged = openDatabase(runtimeRoot);
+    const unchangedStore = new ContextGraphStore(unchanged);
+    assert.equal(unchangedStore.getActivationState().mode, 'active');
+    assert.equal(unchangedStore.getContinuationHead().revision, 0);
+    assert.equal(unchangedStore.getRootCoordinatorState().activeBranchId, null);
     unchanged.close();
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

@@ -15,13 +15,13 @@ import {
 } from '../context-graph.js';
 import {
   ContextGraphStore,
-  eventId,
   shadowProjectionPlanId,
   shadowRequestObservationId,
   type EventMessageProjectionId,
   type SystemLayerProjectionId,
   type WorldEventRecord,
 } from '../store/context-graph.js';
+import { encodeSocialInboundGraph } from './social-inbound.js';
 
 export type ShadowProjectionBlocker =
   | 'legacy_mixed_system'
@@ -64,22 +64,20 @@ export interface ShadowProjectionPlanV1 {
   readonly blockers: readonly ShadowProjectionBlocker[];
 }
 
-export interface ShadowProjectionPlanV2
-  extends Omit<
-    ShadowProjectionPlanV1,
-    'schemaVersion' | 'projectionGeneration'
-  > {
+export interface ShadowProjectionPlanV2 extends Omit<
+  ShadowProjectionPlanV1,
+  'schemaVersion' | 'projectionGeneration'
+> {
   readonly schemaVersion: 2;
   readonly projectionGeneration: 2;
   readonly rendererGeneration: 1;
   readonly localMessageProjectionIds: readonly EventMessageProjectionId[];
 }
 
-export interface ShadowProjectionPlanV3
-  extends Omit<
-    ShadowProjectionPlanV2,
-    'schemaVersion' | 'projectionGeneration' | 'systemLayers'
-  > {
+export interface ShadowProjectionPlanV3 extends Omit<
+  ShadowProjectionPlanV2,
+  'schemaVersion' | 'projectionGeneration' | 'systemLayers'
+> {
   readonly schemaVersion: 3;
   readonly projectionGeneration: 3;
   readonly systemRendererGeneration: 1;
@@ -87,9 +85,7 @@ export interface ShadowProjectionPlanV3
 }
 
 export type ShadowProjectionPlan =
-  | ShadowProjectionPlanV1
-  | ShadowProjectionPlanV2
-  | ShadowProjectionPlanV3;
+  ShadowProjectionPlanV1 | ShadowProjectionPlanV2 | ShadowProjectionPlanV3;
 
 const blockerOrder: readonly ShadowProjectionBlocker[] = [
   'legacy_mixed_system',
@@ -382,51 +378,9 @@ export class ContextGraphShadowRecorder {
   }
 
   recordInbound(message: InboundMessage): WorldEventRecord {
-    const worldId = worldIdForInbound({
-      channelId: message.channelId,
-      guildId: message.guildId,
-      kind: message.kind,
-      originWorldId: message.originWorldId,
-    });
-    const payload = {
-      schemaVersion: 1,
-      id: message.id,
-      source: message.source ?? null,
-      transport: message.transport ?? null,
-      kind: message.kind ?? 'discord',
-      channelId: message.channelId,
-      channelName: message.channelName,
-      guildId: message.guildId ?? null,
-      guildSlug: message.guildSlug ?? null,
-      policyChannelId: message.policyChannelId ?? null,
-      originWorldId: message.originWorldId ?? null,
-      author: message.author,
-      authorId: message.authorId,
-      bot: message.bot ?? false,
-      content: message.content,
-      createdAt: message.createdAt,
-      replyTo: message.replyTo,
-      forwarded: message.forwarded,
-      mentions: [...message.mentions],
-      attachments: message.attachments.map((attachment) => ({ ...attachment })),
-      wakeClass: message.wakeClass ?? 'wake',
-      sendScope: message.sendScope ?? null,
-      sends: message.sends ?? null,
-    };
-    const occurredAt = Date.parse(message.createdAt);
-    const identity = createHash('sha256')
-      .update(worldId)
-      .update('\u0000')
-      .update(message.kind ?? 'discord')
-      .update('\u0000')
-      .update(message.id)
-      .digest('hex');
+    const encoded = encodeSocialInboundGraph(message);
     return this.store.appendWorldEvent({
-      eventId: eventId(`event:ingress:${identity}`),
-      worldId,
-      kind: `inbound:${message.kind ?? 'discord'}`,
-      payload,
-      occurredAt: Number.isSafeInteger(occurredAt) ? occurredAt : 0,
+      ...encoded,
       recordedAt: Date.now(),
     });
   }

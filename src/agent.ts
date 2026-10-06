@@ -740,6 +740,10 @@ export interface AgentDeps {
   density?: DensityModel;
   /** Persistent transcript store (single 'main' stream). */
   transcript: TranscriptStore;
+  /** Active graph ingress owns supported social input before the legacy FIFO. */
+  contextGraphActive?: {
+    recordInbound(message: InboundMessage): void;
+  };
   /** Dark-mode append-only graph recorder. It never changes request assembly. */
   contextGraphShadow?: {
     recordInbound(message: InboundMessage): {
@@ -781,7 +785,9 @@ export interface AgentDeps {
   /** Publishes process-local proof for an exact internal acceptance wake only
    * after the whole drained turn is known to contain no person-facing input. */
   setResidentRecoveredProviderVerificationTurnOrigin?: (
-    origin: import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin | null,
+    origin:
+      | import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin
+      | null,
   ) => void;
   /** Persistent id→name channel directory. Backs channel('name')
    * resolution and known-channel listing under (no live contexts). */
@@ -948,10 +954,11 @@ export class Agent {
   private turnChannelId: string | null = null;
   /** Process-local identity shared by sandbox runs from exactly one Agent turn. */
   private outboundTurnToken: object | null = null;
-  private readonly residentRecoveredProviderVerificationWakeSources = new WeakMap<
-    InboundMessage,
-    import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake']
-  >();
+  private readonly residentRecoveredProviderVerificationWakeSources =
+    new WeakMap<
+      InboundMessage,
+      import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake']
+    >();
   private residentRecoveredProviderVerificationWake:
     | import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake']
     | null = null;
@@ -1079,7 +1086,7 @@ export class Agent {
       );
       this.recoverInterruptedToolCall();
     }
-    this.recoverRunWake();
+    if (!deps.contextGraphActive) this.recoverRunWake();
   }
 
   /** Replace the send handler (wired by the Discord layer on start). */
@@ -1807,6 +1814,26 @@ export class Agent {
    * turn a parked loop on. The periodic tick (`fireAmbientTick`) is the only
    * thing that turns accumulated ambient chat into a turn. */
   enqueue(msg: InboundMessage): void {
+    if (this.deps.contextGraphActive) {
+      const social =
+        (msg.kind === 'signal' && msg.transport === 'signal') ||
+        ((msg.kind === undefined || msg.kind === 'discord') &&
+          msg.channelId !== INTERNAL_CHANNEL_ID &&
+          msg.channelId !== CONSOLE_CHANNEL_ID);
+      if (social) {
+        this.deps.contextGraphActive.recordInbound(msg);
+        return;
+      }
+      this.logger.info(
+        `[context-graph] active mode rejected unsupported ${msg.kind ?? 'discord'} ingress`,
+      );
+      try {
+        msg.onDropped?.();
+      } catch {}
+      throw new Error(
+        `active context graph does not accept ${msg.kind ?? 'discord'} ingress`,
+      );
+    }
     try {
       const lineage = this.deps.contextGraphShadow?.recordInbound(msg);
       if (lineage) {
@@ -1882,8 +1909,7 @@ export class Agent {
       channelId?: string;
       sends?: NonNullable<ChatMessage['sends']>;
       originWorldId?: WorldId;
-      residentRecoveredProviderVerificationWake?:
-        import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake'];
+      residentRecoveredProviderVerificationWake?: import('./types.js').ResidentRecoveredProviderVerificationTurnOrigin['wake'];
     },
   ): void {
     const author = extras.author ?? 'harness';
@@ -2193,9 +2219,11 @@ export class Agent {
     const by = actor === 'self' ? `${this.agentName()} (self)` : 'operator';
     const note = `channel ${label} ${verb} by ${by}${reason ? `: ${reason}` : ''}`;
     this.logger.info(`[agent] killswitch: ${note}`);
-    this.enqueueInternal('harness', 'harness', `[harness] ${note}`, {
-      id: this.syntheticId('mod'),
-    });
+    if (!this.deps.contextGraphActive) {
+      this.enqueueInternal('harness', 'harness', `[harness] ${note}`, {
+        id: this.syntheticId('mod'),
+      });
+    }
     this.deps.console?.roomsChanged();
     return { ok: true, note };
   }
@@ -2480,7 +2508,8 @@ export class Agent {
           m.kind === 'watch';
         if (wakes) {
           this.residentRecoveredProviderVerificationWake =
-            this.residentRecoveredProviderVerificationWakeSources.get(m) ?? null;
+            this.residentRecoveredProviderVerificationWakeSources.get(m) ??
+            null;
         }
         const isScopedInternal =
           isInternal && m.channelId !== INTERNAL_CHANNEL_ID;

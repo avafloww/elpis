@@ -148,6 +148,7 @@ export function createHomeDiscordTextTransport(input: {
   fetchImpl?: typeof fetch;
   apiBase?: string;
   now?: () => number;
+  authorize?: (request: HomeDiscordTextRequest) => void;
 }): HomeDiscordTextTransport {
   if (!input.botToken || /\s/.test(input.botToken)) {
     throw new Error('home Discord text transport requires a bot token');
@@ -180,6 +181,9 @@ export function createHomeDiscordTextTransport(input: {
       });
       const url = `${apiBase}/channels/${request.channelId}/messages`;
       try {
+        const authorizationResult = input.authorize?.(request);
+        if (authorizationResult !== undefined)
+          throw new Error('authorization hook must be synchronous');
         const hookResult = beforeDispatch();
         if (hookResult !== undefined)
           throw new Error('prepare hook must be synchronous');
