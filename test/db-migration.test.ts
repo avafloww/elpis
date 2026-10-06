@@ -171,7 +171,7 @@ test('current migration prefix preserves fleet history and creates resident stat
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    57,
+    58,
   );
   assert.deepEqual(
     (
@@ -283,6 +283,10 @@ test('current migration prefix preserves fleet history and creates resident stat
         component: 'core',
         name: '0057-context-active-home-provider-execution-ledger',
       },
+      {
+        component: 'core',
+        name: '0058-context-active-home-text-speech-barrier',
+      },
     ],
   );
   db.close();
@@ -301,6 +305,19 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -496,7 +513,7 @@ test('migration v27→current grandfathers delivery but leaves every legacy clea
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+        AND name IN ('0028-worker-completion-delivery', '0029-context-graph-dark-store', '0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 27;
   `);
   const insert = db.prepare(
@@ -685,7 +702,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    57,
+    58,
   );
   assert.deepEqual(
     (
@@ -740,6 +757,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
       '0055-context-active-home-ingress-admissions',
       '0056-context-active-home-provider-invocation-admissions',
       '0057-context-active-home-provider-execution-ledger',
+      '0058-context-active-home-text-speech-barrier',
     ],
   );
   runMigrations(db);
@@ -771,7 +789,7 @@ test('migration v12→v15 adds cold notices and backfills retirement deadlines',
         )
         .get() as { n: number }
     ).n,
-    44,
+    45,
   );
   db.close();
 });
@@ -811,7 +829,7 @@ test('migration v16→v23 preserves legacy fleet sessions and creates empty work
   const version = (
     reopened.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(version, 57);
+  assert.equal(version, 58);
   assert.equal(
     (
       reopened
@@ -851,6 +869,19 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -1027,7 +1058,7 @@ test('migration v29→v30 rejects an ambiguous pre-coordinator running branch', 
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+      WHERE component = 'core' AND name IN ('0030-context-root-coordinator', '0031-context-shadow-projections', '0032-context-event-message-projections', '0033-context-system-layer-projections', '0034-context-local-branch-request-views', '0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 29;
     INSERT INTO context_branches(
       branch_id, world_id, parent_branch_id, status, authority_epoch,
@@ -1109,6 +1140,19 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -1258,7 +1302,8 @@ test('migration v37→v38 rejects contradictory approval source provenance', () 
           '0054-context-home-text-speech-delivery',
           '0055-context-active-home-ingress-admissions',
           '0056-context-active-home-provider-invocation-admissions',
-          '0057-context-active-home-provider-execution-ledger'
+          '0057-context-active-home-provider-execution-ledger',
+          '0058-context-active-home-text-speech-barrier'
         );
     PRAGMA user_version = 37;
   `);
@@ -1304,6 +1349,19 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -1458,7 +1516,7 @@ test('migration v38→v39 rejects approvals that predate their layers', () => {
   );
   db.exec(`
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+      WHERE component = 'core' AND name IN ('0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 38;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1517,6 +1575,19 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -1680,7 +1751,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
     DROP TRIGGER context_scoped_runtime_contract_artifacts_no_update;
     DROP TABLE context_scoped_runtime_contract_artifacts;
     DELETE FROM elpis_migrations
-      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+      WHERE component = 'core' AND name IN ('0035-context-dark-ingress-admissions', '0036-context-dark-pending-branch-attempts', '0037-context-system-layer-approvals', '0038-context-system-layer-approval-sources', '0039-context-system-profiles', '0040-context-system-profile-request-view-bindings', '0041-context-dark-pending-profile-binding', '0042-context-scoped-runtime-contract-artifact', '0043-context-resident-source-inspection-candidates', '0044-context-resident-source-candidate-authorizations', '0045-context-resident-identity-system-derivations', '0046-context-resident-world-profile-bindings', '0047-context-dark-isolated-provider-bindings', '0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 34;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1757,7 +1828,7 @@ test('migration v34→v35 establishes an immutable no-backfill ingress watermark
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    57,
+    58,
   );
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
@@ -1792,6 +1863,19 @@ test('migration v55→current preserves an in-flight active branch', () => {
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -1813,7 +1897,7 @@ test('migration v55→current preserves an in-flight active branch', () => {
     DROP TABLE context_active_home_provider_invocation_admissions;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+        AND name IN ('0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 55;
   `);
   for (const trigger of ledgerTriggers) db.exec(trigger.sql);
@@ -1824,7 +1908,7 @@ test('migration v55→current preserves an in-flight active branch', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    57,
+    58,
   );
   assert.equal(migrated.getActivationState().mode, 'active');
   assert.equal(migrated.getBranch(opened.branch.branchId)?.status, 'running');
@@ -1855,6 +1939,19 @@ test('migration v47→v48 rejects ambiguous historical binding order', () => {
     DROP TRIGGER context_active_home_provider_invocation_transition_guard;
     DROP TRIGGER context_active_home_provider_invocation_advance_guard;
     DROP TRIGGER context_active_home_provider_invocation_recovery_guard;
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
     DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
     DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -2021,7 +2118,7 @@ test('migration v47→v48 rejects ambiguous historical binding order', () => {
     DROP TRIGGER elpis_migrations_no_delete;
     DELETE FROM elpis_migrations
       WHERE component = 'core'
-        AND name IN ('0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger');
+        AND name IN ('0048-context-dark-isolated-provider-binding-order', '0049-context-dark-isolated-provider-invocation-admissions', '0050-context-isolated-provider-execution-ledger', '0051-context-home-text-activation-scope', '0052-context-home-text-request-scope', '0053-context-home-text-speech-attempts', '0054-context-home-text-speech-delivery', '0055-context-active-home-ingress-admissions', '0056-context-active-home-provider-invocation-admissions', '0057-context-active-home-provider-execution-ledger', '0058-context-active-home-text-speech-barrier');
     PRAGMA user_version = 47;
   `);
   assert.throws(
@@ -2038,6 +2135,82 @@ test('migration v47→v48 rejects ambiguous historical binding order', () => {
       db
         .prepare(
           "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'context_dark_isolated_provider_binding_order'",
+        )
+        .get() as { n: number }
+    ).n,
+    0,
+  );
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('migration v57 refuses an active success without a speech barrier', () => {
+  const dir = tmpDir();
+  const db = openDatabase(dir);
+  db.exec('PRAGMA foreign_keys = OFF');
+  const ledgerTriggers = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='elpis_migrations' ORDER BY name",
+    )
+    .all() as { name: string; sql: string }[];
+  for (const trigger of ledgerTriggers) {
+    db.exec(`DROP TRIGGER ${JSON.stringify(trigger.name)}`);
+  }
+  db.exec(`
+    DROP TRIGGER context_active_home_text_result_capsules_no_share;
+    DROP TRIGGER context_active_home_text_success_transition_guard;
+    DROP TRIGGER context_active_home_text_success_recovery_guard;
+    DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+    DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+    DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+    DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+    DROP TABLE context_active_home_text_success_obligations;
+    DROP TABLE context_active_home_text_speech_attempts;
+    DROP TRIGGER context_active_home_provider_invocation_capsule_guard;
+    CREATE TRIGGER context_active_home_provider_invocation_capsule_guard
+      BEFORE INSERT ON context_capsules
+      WHEN EXISTS (
+        SELECT 1 FROM context_active_home_provider_invocation_admissions
+        WHERE branch_id = NEW.branch_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'active home provider invocation has no capsule authority');
+      END;
+    DROP TRIGGER context_active_home_provider_outcomes_lineage_guard;
+    INSERT INTO context_active_home_provider_outcomes(
+      attempt_id, effect_id, outcome_kind, phase, visible_text, visible_bytes,
+      visible_hash, outcome_json, outcome_hash, completed_at
+    ) VALUES (
+      'isolated-provider-attempt:legacy-schema57-success',
+      'effect:legacy-schema57-success',
+      'visible_success', 'issued', 'X', 1,
+      '${'0'.repeat(64)}', '{}', '${'1'.repeat(64)}', 1
+    );
+    DELETE FROM elpis_migrations
+      WHERE component = 'core'
+        AND name = '0058-context-active-home-text-speech-barrier';
+    PRAGMA user_version = 57;
+  `);
+  for (const trigger of ledgerTriggers) db.exec(trigger.sql);
+
+  assert.throws(
+    () => runMigrations(db),
+    /pre-schema58 active home provider success lacks speech barrier/,
+  );
+  assert.equal(
+    (db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    57,
+  );
+  assert.equal(
+    (
+      db
+        .prepare(
+          "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'context_active_home_text_speech_attempts'",
         )
         .get() as { n: number }
     ).n,

@@ -6453,6 +6453,19 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
       DROP TRIGGER context_home_text_speech_finalizations_lineage_guard;
+      DROP TRIGGER context_active_home_text_result_capsules_no_share;
+      DROP TRIGGER context_active_home_text_success_transition_guard;
+      DROP TRIGGER context_active_home_text_success_recovery_guard;
+      DROP TRIGGER context_active_home_text_speech_attempts_lineage_guard;
+      DROP TRIGGER context_home_text_speech_attempts_active_collision_guard;
+    DROP TRIGGER context_active_home_text_speech_attempts_no_update;
+      DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+      DROP TRIGGER context_active_home_text_success_obligations_after_outcome_insert;
+      DROP TRIGGER context_active_home_text_success_obligations_lineage_guard;
+    DROP TRIGGER context_active_home_text_success_obligations_no_update;
+      DROP TRIGGER context_active_home_text_success_obligations_no_delete;
+      DROP TABLE context_active_home_text_success_obligations;
+      DROP TABLE context_active_home_text_speech_attempts;
       DROP TRIGGER context_active_home_provider_effect_transition_guard;
       DROP TRIGGER context_active_home_provider_outcomes_no_update;
       DROP TRIGGER context_active_home_provider_outcomes_no_delete;
@@ -6622,7 +6635,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0054-context-home-text-speech-delivery',
             '0055-context-active-home-ingress-admissions',
             '0056-context-active-home-provider-invocation-admissions',
-            '0057-context-active-home-provider-execution-ledger'
+            '0057-context-active-home-provider-execution-ledger',
+            '0058-context-active-home-text-speech-barrier'
           );
       PRAGMA user_version = 40;
     `);
@@ -9298,6 +9312,61 @@ test('active home request consumes one admission and rolls back late failure', (
       requestId: 'request-active-home-1',
       receivedAt: 530,
     });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_active_home_text_success_obligations(
+               provider_attempt_id, speech_attempt_id, provider_outcome_hash
+             ) VALUES (?, ?, ?)`,
+          )
+          .run(
+            execution.attempt.attemptId,
+            `home-text-speech:${'0'.repeat(64)}`,
+            '0'.repeat(64),
+          ),
+      /success obligation lineage is invalid/,
+    );
+    value.database.exec(`
+      CREATE TRIGGER reject_active_home_result_capsule
+      BEFORE INSERT ON context_capsules
+      WHEN NEW.branch_id = '${execution.attempt.attempt.branchId}'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced active home result capsule rejection');
+      END;
+    `);
+    assert.throws(
+      () =>
+        value.store.recordIsolatedProviderOutcome({
+          attemptId: execution.attempt.attemptId,
+          outcomeKind: 'visible_success',
+          phase: 'issued',
+          visibleText: 'ACTIVE_HOME_PROVIDER_RESULT',
+          completedAt: 540,
+        }),
+      /forced active home result capsule rejection/,
+    );
+    value.database.exec('DROP TRIGGER reject_active_home_result_capsule');
+    assert.equal(
+      value.store.getIsolatedProviderOutcome(execution.attempt.attemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(execution.attempt.attempt.effectId)?.status,
+      'prepared',
+    );
+    assert.equal(
+      tableCount(value.database, 'context_active_home_text_speech_attempts'),
+      0,
+    );
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_active_home_text_success_obligations',
+      ),
+      0,
+    );
+    assert.equal(tableCount(value.database, 'context_capsules'), 0);
     const outcome = value.store.recordIsolatedProviderOutcome({
       attemptId: execution.attempt.attemptId,
       outcomeKind: 'visible_success',
@@ -9322,11 +9391,120 @@ test('active home request consumes one admission and rolls back late failure', (
       tableCount(value.database, 'context_active_home_provider_outcomes'),
       1,
     );
-    assert.equal(tableCount(value.database, 'context_capsules'), 0);
+    assert.equal(tableCount(value.database, 'context_capsules'), 1);
+    assert.equal(
+      tableCount(value.database, 'context_active_home_text_speech_attempts'),
+      1,
+    );
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_active_home_text_success_obligations',
+      ),
+      1,
+    );
+    const speech = value.store.getActiveHomeTextSpeechAttempt(
+      execution.attempt.attemptId,
+    );
+    assert.ok(speech);
+    assert.equal(speech.attempt.visibleText, 'ACTIVE_HOME_PROVIDER_RESULT');
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_share_grants(
+               grant_id, shared_event_id, source_capsule_id, source_world_id,
+               destination_world_id, canonical_text, content_hash, status,
+               authority_epoch, created_at, revoked_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+          )
+          .run(
+            'share:forbidden-active-home-text-result',
+            'event:forbidden-active-home-text-result',
+            speech.attempt.resultCapsuleId,
+            speech.attempt.worldId,
+            'world:discord:guild:999999999999999999',
+            'forbidden',
+            '0'.repeat(64),
+            speech.attempt.authorityEpoch,
+            549,
+          ),
+      /world-private/,
+    );
+    assert.throws(
+      () => value.store.recoverCoordinatedBranch(550),
+      /cannot transition before speech resolution/,
+    );
     assert.equal(
       tableCount(value.database, 'context_continuation_advances'),
       0,
     );
+
+    const speechRow = value.database
+      .prepare(
+        `SELECT * FROM context_active_home_text_speech_attempts
+         WHERE provider_attempt_id = ?`,
+      )
+      .get(execution.attempt.attemptId) as Record<
+      string,
+      string | number | null
+    >;
+    const speechColumns = Object.keys(speechRow);
+    const speechValues = speechColumns.map((column) => speechRow[column]);
+    value.database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TRIGGER context_active_home_text_speech_attempts_no_delete;
+      DROP TRIGGER context_capsules_no_delete;
+    `);
+    value.database
+      .prepare(
+        `DELETE FROM context_active_home_text_speech_attempts
+         WHERE provider_attempt_id = ?`,
+      )
+      .run(execution.attempt.attemptId);
+    value.database
+      .prepare('DELETE FROM context_capsules WHERE capsule_id = ?')
+      .run(speech.attempt.resultCapsuleId);
+    value.database.exec(`
+      PRAGMA foreign_keys = ON;
+      BEGIN;
+      PRAGMA defer_foreign_keys = ON;
+    `);
+    try {
+      value.database
+        .prepare(
+          `INSERT INTO context_share_grants(
+             grant_id, shared_event_id, source_capsule_id, source_world_id,
+             destination_world_id, canonical_text, content_hash, status,
+             authority_epoch, created_at, revoked_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+        )
+        .run(
+          'share:deferred-active-home-text-result',
+          'event:deferred-active-home-text-result',
+          speech.attempt.resultCapsuleId,
+          speech.attempt.worldId,
+          'world:discord:guild:999999999999999999',
+          'deferred',
+          '0'.repeat(64),
+          speech.attempt.authorityEpoch,
+          549,
+        );
+      assert.throws(
+        () =>
+          value.database
+            .prepare(
+              `INSERT INTO context_active_home_text_speech_attempts(
+                 ${speechColumns.join(', ')}
+               ) VALUES (${speechColumns.map(() => '?').join(', ')})`,
+            )
+            .run(...speechValues),
+        /speech attempt lineage is invalid/,
+      );
+    } finally {
+      value.database.exec('ROLLBACK');
+    }
   } finally {
     closeFixture(value);
   }

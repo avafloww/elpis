@@ -5096,7 +5096,26 @@ export class ContextGraphStore {
                    AND attempts.effect_payload_hash = effects.payload_hash
                )
            ) AS invalid_effects,
-           EXISTS(SELECT 1 FROM context_capsules WHERE branch_id = ?) AS capsules,
+           EXISTS(
+             SELECT 1 FROM context_capsules AS capsules
+             WHERE capsules.branch_id = ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM context_active_home_text_speech_attempts AS speech
+                 WHERE speech.branch_id = capsules.branch_id
+                   AND speech.world_id = capsules.world_id
+                   AND speech.result_capsule_id = capsules.capsule_id
+                   AND capsules.capsule_kind = 'private'
+                   AND capsules.view_manifest_hash = speech.manifest_hash
+                   AND capsules.source_root_hash = speech.provider_outcome_hash
+                   AND capsules.policy_generation = speech.policy_generation
+                   AND capsules.summarizer_model IS NULL
+                   AND capsules.summarizer_prompt_hash IS NULL
+                   AND capsules.content_json = speech.capsule_content_json
+                   AND capsules.content_hash = speech.capsule_content_hash
+                   AND capsules.created_at = speech.created_at
+               )
+           ) AS invalid_capsules,
            EXISTS(SELECT 1 FROM context_continuation_advances WHERE branch_id = ?) AS advances,
            EXISTS(
              SELECT 1 FROM context_branch_recoveries AS recoveries
@@ -5157,7 +5176,7 @@ export class ContextGraphStore {
         id,
       ) as {
       invalid_effects: number;
-      capsules: number;
+      invalid_capsules: number;
       advances: number;
       invalid_recoveries: number;
     };
@@ -5215,7 +5234,7 @@ export class ContextGraphStore {
         admission.profileHeadRevision ||
       admission.activeActivationEpoch !== admission.sourceActivationEpoch + 1 ||
       artifacts.invalid_effects !== 0 ||
-      artifacts.capsules !== 0 ||
+      artifacts.invalid_capsules !== 0 ||
       artifacts.advances !== 0 ||
       artifacts.invalid_recoveries !== 0 ||
       admittedAt < ingress.admittedAt ||
@@ -6290,6 +6309,11 @@ export class ContextGraphStore {
           completedAt: input.completedAt,
         }).outcome;
       }
+      return this.recordActiveHomeTextProviderSuccess({
+        attemptId,
+        visibleText: input.visibleText,
+        completedAt: input.completedAt,
+      }).outcome;
     }
     return transaction(this.database, () =>
       this.insertIsolatedProviderOutcomeInTransaction({ ...input, attemptId }),
@@ -6433,6 +6457,63 @@ export class ContextGraphStore {
     });
   }
 
+  recordActiveHomeTextProviderSuccess(input: {
+    attemptId: IsolatedProviderExecutionAttemptId;
+    visibleText: string;
+    completedAt: number;
+  }): HomeTextProviderSuccessRecord {
+    const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
+    const completedAt = timestamp('completedAt', input.completedAt);
+    if (!this.getActiveHomeProviderExecutionAttempt(attemptId)) {
+      throw new Error('active home provider execution attempt is missing');
+    }
+    if (
+      typeof input.visibleText !== 'string' ||
+      Buffer.byteLength(input.visibleText) < 1
+    ) {
+      throw new Error('active home text provider result must be nonempty text');
+    }
+    return transaction(this.database, () => {
+      const existingOutcome = this.getIsolatedProviderOutcome(attemptId);
+      if (existingOutcome) {
+        if (
+          existingOutcome.outcome.outcomeKind !== 'visible_success' ||
+          existingOutcome.outcome.phase !== 'issued' ||
+          existingOutcome.outcome.visibleText !== input.visibleText ||
+          existingOutcome.outcome.completedAt !== completedAt
+        ) {
+          throw new Error(
+            'active home text provider success already exists with different content',
+          );
+        }
+        const speech = this.getActiveHomeTextSpeechAttempt(attemptId);
+        if (!speech) {
+          throw new Error(
+            'active home text provider success has no speech barrier',
+          );
+        }
+        return {
+          fresh: false,
+          outcome: existingOutcome,
+          speech,
+          resultCapsule: this.requireHomeTextResultCapsule(speech),
+        };
+      }
+      const outcome = this.insertIsolatedProviderOutcomeInTransaction({
+        attemptId,
+        outcomeKind: 'visible_success',
+        phase: 'issued',
+        visibleText: input.visibleText,
+        completedAt,
+      });
+      const created = this.insertHomeTextSpeechAttemptInTransaction(
+        outcome,
+        'active',
+      );
+      return { fresh: true, outcome, ...created };
+    });
+  }
+
   private insertIsolatedProviderOutcomeInTransaction(input: {
     attemptId: IsolatedProviderExecutionAttemptId;
     outcomeKind: 'visible_success' | 'visible_error';
@@ -6534,6 +6615,7 @@ export class ContextGraphStore {
 
   private insertHomeTextSpeechAttemptInTransaction(
     outcomeRecord: IsolatedProviderOutcomeRecord,
+    lineage: 'dark' | 'active' = 'dark',
   ): {
     speech: HomeTextSpeechAttemptRecord;
     resultCapsule: CapsuleRecord;
@@ -6673,9 +6755,13 @@ export class ContextGraphStore {
     });
     const attemptJson = serialize(speechAttempt);
     const attemptHash = hashContextBytes(attemptJson);
+    const speechTable =
+      lineage === 'active'
+        ? 'context_active_home_text_speech_attempts'
+        : 'context_home_text_speech_attempts';
     this.database
       .prepare(
-        `INSERT INTO context_home_text_speech_attempts(
+        `INSERT INTO ${speechTable}(
            speech_attempt_id, provider_attempt_id, provider_outcome_hash,
            result_capsule_id, speech_effect_id, root_receipt_capsule_id,
            source_activation_epoch, active_activation_epoch, branch_id, world_id,
@@ -6729,7 +6815,10 @@ export class ContextGraphStore {
       content: capsuleContent,
       createdAt: speechAttempt.createdAt,
     });
-    const speech = this.getHomeTextSpeechAttempt(providerAttempt.attemptId);
+    const speech =
+      lineage === 'active'
+        ? this.getActiveHomeTextSpeechAttempt(providerAttempt.attemptId)
+        : this.getHomeTextSpeechAttempt(providerAttempt.attemptId);
     if (!speech) throw new Error('home text speech attempt was not stored');
     return { speech, resultCapsule };
   }
@@ -6740,12 +6829,22 @@ export class ContextGraphStore {
     const providerAttemptId = isolatedProviderExecutionAttemptId(
       providerAttemptIdValue,
     );
-    const row = this.database
+    const darkRow = this.database
       .prepare(
         `SELECT * FROM context_home_text_speech_attempts
          WHERE provider_attempt_id = ?`,
       )
       .get(providerAttemptId) as HomeTextSpeechAttemptRow | undefined;
+    const activeRow = this.database
+      .prepare(
+        `SELECT * FROM context_active_home_text_speech_attempts
+         WHERE provider_attempt_id = ?`,
+      )
+      .get(providerAttemptId) as HomeTextSpeechAttemptRow | undefined;
+    if (darkRow && activeRow) {
+      throw new Error('home text speech attempt lineage is ambiguous');
+    }
+    const row = darkRow ?? activeRow;
     if (!row) return null;
     const attempt = Object.freeze<HomeTextSpeechAttemptV1>({
       schemaVersion: 1,
@@ -6893,6 +6992,26 @@ export class ContextGraphStore {
       attemptJson,
       attemptHash,
     };
+  }
+
+  getActiveHomeTextSpeechAttempt(
+    providerAttemptIdValue: IsolatedProviderExecutionAttemptId,
+  ): HomeTextSpeechAttemptRecord | null {
+    const providerAttemptId = isolatedProviderExecutionAttemptId(
+      providerAttemptIdValue,
+    );
+    const row = this.database
+      .prepare(
+        `SELECT speech_attempt_id FROM context_active_home_text_speech_attempts
+         WHERE provider_attempt_id = ?`,
+      )
+      .get(providerAttemptId) as { speech_attempt_id: string } | undefined;
+    if (!row) return null;
+    const speech = this.getHomeTextSpeechAttempt(providerAttemptId);
+    if (!speech || speech.attempt.speechAttemptId !== row.speech_attempt_id) {
+      throw new Error('stored active home text speech identity is invalid');
+    }
+    return speech;
   }
 
   getHomeTextSpeechAttemptById(

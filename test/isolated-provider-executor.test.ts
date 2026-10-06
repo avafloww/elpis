@@ -513,7 +513,7 @@ test('isolated provider executor records one successful dispatch and never repla
   }
 });
 
-test('isolated provider executor records active-home success without speech authority', async () => {
+test('isolated provider executor atomically creates an active speech barrier', async () => {
   const value = fixture({ activeInvocation: true });
   try {
     let calls = 0;
@@ -552,10 +552,12 @@ test('isolated provider executor records active-home success without speech auth
       first.snapshot.outcome?.outcome.visibleText,
       'ACTIVE_EXECUTOR_RESULT',
     );
-    assert.equal(
-      value.store.getHomeTextSpeechAttempt(first.snapshot.attempt.attemptId),
-      null,
+    const speech = value.store.getActiveHomeTextSpeechAttempt(
+      first.snapshot.attempt.attemptId,
     );
+    assert.ok(speech);
+    assert.equal(speech.attempt.visibleText, 'ACTIVE_EXECUTOR_RESULT');
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
     assert.equal(first.snapshot.effect?.status, 'observed');
     assert.equal(first.snapshot.response?.evidence.statusCode, 200);
     assert.equal(
@@ -569,7 +571,7 @@ test('isolated provider executor records active-home success without speech auth
           .prepare('SELECT count(*) AS count FROM context_capsules')
           .get() as { count: number }
       ).count,
-      0,
+      1,
     );
     const second = await execute(value.invocationId);
     assert.equal(second.state, 'succeeded');
