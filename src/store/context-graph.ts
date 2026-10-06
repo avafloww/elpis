@@ -131,9 +131,7 @@ export const systemLayerProjectionId = (
     value,
     'system-layer:',
   );
-export const systemLayerApprovalId = (
-  value: string,
-): SystemLayerApprovalId =>
+export const systemLayerApprovalId = (value: string): SystemLayerApprovalId =>
   branded<'SystemLayerApprovalId'>(
     'systemLayerApprovalId',
     value,
@@ -393,10 +391,7 @@ export interface SystemLayerProjectionRecord {
 }
 
 export type SystemLayerApprovalRole =
-  | 'scoped_runtime_contract'
-  | 'identity'
-  | 'integrated_self'
-  | 'world_policy';
+  'scoped_runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
 export type SystemLayerApprovalBasisKind =
   | 'authored_scoped_contract'
   | 'soul_snapshot'
@@ -794,15 +789,10 @@ export interface ExactIsolatedProviderTargetV1 {
   readonly role: 'main';
   readonly targetRef: string;
   readonly providerType:
-    | 'openai-compatible'
-    | 'anthropic-oauth'
-    | 'codex-oauth';
+    'openai-compatible' | 'anthropic-oauth' | 'codex-oauth';
   readonly model: string;
   readonly apiSurface:
-    | 'responses'
-    | 'chat-completions'
-    | 'anthropic-messages'
-    | 'codex-responses';
+    'responses' | 'chat-completions' | 'anthropic-messages' | 'codex-responses';
   readonly apiEndpoint: string;
   readonly gateway: null | {
     readonly authority: string;
@@ -983,9 +973,7 @@ export interface IsolatedProviderResponseEvidenceRecord {
 }
 
 export type IsolatedProviderOutcomePhase =
-  | 'pre_dispatch_rejected'
-  | 'issuance_uncertain'
-  | 'issued';
+  'pre_dispatch_rejected' | 'issuance_uncertain' | 'issued';
 
 export interface IsolatedProviderOutcomeV1 {
   readonly schemaVersion: 1;
@@ -1047,6 +1035,47 @@ export interface HomeTextProviderSuccessRecord {
   readonly outcome: IsolatedProviderOutcomeRecord;
   readonly speech: HomeTextSpeechAttemptRecord;
   readonly resultCapsule: CapsuleRecord;
+}
+
+export type HomeTextSpeechReceiptPhase =
+  'pre_dispatch_rejected' | 'issuance_uncertain' | 'observed';
+
+export interface HomeDiscordMessageEvidenceV1 {
+  readonly schemaVersion: 1;
+  readonly speechAttemptId: HomeTextSpeechAttemptId;
+  readonly speechEffectId: EffectId;
+  readonly messageId: string;
+  readonly guildId: string;
+  readonly channelId: string;
+  readonly discordNonce: string;
+  readonly statusCode: 200;
+  readonly textBytes: number;
+  readonly textHash: string;
+  readonly observedAt: number;
+}
+
+export interface HomeTextSpeechReceiptV1 {
+  readonly schemaVersion: 1;
+  readonly speechAttemptId: HomeTextSpeechAttemptId;
+  readonly speechEffectId: EffectId | null;
+  readonly phase: HomeTextSpeechReceiptPhase;
+  readonly evidenceHash: string | null;
+  readonly rootContentHash: string | null;
+  readonly resolvedAt: number;
+}
+
+export interface HomeTextSpeechReceiptRecord {
+  readonly receipt: HomeTextSpeechReceiptV1;
+  readonly evidence: HomeDiscordMessageEvidenceV1 | null;
+  readonly rootContent: RootReturnReceiptV1 | null;
+  readonly evidenceJson: string | null;
+  readonly rootContentJson: string | null;
+  readonly receiptJson: string;
+  readonly receiptHash: string;
+}
+
+export interface HomeTextObservedCompletion extends CoordinatedBranchReturn {
+  readonly speechReceipt: HomeTextSpeechReceiptRecord;
 }
 
 export interface RecoveredIsolatedProviderBindingVerificationV1 {
@@ -1308,7 +1337,11 @@ function residentWorldProfileBindingIdentity(input: {
   );
 }
 
-function boundedProviderText(label: string, value: unknown, max: number): string {
+function boundedProviderText(
+  label: string,
+  value: unknown,
+  max: number,
+): string {
   if (
     typeof value !== 'string' ||
     value.length < 1 ||
@@ -1333,21 +1366,28 @@ export function normalizeExactIsolatedProviderTarget(
   }
   const providerType = input.providerType;
   const apiSurface = input.apiSurface;
-  if (
-    !(
+  if (!(
       (providerType === 'openai-compatible' &&
         ['responses', 'chat-completions'].includes(apiSurface)) ||
-      (providerType === 'anthropic-oauth' && apiSurface === 'anthropic-messages') ||
+    (providerType === 'anthropic-oauth' &&
+      apiSurface === 'anthropic-messages') ||
       (providerType === 'codex-oauth' && apiSurface === 'codex-responses')
-    )
-  ) {
+  )) {
     throw new Error('isolated provider target surface is incompatible');
   }
-  const targetRef = boundedProviderText('isolated provider targetRef', input.targetRef, 512);
+  const targetRef = boundedProviderText(
+    'isolated provider targetRef',
+    input.targetRef,
+    512,
+  );
   if (!/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(targetRef)) {
     throw new Error('isolated provider targetRef is not canonical');
   }
-  const model = boundedProviderText('isolated provider model', input.model, 512);
+  const model = boundedProviderText(
+    'isolated provider model',
+    input.model,
+    512,
+  );
   const endpointText = boundedProviderText(
     'isolated provider apiEndpoint',
     input.apiEndpoint,
@@ -1384,7 +1424,9 @@ export function normalizeExactIsolatedProviderTarget(
       input.gateway.targetGeneration,
       128,
     );
-    const generationMatch = /^egt1\.([A-Za-z0-9_-]{22})$/.exec(targetGeneration);
+    const generationMatch = /^egt1\.([A-Za-z0-9_-]{22})$/.exec(
+      targetGeneration,
+    );
     const generationBytes = generationMatch
       ? Buffer.from(generationMatch[1], 'base64url')
       : null;
@@ -1769,7 +1811,10 @@ function normalizeSystemProfile(value: unknown): SystemProfileV1 {
     ],
     'system profile',
   );
-  const approvals = shadowPlanObject(profile.approvals, 'system profile approvals');
+  const approvals = shadowPlanObject(
+    profile.approvals,
+    'system profile approvals',
+  );
   exactShadowPlanKeys(
     approvals,
     ['scopedRuntimeContract', 'identity', 'integratedSelf', 'worldPolicy'],
@@ -2612,6 +2657,26 @@ interface HomeTextSpeechAttemptRow {
   created_at: number;
 }
 
+interface HomeTextSpeechReceiptRow {
+  speech_attempt_id: string;
+  speech_effect_id: string | null;
+  branch_id: string | null;
+  root_receipt_capsule_id: string | null;
+  phase: string;
+  message_id: string | null;
+  guild_id: string | null;
+  channel_id: string | null;
+  discord_nonce: string | null;
+  status_code: number | null;
+  evidence_json: string | null;
+  evidence_hash: string | null;
+  root_content_json: string | null;
+  root_content_hash: string | null;
+  receipt_json: string;
+  receipt_hash: string;
+  resolved_at: number;
+}
+
 interface ScopedRuntimeContractArtifactRow {
   artifact_id: string;
   schema_version: number;
@@ -3444,7 +3509,10 @@ function normalizeResidentAuthorizationProvenance(
   return Object.freeze({
     version: 1,
     batchId: input.batchId,
-    batchSha256: sha256('resident authorization batchSha256', input.batchSha256),
+    batchSha256: sha256(
+      'resident authorization batchSha256',
+      input.batchSha256,
+    ),
     callIndex: input.callIndex,
     callCount: input.callCount,
     toolName: 'run',
@@ -3584,7 +3652,9 @@ function mapResidentSourceAuthorization(
     row.contract_content_bytes !== candidate.contractContentBytes ||
     row.soul_snapshot_id !== candidate.soulSnapshotId
   ) {
-    throw new Error('stored resident source candidate authorization is invalid');
+    throw new Error(
+      'stored resident source candidate authorization is invalid',
+    );
   }
   const provenance = normalizeResidentAuthorizationProvenance({
     version: 1,
@@ -3600,7 +3670,10 @@ function mapResidentSourceAuthorization(
       'stored resident source candidate authorization reuses its inspection batch',
     );
   }
-  const authorizationId = residentSourceAuthorizationId({ candidate, provenance });
+  const authorizationId = residentSourceAuthorizationId({
+    candidate,
+    provenance,
+  });
   if (row.authorization_id !== authorizationId) {
     throw new Error(
       'stored resident source candidate authorization identity is invalid',
@@ -3675,7 +3748,9 @@ function mapResidentIdentitySystemDerivation(
     row.authority_revision,
   );
   if (authorityRevision < 1) {
-    throw new Error('stored resident identity system derivation revision is invalid');
+    throw new Error(
+      'stored resident identity system derivation revision is invalid',
+    );
   }
   const predecessorDerivationId =
     row.predecessor_derivation_id === null
@@ -3699,7 +3774,9 @@ function mapResidentIdentitySystemDerivation(
     provenance,
   });
   if (row.derivation_id !== derivationId) {
-    throw new Error('stored resident identity system derivation identity is invalid');
+    throw new Error(
+      'stored resident identity system derivation identity is invalid',
+    );
   }
   const derivedAt = timestamp(
     'resident identity derivation derivedAt',
@@ -3795,7 +3872,9 @@ function mapResidentWorldProfileBinding(
     boundAt < event.recordedAt ||
     profile.createdAt !== boundAt
   ) {
-    throw new Error('stored resident world profile binding chronology is invalid');
+    throw new Error(
+      'stored resident world profile binding chronology is invalid',
+    );
   }
   const bindingId = residentWorldProfileBindingIdentity({
     activationEpoch,
@@ -3810,7 +3889,9 @@ function mapResidentWorldProfileBinding(
     provenance,
   });
   if (row.binding_id !== bindingId) {
-    throw new Error('stored resident world profile binding identity is invalid');
+    throw new Error(
+      'stored resident world profile binding identity is invalid',
+    );
   }
   return Object.freeze({
     bindingId,
@@ -3851,9 +3932,7 @@ export class ContextGraphStore {
       .prepare(
         'SELECT * FROM context_scoped_runtime_contract_artifacts WHERE artifact_id = ?',
       )
-      .get(expected.artifactId) as
-      | ScopedRuntimeContractArtifactRow
-      | undefined;
+      .get(expected.artifactId) as ScopedRuntimeContractArtifactRow | undefined;
     if (
       !row ||
       row.schema_version !== expected.schemaVersion ||
@@ -3921,8 +4000,7 @@ export class ContextGraphStore {
          WHERE authorization_id = ?`,
       )
       .get(authorizationId) as
-      | ResidentSourceCandidateAuthorizationRow
-      | undefined;
+      ResidentSourceCandidateAuthorizationRow | undefined;
     if (!row) return null;
     const capture = this.getResidentSourceInspectionCandidate(row.candidate_id);
     if (!capture) {
@@ -3954,11 +4032,15 @@ export class ContextGraphStore {
     const receipt = mapResidentIdentitySystemDerivation(row, authorization);
     const soul = this.getResidentSoulSourceSnapshot(receipt.soulSnapshotId);
     const artifact = this.getScopedRuntimeContractArtifact();
-    const contractLayer = this.getSystemLayerProjection(receipt.contractLayerId);
+    const contractLayer = this.getSystemLayerProjection(
+      receipt.contractLayerId,
+    );
     const contractApproval = this.getSystemLayerApproval(
       receipt.contractApprovalId,
     );
-    const identityLayer = this.getSystemLayerProjection(receipt.identityLayerId);
+    const identityLayer = this.getSystemLayerProjection(
+      receipt.identityLayerId,
+    );
     const identityApproval = this.getSystemLayerApproval(
       receipt.identityApprovalId,
     );
@@ -4128,7 +4210,9 @@ export class ContextGraphStore {
     const event = this.getWorldEvent(eventId(row.ingress_event_id));
     const profile = this.getSystemProfile(systemProfileId(row.profile_id));
     if (!derivation || !event || !profile) {
-      throw new Error('stored resident world profile binding lineage is missing');
+      throw new Error(
+        'stored resident world profile binding lineage is missing',
+      );
     }
     const receipt = mapResidentWorldProfileBinding(
       row,
@@ -4212,7 +4296,10 @@ export class ContextGraphStore {
       parsedTarget as ExactIsolatedProviderTargetV1,
     );
     const targetJson = serialize(target);
-    const targetHash = sha256('dark isolated provider targetHash', row.target_hash);
+    const targetHash = sha256(
+      'dark isolated provider targetHash',
+      row.target_hash,
+    );
     if (
       row.target_json !== targetJson ||
       hashContextBytes(targetJson) !== targetHash ||
@@ -4243,8 +4330,16 @@ export class ContextGraphStore {
     const residentBinding = this.getResidentWorldProfileBinding(
       residentWorldProfileBindingId(row.resident_profile_binding_id),
     );
-    if (!branch || !attempt || !requestView || !requestBinding || !residentBinding) {
-      throw new Error('stored dark isolated provider binding lineage is missing');
+    if (
+      !branch ||
+      !attempt ||
+      !requestView ||
+      !requestBinding ||
+      !residentBinding
+    ) {
+      throw new Error(
+        'stored dark isolated provider binding lineage is missing',
+      );
     }
     if (
       attempt.branchId !== branch.branchId ||
@@ -4263,13 +4358,17 @@ export class ContextGraphStore {
       residentBinding.profileHeadRevision !==
         requestBinding.binding.profileHeadRevision
     ) {
-      throw new Error('stored dark isolated provider binding lineage is invalid');
+      throw new Error(
+        'stored dark isolated provider binding lineage is invalid',
+      );
     }
     const manifest = this.getManifestProjection(requestView.manifestId, {
       requireActiveShares: true,
     });
     if (!manifest) {
-      throw new Error('stored dark isolated provider binding manifest is missing');
+      throw new Error(
+        'stored dark isolated provider binding manifest is missing',
+      );
     }
     const request = this.materializeStoredLocalBranchRequest(requestView);
     const cacheNamespace = isolatedProviderCacheNamespace({
@@ -4333,7 +4432,10 @@ export class ContextGraphStore {
       boundAt,
     });
     const bindingJson = serialize(binding);
-    const bindingHash = sha256('dark isolated provider bindingHash', row.binding_hash);
+    const bindingHash = sha256(
+      'dark isolated provider bindingHash',
+      row.binding_hash,
+    );
     if (
       row.activation_epoch !== attempt.activationEpoch ||
       row.world_id !== branch.worldId ||
@@ -4341,7 +4443,8 @@ export class ContextGraphStore {
       row.request_profile_binding_hash !== requestBinding.bindingHash ||
       row.profile_id !== requestBinding.binding.profileId ||
       row.profile_hash !== requestBinding.binding.profileHash ||
-      row.profile_head_revision !== requestBinding.binding.profileHeadRevision ||
+      row.profile_head_revision !==
+        requestBinding.binding.profileHeadRevision ||
       row.manifest_id !== manifest.record.manifestId ||
       row.manifest_hash !== manifest.record.hash ||
       row.request_view_hash !== requestView.viewHash ||
@@ -4391,12 +4494,16 @@ export class ContextGraphStore {
       row.transport_retries !== 0 ||
       row.surface_fallback !== 0
     ) {
-      throw new Error('stored dark isolated provider invocation admission policy is invalid');
+      throw new Error(
+        'stored dark isolated provider invocation admission policy is invalid',
+      );
     }
     const bindingId = darkIsolatedProviderBindingId(row.binding_id);
     const binding = this.getDarkIsolatedProviderBinding(bindingId);
     if (!binding) {
-      throw new Error('stored dark isolated provider invocation binding is missing');
+      throw new Error(
+        'stored dark isolated provider invocation binding is missing',
+      );
     }
     const admittedAt = timestamp(
       'dark isolated provider invocation admittedAt',
@@ -4406,7 +4513,9 @@ export class ContextGraphStore {
       requireActiveShares: true,
     });
     if (!manifest) {
-      throw new Error('stored dark isolated provider invocation manifest is missing');
+      throw new Error(
+        'stored dark isolated provider invocation manifest is missing',
+      );
     }
     const admission = darkIsolatedProviderInvocationAdmission(
       binding,
@@ -4422,7 +4531,8 @@ export class ContextGraphStore {
       row.binding_hash !== binding.bindingHash ||
       row.resident_profile_binding_id !== admission.residentProfileBindingId ||
       row.request_profile_binding_id !== admission.requestProfileBindingId ||
-      row.request_profile_binding_hash !== admission.requestProfileBindingHash ||
+      row.request_profile_binding_hash !==
+        admission.requestProfileBindingHash ||
       row.activation_epoch !== admission.activationEpoch ||
       row.branch_id !== admission.branchId ||
       row.world_id !== admission.worldId ||
@@ -4445,7 +4555,9 @@ export class ContextGraphStore {
       hashContextBytes(admissionJson) !== admissionHash ||
       darkIsolatedProviderInvocationIdentity(admissionJson) !== id
     ) {
-      throw new Error('stored dark isolated provider invocation admission is invalid');
+      throw new Error(
+        'stored dark isolated provider invocation admission is invalid',
+      );
     }
     return { invocationId: id, admission, admissionJson, admissionHash };
   }
@@ -4466,14 +4578,20 @@ export class ContextGraphStore {
     return transaction(this.database, () => {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
-        throw new Error('isolated provider invocation admission requires dark graph mode');
+        throw new Error(
+          'isolated provider invocation admission requires dark graph mode',
+        );
       }
       const binding = this.getDarkIsolatedProviderBinding(bindingId);
       if (!binding || binding.targetJson !== targetJson) {
-        throw new Error('isolated provider invocation binding or target is invalid');
+        throw new Error(
+          'isolated provider invocation binding or target is invalid',
+        );
       }
       if (activation.epoch !== binding.binding.activationEpoch) {
-        throw new Error('isolated provider invocation admission lineage is not current');
+        throw new Error(
+          'isolated provider invocation admission lineage is not current',
+        );
       }
       const manifest = this.getManifestProjection(binding.binding.manifestId, {
         requireActiveShares: true,
@@ -4501,12 +4619,16 @@ export class ContextGraphStore {
           throw new Error('isolated provider invocation admission disappeared');
         }
         if (replay.admissionJson !== admissionJson) {
-          throw new Error('isolated provider invocation binding already has a conflicting admission');
+          throw new Error(
+            'isolated provider invocation binding already has a conflicting admission',
+          );
         }
         return replay;
       }
       if (admittedAt < binding.binding.boundAt) {
-        throw new Error('isolated provider invocation admission predates its binding');
+        throw new Error(
+          'isolated provider invocation admission predates its binding',
+        );
       }
       const branch = this.getBranch(binding.binding.branchId);
       const coordinator = this.getRootCoordinatorState();
@@ -4514,7 +4636,9 @@ export class ContextGraphStore {
         binding.binding.branchId,
       );
       const recovery = this.database
-        .prepare('SELECT 1 AS present FROM context_branch_recoveries WHERE branch_id = ?')
+        .prepare(
+          'SELECT 1 AS present FROM context_branch_recoveries WHERE branch_id = ?',
+        )
         .get(binding.binding.branchId) as { present: number } | undefined;
       const laterProfile = this.database
         .prepare(
@@ -4554,10 +4678,13 @@ export class ContextGraphStore {
         branchArtifacts.capsules !== 0 ||
         branchArtifacts.advances !== 0
       ) {
-        throw new Error('isolated provider invocation admission lineage is not current');
+        throw new Error(
+          'isolated provider invocation admission lineage is not current',
+        );
       }
       const admissionHash = hashContextBytes(admissionJson);
-      const invocationId = darkIsolatedProviderInvocationIdentity(admissionJson);
+      const invocationId =
+        darkIsolatedProviderInvocationIdentity(admissionJson);
       this.database
         .prepare(
           `INSERT INTO context_dark_isolated_provider_invocation_admissions(
@@ -4609,9 +4736,12 @@ export class ContextGraphStore {
           admissionHash,
           admittedAt,
         );
-      const created = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+      const created =
+        this.getDarkIsolatedProviderInvocationAdmission(invocationId);
       if (!created) {
-        throw new Error('isolated provider invocation admission was not stored');
+        throw new Error(
+          'isolated provider invocation admission was not stored',
+        );
       }
       return created;
     });
@@ -4767,7 +4897,8 @@ export class ContextGraphStore {
       .get(id) as IsolatedProviderExecutionAttemptRow | undefined;
     if (!row) return null;
     const invocationId = darkIsolatedProviderInvocationId(row.invocation_id);
-    const admissionRecord = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+    const admissionRecord =
+      this.getDarkIsolatedProviderInvocationAdmission(invocationId);
     if (!admissionRecord) {
       throw new Error('isolated provider execution admission is missing');
     }
@@ -4869,7 +5000,8 @@ export class ContextGraphStore {
   getIsolatedProviderExecutionAttemptForInvocation(
     invocationId: DarkIsolatedProviderInvocationId,
   ): IsolatedProviderExecutionAttemptRecord | null {
-    const normalizedInvocationId = darkIsolatedProviderInvocationId(invocationId);
+    const normalizedInvocationId =
+      darkIsolatedProviderInvocationId(invocationId);
     const row = this.database
       .prepare(
         `SELECT attempt_id FROM context_isolated_provider_execution_attempts
@@ -4904,14 +5036,19 @@ export class ContextGraphStore {
     const invocationId = darkIsolatedProviderInvocationId(input.invocationId);
     const expectedWorldId = worldId(input.expectedWorldId);
     return transaction(this.database, () => {
-      const prior = this.getIsolatedProviderExecutionAttemptForInvocation(invocationId);
+      const prior =
+        this.getIsolatedProviderExecutionAttemptForInvocation(invocationId);
       if (prior) {
         if (prior.attempt.worldId !== expectedWorldId) {
-          throw new Error('isolated provider execution attempt belongs to another world');
+          throw new Error(
+            'isolated provider execution attempt belongs to another world',
+          );
         }
         return { fresh: false, attempt: prior } as const;
       }
-      const expectedTarget = normalizeExactIsolatedProviderTarget(input.expectedTarget);
+      const expectedTarget = normalizeExactIsolatedProviderTarget(
+        input.expectedTarget,
+      );
       const targetJson = serialize(expectedTarget);
       const targetHash = hashContextBytes(targetJson);
       const callTimeoutMs = generation('callTimeoutMs', input.callTimeoutMs);
@@ -4935,12 +5072,16 @@ export class ContextGraphStore {
         expectedTarget.apiSurface !== 'codex-responses' ||
         expectedTarget.gateway !== null
       ) {
-        throw new Error('isolated provider execution requires direct Codex Responses');
+        throw new Error(
+          'isolated provider execution requires direct Codex Responses',
+        );
       }
       const activation = this.getActivationState();
       const scopeRecord = this.getHomeTextActivationScope();
-      const admissionRecord = this.getDarkIsolatedProviderInvocationAdmission(invocationId);
-      if (!admissionRecord) throw new Error('isolated provider invocation admission is missing');
+      const admissionRecord =
+        this.getDarkIsolatedProviderInvocationAdmission(invocationId);
+      if (!admissionRecord)
+        throw new Error('isolated provider invocation admission is missing');
       const admission = admissionRecord.admission;
       if (
         activation.mode !== 'active' ||
@@ -4968,8 +5109,11 @@ export class ContextGraphStore {
       ) {
         throw new Error('isolated provider execution branch is not current');
       }
-      const requestView = this.getLocalBranchRequestView(admission.requestViewId);
-      if (!requestView) throw new Error('isolated provider execution request view is missing');
+      const requestView = this.getLocalBranchRequestView(
+        admission.requestViewId,
+      );
+      if (!requestView)
+        throw new Error('isolated provider execution request view is missing');
       const requestEvents = requestView.view.messageProjectionIds.map(
         (projectionId) => {
           const projection = this.getEventMessageProjection(projectionId);
@@ -4989,7 +5133,9 @@ export class ContextGraphStore {
           );
         })
       ) {
-        throw new Error('isolated provider execution request is outside its home text scope');
+        throw new Error(
+          'isolated provider execution request is outside its home text scope',
+        );
       }
       const request = this.materializeStoredLocalBranchRequest(requestView);
       if (
@@ -5081,7 +5227,8 @@ export class ContextGraphStore {
           authorizedAt,
         );
       const stored = this.getIsolatedProviderExecutionAttempt(attemptId);
-      if (!stored) throw new Error('isolated provider execution attempt was not stored');
+      if (!stored)
+        throw new Error('isolated provider execution attempt was not stored');
       return { fresh: true, attempt: stored, request } as const;
     });
   }
@@ -5093,7 +5240,8 @@ export class ContextGraphStore {
     const attempt = this.getIsolatedProviderExecutionAttempt(
       isolatedProviderExecutionAttemptId(attemptId),
     );
-    if (!attempt) throw new Error('isolated provider execution attempt is missing');
+    if (!attempt)
+      throw new Error('isolated provider execution attempt is missing');
     return this.prepareEffect({
       effectId: attempt.attempt.effectId,
       branchId: attempt.attempt.branchId,
@@ -5115,12 +5263,14 @@ export class ContextGraphStore {
   }): IsolatedProviderResponseEvidenceRecord {
     const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
     const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
-    if (!attempt) throw new Error('isolated provider execution attempt is missing');
+    if (!attempt)
+      throw new Error('isolated provider execution attempt is missing');
     const statusCode = generation('statusCode', input.statusCode);
     if (statusCode < 100 || statusCode > 599) {
       throw new Error('statusCode must be between 100 and 599');
     }
-    const requestId = input.requestId === undefined
+    const requestId =
+      input.requestId === undefined
       ? null
       : boundedProviderText('requestId', input.requestId, 256);
     const receivedAt = timestamp('receivedAt', input.receivedAt);
@@ -5173,7 +5323,10 @@ export class ContextGraphStore {
     });
     const evidenceJson = serialize(evidence);
     const evidenceHash = hashContextBytes(evidenceJson);
-    if (row.evidence_json !== evidenceJson || row.evidence_hash !== evidenceHash) {
+    if (
+      row.evidence_json !== evidenceJson ||
+      row.evidence_hash !== evidenceHash
+    ) {
       throw new Error('stored isolated provider response evidence is invalid');
     }
     return { evidence, evidenceJson, evidenceHash };
@@ -5208,7 +5361,10 @@ export class ContextGraphStore {
   }): HomeTextProviderSuccessRecord {
     const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
     const completedAt = timestamp('completedAt', input.completedAt);
-    if (typeof input.visibleText !== 'string' || Buffer.byteLength(input.visibleText) < 1) {
+    if (
+      typeof input.visibleText !== 'string' ||
+      Buffer.byteLength(input.visibleText) < 1
+    ) {
       throw new Error('home text provider result must be nonempty text');
     }
     return transaction(this.database, () => {
@@ -5220,10 +5376,13 @@ export class ContextGraphStore {
           existingOutcome.outcome.visibleText !== input.visibleText ||
           existingOutcome.outcome.completedAt !== completedAt
         ) {
-          throw new Error('home text provider success already exists with different content');
+          throw new Error(
+            'home text provider success already exists with different content',
+          );
         }
         const speech = this.getHomeTextSpeechAttempt(attemptId);
-        if (!speech) throw new Error('home text provider success has no speech barrier');
+        if (!speech)
+          throw new Error('home text provider success has no speech barrier');
         return {
           fresh: false,
           outcome: existingOutcome,
@@ -5252,8 +5411,10 @@ export class ContextGraphStore {
   }): IsolatedProviderOutcomeRecord {
     const attemptId = isolatedProviderExecutionAttemptId(input.attemptId);
     const attempt = this.getIsolatedProviderExecutionAttempt(attemptId);
-    if (!attempt) throw new Error('isolated provider execution attempt is missing');
-    if (typeof input.visibleText !== 'string') throw new Error('visibleText must be a string');
+    if (!attempt)
+      throw new Error('isolated provider execution attempt is missing');
+    if (typeof input.visibleText !== 'string')
+      throw new Error('visibleText must be a string');
     const visibleBytes = Buffer.byteLength(input.visibleText);
     if (visibleBytes > attempt.attempt.maxOutputBytes) {
       throw new Error('isolated provider visible output exceeds byte limit');
@@ -5268,9 +5429,8 @@ export class ContextGraphStore {
     ) {
       throw new Error('response evidence is newer than the provider outcome');
     }
-    const effectIdValue = input.phase === 'pre_dispatch_rejected'
-      ? null
-      : attempt.attempt.effectId;
+    const effectIdValue =
+      input.phase === 'pre_dispatch_rejected' ? null : attempt.attempt.effectId;
     const outcome = Object.freeze<IsolatedProviderOutcomeV1>({
       schemaVersion: 1,
       attemptId,
@@ -5335,10 +5495,17 @@ export class ContextGraphStore {
     resultCapsule: CapsuleRecord;
   } {
     const outcome = outcomeRecord.outcome;
-    if (outcome.outcomeKind !== 'visible_success' || outcome.phase !== 'issued') {
-      throw new Error('home text speech requires an issued successful provider outcome');
+    if (
+      outcome.outcomeKind !== 'visible_success' ||
+      outcome.phase !== 'issued'
+    ) {
+      throw new Error(
+        'home text speech requires an issued successful provider outcome',
+      );
     }
-    const providerAttempt = this.getIsolatedProviderExecutionAttempt(outcome.attemptId);
+    const providerAttempt = this.getIsolatedProviderExecutionAttempt(
+      outcome.attemptId,
+    );
     const scopeRecord = this.getHomeTextActivationScope();
     if (!providerAttempt || !scopeRecord) {
       throw new Error('home text speech authority is incomplete');
@@ -5351,7 +5518,9 @@ export class ContextGraphStore {
     }
     const routes = requestView.view.messageProjectionIds.map((projectionId) => {
       const projection = this.getEventMessageProjection(projectionId);
-      const event = projection ? this.getWorldEvent(projection.sourceEventId) : null;
+      const event = projection
+        ? this.getWorldEvent(projection.sourceEventId)
+        : null;
       const route = event ? directDiscordTextIngressRoute(event) : null;
       if (!projection || !event || !route) {
         throw new Error('home text speech request contains non-direct text');
@@ -5368,7 +5537,9 @@ export class ContextGraphStore {
       terminalRoute.guildId !== scopeRecord.scope.guildId ||
       terminalRoute.channelId !== scopeRecord.scope.channelId
     ) {
-      throw new Error('home text speech request route does not match its scope');
+      throw new Error(
+        'home text speech request route does not match its scope',
+      );
     }
     const provider = providerAttempt.attempt;
     const branch = this.getBranch(provider.branchId);
@@ -5383,8 +5554,10 @@ export class ContextGraphStore {
       coordinator.activeWorldId !== provider.worldId ||
       activation.mode !== 'active' ||
       activation.epoch !== provider.activeActivationEpoch ||
-      scopeRecord.scope.sourceActivationEpoch !== provider.sourceActivationEpoch ||
-      scopeRecord.scope.activeActivationEpoch !== provider.activeActivationEpoch ||
+      scopeRecord.scope.sourceActivationEpoch !==
+        provider.sourceActivationEpoch ||
+      scopeRecord.scope.activeActivationEpoch !==
+        provider.activeActivationEpoch ||
       scopeRecord.scope.worldId !== provider.worldId ||
       scopeRecord.scopeHash.length !== 64 ||
       requestView.viewHash !== provider.requestViewHash ||
@@ -5520,7 +5693,9 @@ export class ContextGraphStore {
   getHomeTextSpeechAttempt(
     providerAttemptIdValue: IsolatedProviderExecutionAttemptId,
   ): HomeTextSpeechAttemptRecord | null {
-    const providerAttemptId = isolatedProviderExecutionAttemptId(providerAttemptIdValue);
+    const providerAttemptId = isolatedProviderExecutionAttemptId(
+      providerAttemptIdValue,
+    );
     const row = this.database
       .prepare(
         `SELECT * FROM context_home_text_speech_attempts
@@ -5531,13 +5706,24 @@ export class ContextGraphStore {
     const attempt = Object.freeze<HomeTextSpeechAttemptV1>({
       schemaVersion: 1,
       speechAttemptId: homeTextSpeechAttemptId(row.speech_attempt_id),
-      providerAttemptId: isolatedProviderExecutionAttemptId(row.provider_attempt_id),
-      providerOutcomeHash: sha256('providerOutcomeHash', row.provider_outcome_hash),
+      providerAttemptId: isolatedProviderExecutionAttemptId(
+        row.provider_attempt_id,
+      ),
+      providerOutcomeHash: sha256(
+        'providerOutcomeHash',
+        row.provider_outcome_hash,
+      ),
       resultCapsuleId: capsuleId(row.result_capsule_id),
       speechEffectId: effectId(row.speech_effect_id),
       rootReceiptCapsuleId: capsuleId(row.root_receipt_capsule_id),
-      sourceActivationEpoch: generation('sourceActivationEpoch', row.source_activation_epoch),
-      activeActivationEpoch: generation('activeActivationEpoch', row.active_activation_epoch),
+      sourceActivationEpoch: generation(
+        'sourceActivationEpoch',
+        row.source_activation_epoch,
+      ),
+      activeActivationEpoch: generation(
+        'activeActivationEpoch',
+        row.active_activation_epoch,
+      ),
       branchId: branchId(row.branch_id),
       worldId: worldId(row.world_id),
       authorityEpoch: generation('authorityEpoch', row.authority_epoch),
@@ -5545,14 +5731,20 @@ export class ContextGraphStore {
       requestViewHash: sha256('requestViewHash', row.request_view_hash),
       manifestHash: sha256('manifestHash', row.manifest_hash),
       policyGeneration: generation('policyGeneration', row.policy_generation),
-      activationScopeHash: sha256('activationScopeHash', row.activation_scope_hash),
+      activationScopeHash: sha256(
+        'activationScopeHash',
+        row.activation_scope_hash,
+      ),
       guildId: row.guild_id,
       channelId: row.channel_id,
       visibleText: row.visible_text,
       visibleBytes: generation('visibleBytes', row.visible_bytes),
       visibleHash: sha256('visibleHash', row.visible_hash),
       discordNonce: row.discord_nonce,
-      capsuleContentHash: sha256('capsuleContentHash', row.capsule_content_hash),
+      capsuleContentHash: sha256(
+        'capsuleContentHash',
+        row.capsule_content_hash,
+      ),
       effectPayloadHash: sha256('effectPayloadHash', row.effect_payload_hash),
       createdAt: timestamp('createdAt', row.created_at),
     });
@@ -5570,10 +5762,14 @@ export class ContextGraphStore {
     }
     const routes = requestView.view.messageProjectionIds.map((projectionId) => {
       const projection = this.getEventMessageProjection(projectionId);
-      const event = projection ? this.getWorldEvent(projection.sourceEventId) : null;
+      const event = projection
+        ? this.getWorldEvent(projection.sourceEventId)
+        : null;
       const route = event ? directDiscordTextIngressRoute(event) : null;
       if (!projection || !event || !route) {
-        throw new Error('stored home text speech request contains non-direct text');
+        throw new Error(
+          'stored home text speech request contains non-direct text',
+        );
       }
       return route;
     });
@@ -5655,6 +5851,646 @@ export class ContextGraphStore {
     };
   }
 
+  getHomeTextSpeechAttemptById(
+    speechAttemptIdValue: HomeTextSpeechAttemptId,
+  ): HomeTextSpeechAttemptRecord {
+    const speechAttemptId = homeTextSpeechAttemptId(speechAttemptIdValue);
+    const row = this.database
+      .prepare(
+        `SELECT provider_attempt_id FROM context_home_text_speech_attempts
+         WHERE speech_attempt_id = ?`,
+      )
+      .get(speechAttemptId) as { provider_attempt_id: string } | undefined;
+    if (!row) throw new Error('home text speech attempt is missing');
+    const speech = this.getHomeTextSpeechAttempt(
+      isolatedProviderExecutionAttemptId(row.provider_attempt_id),
+    );
+    if (!speech || speech.attempt.speechAttemptId !== speechAttemptId) {
+      throw new Error('stored home text speech attempt identity is invalid');
+    }
+    return speech;
+  }
+
+  private homeTextRootContent(
+    speech: HomeTextSpeechAttemptRecord,
+    resolvedAtValue: number,
+  ): RootReturnReceiptV1 {
+    const resolvedAt = timestamp('resolvedAt', resolvedAtValue);
+    const providerAttempt = this.getIsolatedProviderExecutionAttempt(
+      speech.attempt.providerAttemptId,
+    );
+    if (!providerAttempt)
+      throw new Error('home text provider attempt is missing');
+    const providerEffect = this.getEffect(providerAttempt.attempt.effectId);
+    const speechEffect = this.getEffect(speech.attempt.speechEffectId);
+    if (
+      !providerEffect ||
+      providerEffect.status !== 'observed' ||
+      providerEffect.resolvedAt === null ||
+      !speechEffect ||
+      !['prepared', 'observed'].includes(speechEffect.status) ||
+      speechEffect.preparedAt < speech.attempt.createdAt ||
+      resolvedAt < speechEffect.preparedAt
+    ) {
+      throw new Error('home text speech effects are incomplete');
+    }
+    const effects: RootReturnEffectReceipt[] = [
+      {
+        effectId: providerEffect.effectId,
+        destinationWorldId: providerEffect.destinationWorldId,
+        kind: providerEffect.kind,
+        authorityEpoch: providerEffect.authorityEpoch,
+        payloadHash: providerEffect.payloadHash,
+        status: 'observed',
+        preparedAt: providerEffect.preparedAt,
+        resolvedAt: providerEffect.resolvedAt,
+      },
+      {
+        effectId: speechEffect.effectId,
+        destinationWorldId: speechEffect.destinationWorldId,
+        kind: speechEffect.kind,
+        authorityEpoch: speechEffect.authorityEpoch,
+        payloadHash: speechEffect.payloadHash,
+        status: 'observed',
+        preparedAt: speechEffect.preparedAt,
+        resolvedAt,
+      },
+    ];
+    return {
+      schemaVersion: 1,
+      branchId: speech.attempt.branchId,
+      worldId: speech.attempt.worldId,
+      viewManifestHash: speech.attempt.manifestHash,
+      outcome: 'completed',
+      authorityEpoch: speech.attempt.authorityEpoch,
+      privateCapsuleId: speech.attempt.resultCapsuleId,
+      effects,
+      commitments: [],
+      blockers: [],
+      artifactRefs: [],
+    };
+  }
+
+  getHomeTextSpeechReceipt(
+    speechAttemptIdValue: HomeTextSpeechAttemptId,
+  ): HomeTextSpeechReceiptRecord | null {
+    const speechAttemptId = homeTextSpeechAttemptId(speechAttemptIdValue);
+    const row = this.database
+      .prepare(
+        `SELECT * FROM context_home_text_speech_receipts
+         WHERE speech_attempt_id = ?`,
+      )
+      .get(speechAttemptId) as HomeTextSpeechReceiptRow | undefined;
+    if (!row) return null;
+    const speech = this.getHomeTextSpeechAttemptById(speechAttemptId);
+    if (
+      !['pre_dispatch_rejected', 'issuance_uncertain', 'observed'].includes(
+        row.phase,
+      )
+    ) {
+      throw new Error('stored home text speech receipt phase is invalid');
+    }
+    const phase = row.phase as HomeTextSpeechReceiptPhase;
+    const resolvedAt = timestamp('resolvedAt', row.resolved_at);
+    const speechEffectId =
+      row.speech_effect_id === null ? null : effectId(row.speech_effect_id);
+    let evidence: HomeDiscordMessageEvidenceV1 | null = null;
+    let evidenceJson: string | null = null;
+    let rootContent: RootReturnReceiptV1 | null = null;
+    let rootContentJson: string | null = null;
+    if (phase === 'observed') {
+      if (
+        speechEffectId !== speech.attempt.speechEffectId ||
+        row.branch_id !== speech.attempt.branchId ||
+        row.root_receipt_capsule_id !== speech.attempt.rootReceiptCapsuleId ||
+        row.message_id === null ||
+        row.guild_id === null ||
+        row.channel_id === null ||
+        row.discord_nonce === null ||
+        row.status_code !== 200 ||
+        row.guild_id !== speech.attempt.guildId ||
+        row.channel_id !== speech.attempt.channelId ||
+        row.discord_nonce !== speech.attempt.discordNonce ||
+        !/^[0-9]{17,20}$/.test(row.message_id)
+      ) {
+        throw new Error('stored home text observed evidence is invalid');
+      }
+      evidence = {
+        schemaVersion: 1,
+        speechAttemptId,
+        speechEffectId,
+        messageId: row.message_id,
+        guildId: row.guild_id,
+        channelId: row.channel_id,
+        discordNonce: row.discord_nonce,
+        statusCode: 200,
+        textBytes: speech.attempt.visibleBytes,
+        textHash: speech.attempt.visibleHash,
+        observedAt: resolvedAt,
+      };
+      evidenceJson = serialize(evidence);
+      rootContent = this.homeTextRootContent(speech, resolvedAt);
+      rootContentJson = serialize(rootContent);
+      const effect = this.getEffect(speech.attempt.speechEffectId);
+      const branch = this.getBranch(speech.attempt.branchId);
+      const start = this.getBranchStart(speech.attempt.branchId);
+      const root = this.database
+        .prepare(
+          `SELECT branch_id, world_id, capsule_kind, view_manifest_hash,
+             source_root_hash, policy_generation, summarizer_model,
+             summarizer_prompt_hash, content_json, content_hash, created_at
+           FROM context_capsules WHERE capsule_id = ?`,
+        )
+        .get(speech.attempt.rootReceiptCapsuleId) as
+        | {
+            branch_id: string;
+            world_id: string;
+            capsule_kind: string;
+            view_manifest_hash: string | null;
+            source_root_hash: string;
+            policy_generation: number;
+            summarizer_model: string | null;
+            summarizer_prompt_hash: string | null;
+            content_json: string;
+            content_hash: string;
+            created_at: number;
+          }
+        | undefined;
+      const advance = this.database
+        .prepare(
+          `SELECT revision, predecessor_branch_id, predecessor_world_id,
+             world_id, advanced_at
+           FROM context_continuation_advances WHERE branch_id = ?`,
+        )
+        .get(speech.attempt.branchId) as
+        | {
+            revision: number;
+            predecessor_branch_id: string | null;
+            predecessor_world_id: string | null;
+            world_id: string;
+            advanced_at: number;
+          }
+        | undefined;
+      if (
+        !effect ||
+        effect.status !== 'observed' ||
+        effect.resolvedAt !== resolvedAt ||
+        row.evidence_json !== evidenceJson ||
+        row.evidence_hash !== hashContextBytes(evidenceJson) ||
+        row.root_content_json !== rootContentJson ||
+        row.root_content_hash !== hashContextBytes(rootContentJson) ||
+        !branch ||
+        branch.status !== 'yielded' ||
+        branch.endedAt !== resolvedAt ||
+        !start ||
+        !root ||
+        root.branch_id !== speech.attempt.branchId ||
+        root.world_id !== speech.attempt.worldId ||
+        root.capsule_kind !== 'root_receipt' ||
+        root.view_manifest_hash !== speech.attempt.manifestHash ||
+        root.source_root_hash !== speech.attempt.providerOutcomeHash ||
+        root.policy_generation !== speech.attempt.policyGeneration ||
+        root.summarizer_model !== null ||
+        root.summarizer_prompt_hash !== null ||
+        root.content_json !== rootContentJson ||
+        root.content_hash !== hashContextBytes(rootContentJson) ||
+        root.created_at !== resolvedAt ||
+        !advance ||
+        advance.revision !== start.baseRevision + 1 ||
+        advance.predecessor_branch_id !== start.predecessorBranchId ||
+        advance.predecessor_world_id !== start.predecessorWorldId ||
+        advance.world_id !== speech.attempt.worldId ||
+        advance.advanced_at !== resolvedAt
+      ) {
+        throw new Error('stored home text observed receipt is invalid');
+      }
+    } else {
+      const effect = this.getEffect(speech.attempt.speechEffectId);
+      if (
+        row.branch_id !== null ||
+        row.root_receipt_capsule_id !== null ||
+        row.message_id !== null ||
+        row.guild_id !== null ||
+        row.channel_id !== null ||
+        row.discord_nonce !== null ||
+        row.status_code !== null ||
+        row.evidence_json !== null ||
+        row.evidence_hash !== null ||
+        row.root_content_json !== null ||
+        row.root_content_hash !== null ||
+        (phase === 'pre_dispatch_rejected' &&
+          (speechEffectId !== null || effect !== null)) ||
+        (phase === 'issuance_uncertain' &&
+          (speechEffectId !== speech.attempt.speechEffectId ||
+            !effect ||
+            effect.status !== 'uncertain' ||
+            effect.resolvedAt !== resolvedAt))
+      ) {
+        throw new Error('stored home text failure receipt is invalid');
+      }
+    }
+    const receipt: HomeTextSpeechReceiptV1 = {
+      schemaVersion: 1,
+      speechAttemptId,
+      speechEffectId,
+      phase,
+      evidenceHash:
+        evidenceJson === null ? null : hashContextBytes(evidenceJson),
+      rootContentHash:
+        rootContentJson === null ? null : hashContextBytes(rootContentJson),
+      resolvedAt,
+    };
+    const receiptJson = serialize(receipt);
+    if (
+      row.receipt_json !== receiptJson ||
+      row.receipt_hash !== hashContextBytes(receiptJson)
+    ) {
+      throw new Error('stored home text speech receipt is invalid');
+    }
+    const start = this.getBranchStart(speech.attempt.branchId);
+    const continuationRevision =
+      phase === 'observed' && start ? start.baseRevision + 1 : null;
+    const finalization = {
+      schemaVersion: 1,
+      speechAttemptId,
+      phase,
+      branchId: speech.attempt.branchId,
+      receiptHash: row.receipt_hash,
+      continuationRevision,
+      finalizedAt: resolvedAt,
+    };
+    const finalizationJson = serialize(finalization);
+    const finalizationRow = this.database
+      .prepare(
+        `SELECT branch_id, phase, continuation_revision, receipt_hash,
+           finalization_json, finalization_hash, finalized_at
+         FROM context_home_text_speech_finalizations
+         WHERE speech_attempt_id = ?`,
+      )
+      .get(speechAttemptId) as
+      | {
+          branch_id: string;
+          phase: string;
+          continuation_revision: number | null;
+          receipt_hash: string;
+          finalization_json: string;
+          finalization_hash: string;
+          finalized_at: number;
+        }
+      | undefined;
+    if (
+      !finalizationRow ||
+      finalizationRow.branch_id !== speech.attempt.branchId ||
+      finalizationRow.phase !== phase ||
+      finalizationRow.continuation_revision !== continuationRevision ||
+      finalizationRow.receipt_hash !== row.receipt_hash ||
+      finalizationRow.finalized_at !== resolvedAt ||
+      finalizationRow.finalization_json !== finalizationJson ||
+      finalizationRow.finalization_hash !== hashContextBytes(finalizationJson)
+    ) {
+      throw new Error('stored home text speech finalization is invalid');
+    }
+    return {
+      receipt,
+      evidence,
+      rootContent,
+      evidenceJson,
+      rootContentJson,
+      receiptJson,
+      receiptHash: row.receipt_hash,
+    };
+  }
+
+  private insertHomeTextSpeechFinalization(input: {
+    speech: HomeTextSpeechAttemptRecord;
+    phase: HomeTextSpeechReceiptPhase;
+    receiptHash: string;
+    finalizedAt: number;
+    continuationRevision: number | null;
+  }): void {
+    const finalization = {
+      schemaVersion: 1,
+      speechAttemptId: input.speech.attempt.speechAttemptId,
+      phase: input.phase,
+      branchId: input.speech.attempt.branchId,
+      receiptHash: input.receiptHash,
+      continuationRevision: input.continuationRevision,
+      finalizedAt: input.finalizedAt,
+    };
+    const finalizationJson = serialize(finalization);
+    this.database
+      .prepare(
+        `INSERT INTO context_home_text_speech_finalizations(
+           speech_attempt_id, branch_id, phase, continuation_revision,
+           receipt_hash, finalization_json, finalization_hash, finalized_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.speech.attempt.speechAttemptId,
+        input.speech.attempt.branchId,
+        input.phase,
+        input.continuationRevision,
+        input.receiptHash,
+        finalizationJson,
+        hashContextBytes(finalizationJson),
+        input.finalizedAt,
+      );
+  }
+
+  prepareHomeTextSpeechEffect(input: {
+    speechAttemptId: HomeTextSpeechAttemptId;
+    preparedAt: number;
+  }): EffectRecord {
+    const speechAttemptId = homeTextSpeechAttemptId(input.speechAttemptId);
+    const preparedAt = timestamp('preparedAt', input.preparedAt);
+    return transaction(this.database, () => {
+      const speech = this.getHomeTextSpeechAttemptById(speechAttemptId);
+      if (this.getHomeTextSpeechReceipt(speechAttemptId)) {
+        throw new Error('home text speech attempt is already resolved');
+      }
+      if (this.getEffect(speech.attempt.speechEffectId)) {
+        throw new Error('home text speech effect already exists');
+      }
+      return this.prepareEffect({
+        effectId: speech.attempt.speechEffectId,
+        branchId: speech.attempt.branchId,
+        worldId: speech.attempt.worldId,
+        destinationWorldId: speech.attempt.worldId,
+        kind: 'home_discord_text',
+        authorityEpoch: speech.attempt.authorityEpoch,
+        payload: JSON.parse(speech.effectPayloadJson) as unknown,
+        idempotencyKey: speech.attempt.speechAttemptId,
+        preparedAt,
+      });
+    });
+  }
+
+  recordHomeTextSpeechFailure(input: {
+    speechAttemptId: HomeTextSpeechAttemptId;
+    phase: Exclude<HomeTextSpeechReceiptPhase, 'observed'>;
+    resolvedAt: number;
+  }): HomeTextSpeechReceiptRecord {
+    const speechAttemptId = homeTextSpeechAttemptId(input.speechAttemptId);
+    const resolvedAt = timestamp('resolvedAt', input.resolvedAt);
+    if (
+      !['pre_dispatch_rejected', 'issuance_uncertain'].includes(input.phase)
+    ) {
+      throw new Error('invalid home text speech failure phase');
+    }
+    return transaction(this.database, () => {
+      const existing = this.getHomeTextSpeechReceipt(speechAttemptId);
+      if (existing) {
+        if (
+          existing.receipt.phase !== input.phase ||
+          existing.receipt.resolvedAt !== resolvedAt
+        ) {
+          throw new Error(
+            'home text speech attempt already has a different receipt',
+          );
+        }
+        return existing;
+      }
+      const speech = this.getHomeTextSpeechAttemptById(speechAttemptId);
+      const effect = this.getEffect(speech.attempt.speechEffectId);
+      if (
+        (input.phase === 'pre_dispatch_rejected' && effect !== null) ||
+        (input.phase === 'issuance_uncertain' &&
+          (!effect || effect.status !== 'prepared'))
+      ) {
+        throw new Error('home text speech failure does not match effect state');
+      }
+      const speechEffectId =
+        input.phase === 'pre_dispatch_rejected'
+          ? null
+          : speech.attempt.speechEffectId;
+      const receipt: HomeTextSpeechReceiptV1 = {
+        schemaVersion: 1,
+        speechAttemptId,
+        speechEffectId,
+        phase: input.phase,
+        evidenceHash: null,
+        rootContentHash: null,
+        resolvedAt,
+      };
+      const receiptJson = serialize(receipt);
+      const receiptHash = hashContextBytes(receiptJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_home_text_speech_receipts(
+             speech_attempt_id, speech_effect_id, phase, message_id,
+             guild_id, channel_id, discord_nonce, status_code,
+             evidence_json, evidence_hash, root_content_json, root_content_hash,
+             receipt_json, receipt_hash, resolved_at
+           ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+        )
+        .run(
+          speechAttemptId,
+          speechEffectId,
+          input.phase,
+          receiptJson,
+          receiptHash,
+          resolvedAt,
+        );
+      if (effect) {
+        const update = this.database
+          .prepare(
+            `UPDATE context_effects
+             SET status = 'uncertain', resolved_at = ?, observation_json = ?
+             WHERE effect_id = ? AND status = 'prepared'`,
+          )
+          .run(
+            resolvedAt,
+            serialize({ schemaVersion: 1, speechReceiptHash: receiptHash }),
+            effect.effectId,
+          );
+        if (update.changes !== 1) {
+          throw new Error('home text speech effect is not prepared');
+        }
+      }
+      this.insertHomeTextSpeechFinalization({
+        speech,
+        phase: input.phase,
+        receiptHash,
+        finalizedAt: resolvedAt,
+        continuationRevision: null,
+      });
+      const stored = this.getHomeTextSpeechReceipt(speechAttemptId);
+      if (!stored) throw new Error('home text speech failure was not stored');
+      return stored;
+    });
+  }
+
+  completeObservedHomeTextSpeech(input: {
+    speechAttemptId: HomeTextSpeechAttemptId;
+    evidence: HomeDiscordMessageEvidenceV1;
+  }): HomeTextObservedCompletion {
+    const speechAttemptId = homeTextSpeechAttemptId(input.speechAttemptId);
+    return transaction(this.database, () => {
+      if (this.getHomeTextSpeechReceipt(speechAttemptId)) {
+        throw new Error('home text speech attempt is already resolved');
+      }
+      const speech = this.getHomeTextSpeechAttemptById(speechAttemptId);
+      const evidence = input.evidence;
+      if (
+        evidence.schemaVersion !== 1 ||
+        evidence.speechAttemptId !== speechAttemptId ||
+        evidence.speechEffectId !== speech.attempt.speechEffectId ||
+        !/^[0-9]{17,20}$/.test(evidence.messageId) ||
+        evidence.guildId !== speech.attempt.guildId ||
+        evidence.channelId !== speech.attempt.channelId ||
+        evidence.discordNonce !== speech.attempt.discordNonce ||
+        evidence.statusCode !== 200 ||
+        evidence.textBytes !== speech.attempt.visibleBytes ||
+        evidence.textHash !== speech.attempt.visibleHash
+      ) {
+        throw new Error(
+          'home Discord message evidence does not match speech authority',
+        );
+      }
+      const observedAt = timestamp('observedAt', evidence.observedAt);
+      const speechEffect = this.getEffect(speech.attempt.speechEffectId);
+      if (!speechEffect || speechEffect.status !== 'prepared') {
+        throw new Error('home text speech effect is not prepared');
+      }
+      const evidenceJson = serialize(evidence);
+      const evidenceHash = hashContextBytes(evidenceJson);
+      const rootContent = this.homeTextRootContent(speech, observedAt);
+      const rootContentJson = serialize(rootContent);
+      const rootContentHash = hashContextBytes(rootContentJson);
+      const receipt: HomeTextSpeechReceiptV1 = {
+        schemaVersion: 1,
+        speechAttemptId,
+        speechEffectId: speech.attempt.speechEffectId,
+        phase: 'observed',
+        evidenceHash,
+        rootContentHash,
+        resolvedAt: observedAt,
+      };
+      const receiptJson = serialize(receipt);
+      const receiptHash = hashContextBytes(receiptJson);
+      this.database
+        .prepare(
+          `INSERT INTO context_home_text_speech_receipts(
+             speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+             phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+             evidence_json, evidence_hash, root_content_json, root_content_hash,
+             receipt_json, receipt_hash, resolved_at
+           ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          speechAttemptId,
+          speech.attempt.speechEffectId,
+          speech.attempt.branchId,
+          speech.attempt.rootReceiptCapsuleId,
+          evidence.messageId,
+          evidence.guildId,
+          evidence.channelId,
+          evidence.discordNonce,
+          evidenceJson,
+          evidenceHash,
+          rootContentJson,
+          rootContentHash,
+          receiptJson,
+          receiptHash,
+          observedAt,
+        );
+      const effectUpdate = this.database
+        .prepare(
+          `UPDATE context_effects
+           SET status = 'observed', resolved_at = ?, observation_json = ?
+           WHERE effect_id = ? AND status = 'prepared'`,
+        )
+        .run(
+          observedAt,
+          serialize({
+            schemaVersion: 1,
+            speechReceiptHash: receiptHash,
+            evidenceHash,
+            messageId: evidence.messageId,
+          }),
+          speech.attempt.speechEffectId,
+        );
+      if (effectUpdate.changes !== 1) {
+        throw new Error('home text speech effect is not prepared');
+      }
+      const privateCapsule = this.requireHomeTextResultCapsule(speech);
+      const rootReceipt = this.insertCapsuleInTransaction({
+        capsuleId: speech.attempt.rootReceiptCapsuleId,
+        branchId: speech.attempt.branchId,
+        worldId: speech.attempt.worldId,
+        kind: 'root_receipt',
+        viewManifestHash: speech.attempt.manifestHash,
+        sourceRootHash: speech.attempt.providerOutcomeHash,
+        policyGeneration: speech.attempt.policyGeneration,
+        content: rootContent,
+        createdAt: observedAt,
+      });
+      const start = this.getBranchStart(speech.attempt.branchId);
+      if (!start) throw new Error('home text speech branch start is missing');
+      const branch = this.finishBranch(
+        speech.attempt.branchId,
+        'yielded',
+        observedAt,
+      );
+      const head = this.advanceContinuationHeadInTransaction(
+        start.baseRevision,
+        speech.attempt.branchId,
+        observedAt,
+      );
+      this.insertHomeTextSpeechFinalization({
+        speech,
+        phase: 'observed',
+        receiptHash,
+        finalizedAt: observedAt,
+        continuationRevision: head.revision,
+      });
+      const speechReceipt = this.getHomeTextSpeechReceipt(speechAttemptId);
+      if (!speechReceipt)
+        throw new Error('home text observed receipt was not stored');
+      return { branch, privateCapsule, rootReceipt, head, speechReceipt };
+    });
+  }
+
+  reconcileHomeTextSpeechBeforeRecovery(
+    recoveredAtValue: number,
+  ): readonly HomeTextSpeechReceiptRecord[] {
+    const recoveredAt = timestamp('recoveredAt', recoveredAtValue);
+    const rows = this.database
+      .prepare(
+        `SELECT speech.speech_attempt_id
+         FROM context_home_text_speech_attempts AS speech
+         JOIN context_branches AS branches ON branches.branch_id = speech.branch_id
+         WHERE branches.status = 'running'
+         ORDER BY speech.created_at, speech.speech_attempt_id`,
+      )
+      .all() as { speech_attempt_id: string }[];
+    const reconciled: HomeTextSpeechReceiptRecord[] = [];
+    for (const row of rows) {
+      const speechAttemptId = homeTextSpeechAttemptId(row.speech_attempt_id);
+      const existing = this.getHomeTextSpeechReceipt(speechAttemptId);
+      if (existing) {
+        if (existing.receipt.phase === 'observed') {
+          throw new Error('observed home text speech branch is still running');
+        }
+        reconciled.push(existing);
+        continue;
+      }
+      const speech = this.getHomeTextSpeechAttemptById(speechAttemptId);
+      const effect = this.getEffect(speech.attempt.speechEffectId);
+      if (effect && effect.status !== 'prepared') {
+        throw new Error('home text speech effect has no matching receipt');
+      }
+      reconciled.push(
+        this.recordHomeTextSpeechFailure({
+          speechAttemptId,
+          phase: effect ? 'issuance_uncertain' : 'pre_dispatch_rejected',
+          resolvedAt: recoveredAt,
+        }),
+      );
+    }
+    return reconciled;
+  }
+
   private requireHomeTextResultCapsule(
     speech: HomeTextSpeechAttemptRecord,
   ): CapsuleRecord {
@@ -5724,12 +6560,13 @@ export class ContextGraphStore {
       .get(attemptId) as IsolatedProviderOutcomeRow | undefined;
     if (!row) return null;
     if (
-      (row.outcome_kind !== 'visible_success' && row.outcome_kind !== 'visible_error') ||
+      (row.outcome_kind !== 'visible_success' &&
+        row.outcome_kind !== 'visible_error') ||
       (row.phase !== 'pre_dispatch_rejected' &&
         row.phase !== 'issuance_uncertain' &&
         row.phase !== 'issued') ||
       (row.outcome_kind === 'visible_success' && row.phase !== 'issued') ||
-      ((row.phase === 'pre_dispatch_rejected') !== (row.effect_id === null))
+      (row.phase === 'pre_dispatch_rejected') !== (row.effect_id === null)
     ) {
       throw new Error('stored isolated provider outcome policy is invalid');
     }
@@ -5747,7 +6584,8 @@ export class ContextGraphStore {
     const outcomeJson = serialize(outcome);
     const outcomeHash = hashContextBytes(outcomeJson);
     const attempt = this.getIsolatedProviderExecutionAttempt(outcome.attemptId);
-    if (!attempt) throw new Error('stored isolated provider outcome attempt is missing');
+    if (!attempt)
+      throw new Error('stored isolated provider outcome attempt is missing');
     const response = this.getIsolatedProviderResponse(outcome.attemptId);
     const effect = this.getEffect(attempt.attempt.effectId);
     const expectedEffectStatus: EffectStatus | null =
@@ -5768,7 +6606,8 @@ export class ContextGraphStore {
       hashContextBytes(outcome.visibleText) !== outcome.visibleHash ||
       outcome.completedAt < attempt.attempt.authorizedAt ||
       (outcome.phase === 'issued') !== (response !== null) ||
-      (response !== null && response.evidence.receivedAt > outcome.completedAt) ||
+      (response !== null &&
+        response.evidence.receivedAt > outcome.completedAt) ||
       (expectedEffectStatus === null
         ? effect !== null
         : effect === null ||
@@ -5797,14 +6636,18 @@ export class ContextGraphStore {
   verifyLatestRecoveredIsolatedProviderBinding(
     expectedTarget: ExactIsolatedProviderTargetV1,
   ): RecoveredIsolatedProviderBindingVerificationV1 {
-    const normalizedTarget = normalizeExactIsolatedProviderTarget(expectedTarget);
+    const normalizedTarget =
+      normalizeExactIsolatedProviderTarget(expectedTarget);
     const expectedTargetJson = serialize(normalizedTarget);
     return readTransaction(this.database, () => {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
-        throw new Error('isolated provider recovery verification requires dark mode');
+        throw new Error(
+          'isolated provider recovery verification requires dark mode',
+        );
       }
-      const migrationName = '0048-context-dark-isolated-provider-binding-order' as const;
+      const migrationName =
+        '0048-context-dark-isolated-provider-binding-order' as const;
       const migration = this.database
         .prepare(
           `SELECT checksum FROM elpis_migrations
@@ -5812,7 +6655,9 @@ export class ContextGraphStore {
         )
         .get(migrationName) as { checksum: string } | undefined;
       if (!migration) {
-        throw new Error('isolated provider binding migration receipt is missing');
+        throw new Error(
+          'isolated provider binding migration receipt is missing',
+        );
       }
       const migrationChecksum = sha256(
         'isolated provider binding migration checksum',
@@ -5884,11 +6729,16 @@ export class ContextGraphStore {
         throw new Error('latest isolated provider binding recovery is invalid');
       }
       const coordinator = this.getRootCoordinatorState();
-      if (coordinator.activeBranchId !== null || coordinator.activeWorldId !== null) {
+      if (
+        coordinator.activeBranchId !== null ||
+        coordinator.activeWorldId !== null
+      ) {
         throw new Error('context root coordinator still owns a branch');
       }
       const count = (sql: string, ...params: string[]): number => {
-        const row = this.database.prepare(sql).get(...params) as { count: number };
+        const row = this.database.prepare(sql).get(...params) as {
+          count: number;
+        };
         return generation('isolated provider recovery count', row.count);
       };
       const effectCount = count(
@@ -5905,11 +6755,19 @@ export class ContextGraphStore {
         branch.branchId,
         branch.branchId,
       );
-      if (effectCount !== 0 || capsuleCount !== 0 || continuationAdvanceCount !== 0) {
-        throw new Error('latest isolated provider binding recovery has graph effects');
+      if (
+        effectCount !== 0 ||
+        capsuleCount !== 0 ||
+        continuationAdvanceCount !== 0
+      ) {
+        throw new Error(
+          'latest isolated provider binding recovery has graph effects',
+        );
       }
       if (record.binding.activationEpoch !== activation.epoch) {
-        throw new Error('latest isolated provider binding activation epoch is stale');
+        throw new Error(
+          'latest isolated provider binding activation epoch is stale',
+        );
       }
       const recoveryHash = hashContextBytes(
         serialize({
@@ -6148,18 +7006,26 @@ export class ContextGraphStore {
       bodyBytes: input.freshSoul.bodyBytes,
       capturedAt: authorizedAt,
     });
-    const provenance = normalizeResidentAuthorizationProvenance(input.provenance);
+    const provenance = normalizeResidentAuthorizationProvenance(
+      input.provenance,
+    );
     const finish = (receipt: ResidentSourceCandidateAuthorizationV1) =>
       finalize ? finalize(receipt) : receipt;
 
     return transaction(this.database, () => {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
-        throw new Error('resident source authorization requires dark graph mode');
+        throw new Error(
+          'resident source authorization requires dark graph mode',
+        );
       }
-      const capture = this.getResidentSourceInspectionCandidate(input.candidateId);
+      const capture = this.getResidentSourceInspectionCandidate(
+        input.candidateId,
+      );
       if (!capture) {
-        throw new Error('resident source authorization candidate does not exist');
+        throw new Error(
+          'resident source authorization candidate does not exist',
+        );
       }
       const { candidate, soul } = capture;
       if (candidate.activationEpoch !== activation.epoch) {
@@ -6188,19 +7054,19 @@ export class ContextGraphStore {
            WHERE authorize_batch_id = ? AND authorize_call_index = ?`,
         )
         .get(provenance.batchId, provenance.callIndex) as
-        | { authorization_id: string }
-        | undefined;
+        { authorization_id: string } | undefined;
       if (priorCall) {
         if (priorCall.authorization_id !== authorizationId) {
           throw new Error(
             'resident source authorization call already authorized different sources',
           );
         }
-        const existing = this.getResidentSourceCandidateAuthorization(
-          authorizationId,
-        );
+        const existing =
+          this.getResidentSourceCandidateAuthorization(authorizationId);
         if (!existing) {
-          throw new Error('resident source candidate authorization disappeared');
+          throw new Error(
+            'resident source candidate authorization disappeared',
+          );
         }
         return finish(existing);
       }
@@ -6210,9 +7076,7 @@ export class ContextGraphStore {
            FROM context_resident_source_candidate_authorizations
            WHERE candidate_id = ?`,
         )
-        .get(candidate.candidateId) as
-        | { authorization_id: string }
-        | undefined;
+        .get(candidate.candidateId) as { authorization_id: string } | undefined;
       if (priorCandidate) {
         throw new Error(
           'resident source candidate was already authorized by a different call',
@@ -6251,11 +7115,12 @@ export class ContextGraphStore {
           provenance.argumentsSha256,
           authorizedAt,
         );
-      const created = this.getResidentSourceCandidateAuthorization(
-        authorizationId,
-      );
+      const created =
+        this.getResidentSourceCandidateAuthorization(authorizationId);
       if (!created) {
-        throw new Error('resident source candidate authorization was not stored');
+        throw new Error(
+          'resident source candidate authorization was not stored',
+        );
       }
       return finish(created);
     });
@@ -6285,7 +7150,11 @@ export class ContextGraphStore {
     },
     finalize?: (receipt: ResidentIdentitySystemDerivationV1) => T,
   ): ResidentIdentitySystemDerivationV1 | T {
-    if (!/^resident-source-authorization:[0-9a-f]{64}$/.test(input.authorizationId)) {
+    if (
+      !/^resident-source-authorization:[0-9a-f]{64}$/.test(
+        input.authorizationId,
+      )
+    ) {
       throw new Error(
         'resident identity system derivation authorizationId is invalid',
       );
@@ -6401,8 +7270,7 @@ export class ContextGraphStore {
            WHERE authorization_id = ?`,
         )
         .get(authorization.authorizationId) as
-        | { derivation_id: string }
-        | undefined;
+        { derivation_id: string } | undefined;
       if (priorAuthorization) {
         throw new Error(
           'resident identity authorization was already derived by a different call',
@@ -6680,13 +7548,16 @@ export class ContextGraphStore {
     return transaction(this.database, () => {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
-        throw new Error('resident world profile binding requires dark graph mode');
-      }
-      const derivation = this.getResidentIdentitySystemDerivation(
-        derivationIdValue,
+        throw new Error(
+          'resident world profile binding requires dark graph mode',
       );
+      }
+      const derivation =
+        this.getResidentIdentitySystemDerivation(derivationIdValue);
       if (!derivation) {
-        throw new Error('resident world profile binding derivation does not exist');
+        throw new Error(
+          'resident world profile binding derivation does not exist',
+        );
       }
       if (derivation.activationEpoch !== activation.epoch) {
         throw new Error(
@@ -6745,10 +7616,7 @@ export class ContextGraphStore {
           'resident world profile binding requires exact current social ingress lineage',
         );
       }
-      if (
-        boundAt < derivation.derivedAt ||
-        boundAt < event.recordedAt
-      ) {
+      if (boundAt < derivation.derivedAt || boundAt < event.recordedAt) {
         throw new Error('resident world profile binding chronology is invalid');
       }
 
@@ -6796,8 +7664,7 @@ export class ContextGraphStore {
            WHERE bind_batch_id = ? AND bind_call_index = ?`,
         )
         .get(provenance.batchId, provenance.callIndex) as
-        | ResidentWorldProfileBindingRow
-        | undefined;
+        ResidentWorldProfileBindingRow | undefined;
       if (priorCall) {
         if (
           priorCall.binding_id !== bindingId ||
@@ -6828,8 +7695,7 @@ export class ContextGraphStore {
            WHERE activation_epoch = ? AND world_id = ?`,
         )
         .get(activation.epoch, targetWorldId) as
-        | { binding_id: string }
-        | undefined;
+        { binding_id: string } | undefined;
       if (priorWorld) {
         throw new Error(
           'resident world profile was already bound by a different call',
@@ -7595,11 +8461,8 @@ export class ContextGraphStore {
         `SELECT approval_id FROM context_system_layer_approvals
          WHERE approval_id = ? OR (layer_id = ? AND approval_generation = ?)`,
       )
-      .get(
-        approvalId,
-        layer.layerId,
-        approvalGeneration,
-      ) as unknown as { approval_id: string } | undefined;
+      .get(approvalId, layer.layerId, approvalGeneration) as unknown as
+      { approval_id: string } | undefined;
     if (collision) {
       const existing = this.getSystemLayerApproval(
         systemLayerApprovalId(collision.approval_id),
@@ -7654,7 +8517,9 @@ export class ContextGraphStore {
       systemLayerProjectionId(row.layer_id),
     );
     if (!layer) {
-      throw new Error(`stored system layer approval has no layer: ${row.approval_id}`);
+      throw new Error(
+        `stored system layer approval has no layer: ${row.approval_id}`,
+      );
     }
     return mapSystemLayerApproval(row, layer);
   }
@@ -7695,7 +8560,10 @@ export class ContextGraphStore {
     ];
     for (const [role, approvalId] of refs) {
       if (approvalId === null) continue;
-      const { approval, layer } = this.requireSystemProfileApproval(approvalId, role);
+      const { approval, layer } = this.requireSystemProfileApproval(
+        approvalId,
+        role,
+      );
       if (
         approval.approvedAt > createdAt ||
         layer.rendererGeneration !== profile.systemRendererGeneration ||
@@ -7925,10 +8793,8 @@ export class ContextGraphStore {
         profile.approvals.scopedRuntimeContract,
         'scoped_runtime_contract',
       ).layer.layerId,
-      this.requireSystemProfileApproval(
-        profile.approvals.identity,
-        'identity',
-      ).layer.layerId,
+      this.requireSystemProfileApproval(profile.approvals.identity, 'identity')
+        .layer.layerId,
     ];
     if (profile.approvals.integratedSelf !== null) {
       layers.push(
@@ -7972,7 +8838,9 @@ export class ContextGraphStore {
       }
       const requestView = this.getLocalBranchRequestView(input.requestViewId);
       if (!requestView) {
-        throw new Error(`local branch request view not found: ${input.requestViewId}`);
+      throw new Error(
+        `local branch request view not found: ${input.requestViewId}`,
+      );
       }
       const profileHeadRevision = generation(
         'expectedProfileHeadRevision',
@@ -7980,8 +8848,9 @@ export class ContextGraphStore {
       );
       const expectedProfileId = systemProfileId(input.expectedProfileId);
       const boundAt = timestamp('boundAt', input.boundAt);
-      const existingForView =
-        this.getSystemProfileRequestViewBindingForView(requestView.requestViewId);
+    const existingForView = this.getSystemProfileRequestViewBindingForView(
+      requestView.requestViewId,
+    );
       if (existingForView) {
         if (
           existingForView.binding.worldId !== requestView.worldId ||
@@ -8029,7 +8898,9 @@ export class ContextGraphStore {
         head.advancedAt > requestView.createdAt ||
         requestView.createdAt > boundAt
       ) {
-        throw new Error('system profile request view binding chronology is invalid');
+      throw new Error(
+        'system profile request view binding chronology is invalid',
+      );
       }
       const binding = normalizeSystemProfileRequestViewBinding({
         schemaVersion: 1,
@@ -8051,8 +8922,7 @@ export class ContextGraphStore {
            WHERE binding_id = ? OR request_view_id = ?`,
         )
         .get(bindingId, requestView.requestViewId) as unknown as
-        | { binding_id: string }
-        | undefined;
+      { binding_id: string } | undefined;
       if (collision) {
         const existing = this.getSystemProfileRequestViewBinding(
           systemProfileRequestViewBindingId(collision.binding_id),
@@ -8130,7 +9000,9 @@ export class ContextGraphStore {
       head.advancedAt > requestView.createdAt ||
       requestView.createdAt > record.binding.boundAt
     ) {
-      throw new Error(`stored system profile request view binding lineage is invalid: ${id}`);
+      throw new Error(
+        `stored system profile request view binding lineage is invalid: ${id}`,
+      );
     }
     const layerIds = this.systemProfileLayerIds(profile.profile);
     if (
@@ -8140,7 +9012,9 @@ export class ContextGraphStore {
           layerId !== requestView.view.systemLayerProjectionIds[ordinal],
       )
     ) {
-      throw new Error(`stored system profile request view binding layers are invalid: ${id}`);
+      throw new Error(
+        `stored system profile request view binding layers are invalid: ${id}`,
+      );
     }
     return record;
   }
@@ -8495,12 +9369,14 @@ export class ContextGraphStore {
   ): MaterializedLocalBranchRequest {
     const systemLayers = requestView.view.systemLayerProjectionIds.map((id) => {
       const layer = this.getSystemLayerProjection(id);
-      if (!layer) throw new Error(`local branch request system layer disappeared: ${id}`);
+      if (!layer)
+        throw new Error(`local branch request system layer disappeared: ${id}`);
       return layer;
     });
     const messages = requestView.view.messageProjectionIds.map((id) => {
       const projection = this.getEventMessageProjection(id);
-      if (!projection) throw new Error(`local branch request message disappeared: ${id}`);
+      if (!projection)
+        throw new Error(`local branch request message disappeared: ${id}`);
       return projection.message;
     });
     return buildMaterializedLocalBranchRequest({
@@ -9029,7 +9905,9 @@ export class ContextGraphStore {
       requestView.branchId !== branch.branchId ||
       requestView.worldId !== input.worldId
     ) {
-      throw new Error('resident dark request stored assembly lineage is invalid');
+      throw new Error(
+        'resident dark request stored assembly lineage is invalid',
+      );
     }
     const coordinator = this.getRootCoordinatorState();
     if (
@@ -9037,7 +9915,9 @@ export class ContextGraphStore {
       coordinator.activeWorldId !== branch.worldId ||
       coordinator.baseRevision !== start.baseRevision
     ) {
-      throw new Error('resident dark request stored coordinator lineage is invalid');
+      throw new Error(
+        'resident dark request stored coordinator lineage is invalid',
+      );
     }
     const manifestProjection = this.getManifestProjection(
       requestView.manifestId,
@@ -9050,26 +9930,33 @@ export class ContextGraphStore {
       !manifestProjection ||
       manifestProjection.record.branchId !== branch.branchId ||
       !profileBinding ||
-      profileBinding.binding.profileId !== input.residentProfileBinding.profileId ||
+      profileBinding.binding.profileId !==
+        input.residentProfileBinding.profileId ||
       profileBinding.binding.profileHeadRevision !==
         input.residentProfileBinding.profileHeadRevision
     ) {
-      throw new Error('resident dark request stored request lineage is invalid');
+      throw new Error(
+        'resident dark request stored request lineage is invalid',
+      );
     }
     const systemLayers = requestView.view.systemLayerProjectionIds.map((id) => {
       const layer = this.getSystemLayerProjection(id);
       if (!layer) {
-        throw new Error(`resident dark request system layer disappeared: ${id}`);
+        throw new Error(
+          `resident dark request system layer disappeared: ${id}`,
+        );
       }
       return layer;
     });
-    const messageProjections = requestView.view.messageProjectionIds.map((id) => {
+    const messageProjections = requestView.view.messageProjectionIds.map(
+      (id) => {
       const projection = this.getEventMessageProjection(id);
       if (!projection) {
         throw new Error(`resident dark request message disappeared: ${id}`);
       }
       return projection;
-    });
+      },
+    );
     const request = buildMaterializedLocalBranchRequest({
       requestViewId: requestView.requestViewId,
       messages: [
@@ -9134,7 +10021,8 @@ export class ContextGraphStore {
     const currentSequence = generation('currentSequence', input.sequence);
     const maxEvents = generation('maxEvents', input.maxEvents);
     const assembledAt = timestamp('assembledAt', input.assembledAt);
-    if (currentSequence < 1) throw new Error('currentSequence must be positive');
+    if (currentSequence < 1)
+      throw new Error('currentSequence must be positive');
     if (maxEvents < 1 || maxEvents > 1_024) {
       throw new Error('maxEvents must be between 1 and 1024');
     }
@@ -9144,7 +10032,9 @@ export class ContextGraphStore {
     return transaction(this.database, () => {
       const activation = this.getActivationState();
       if (activation.mode !== 'dark') {
-        throw new Error('resident dark request assembly requires dark graph mode');
+        throw new Error(
+          'resident dark request assembly requires dark graph mode',
+        );
       }
       const currentEvent = this.getWorldEvent(currentEventId);
       if (
@@ -9163,16 +10053,19 @@ export class ContextGraphStore {
            WHERE activation_epoch = ? AND world_id = ?`,
         )
         .get(activation.epoch, targetWorldId) as
-        | { binding_id: string }
-        | undefined;
+        { binding_id: string } | undefined;
       if (!bindingRow) {
-        throw new Error('resident dark request assembly requires a bound world profile');
+        throw new Error(
+          'resident dark request assembly requires a bound world profile',
+        );
       }
       const residentProfileBinding = this.getResidentWorldProfileBinding(
         residentWorldProfileBindingId(bindingRow.binding_id),
       );
       if (!residentProfileBinding) {
-        throw new Error('resident dark request world profile binding disappeared');
+        throw new Error(
+          'resident dark request world profile binding disappeared',
+        );
       }
       const profileHead = this.getSystemProfileHead(
         targetWorldId,
@@ -9204,7 +10097,9 @@ export class ContextGraphStore {
         )
         .get() as DarkIngressGenerationRow | undefined;
       if (!generationRow) {
-        throw new Error('resident dark request ingress generation is unavailable');
+        throw new Error(
+          'resident dark request ingress generation is unavailable',
+        );
       }
       const queue = mapDarkIngressGeneration(generationRow);
       if (
@@ -9280,7 +10175,9 @@ export class ContextGraphStore {
           expectedHeadRevision: head.revision,
           worldId: targetWorldId,
           branchId: input.branchId,
-          messageProjectionIds: inspection.items.map((item) => item.projectionId),
+          messageProjectionIds: inspection.items.map(
+            (item) => item.projectionId,
+          ),
           assembledAt,
         },
         activation.epoch,
@@ -9293,7 +10190,9 @@ export class ContextGraphStore {
         assembly.profileBinding.binding.profileHeadRevision !==
           residentProfileBinding.profileHeadRevision
       ) {
-        throw new Error('resident dark request profile binding changed during assembly');
+        throw new Error(
+          'resident dark request profile binding changed during assembly',
+        );
       }
       this.database
         .prepare(
@@ -9371,7 +10270,10 @@ export class ContextGraphStore {
     const provenance = normalizeDarkIsolatedProviderBindingProvenance(
       input.provenance,
     );
-    const boundAt = timestamp('dark isolated provider binding boundAt', input.boundAt);
+    const boundAt = timestamp(
+      'dark isolated provider binding boundAt',
+      input.boundAt,
+    );
     const finish = (record: DarkIsolatedProviderBindingRecord) =>
       finalize ? finalize(record) : record;
 
@@ -9387,16 +10289,22 @@ export class ContextGraphStore {
         currentEvent.sequence !== currentSequence ||
         !['inbound:discord', 'inbound:signal'].includes(currentEvent.kind)
       ) {
-        throw new Error('isolated provider binding requires exact current social ingress');
+        throw new Error(
+          'isolated provider binding requires exact current social ingress',
+        );
       }
       const coordinator = this.getRootCoordinatorState();
       if (
         coordinator.activeBranchId === null ||
         coordinator.activeWorldId !== targetWorldId
       ) {
-        throw new Error('isolated provider binding requires an active current-world branch');
+        throw new Error(
+          'isolated provider binding requires an active current-world branch',
+        );
       }
-      const attempt = this.getDarkPendingBranchAttempt(coordinator.activeBranchId);
+      const attempt = this.getDarkPendingBranchAttempt(
+        coordinator.activeBranchId,
+      );
       const admission = this.getDarkIngressAdmission(currentEventId);
       if (
         !attempt ||
@@ -9407,7 +10315,9 @@ export class ContextGraphStore {
         admission.worldId !== targetWorldId ||
         admission.sourceSequence !== currentSequence
       ) {
-        throw new Error('isolated provider binding pending attempt lineage is invalid');
+        throw new Error(
+          'isolated provider binding pending attempt lineage is invalid',
+        );
       }
       const residentRow = this.database
         .prepare(
@@ -9415,16 +10325,19 @@ export class ContextGraphStore {
            WHERE activation_epoch = ? AND world_id = ?`,
         )
         .get(activation.epoch, targetWorldId) as
-        | { binding_id: string }
-        | undefined;
+        { binding_id: string } | undefined;
       if (!residentRow) {
-        throw new Error('isolated provider binding requires a resident world profile');
+        throw new Error(
+          'isolated provider binding requires a resident world profile',
+        );
       }
       const residentProfileBinding = this.getResidentWorldProfileBinding(
         residentWorldProfileBindingId(residentRow.binding_id),
       );
       if (!residentProfileBinding) {
-        throw new Error('isolated provider binding resident profile disappeared');
+        throw new Error(
+          'isolated provider binding resident profile disappeared',
+        );
       }
       const darkRequest = this.rereadResidentCurrentWorldDarkRequest({
         worldId: targetWorldId,
@@ -9454,8 +10367,7 @@ export class ContextGraphStore {
            WHERE bind_batch_id = ? AND bind_call_index = ?`,
         )
         .get(provenance.batchId, provenance.callIndex) as
-        | { binding_id: string }
-        | undefined;
+        { binding_id: string } | undefined;
       const replay = priorCall
         ? this.getDarkIsolatedProviderBinding(
             darkIsolatedProviderBindingId(priorCall.binding_id),
@@ -9465,7 +10377,9 @@ export class ContextGraphStore {
         throw new Error('isolated provider binding disappeared');
       }
       if (!replay && boundAt < attempt.assembledAt) {
-        throw new Error('isolated provider binding pending attempt lineage is invalid');
+        throw new Error(
+          'isolated provider binding pending attempt lineage is invalid',
+        );
       }
       const receiptBoundAt = replay?.binding.boundAt ?? boundAt;
       const binding: DarkIsolatedProviderBindingV1 = Object.freeze({
@@ -9508,7 +10422,9 @@ export class ContextGraphStore {
       const bindingId = darkIsolatedProviderBindingIdentity(bindingJson);
       if (replay) {
         if (priorCall!.binding_id !== bindingId) {
-          throw new Error('isolated provider binding call already bound different lineage');
+          throw new Error(
+            'isolated provider binding call already bound different lineage',
+          );
         }
         return finish(replay);
       }
@@ -9519,7 +10435,9 @@ export class ContextGraphStore {
         )
         .get(branch.branchId) as { binding_id: string } | undefined;
       if (priorBranch) {
-        throw new Error('isolated provider request was already bound by a different call');
+        throw new Error(
+          'isolated provider request was already bound by a different call',
+        );
       }
       this.database
         .prepare(
@@ -9620,7 +10538,9 @@ export class ContextGraphStore {
       });
       if (inspection.status !== 'ready') return inspection;
       if (inspection.items.length < 1) {
-        throw new Error('dark pending inspection returned an empty ready batch');
+        throw new Error(
+          'dark pending inspection returned an empty ready batch',
+        );
       }
       const assembly = this.assembleDarkLocalBranchRecordsInTransaction(
         {
@@ -9693,7 +10613,9 @@ export class ContextGraphStore {
       expectedActivationEpoch,
     );
     if (!profileHead) {
-      throw new Error(`current system profile head not found: ${input.worldId}`);
+      throw new Error(
+        `current system profile head not found: ${input.worldId}`,
+      );
     }
     const systemProfile = this.getSystemProfile(profileHead.profileId);
     if (!systemProfile) {

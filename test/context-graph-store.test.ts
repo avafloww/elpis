@@ -418,7 +418,10 @@ test('resident source authorizations are exact, separate-batch, immutable receip
       /^resident-source-authorization:[0-9a-f]{64}$/,
     );
     assert.equal(authorization.candidateId, first.candidate.candidateId);
-    assert.equal(authorization.authorizeBatchId, residentRunProvenance('103').batchId);
+    assert.equal(
+      authorization.authorizeBatchId,
+      residentRunProvenance('103').batchId,
+    );
     assert.deepEqual(
       value.store.authorizeResidentSourceCandidate({
         candidateId: first.candidate.candidateId,
@@ -732,10 +735,7 @@ test('authorized resident identity layers derive atomically without creating run
     );
 
     const sourceOnlyPath = path.join(value.directory, 'source-only-SOUL.md');
-    fs.writeFileSync(
-      sourceOnlyPath,
-      `---\nname: Briar\n---\n\n${soul.body}`,
-    );
+    fs.writeFileSync(sourceOnlyPath, `---\nname: Briar\n---\n\n${soul.body}`);
     const sourceOnlyChangedSoul = readPromptFacingSoulSnapshot(sourceOnlyPath);
     assert.equal(sourceOnlyChangedSoul.body, soul.body);
     assert.notEqual(sourceOnlyChangedSoul.sourceFileHash, soul.sourceFileHash);
@@ -764,7 +764,10 @@ test('authorized resident identity layers derive atomically without creating run
       receiptAgain.derivationId,
     );
     assert.equal(receiptSourceOnly.contractLayerId, receipt.contractLayerId);
-    assert.equal(receiptSourceOnly.contractApprovalId, receipt.contractApprovalId);
+    assert.equal(
+      receiptSourceOnly.contractApprovalId,
+      receipt.contractApprovalId,
+    );
     assert.notEqual(receiptSourceOnly.identityLayerId, receipt.identityLayerId);
     assert.notEqual(
       receiptSourceOnly.identityApprovalId,
@@ -775,7 +778,8 @@ test('authorized resident identity layers derive atomically without creating run
       value.directory,
       '# Changed authorized synthetic soul\n',
     );
-    const inspectedChanged = value.store.createResidentSourceInspectionCandidate({
+    const inspectedChanged =
+      value.store.createResidentSourceInspectionCandidate({
       soul: changedSoul,
       provenance: residentRunProvenance('211'),
       observedAt: 460,
@@ -800,7 +804,10 @@ test('authorized resident identity layers derive atomically without creating run
     assert.equal(receiptChanged.contractLayerId, receipt.contractLayerId);
     assert.equal(receiptChanged.contractApprovalId, receipt.contractApprovalId);
     assert.notEqual(receiptChanged.identityLayerId, receipt.identityLayerId);
-    assert.notEqual(receiptChanged.identityApprovalId, receipt.identityApprovalId);
+    assert.notEqual(
+      receiptChanged.identityApprovalId,
+      receipt.identityApprovalId,
+    );
     const changedCounts = value.database
       .prepare(
         `SELECT
@@ -955,20 +962,20 @@ test('resident current-world profile binding is atomic and social-lineage scoped
       profile?.profile.approvals.scopedRuntimeContract,
       derivation.contractApprovalId,
     );
-    assert.equal(profile?.profile.approvals.identity, derivation.identityApprovalId);
+    assert.equal(
+      profile?.profile.approvals.identity,
+      derivation.identityApprovalId,
+    );
     assert.equal(profile?.profile.approvals.integratedSelf, null);
     assert.equal(profile?.profile.approvals.worldPolicy, null);
-    assert.deepEqual(
-      value.store.getSystemProfileHead(targetWorldId, 0),
-      {
+    assert.deepEqual(value.store.getSystemProfileHead(targetWorldId, 0), {
         worldId: targetWorldId,
         activationEpoch: 0,
         revision: 1,
         predecessorProfileId: null,
         profileId: receipt.profileId,
         advancedAt: 500,
-      },
-    );
+    });
     assert.throws(
       () =>
         value.store.bindResidentCurrentWorldProfile({
@@ -1190,12 +1197,21 @@ test('resident current-world dark request admits and assembles atomically', () =
     });
     assert.equal(record.currentEvent.eventId, current.eventId);
     assert.equal(record.admission.eventId, current.eventId);
-    assert.equal(record.residentProfileBinding.bindingId, profileBinding.bindingId);
+    assert.equal(
+      record.residentProfileBinding.bindingId,
+      profileBinding.bindingId,
+    );
     assert.equal(record.attempt.selectedCount, 1);
     assert.equal(record.attempt.firstSourceSequence, current.sequence);
     assert.equal(record.attempt.lastSourceSequence, current.sequence);
-    assert.equal(record.assembly.requestView.view.messageProjectionIds[0], projection.projectionId);
-    assert.equal(record.assembly.profileBinding.binding.profileId, profileBinding.profileId);
+    assert.equal(
+      record.assembly.requestView.view.messageProjectionIds[0],
+      projection.projectionId,
+    );
+    assert.equal(
+      record.assembly.profileBinding.binding.profileId,
+      profileBinding.profileId,
+    );
     assert.equal(record.assembly.profileBinding.binding.profileHeadRevision, 1);
     assert.equal(record.assembly.request.runnable, false);
     assert.equal(record.assembly.request.toolMode, 'none');
@@ -1208,7 +1224,9 @@ test('resident current-world dark request admits and assembles atomically', () =
       record,
     );
     assert.equal(
-      record.assembly.request.candidateJson.includes('CURRENT_DARK_REQUEST_CANARY'),
+      record.assembly.request.candidateJson.includes(
+        'CURRENT_DARK_REQUEST_CANARY',
+      ),
       true,
     );
     assert.equal(
@@ -1303,7 +1321,10 @@ test('resident current-world dark request admits and assembles atomically', () =
       expectedTarget: providerTarget,
       admittedAt: 760,
     });
-    assert.equal(invocation.admission.admissionKind, 'dark_isolated_provider_invocation');
+    assert.equal(
+      invocation.admission.admissionKind,
+      'dark_isolated_provider_invocation',
+    );
     assert.equal(invocation.admission.runnable, false);
     assert.equal(invocation.admission.networkAuthority, 'none');
     assert.equal(invocation.admission.toolMode, 'none');
@@ -1329,8 +1350,14 @@ test('resident current-world dark request admits and assembles atomically', () =
       providerBinding.binding.requestProfileBindingHash,
     );
     assert.equal(invocation.admission.targetHash, providerBinding.targetHash);
-    assert.deepEqual(invocation.admission.target, providerBinding.binding.target);
-    assert.equal(invocation.admission.candidateHash, providerBinding.binding.candidateHash);
+    assert.deepEqual(
+      invocation.admission.target,
+      providerBinding.binding.target,
+    );
+    assert.equal(
+      invocation.admission.candidateHash,
+      providerBinding.binding.candidateHash,
+    );
     assert.match(invocation.admission.manifestCacheNamespace, /^context:/);
     assert.deepEqual(
       value.store.admitDarkIsolatedProviderInvocation({
@@ -1350,11 +1377,16 @@ test('resident current-world dark request admits and assembles atomically', () =
       /already has a conflicting admission/,
     );
     assert.deepEqual(
-      value.store.getDarkIsolatedProviderInvocationAdmission(invocation.invocationId),
+      value.store.getDarkIsolatedProviderInvocationAdmission(
+        invocation.invocationId,
+      ),
       invocation,
     );
     assert.equal(
-      tableCount(value.database, 'context_dark_isolated_provider_invocation_admissions'),
+      tableCount(
+        value.database,
+        'context_dark_isolated_provider_invocation_admissions',
+      ),
       1,
     );
     assert.throws(
@@ -1398,10 +1430,19 @@ test('resident current-world dark request admits and assembles atomically', () =
     assert.equal(value.store.getContinuationHead().revision, 0);
     assert.equal(tableCount(value.database, 'context_effects'), 0);
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
-    assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
-    assert.equal(tableCount(value.database, 'context_shadow_request_observations'), 0);
+    assert.equal(
+      tableCount(value.database, 'context_continuation_advances'),
+      0,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_shadow_request_observations'),
+      0,
+    );
     assert.throws(
-      () => value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget),
+      () =>
+        value.store.verifyLatestRecoveredIsolatedProviderBinding(
+          providerTarget,
+        ),
       /latest isolated provider binding is not recovered/,
     );
 
@@ -1418,7 +1459,9 @@ test('resident current-world dark request admits and assembles atomically', () =
       providerBinding,
     );
     assert.deepEqual(
-      value.store.getDarkIsolatedProviderInvocationAdmission(invocation.invocationId),
+      value.store.getDarkIsolatedProviderInvocationAdmission(
+        invocation.invocationId,
+      ),
       invocation,
     );
     assert.deepEqual(
@@ -1440,7 +1483,10 @@ test('resident current-world dark request admits and assembles atomically', () =
     );
     const verification =
       value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget);
-    assert.equal(verification.verificationKind, 'latest_recovered_dark_isolated_provider_binding');
+    assert.equal(
+      verification.verificationKind,
+      'latest_recovered_dark_isolated_provider_binding',
+    );
     assert.equal(verification.bindingHash, providerBinding.bindingHash);
     assert.equal(verification.targetHash, providerBinding.targetHash);
     assert.equal(
@@ -1473,7 +1519,9 @@ test('resident current-world dark request admits and assembles atomically', () =
     value.database.exec('PRAGMA query_only = ON');
     try {
       assert.deepEqual(
-        value.store.verifyLatestRecoveredIsolatedProviderBinding(providerTarget),
+        value.store.verifyLatestRecoveredIsolatedProviderBinding(
+          providerTarget,
+        ),
         verification,
       );
     } finally {
@@ -1487,8 +1535,7 @@ test('resident current-world dark request admits and assembles atomically', () =
       latestSelector.latestDarkIsolatedProviderBindingId(),
       providerBinding.bindingId,
     );
-    const syntheticLaterBindingId =
-      `dark-isolated-provider-binding:${'f'.repeat(64)}`;
+    const syntheticLaterBindingId = `dark-isolated-provider-binding:${'f'.repeat(64)}`;
     value.database.exec('PRAGMA foreign_keys = OFF');
     value.database
       .prepare(
@@ -1533,7 +1580,17 @@ test('active provider execution is single-attempt and uses durable effect eviden
       eventId: eventId('event:active-provider-binding-ingress'),
       worldId: targetWorldId,
       kind: 'inbound:discord',
-      payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'SYNTHETIC_HOME_TEXT', channelId, guildId, attachments: [], forwarded: null },
+      payload: {
+        schemaVersion: 1,
+        kind: 'discord',
+        source: null,
+        transport: null,
+        content: 'SYNTHETIC_HOME_TEXT',
+        channelId,
+        guildId,
+        attachments: [],
+        forwarded: null,
+      },
       occurredAt: 50,
       recordedAt: 50,
     });
@@ -1549,7 +1606,17 @@ test('active provider execution is single-attempt and uses durable effect eviden
       eventId: eventId('event:active-provider-current-ingress'),
       worldId: targetWorldId,
       kind: 'inbound:discord',
-      payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'SYNTHETIC_HOME_TEXT', channelId, guildId, attachments: [], forwarded: null },
+      payload: {
+        schemaVersion: 1,
+        kind: 'discord',
+        source: null,
+        transport: null,
+        content: 'SYNTHETIC_HOME_TEXT',
+        channelId,
+        guildId,
+        attachments: [],
+        forwarded: null,
+      },
       occurredAt: 600,
       recordedAt: 600,
     });
@@ -1558,7 +1625,10 @@ test('active provider execution is single-attempt and uses durable effect eviden
       sourceSequence: current.sequence,
       worldId: targetWorldId,
       rendererGeneration: 1,
-      message: { role: 'user', content: '<incoming>ACTIVE_PROVIDER_CANARY</incoming>' },
+      message: {
+        role: 'user',
+        content: '<incoming>ACTIVE_PROVIDER_CANARY</incoming>',
+      },
       createdAt: 600,
     });
     const request = value.store.assembleResidentCurrentWorldDarkRequest({
@@ -1611,7 +1681,13 @@ test('active provider execution is single-attempt and uses durable effect eviden
         }),
       /authority is not current/,
     );
-    assert.equal(tableCount(value.database, 'context_isolated_provider_execution_attempts'), 0);
+    assert.equal(
+      tableCount(
+        value.database,
+        'context_isolated_provider_execution_attempts',
+      ),
+      0,
+    );
 
     const scope = value.store.createHomeTextActivationScope({
       expectedSourceActivationEpoch: 0,
@@ -1676,11 +1752,17 @@ test('active provider execution is single-attempt and uses durable effect eviden
       authorizedAt: 760,
     });
     assert.equal(started.fresh, true);
-    assert.equal(started.attempt.attempt.networkAuthority, 'one_direct_codex_request');
+    assert.equal(
+      started.attempt.attempt.networkAuthority,
+      'one_direct_codex_request',
+    );
     assert.equal(started.attempt.attempt.activeActivationEpoch, 1);
     assert.equal(started.attempt.attempt.callTimeoutMs, 120_000);
     assert.equal(started.attempt.attempt.streamIdleTimeoutMs, 30_000);
-    assert.equal(started.request.candidateHash, request.assembly.request.candidateHash);
+    assert.equal(
+      started.request.candidateHash,
+      request.assembly.request.candidateHash,
+    );
     const replay = value.store.beginIsolatedProviderExecutionAttempt({
       invocationId: invocation.invocationId,
       expectedWorldId: targetWorldId,
@@ -1693,7 +1775,8 @@ test('active provider execution is single-attempt and uses durable effect eviden
     assert.equal(replay.fresh, false);
     assert.deepEqual(replay.attempt, started.attempt);
     assert.equal('request' in replay, false);
-    const changedConfigReplay = value.store.beginIsolatedProviderExecutionAttempt({
+    const changedConfigReplay =
+      value.store.beginIsolatedProviderExecutionAttempt({
       invocationId: invocation.invocationId,
       expectedWorldId: targetWorldId,
       expectedTarget: { ...providerTarget, reasoningEffort: 'medium' },
@@ -1779,7 +1862,10 @@ test('active provider execution is single-attempt and uses durable effect eviden
         }),
       /response evidence is newer than the provider outcome/,
     );
-    assert.equal(value.store.getIsolatedProviderOutcome(started.attempt.attemptId), null);
+    assert.equal(
+      value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
+      null,
+    );
     assert.throws(
       () =>
         value.store.recordIsolatedProviderOutcome({
@@ -1809,9 +1895,18 @@ test('active provider execution is single-attempt and uses durable effect eviden
       /fixture late speech barrier failure/,
     );
     value.database.exec('DROP TRIGGER fixture_reject_home_text_speech_attempt');
-    assert.equal(value.store.getIsolatedProviderOutcome(started.attempt.attemptId), null);
-    assert.equal(value.store.getEffect(started.attempt.attempt.effectId)?.status, 'prepared');
-    assert.equal(tableCount(value.database, 'context_home_text_speech_attempts'), 0);
+    assert.equal(
+      value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(started.attempt.attempt.effectId)?.status,
+      'prepared',
+    );
+    assert.equal(
+      tableCount(value.database, 'context_home_text_speech_attempts'),
+      0,
+    );
     assert.equal(tableCount(value.database, 'context_capsules'), 0);
     const outcome = value.store.recordIsolatedProviderOutcome({
       attemptId: started.attempt.attemptId,
@@ -1820,21 +1915,31 @@ test('active provider execution is single-attempt and uses durable effect eviden
       visibleText: '{"done":"✓"}',
       completedAt: 790,
     });
-    assert.equal(outcome.outcome.visibleBytes, Buffer.byteLength('{"done":"✓"}'));
+    assert.equal(
+      outcome.outcome.visibleBytes,
+      Buffer.byteLength('{"done":"✓"}'),
+    );
     assert.deepEqual(
       value.store.getIsolatedProviderOutcome(started.attempt.attemptId),
       outcome,
     );
-    const speech = value.store.getHomeTextSpeechAttempt(started.attempt.attemptId);
+    const speech = value.store.getHomeTextSpeechAttempt(
+      started.attempt.attemptId,
+    );
     assert.ok(speech);
     assert.equal(speech.attempt.visibleText, '{"done":"✓"}');
     assert.equal(speech.attempt.channelId, channelId);
     assert.equal(speech.attempt.providerOutcomeHash, outcome.outcomeHash);
     const speechRow = value.database
-      .prepare('SELECT * FROM context_home_text_speech_attempts WHERE provider_attempt_id = ?')
+      .prepare(
+        'SELECT * FROM context_home_text_speech_attempts WHERE provider_attempt_id = ?',
+      )
       .get(started.attempt.attemptId) as Record<string, string | number | null>;
     const poisonedEffectPayload = JSON.stringify({
-      ...(JSON.parse(speechRow.effect_payload_json as string) as Record<string, unknown>),
+      ...(JSON.parse(speechRow.effect_payload_json as string) as Record<
+        string,
+        unknown
+      >),
       channelId: '999999999999999999',
     });
     const poisonedRow = {
@@ -1854,12 +1959,18 @@ test('active provider execution is single-attempt and uses durable effect eviden
       /home text speech attempt lineage is invalid/,
     );
     const subtypeCapsuleContent = JSON.stringify({
-      ...(JSON.parse(speechRow.capsule_content_json as string) as Record<string, unknown>),
+      ...(JSON.parse(speechRow.capsule_content_json as string) as Record<
+        string,
+        unknown
+      >),
       visibleText: JSON.parse(speechRow.visible_text as string),
     });
     const subtypeCapsuleHash = hashContextBytes(subtypeCapsuleContent);
     const subtypeAttemptJson = JSON.stringify({
-      ...(JSON.parse(speechRow.attempt_json as string) as Record<string, unknown>),
+      ...(JSON.parse(speechRow.attempt_json as string) as Record<
+        string,
+        unknown
+      >),
       visibleText: JSON.parse(speechRow.visible_text as string),
       capsuleContentHash: subtypeCapsuleHash,
     });
@@ -1937,9 +2048,16 @@ test('active provider execution is single-attempt and uses durable effect eviden
         }),
       /different content/,
     );
-    assert.equal(value.store.getEffect(started.attempt.attempt.effectId)?.status, 'observed');
+    assert.equal(
+      value.store.getEffect(started.attempt.attempt.effectId)?.status,
+      'observed',
+    );
     assert.throws(
-      () => value.store.prepareIsolatedProviderExecutionEffect(started.attempt.attemptId, 800),
+      () =>
+        value.store.prepareIsolatedProviderExecutionEffect(
+          started.attempt.attemptId,
+          800,
+        ),
       /UNIQUE constraint failed|context effect/,
     );
     for (const table of [
@@ -1955,7 +2073,623 @@ test('active provider execution is single-attempt and uses durable effect eviden
     }
     assert.equal(value.store.getContinuationHead().revision, 0);
     assert.equal(tableCount(value.database, 'context_capsules'), 1);
-    assert.equal(tableCount(value.database, 'context_continuation_advances'), 0);
+    assert.equal(
+      tableCount(value.database, 'context_continuation_advances'),
+      0,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, phase, message_id,
+               guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, NULL, 'pre_dispatch_rejected', NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL, NULL, NULL, '{}', ?, ?)`,
+          )
+          .run(speech.attempt.speechAttemptId, '0'.repeat(64), 800),
+      /home text speech receipt lineage is invalid/,
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    const unsafeResolvedAt = 9_007_199_254_740_992;
+    const unsafeReceiptJson = JSON.stringify({
+      schemaVersion: 1,
+      speechAttemptId: speech.attempt.speechAttemptId,
+      speechEffectId: null,
+      phase: 'pre_dispatch_rejected',
+      evidenceHash: null,
+      rootContentHash: null,
+      resolvedAt: unsafeResolvedAt,
+    });
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, phase, message_id,
+               guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, NULL, 'pre_dispatch_rejected', NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL, NULL, NULL, ?, ?, 9007199254740992)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            unsafeReceiptJson,
+            hashContextBytes(unsafeReceiptJson),
+          ),
+      /home text speech receipt lineage is invalid|CHECK constraint failed/,
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_effects(
+               effect_id, branch_id, world_id, destination_world_id, effect_kind,
+               authority_epoch, payload_json, payload_hash, idempotency_key,
+               status, prepared_at, resolved_at, observation_json
+             ) VALUES (?, ?, ?, ?, 'home_discord_text', ?, ?, ?, ?, 'prepared',
+               9007199254740992, NULL, NULL)`,
+          )
+          .run(
+            speech.attempt.speechEffectId,
+            speech.attempt.branchId,
+            speech.attempt.worldId,
+            speech.attempt.worldId,
+            speech.attempt.authorityEpoch,
+            speech.effectPayloadJson,
+            speech.attempt.effectPayloadHash,
+            speech.attempt.speechAttemptId,
+          ),
+      /context dark pending branch cannot issue effects/,
+    );
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+
+    const speechEffect = value.store.prepareHomeTextSpeechEffect({
+      speechAttemptId: speech.attempt.speechAttemptId,
+      preparedAt: 800,
+    });
+    assert.equal(speechEffect.status, 'prepared');
+    const directUncertainReceipt = {
+      schemaVersion: 1,
+      speechAttemptId: speech.attempt.speechAttemptId,
+      speechEffectId: speech.attempt.speechEffectId,
+      phase: 'issuance_uncertain',
+      evidenceHash: null,
+      rootContentHash: null,
+      resolvedAt: 805,
+    };
+    const directUncertainReceiptJson = JSON.stringify(directUncertainReceipt);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, phase, message_id,
+               guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, ?, 'issuance_uncertain', NULL, NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL, NULL, ?, ?, 805)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            speech.attempt.speechEffectId,
+            directUncertainReceiptJson,
+            hashContextBytes(directUncertainReceiptJson),
+          ),
+      /FOREIGN KEY constraint failed/,
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'prepared',
+    );
+    const providerEffect = value.store.getEffect(
+      started.attempt.attempt.effectId,
+    );
+    assert.ok(providerEffect);
+    const directEvidence = {
+      schemaVersion: 1,
+      speechAttemptId: speech.attempt.speechAttemptId,
+      speechEffectId: speech.attempt.speechEffectId,
+      messageId: '345678901234567890',
+      guildId,
+      channelId,
+      discordNonce: speech.attempt.discordNonce,
+      statusCode: 200,
+      textBytes: speech.attempt.visibleBytes,
+      textHash: speech.attempt.visibleHash,
+      observedAt: 810,
+    };
+    const directEvidenceJson = JSON.stringify(directEvidence);
+    const directRootContent = {
+      schemaVersion: 1,
+      branchId: speech.attempt.branchId,
+      worldId: speech.attempt.worldId,
+      viewManifestHash: speech.attempt.manifestHash,
+      outcome: 'completed',
+      authorityEpoch: speech.attempt.authorityEpoch,
+      privateCapsuleId: speech.attempt.resultCapsuleId,
+      effects: [
+        {
+          effectId: providerEffect.effectId,
+          destinationWorldId: providerEffect.destinationWorldId,
+          kind: providerEffect.kind,
+          authorityEpoch: providerEffect.authorityEpoch,
+          payloadHash: providerEffect.payloadHash,
+          status: 'observed',
+          preparedAt: providerEffect.preparedAt,
+          resolvedAt: providerEffect.resolvedAt,
+        },
+        {
+          effectId: speechEffect.effectId,
+          destinationWorldId: speechEffect.destinationWorldId,
+          kind: speechEffect.kind,
+          authorityEpoch: speechEffect.authorityEpoch,
+          payloadHash: speechEffect.payloadHash,
+          status: 'observed',
+          preparedAt: speechEffect.preparedAt,
+          resolvedAt: 810,
+        },
+      ],
+      commitments: [],
+      blockers: [],
+      artifactRefs: [],
+    };
+    const directRootContentJson = JSON.stringify(directRootContent);
+    const directReceipt = {
+      schemaVersion: 1,
+      speechAttemptId: speech.attempt.speechAttemptId,
+      speechEffectId: speech.attempt.speechEffectId,
+      phase: 'observed',
+      evidenceHash: hashContextBytes(directEvidenceJson),
+      rootContentHash: hashContextBytes(directRootContentJson),
+      resolvedAt: 810,
+    };
+    const directReceiptJson = JSON.stringify(directReceipt);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+               phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            speech.attempt.speechEffectId,
+            speech.attempt.branchId,
+            speech.attempt.resultCapsuleId,
+            directEvidence.messageId,
+            guildId,
+            channelId,
+            speech.attempt.discordNonce,
+            directEvidenceJson,
+            directReceipt.evidenceHash,
+            directRootContentJson,
+            directReceipt.rootContentHash,
+            directReceiptJson,
+            hashContextBytes(directReceiptJson),
+          ),
+      /home text speech receipt lineage is invalid/,
+    );
+    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    const nulMessageId = `${directEvidence.messageId}\u0000junk`;
+    const nulEvidence = { ...directEvidence, messageId: nulMessageId };
+    const nulEvidenceJson = JSON.stringify(nulEvidence);
+    const nulReceipt = {
+      ...directReceipt,
+      evidenceHash: hashContextBytes(nulEvidenceJson),
+    };
+    const nulReceiptJson = JSON.stringify(nulReceipt);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+               phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            speech.attempt.speechEffectId,
+            speech.attempt.branchId,
+            speech.attempt.rootReceiptCapsuleId,
+            nulMessageId,
+            guildId,
+            channelId,
+            speech.attempt.discordNonce,
+            nulEvidenceJson,
+            nulReceipt.evidenceHash,
+            directRootContentJson,
+            directReceipt.rootContentHash,
+            nulReceiptJson,
+            hashContextBytes(nulReceiptJson),
+          ),
+      /CHECK constraint failed/,
+    );
+    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+               phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, ?, ?, ?, 'observed', CAST(? AS BLOB), ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            speech.attempt.speechEffectId,
+            speech.attempt.branchId,
+            speech.attempt.rootReceiptCapsuleId,
+            directEvidence.messageId,
+            guildId,
+            channelId,
+            speech.attempt.discordNonce,
+            directEvidenceJson,
+            directReceipt.evidenceHash,
+            directRootContentJson,
+            directReceipt.rootContentHash,
+            directReceiptJson,
+            hashContextBytes(directReceiptJson),
+          ),
+      /CHECK constraint failed/,
+    );
+    assert.equal(value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId), null);
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_home_text_speech_receipts(
+               speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+               phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+               evidence_json, evidence_hash, root_content_json, root_content_hash,
+               receipt_json, receipt_hash, resolved_at
+             ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+          )
+          .run(
+            speech.attempt.speechAttemptId,
+            speech.attempt.speechEffectId,
+            speech.attempt.branchId,
+            speech.attempt.rootReceiptCapsuleId,
+            directEvidence.messageId,
+            guildId,
+            channelId,
+            speech.attempt.discordNonce,
+            directEvidenceJson,
+            directReceipt.evidenceHash,
+            directRootContentJson,
+            directReceipt.rootContentHash,
+            directReceiptJson,
+            hashContextBytes(directReceiptJson),
+          ),
+      /FOREIGN KEY constraint failed|home text speech receipt lineage is invalid/,
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    value.database.exec('BEGIN IMMEDIATE');
+    try {
+      value.database
+        .prepare(
+          `INSERT INTO context_home_text_speech_receipts(
+             speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+             phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+             evidence_json, evidence_hash, root_content_json, root_content_hash,
+             receipt_json, receipt_hash, resolved_at
+           ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+        )
+        .run(
+          speech.attempt.speechAttemptId,
+          speech.attempt.speechEffectId,
+          speech.attempt.branchId,
+          speech.attempt.rootReceiptCapsuleId,
+          directEvidence.messageId,
+          guildId,
+          channelId,
+          speech.attempt.discordNonce,
+          directEvidenceJson,
+          directReceipt.evidenceHash,
+          directRootContentJson,
+          directReceipt.rootContentHash,
+          directReceiptJson,
+          hashContextBytes(directReceiptJson),
+        );
+      value.database
+        .prepare(
+          `UPDATE context_effects
+           SET status = 'observed', resolved_at = 810, observation_json = ?
+           WHERE effect_id = ?`,
+        )
+        .run(
+          JSON.stringify({
+            schemaVersion: 1,
+            speechReceiptHash: hashContextBytes(directReceiptJson),
+            evidenceHash: directReceipt.evidenceHash,
+            messageId: directEvidence.messageId,
+          }),
+          speech.attempt.speechEffectId,
+        );
+      value.database
+        .prepare(
+          `INSERT INTO context_capsules(
+             capsule_id, branch_id, world_id, capsule_kind,
+             view_manifest_hash, source_root_hash, policy_generation,
+             summarizer_model, summarizer_prompt_hash, content_json,
+             content_hash, created_at
+           ) VALUES (?, ?, ?, 'root_receipt', ?, ?, ?, NULL, NULL, ?, ?, 810)`,
+        )
+        .run(
+          speech.attempt.rootReceiptCapsuleId,
+          speech.attempt.branchId,
+          speech.attempt.worldId,
+          speech.attempt.manifestHash,
+          speech.attempt.providerOutcomeHash,
+          speech.attempt.policyGeneration,
+          directRootContentJson,
+          hashContextBytes(directRootContentJson),
+        );
+      value.store.finishBranch(speech.attempt.branchId, 'yielded', 810);
+      assert.throws(
+        () =>
+          value.database
+            .prepare(
+              `INSERT INTO context_continuation_advances(
+                 revision, predecessor_branch_id, predecessor_world_id,
+                 branch_id, world_id, advanced_at
+               ) VALUES (1, NULL, NULL, ?, ?, 811)`,
+            )
+            .run(speech.attempt.branchId, speech.attempt.worldId),
+        /home text continuation advance does not match its receipt/,
+      );
+      assert.throws(
+        () => value.database.exec('COMMIT'),
+        /FOREIGN KEY constraint failed/,
+      );
+    } finally {
+      if (value.database.isTransaction) value.database.exec('ROLLBACK');
+    }
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'prepared',
+    );
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'running',
+    );
+    value.database.exec('BEGIN IMMEDIATE');
+    try {
+      value.database
+        .prepare(
+          `INSERT INTO context_home_text_speech_receipts(
+             speech_attempt_id, speech_effect_id, branch_id, root_receipt_capsule_id,
+             phase, message_id, guild_id, channel_id, discord_nonce, status_code,
+             evidence_json, evidence_hash, root_content_json, root_content_hash,
+             receipt_json, receipt_hash, resolved_at
+           ) VALUES (?, ?, ?, ?, 'observed', ?, ?, ?, ?, 200, ?, ?, ?, ?, ?, ?, 810)`,
+        )
+        .run(
+          speech.attempt.speechAttemptId,
+          speech.attempt.speechEffectId,
+          speech.attempt.branchId,
+          speech.attempt.rootReceiptCapsuleId,
+          directEvidence.messageId,
+          guildId,
+          channelId,
+          speech.attempt.discordNonce,
+          directEvidenceJson,
+          directReceipt.evidenceHash,
+          directRootContentJson,
+          directReceipt.rootContentHash,
+          directReceiptJson,
+          hashContextBytes(directReceiptJson),
+        );
+      value.database
+        .prepare(
+          `UPDATE context_effects
+           SET status = 'observed', resolved_at = 810, observation_json = ?
+           WHERE effect_id = ?`,
+        )
+        .run(
+          JSON.stringify({
+            schemaVersion: 1,
+            speechReceiptHash: hashContextBytes(directReceiptJson),
+            evidenceHash: directReceipt.evidenceHash,
+            messageId: directEvidence.messageId,
+          }),
+          speech.attempt.speechEffectId,
+        );
+      value.database
+        .prepare(
+          `INSERT INTO context_capsules(
+             capsule_id, branch_id, world_id, capsule_kind,
+             view_manifest_hash, source_root_hash, policy_generation,
+             summarizer_model, summarizer_prompt_hash, content_json,
+             content_hash, created_at
+           ) VALUES (?, ?, ?, 'root_receipt', ?, ?, ?, NULL, NULL, ?, ?, 810)`,
+        )
+        .run(
+          speech.attempt.rootReceiptCapsuleId,
+          speech.attempt.branchId,
+          speech.attempt.worldId,
+          speech.attempt.manifestHash,
+          speech.attempt.providerOutcomeHash,
+          speech.attempt.policyGeneration,
+          directRootContentJson,
+          hashContextBytes(directRootContentJson),
+        );
+      value.store.finishBranch(speech.attempt.branchId, 'yielded', 810);
+      value.database
+        .prepare(
+          `INSERT INTO context_continuation_advances(
+             revision, predecessor_branch_id, predecessor_world_id,
+             branch_id, world_id, advanced_at
+           ) VALUES (1, NULL, NULL, ?, ?, 810)`,
+        )
+        .run(speech.attempt.branchId, speech.attempt.worldId);
+      assert.throws(
+        () => value.database.exec('COMMIT'),
+        /FOREIGN KEY constraint failed/,
+      );
+    } finally {
+      if (value.database.isTransaction) value.database.exec('ROLLBACK');
+    }
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'running',
+    );
+    assert.throws(
+      () =>
+        value.store.completeObservedHomeTextSpeech({
+          speechAttemptId: speech.attempt.speechAttemptId,
+          evidence: {
+            schemaVersion: 1,
+            speechAttemptId: speech.attempt.speechAttemptId,
+            speechEffectId: speech.attempt.speechEffectId,
+            messageId: '345678901234567890',
+            guildId,
+            channelId,
+            discordNonce: speech.attempt.discordNonce,
+            statusCode: 200,
+            textBytes: speech.attempt.visibleBytes,
+            textHash: speech.attempt.visibleHash,
+            observedAt: 799,
+          },
+        }),
+      /home text speech effects are incomplete/,
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      null,
+    );
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'prepared',
+    );
+    const completed = value.store.completeObservedHomeTextSpeech({
+      speechAttemptId: speech.attempt.speechAttemptId,
+      evidence: {
+        schemaVersion: 1,
+        speechAttemptId: speech.attempt.speechAttemptId,
+        speechEffectId: speech.attempt.speechEffectId,
+        messageId: '345678901234567890',
+        guildId,
+        channelId,
+        discordNonce: speech.attempt.discordNonce,
+        statusCode: 200,
+        textBytes: speech.attempt.visibleBytes,
+        textHash: speech.attempt.visibleHash,
+        observedAt: 810,
+      },
+    });
+    assert.equal(completed.branch.status, 'yielded');
+    assert.equal(
+      completed.privateCapsule.capsuleId,
+      speech.attempt.resultCapsuleId,
+    );
+    assert.equal(
+      completed.rootReceipt.capsuleId,
+      speech.attempt.rootReceiptCapsuleId,
+    );
+    assert.equal(completed.speechReceipt.receipt.phase, 'observed');
+    assert.equal(
+      completed.speechReceipt.evidence?.messageId,
+      '345678901234567890',
+    );
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            `INSERT INTO context_share_grants(
+               grant_id, shared_event_id, source_capsule_id, source_world_id,
+               destination_world_id, canonical_text, content_hash, status,
+               authority_epoch, created_at, revoked_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+          )
+          .run(
+            'share:forbidden-home-text-root',
+            'event:forbidden-home-text-root',
+            speech.attempt.rootReceiptCapsuleId,
+            speech.attempt.worldId,
+            'world:discord:guild:999999999999999999',
+            'forbidden',
+            '0'.repeat(64),
+            speech.attempt.authorityEpoch,
+            811,
+          ),
+      /world-private/,
+    );
+    assert.deepEqual(
+      value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      completed.speechReceipt,
+    );
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'observed',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 1);
+    assert.equal(
+      value.store.getContinuationHead().branchId,
+      speech.attempt.branchId,
+    );
+    assert.equal(tableCount(value.database, 'context_capsules'), 2);
+    assert.equal(
+      tableCount(value.database, 'context_continuation_advances'),
+      1,
+    );
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    assert.equal(
+      tableCount(value.database, 'context_home_text_speech_finalizations'),
+      1,
+    );
+    for (const table of [
+      'context_home_text_speech_receipts',
+      'context_home_text_speech_finalizations',
+    ]) {
+      assert.throws(
+        () => value.database.prepare(`DELETE FROM ${table}`).run(),
+        /immutable/,
+      );
+    }
+    value.database.exec('DROP TRIGGER context_capsules_no_update');
+    value.database
+      .prepare(
+        'UPDATE context_capsules SET created_at = created_at + 1 WHERE capsule_id = ?',
+      )
+      .run(speech.attempt.rootReceiptCapsuleId);
+    assert.throws(
+      () =>
+        value.store.getHomeTextSpeechReceipt(speech.attempt.speechAttemptId),
+      /stored home text observed receipt is invalid/,
+    );
   } finally {
     closeFixture(value);
   }
@@ -2024,7 +2758,6 @@ test('resident identity derivation refuses preexisting target rows without a der
 });
 
 test('scoped runtime contract artifact is exact, independent from legacy prompt inputs, and immutable', () => {
-
   const value = fixture();
   try {
     const artifact = value.store.getScopedRuntimeContractArtifact();
@@ -4411,7 +5144,10 @@ test('dark local branch assembly atomically reserves only one world and remains 
       1,
     );
     assert.equal(
-      tableCount(value.database, 'context_system_profile_request_view_bindings'),
+      tableCount(
+        value.database,
+        'context_system_profile_request_view_bindings',
+      ),
       1,
     );
     assert.equal(
@@ -4929,7 +5665,10 @@ test('dark ingress admission atomically records only a new exact inbound event',
         }),
       /dark ingress admission conflict/,
     );
-    assert.equal(tableCount(value.database, 'context_dark_ingress_admissions'), 1);
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      1,
+    );
     for (const table of [
       'context_branches',
       'context_branch_starts',
@@ -4979,7 +5718,10 @@ test('dark ingress admission rolls its event back after a late database rejectio
     assert.equal(value.store.getWorldEvent(rejectedId), null);
     assert.equal(value.store.getDarkIngressAdmission(rejectedId), null);
     assert.equal(tableCount(value.database, 'context_world_events'), 0);
-    assert.equal(tableCount(value.database, 'context_dark_ingress_admissions'), 0);
+    assert.equal(
+      tableCount(value.database, 'context_dark_ingress_admissions'),
+      0,
+    );
   } finally {
     closeFixture(value);
   }
@@ -5281,8 +6023,14 @@ test('dark pending inspection never skips an unrenderable frontier', () => {
       sourceSequence: first.receipt.event.sequence,
       messageRendererGeneration: 7,
     });
-    assert.equal(JSON.stringify(blocked).includes('FRONTIER_A_PRIVATE_CANARY'), false);
-    assert.equal(JSON.stringify(blocked).includes('LATER_B_PRIVATE_CANARY'), false);
+    assert.equal(
+      JSON.stringify(blocked).includes('FRONTIER_A_PRIVATE_CANARY'),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(blocked).includes('LATER_B_PRIVATE_CANARY'),
+      false,
+    );
     assert.deepEqual(
       value.store.inspectNextDarkPendingBatch({
         expectedActivationEpoch: 0,
@@ -5695,6 +6443,18 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
       DELETE FROM context_system_profile_request_view_bindings
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
+      DROP TRIGGER context_home_text_speech_finalizations_lineage_guard;
+      DROP TRIGGER context_home_text_speech_finalizations_no_update;
+      DROP TRIGGER context_home_text_speech_finalizations_no_delete;
+      DROP TRIGGER context_home_text_speech_effect_transition_guard;
+    DROP TRIGGER context_home_text_continuation_advance_guard;
+    DROP TRIGGER context_home_text_continuation_head_guard;
+    DROP TRIGGER context_home_text_coordinator_release_guard;
+    DROP TRIGGER context_home_text_speech_receipts_no_update;
+    DROP TRIGGER context_home_text_speech_receipts_no_delete;
+    DROP TRIGGER context_home_text_speech_receipts_lineage_guard;
+    DROP TABLE context_home_text_speech_receipts;
+      DROP TABLE context_home_text_speech_finalizations;
       DROP TRIGGER context_home_text_result_capsules_no_share;
       DROP TRIGGER context_home_text_speech_attempts_no_update;
       DROP TRIGGER context_home_text_speech_attempts_no_delete;
@@ -5818,7 +6578,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0050-context-isolated-provider-execution-ledger',
             '0051-context-home-text-activation-scope',
             '0052-context-home-text-request-scope',
-            '0053-context-home-text-speech-attempts'
+            '0053-context-home-text-speech-attempts',
+            '0054-context-home-text-speech-delivery'
           );
       PRAGMA user_version = 40;
     `);
@@ -6187,10 +6948,7 @@ test('dark pending attempt receipts reject skipped and non-maximal admitted pref
 test('atomic dark pending assembly commits one bounded attempt and recovery makes it retryable', () => {
   const value = fixture();
   try {
-    const input = createPendingAssemblyInputs(
-      value,
-      'pending-atomic-retry',
-    );
+    const input = createPendingAssemblyInputs(value, 'pending-atomic-retry');
     const first = assembleNextDarkPendingBranch({
       store: value.store,
       expectedActivationEpoch: 0,
@@ -6360,7 +7118,9 @@ test('atomic dark pending assembly stops at the first world boundary', () => {
         false,
       );
       assert.deepEqual(
-        assembled.assembly.request.messages.slice(1).map((item) => item.content),
+        assembled.assembly.request.messages
+          .slice(1)
+          .map((item) => item.content),
         [
           '<incoming>PENDING_BOUNDARY_A1_PRIVATE_CANARY</incoming>',
           '<incoming>PENDING_BOUNDARY_A2_PRIVATE_CANARY</incoming>',
@@ -6580,8 +7340,18 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
   try {
     const world = worldId('world:signal:approval-fixture');
     const createLayer = (input: {
-      kind: 'runtime_contract' | 'identity' | 'integrated_self' | 'world_policy' | 'legacy_memory';
-      visibility: 'global_contract' | 'integrated_self' | 'integrated_self_candidate' | 'world' | 'legacy_mixed';
+      kind:
+        | 'runtime_contract'
+        | 'identity'
+        | 'integrated_self'
+        | 'world_policy'
+        | 'legacy_memory';
+      visibility:
+        | 'global_contract'
+        | 'integrated_self'
+        | 'integrated_self_candidate'
+        | 'world'
+        | 'legacy_mixed';
       worldId: ReturnType<typeof worldId> | null;
       source: string;
       sourceKind: string;
@@ -6599,25 +7369,49 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       });
     const specs = [
       {
-        layer: createLayer({ kind: 'runtime_contract', visibility: 'global_contract', worldId: null, source: 'approval-contract', sourceKind: 'authored_scoped_contract' }),
+        layer: createLayer({
+          kind: 'runtime_contract',
+          visibility: 'global_contract',
+          worldId: null,
+          source: 'approval-contract',
+          sourceKind: 'authored_scoped_contract',
+        }),
         role: 'scoped_runtime_contract' as const,
         basisRef: 'fixture:contract:v1',
         basisKind: 'authored_scoped_contract',
       },
       {
-        layer: createLayer({ kind: 'identity', visibility: 'integrated_self', worldId: null, source: 'approval-identity', sourceKind: 'soul_snapshot' }),
+        layer: createLayer({
+          kind: 'identity',
+          visibility: 'integrated_self',
+          worldId: null,
+          source: 'approval-identity',
+          sourceKind: 'soul_snapshot',
+        }),
         role: 'identity' as const,
         basisRef: 'fixture:identity:v1',
         basisKind: 'soul_snapshot',
       },
       {
-        layer: createLayer({ kind: 'integrated_self', visibility: 'integrated_self', worldId: null, source: 'approval-self-delta', sourceKind: 'accepted_self_delta' }),
+        layer: createLayer({
+          kind: 'integrated_self',
+          visibility: 'integrated_self',
+          worldId: null,
+          source: 'approval-self-delta',
+          sourceKind: 'accepted_self_delta',
+        }),
         role: 'integrated_self' as const,
         basisRef: 'fixture:self-delta:v1',
         basisKind: 'accepted_self_delta',
       },
       {
-        layer: createLayer({ kind: 'world_policy', visibility: 'world', worldId: world, source: 'approval-policy', sourceKind: 'routing_policy' }),
+        layer: createLayer({
+          kind: 'world_policy',
+          visibility: 'world',
+          worldId: world,
+          source: 'approval-policy',
+          sourceKind: 'routing_policy',
+        }),
         role: 'world_policy' as const,
         basisRef: 'fixture:routing-policy:v1',
         basisKind: 'routing_policy',
@@ -6636,10 +7430,14 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       assert.match(approval.approvalId, /^system-layer-approval:[0-9a-f]{64}$/);
       assert.equal(approval.basisKind, specs[index].basisKind);
       assert.equal(approval.basisHash, specs[index].layer.sourceHash);
-      assert.deepEqual(value.store.getSystemLayerApproval(approval.approvalId), approval);
+      assert.deepEqual(
+        value.store.getSystemLayerApproval(approval.approvalId),
+        approval,
+      );
     });
     assert.throws(
-      () => value.store.approveSystemLayer({
+      () =>
+        value.store.approveSystemLayer({
         layerId: specs[1].layer.layerId,
         role: 'identity',
         basisRef: 'fixture:identity:backdated',
@@ -6659,7 +7457,8 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       approvals[1],
     );
     assert.throws(
-      () => value.store.approveSystemLayer({
+      () =>
+        value.store.approveSystemLayer({
         layerId: specs[1].layer.layerId,
         role: 'identity',
         basisRef: 'fixture:identity:changed',
@@ -6669,7 +7468,8 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       /system layer approval identity conflict/,
     );
     assert.throws(
-      () => value.store.approveSystemLayer({
+      () =>
+        value.store.approveSystemLayer({
         layerId: specs[1].layer.layerId,
         role: 'identity',
         basisRef: specs[1].basisRef,
@@ -6679,12 +7479,25 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       /system layer approval identity conflict/,
     );
     const unsafe = [
-      createLayer({ kind: 'identity', visibility: 'integrated_self_candidate', worldId: null, source: 'approval-candidate', sourceKind: 'soul_snapshot' }),
-      createLayer({ kind: 'legacy_memory', visibility: 'legacy_mixed', worldId: null, source: 'approval-legacy', sourceKind: 'authored_scoped_contract' }),
+      createLayer({
+        kind: 'identity',
+        visibility: 'integrated_self_candidate',
+        worldId: null,
+        source: 'approval-candidate',
+        sourceKind: 'soul_snapshot',
+      }),
+      createLayer({
+        kind: 'legacy_memory',
+        visibility: 'legacy_mixed',
+        worldId: null,
+        source: 'approval-legacy',
+        sourceKind: 'authored_scoped_contract',
+      }),
     ];
     for (const layer of unsafe) {
       assert.throws(
-        () => value.store.approveSystemLayer({
+        () =>
+          value.store.approveSystemLayer({
           layerId: layer.layerId,
           role: 'identity',
           basisRef: 'fixture:unsafe',
@@ -6702,7 +7515,8 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       sourceKind: 'synthetic_fixture',
     });
     assert.throws(
-      () => value.store.approveSystemLayer({
+      () =>
+        value.store.approveSystemLayer({
         layerId: wrongSource.layerId,
         role: 'identity',
         basisRef: 'fixture:wrong-source',
@@ -6711,14 +7525,24 @@ test('system layer approvals derive provenance and reject unsafe layers', () => 
       }),
       /system layer approval role does not match layer scope/,
     );
-    const corruptLayer = createLayer({ kind: 'runtime_contract', visibility: 'global_contract', worldId: null, source: 'approval-corrupt', sourceKind: 'authored_scoped_contract' });
-    const corruptId = systemLayerApprovalId(`system-layer-approval:${'f'.repeat(64)}`);
-    value.database.prepare(
+    const corruptLayer = createLayer({
+      kind: 'runtime_contract',
+      visibility: 'global_contract',
+      worldId: null,
+      source: 'approval-corrupt',
+      sourceKind: 'authored_scoped_contract',
+    });
+    const corruptId = systemLayerApprovalId(
+      `system-layer-approval:${'f'.repeat(64)}`,
+    );
+    value.database
+      .prepare(
       `INSERT INTO context_system_layer_approvals(
          approval_id, layer_id, approval_role, basis_kind, basis_ref,
          basis_hash, approval_generation, approved_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+      )
+      .run(
       corruptId,
       corruptLayer.layerId,
       'scoped_runtime_contract',
@@ -6743,11 +7567,20 @@ test('system profiles bind exact approvals and advance one append-only world hea
     const worldA = worldId('world:signal:profile-a');
     const worldB = worldId('world:signal:profile-b');
     const approve = (input: {
-      kind: 'runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
+      kind:
+        'runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
       visibility: 'global_contract' | 'integrated_self' | 'world';
       worldId: ReturnType<typeof worldId> | null;
-      sourceKind: 'authored_scoped_contract' | 'soul_snapshot' | 'accepted_self_delta' | 'routing_policy';
-      role: 'scoped_runtime_contract' | 'identity' | 'integrated_self' | 'world_policy';
+      sourceKind:
+        | 'authored_scoped_contract'
+        | 'soul_snapshot'
+        | 'accepted_self_delta'
+        | 'routing_policy';
+      role:
+        | 'scoped_runtime_contract'
+        | 'identity'
+        | 'integrated_self'
+        | 'world_policy';
       source: string;
       rendererGeneration?: number;
       policyGeneration?: number;
@@ -6804,7 +7637,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       source: 'profile-policy-a',
     });
     assert.throws(
-      () => value.store.createSystemProfile({
+      () =>
+        value.store.createSystemProfile({
         worldId: worldA,
         scopedRuntimeContractApprovalId: contract.approvalId,
         identityApprovalId: identity.approvalId,
@@ -6825,7 +7659,10 @@ test('system profiles bind exact approvals and advance one append-only world hea
     assert.equal(profileA.profile.activationEpoch, 0);
     assert.equal(profileA.profile.systemRendererGeneration, 2);
     assert.equal(profileA.profile.policyGeneration, 3);
-    assert.deepEqual(value.store.getSystemProfile(profileA.profileId), profileA);
+    assert.deepEqual(
+      value.store.getSystemProfile(profileA.profileId),
+      profileA,
+    );
     assert.deepEqual(
       value.store.createSystemProfile({
         worldId: worldA,
@@ -6838,7 +7675,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       profileA,
     );
     assert.throws(
-      () => value.store.createSystemProfile({
+      () =>
+        value.store.createSystemProfile({
         worldId: worldA,
         scopedRuntimeContractApprovalId: contract.approvalId,
         identityApprovalId: identity.approvalId,
@@ -6849,7 +7687,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       /system profile identity conflict/,
     );
     assert.throws(
-      () => value.store.advanceSystemProfileHead({
+      () =>
+        value.store.advanceSystemProfileHead({
         worldId: worldA,
         expectedRevision: 0,
         expectedProfileId: null,
@@ -6885,7 +7724,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       createdAt: 32,
     });
     assert.throws(
-      () => value.store.advanceSystemProfileHead({
+      () =>
+        value.store.advanceSystemProfileHead({
         worldId: worldA,
         expectedRevision: 0,
         expectedProfileId: null,
@@ -6895,7 +7735,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       /system profile head is not at revision 0/,
     );
     assert.throws(
-      () => value.store.advanceSystemProfileHead({
+      () =>
+        value.store.advanceSystemProfileHead({
         worldId: worldA,
         expectedRevision: 1,
         expectedProfileId: profileA.profileId,
@@ -6917,9 +7758,16 @@ test('system profiles bind exact approvals and advance one append-only world hea
         predecessor: head2.predecessorProfileId,
         profile: head2.profileId,
       },
-      { revision: 2, predecessor: profileA.profileId, profile: profileB.profileId },
+      {
+        revision: 2,
+        predecessor: profileA.profileId,
+        profile: profileB.profileId,
+      },
     );
-    assert.deepEqual(value.store.getSystemProfile(profileA.profileId), profileA);
+    assert.deepEqual(
+      value.store.getSystemProfile(profileA.profileId),
+      profileA,
+    );
 
     value.database.exec(`
       SAVEPOINT corrupt_old_profile_head;
@@ -6978,7 +7826,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       source: 'profile-policy-b',
     });
     assert.throws(
-      () => value.store.createSystemProfile({
+      () =>
+        value.store.createSystemProfile({
         worldId: worldA,
         scopedRuntimeContractApprovalId: contract.approvalId,
         identityApprovalId: identity.approvalId,
@@ -6997,7 +7846,8 @@ test('system profiles bind exact approvals and advance one append-only world hea
       rendererGeneration: 4,
     });
     assert.throws(
-      () => value.store.createSystemProfile({
+      () =>
+        value.store.createSystemProfile({
         worldId: worldA,
         scopedRuntimeContractApprovalId: contract.approvalId,
         identityApprovalId: wrongGeneration.approvalId,
@@ -7006,12 +7856,15 @@ test('system profiles bind exact approvals and advance one append-only world hea
       /system profile identity lineage is invalid/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_system_profile_advances(
            world_id, activation_epoch, revision, predecessor_profile_id,
            profile_id, advanced_at
          ) VALUES (?, 0, 4, ?, ?, 60)`,
-      ).run(worldA, profileA.profileId, profileA.profileId),
+          )
+          .run(worldA, profileA.profileId, profileA.profileId),
       /invalid context system profile advance/,
     );
   } finally {
@@ -7037,14 +7890,18 @@ test('profile bindings seal one exact historical request view', () => {
       sourceSequence: 1,
       worldId: world,
       rendererGeneration: 2,
-      message: { role: 'user', content: '<incoming>BOUND_PROFILE_MESSAGE</incoming>' },
+      message: {
+        role: 'user',
+        content: '<incoming>BOUND_PROFILE_MESSAGE</incoming>',
+      },
       createdAt: 10,
     });
     const approve = (input: {
       kind: 'runtime_contract' | 'identity' | 'world_policy';
       visibility: 'global_contract' | 'integrated_self' | 'world';
       worldId: ReturnType<typeof worldId> | null;
-      sourceKind: 'authored_scoped_contract' | 'soul_snapshot' | 'routing_policy';
+      sourceKind:
+        'authored_scoped_contract' | 'soul_snapshot' | 'routing_policy';
       role: 'scoped_runtime_contract' | 'identity' | 'world_policy';
       source: string;
       content: string;
@@ -7121,7 +7978,10 @@ test('profile bindings seal one exact historical request view', () => {
     });
     const binding = assembly.profileBinding;
     assert.match(binding.bindingId, /^profile-view-binding:[0-9a-f]{64}$/);
-    assert.equal(binding.binding.requestViewHash, assembly.requestView.viewHash);
+    assert.equal(
+      binding.binding.requestViewHash,
+      assembly.requestView.viewHash,
+    );
     assert.equal(binding.binding.profileHash, profileA.profileHash);
     assert.deepEqual(
       value.store.getSystemProfileRequestViewBinding(binding.bindingId),
@@ -7138,7 +7998,10 @@ test('profile bindings seal one exact historical request view', () => {
       bindingId: binding.bindingId,
     });
     assert.equal(materialized.binding.bindingId, binding.bindingId);
-    assert.equal(materialized.request.candidateHash, assembly.request.candidateHash);
+    assert.equal(
+      materialized.request.candidateHash,
+      assembly.request.candidateHash,
+    );
     assert.deepEqual(
       value.store.createSystemProfileRequestViewBinding({
         requestViewId: assembly.requestView.requestViewId,
@@ -7149,7 +8012,8 @@ test('profile bindings seal one exact historical request view', () => {
       binding,
     );
     assert.throws(
-      () => value.store.createSystemProfileRequestViewBinding({
+      () =>
+        value.store.createSystemProfileRequestViewBinding({
         requestViewId: assembly.requestView.requestViewId,
         expectedProfileId: profileA.profileId,
         expectedProfileHeadRevision: 1,
@@ -7157,10 +8021,12 @@ test('profile bindings seal one exact historical request view', () => {
       }),
       /binding identity conflict/,
     );
-    const storedBinding = value.database.prepare(
+    const storedBinding = value.database
+      .prepare(
       `SELECT * FROM context_system_profile_request_view_bindings
        WHERE binding_id = ?`,
-    ).get(binding.bindingId) as Record<string, string | number>;
+      )
+      .get(binding.bindingId) as Record<string, string | number>;
     value.database.exec(`
       SAVEPOINT reject_retroactive_effect_binding;
       DROP TRIGGER context_system_profile_request_view_bindings_no_delete;
@@ -7178,13 +8044,16 @@ test('profile bindings seal one exact historical request view', () => {
       preparedAt: 40,
     });
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_system_profile_request_view_bindings(
            binding_id, request_view_id, world_id, activation_epoch,
            profile_id, profile_head_revision, request_view_hash, profile_hash,
            binding_json, binding_hash, bound_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+          )
+          .run(
         storedBinding.binding_id,
         storedBinding.request_view_id,
         storedBinding.world_id,
@@ -7204,13 +8073,16 @@ test('profile bindings seal one exact historical request view', () => {
       RELEASE reject_retroactive_effect_binding;
     `);
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT OR REPLACE INTO context_system_profile_request_view_bindings(
            binding_id, request_view_id, world_id, activation_epoch,
            profile_id, profile_head_revision, request_view_hash, profile_hash,
            binding_json, binding_hash, bound_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+          )
+          .run(
         storedBinding.binding_id,
         storedBinding.request_view_id,
         storedBinding.world_id,
@@ -7226,25 +8098,34 @@ test('profile bindings seal one exact historical request view', () => {
       /binding identity already exists/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `UPDATE context_system_profile_request_view_bindings
          SET bound_at = bound_at + 1 WHERE binding_id = ?`,
-      ).run(binding.bindingId),
+          )
+          .run(binding.bindingId),
       /bindings are immutable/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `DELETE FROM context_system_profile_request_view_bindings
          WHERE binding_id = ?`,
-      ).run(binding.bindingId),
+          )
+          .run(binding.bindingId),
       /bindings are immutable/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_local_branch_request_system_layers(
            request_view_id, layer_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
-      ).run(
+          )
+          .run(
         assembly.requestView.requestViewId,
         contract.layer.layerId,
         world,
@@ -7252,31 +8133,36 @@ test('profile bindings seal one exact historical request view', () => {
       /bound request view system layers are sealed/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_local_branch_request_messages(
            request_view_id, projection_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
-      ).run(
-        assembly.requestView.requestViewId,
-        message.projectionId,
-        world,
-      ),
+          )
+          .run(assembly.requestView.requestViewId, message.projectionId, world),
       /bound request view messages are sealed/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_manifest_events(
            manifest_id, event_id, world_id, ordinal
          ) VALUES (?, ?, ?, 99)`,
-      ).run(assembly.manifest.manifestId, sourceEventId, world),
+          )
+          .run(assembly.manifest.manifestId, sourceEventId, world),
       /bound request view manifest events are sealed/,
     );
     assert.throws(
-      () => value.database.prepare(
+      () =>
+        value.database
+          .prepare(
         `INSERT INTO context_manifest_shares(
            manifest_id, grant_id, shared_event_id, destination_world_id, ordinal
          ) VALUES (?, 'share:sealed-fixture', ?, ?, 99)`,
-      ).run(assembly.manifest.manifestId, sourceEventId, world),
+          )
+          .run(assembly.manifest.manifestId, sourceEventId, world),
       /bound request view manifest shares are sealed/,
     );
     const identityB = approve({

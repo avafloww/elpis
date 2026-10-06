@@ -1,0 +1,5 @@
+# Make scoped home text delivery recoverable
+
+Schema v54 adds immutable home-text speech receipts, deferred immutable terminal-finalization barriers, and a dedicated one-request Discord transport. A synchronous pre-dispatch hook durably prepares the exact scoped speech effect; every terminal path is recorded as pre-dispatch rejection, issuance uncertainty, or exact observed message evidence. A receipt cannot commit until its finalization barrier verifies the exact terminal effect and branch state. Observed delivery atomically resolves the effect, creates the predeclared root receipt, yields the branch, advances the continuation head, and releases the coordinator, so a delivered message cannot be separated from branch return.
+
+Startup reconciliation records the speech boundary before generic branch recovery and never resends. The transport and executor remain dormant and disconnected from Agent routing; this change does not activate graph mode or perform a live Discord call. Deterministic coverage exercises exact transport requests, no-replay outcomes, late transactional rollback, restart reconciliation, SQL authority guards, and migration paths.

@@ -102,6 +102,12 @@ Only fresh, complete, unstripped resident assistant output is eligible. The resi
 
 Restored history, inbound text, and tool results are never replayed as sends. A context clear invalidates the old epoch: a late outcome leaves only a bounded private completion diagnostic, not a receipt in the newly cleared conversation. Failed or interrupted delivery can be partial; the mechanism does not promise crash-safe exactly-once delivery or automatically retry.
 
+### Scoped home-text delivery
+
+The dormant scoped-context home-text path uses a separate single-request Discord transport rather than the generic chunking send path. It prepares one exact `home_discord_text` effect synchronously before the POST and records exactly one terminal disposition: provable pre-dispatch rejection, issuance uncertainty, or independently observed Discord message evidence. Uncertain issuance is never retried.
+
+An observed delivery commits its receipt, resolves the speech effect, reuses the already-bound private result capsule, creates the predeclared root receipt, yields the branch, advances the continuation head, and releases the root coordinator in one SQLite transaction. Every terminal receipt has a deferred immutable finalization row written last; commit fails unless rejection, uncertainty, or observed return has reached its exact terminal database state. Startup reconciliation records a missing speech effect as rejected or a prepared effect as uncertain before generic branch recovery; it never invokes Discord. The executor and transport remain disconnected from Agent routing until the complete scoped home cutover is explicitly activated.
+
 ## Direct-channel action acknowledgements
 
 When the message that owns a turn's wake comes from a sendable Discord `direct`-tier channel or a configured send-enabled Signal contact, Elpis appends a request-only `<direct-channel-action-acknowledgement>` card immediately before the current inbound batch. If the resident decides to act because the person asked, the card requires the first assistant response to be a brief speech-header acknowledgement before the first tool call. It does not force action or speech for an ordinary answer, refusal, silence, or a request the resident declines to perform.

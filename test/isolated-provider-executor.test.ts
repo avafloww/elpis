@@ -5,8 +5,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MaterializedConfig } from '../src/config.js';
 import { createIsolatedProviderExecutor } from '../src/context/isolated-provider-executor.js';
+import { createHomeDiscordTextExecutor } from '../src/context/home-discord-text-executor.js';
+import {
+  HomeDiscordTextTransportError,
+  type HomeDiscordTextTransport,
+} from '../src/context/home-discord-text-transport.js';
+
 import { exactMainIsolatedProviderTarget } from '../src/context/resident-isolated-provider-binding.js';
-import { RUN_TOOL, type LLM, type StandaloneCompleteOptions } from '../src/llm/llm.js';
+import {
+  RUN_TOOL,
+  type LLM,
+  type StandaloneCompleteOptions,
+} from '../src/llm/llm.js';
 import { legacyLlmModelRegistry } from '../src/llm/model-registry.js';
 import { openDatabase } from '../src/store/db.js';
 import {
@@ -56,12 +66,18 @@ function fixture(
     priorChannelId?: string;
     currentSource?: 'voice' | null;
     currentTransport?: 'signal' | null;
-    currentForwarded?: { author: string; channelName: string | null; content: string } | null;
+    currentForwarded?: {
+      author: string;
+      channelName: string | null;
+      content: string;
+    } | null;
     currentAttachments?: readonly unknown[];
     currentContent?: unknown;
   } = {},
 ) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'isolated-provider-executor-'));
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'isolated-provider-executor-'),
+  );
   const database = openDatabase(directory);
   const store = new ContextGraphStore(database);
   const config = codexConfig();
@@ -101,7 +117,17 @@ function fixture(
     eventId: eventId('event:executor-binding-ingress'),
     worldId: expectedWorldId,
     kind: 'inbound:discord',
-    payload: { schemaVersion: 1, kind: 'discord', source: null, transport: null, content: 'BINDING_PRIVATE_CANARY', channelId, guildId, attachments: [], forwarded: null },
+    payload: {
+      schemaVersion: 1,
+      kind: 'discord',
+      source: null,
+      transport: null,
+      content: 'BINDING_PRIVATE_CANARY',
+      channelId,
+      guildId,
+      attachments: [],
+      forwarded: null,
+    },
     occurredAt: 400,
     recordedAt: 400,
   });
@@ -144,7 +170,10 @@ function fixture(
       sourceSequence: prior.event.sequence,
       worldId: expectedWorldId,
       rendererGeneration: 1,
-      message: { role: 'user', content: '<incoming>PRIOR_PRIVATE_CANARY</incoming>' },
+      message: {
+        role: 'user',
+        content: '<incoming>PRIOR_PRIVATE_CANARY</incoming>',
+      },
       createdAt: 550,
     });
   }
@@ -173,7 +202,10 @@ function fixture(
     sourceSequence: current.sequence,
     worldId: expectedWorldId,
     rendererGeneration: 1,
-    message: { role: 'user', content: '<incoming>EXECUTOR_PRIVATE_CANARY</incoming>' },
+    message: {
+      role: 'user',
+      content: '<incoming>EXECUTOR_PRIVATE_CANARY</incoming>',
+    },
     createdAt: 600,
   });
   store.assembleResidentCurrentWorldDarkRequest({
@@ -207,6 +239,7 @@ function fixture(
   });
   store.activate(0, 800);
   return {
+    database,
     store,
     config,
     target,
@@ -235,9 +268,40 @@ function fakeLlm(
   };
 }
 
-function clock() {
-  let value = 900;
+function clock(start = 900) {
+  let value = start;
   return () => ++value;
+}
+
+async function produceSpeechAttempt(value: ReturnType<typeof fixture>) {
+  const execute = createIsolatedProviderExecutor({
+    store: value.store,
+    config: value.config,
+    llm: fakeLlm(async (_messages, options = {}) => {
+      options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
+      options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 200 });
+      return {
+        content: 'VISIBLE_EXECUTOR_RESULT',
+        usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+        model: value.target.model,
+        providerType: value.target.providerType,
+        apiSurface: value.target.apiSurface,
+        apiEndpoint: value.target.apiEndpoint,
+        toolContractVersion: value.target.toolContractVersion,
+        reasoningEffort: value.target.reasoningEffort ?? undefined,
+      };
+    }),
+    expectedWorldId: value.expectedWorldId,
+    maxOutputBytes: 1024,
+    now: clock(),
+  });
+  const result = await execute(value.invocationId);
+  assert.equal(result.state, 'succeeded');
+  const speech = value.store.getHomeTextSpeechAttempt(
+    result.snapshot.attempt.attemptId,
+  );
+  assert.ok(speech);
+  return speech;
 }
 
 test('isolated provider executor rejects another channel in the scoped guild before dispatch', async () => {
@@ -334,7 +398,12 @@ test('isolated provider executor records one successful dispatch and never repla
     const llm = fakeLlm(async (messages, options = {}) => {
       calls += 1;
       seenOptions = options;
-      assert.equal(messages.some((message) => message.content.includes('EXECUTOR_PRIVATE_CANARY')), true);
+      assert.equal(
+        messages.some((message) =>
+          message.content.includes('EXECUTOR_PRIVATE_CANARY'),
+        ),
+        true,
+      );
       options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
       options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 200 });
       return {
@@ -358,9 +427,13 @@ test('isolated provider executor records one successful dispatch and never repla
     });
     const first = await execute(value.invocationId);
     assert.equal(first.state, 'succeeded');
-    assert.equal(first.snapshot.outcome?.outcome.visibleText, 'VISIBLE\u0000EXECUTOR_RESULT');
     assert.equal(
-      value.store.getHomeTextSpeechAttempt(first.snapshot.attempt.attemptId)?.attempt.visibleText,
+      first.snapshot.outcome?.outcome.visibleText,
+      'VISIBLE\u0000EXECUTOR_RESULT',
+    );
+    assert.equal(
+      value.store.getHomeTextSpeechAttempt(first.snapshot.attempt.attemptId)
+        ?.attempt.visibleText,
       'VISIBLE\u0000EXECUTOR_RESULT',
     );
 
@@ -382,6 +455,233 @@ test('isolated provider executor records one successful dispatch and never repla
   }
 });
 
+test('home Discord delivery observes one message and atomically returns the branch', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    let sends = 0;
+    const transport: HomeDiscordTextTransport = {
+      async send(request, beforeDispatch) {
+        sends += 1;
+        beforeDispatch();
+        return {
+          statusCode: 200,
+          messageId: '345678901234567890',
+          guildId: request.guildId,
+          channelId: request.channelId,
+          nonce: request.nonce,
+          textBytes: request.textBytes,
+          textHash: request.textHash,
+          observedAt: 1_010,
+        };
+      },
+    };
+    const deliver = createHomeDiscordTextExecutor({
+      store: value.store,
+      transport,
+      now: clock(1_000),
+    });
+    const first = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(first.state, 'observed');
+    assert.ok(first.completion);
+    assert.equal(first.completion.branch.status, 'yielded');
+    assert.equal(first.completion.head.revision, 1);
+    assert.equal(first.receipt.evidence?.messageId, '345678901234567890');
+    assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
+    const second = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(second.state, 'observed');
+    assert.equal(second.completion, null);
+    assert.equal(sends, 1);
+  } finally {
+    value.close();
+  }
+});
+
+test('home Discord delivery rolls back a late return failure and freezes issuance', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    value.database.exec(`
+      CREATE TRIGGER fixture_reject_home_text_root_receipt
+      BEFORE INSERT ON context_capsules
+      WHEN NEW.capsule_kind = 'root_receipt'
+      BEGIN
+        SELECT RAISE(ABORT, 'fixture late root receipt failure');
+      END;
+    `);
+    const transport: HomeDiscordTextTransport = {
+      async send(request, beforeDispatch) {
+        beforeDispatch();
+        return {
+          statusCode: 200,
+          messageId: '345678901234567890',
+          guildId: request.guildId,
+          channelId: request.channelId,
+          nonce: request.nonce,
+          textBytes: request.textBytes,
+          textHash: request.textHash,
+          observedAt: 1_010,
+        };
+      },
+    };
+    const deliver = createHomeDiscordTextExecutor({
+      store: value.store,
+      transport,
+      now: clock(1_000),
+    });
+    const result = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(result.state, 'issuance_uncertain');
+    assert.equal(result.receipt.receipt.phase, 'issuance_uncertain');
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'uncertain',
+    );
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'running',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+    assert.equal(
+      (
+        value.database
+          .prepare(
+            'SELECT COUNT(*) AS n FROM context_capsules WHERE capsule_id = ?',
+          )
+          .get(speech.attempt.rootReceiptCapsuleId) as { n: number }
+      ).n,
+      0,
+    );
+    value.database.exec('DROP TRIGGER fixture_reject_home_text_root_receipt');
+    assert.ok(value.store.recoverCoordinatedBranch(1_020));
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('home Discord delivery freezes uncertain issuance without replay', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    let sends = 0;
+    const transport: HomeDiscordTextTransport = {
+      async send(_request, beforeDispatch) {
+        sends += 1;
+        beforeDispatch();
+        throw new HomeDiscordTextTransportError(
+          'issuance_uncertain',
+          'dispatch_uncertain',
+        );
+      },
+    };
+    const deliver = createHomeDiscordTextExecutor({
+      store: value.store,
+      transport,
+      now: clock(1_000),
+    });
+    const first = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(first.state, 'issuance_uncertain');
+    assert.equal(
+      value.store.getEffect(speech.attempt.speechEffectId)?.status,
+      'uncertain',
+    );
+    const second = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(second.state, 'issuance_uncertain');
+    assert.equal(sends, 1);
+    assert.deepEqual(value.store.reconcileHomeTextSpeechBeforeRecovery(1_020), [
+      first.receipt,
+    ]);
+    const recovery = value.store.recoverCoordinatedBranch(1_030);
+    assert.ok(recovery);
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    value.close();
+  }
+});
+
+test('home Discord delivery records a rejected pre-dispatch attempt without an effect', async () => {
+  const value = fixture();
+  try {
+    const speech = await produceSpeechAttempt(value);
+    let sends = 0;
+    const transport: HomeDiscordTextTransport = {
+      async send() {
+        sends += 1;
+        throw new HomeDiscordTextTransportError(
+          'pre_dispatch_rejected',
+          'invalid_request',
+        );
+      },
+    };
+    const deliver = createHomeDiscordTextExecutor({
+      store: value.store,
+      transport,
+      now: clock(1_000),
+    });
+    const result = await deliver(speech.attempt.speechAttemptId);
+    assert.equal(result.state, 'pre_dispatch_rejected');
+    assert.equal(value.store.getEffect(speech.attempt.speechEffectId), null);
+    assert.equal(
+      (await deliver(speech.attempt.speechAttemptId)).state,
+      'pre_dispatch_rejected',
+    );
+    assert.equal(sends, 1);
+    const recovery = value.store.recoverCoordinatedBranch(1_030);
+    assert.ok(recovery);
+    assert.equal(
+      value.store.getBranch(speech.attempt.branchId)?.status,
+      'crashed',
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test('startup reconciliation records the speech boundary before generic branch recovery', async (t) => {
+  for (const prepared of [false, true]) {
+    await t.test(
+      prepared
+        ? 'prepared speech effect becomes uncertain'
+        : 'missing speech effect is rejected',
+      async () => {
+        const value = fixture();
+        try {
+          const speech = await produceSpeechAttempt(value);
+          if (prepared) {
+            value.store.prepareHomeTextSpeechEffect({
+              speechAttemptId: speech.attempt.speechAttemptId,
+              preparedAt: 1_000,
+            });
+          }
+          const receipts =
+            value.store.reconcileHomeTextSpeechBeforeRecovery(1_010);
+          assert.equal(receipts.length, 1);
+          assert.equal(
+            receipts[0]?.receipt.phase,
+            prepared ? 'issuance_uncertain' : 'pre_dispatch_rejected',
+          );
+          const recovery = value.store.recoverCoordinatedBranch(1_020);
+          assert.ok(recovery);
+          assert.equal(
+            value.store.getBranch(speech.attempt.branchId)?.status,
+            'crashed',
+          );
+          assert.equal(value.store.getContinuationHead().revision, 0);
+        } finally {
+          value.close();
+        }
+      },
+    );
+  }
+});
+
 test('isolated provider executor records provable pre-dispatch rejection without an effect', async () => {
   const value = fixture();
   try {
@@ -391,7 +691,9 @@ test('isolated provider executor records provable pre-dispatch rejection without
       config: value.config,
       llm: fakeLlm(async () => {
         calls += 1;
-        throw new Error('credential unavailable before dispatch: PRIVATE_ERROR_CANARY');
+        throw new Error(
+          'credential unavailable before dispatch: PRIVATE_ERROR_CANARY',
+        );
       }),
       expectedWorldId: value.expectedWorldId,
       maxOutputBytes: 1024,
@@ -399,7 +701,10 @@ test('isolated provider executor records provable pre-dispatch rejection without
     });
     const result = await execute(value.invocationId);
     assert.equal(result.state, 'failed');
-    assert.equal(result.snapshot.outcome?.outcome.phase, 'pre_dispatch_rejected');
+    assert.equal(
+      result.snapshot.outcome?.outcome.phase,
+      'pre_dispatch_rejected',
+    );
     assert.equal(
       result.snapshot.outcome?.outcome.visibleText,
       'provider request rejected before dispatch',
@@ -426,7 +731,9 @@ test('isolated provider executor freezes after a network-boundary error without 
       llm: fakeLlm(async (_messages, options = {}) => {
         calls += 1;
         options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
-        throw new Error('socket vanished after dispatch boundary: PRIVATE_NETWORK_CANARY');
+        throw new Error(
+          'socket vanished after dispatch boundary: PRIVATE_NETWORK_CANARY',
+        );
       }),
       expectedWorldId: value.expectedWorldId,
       maxOutputBytes: 1024,
@@ -448,9 +755,14 @@ test('isolated provider executor freezes after a network-boundary error without 
     const recovered = value.store.recoverCoordinatedBranch(1_000);
     assert.equal(recovered?.uncertainEffects, 0);
     assert.equal(value.store.getRootCoordinatorState().activeBranchId, null);
-    assert.equal(value.store.getBranch(result.snapshot.attempt.attempt.branchId)?.status, 'crashed');
     assert.equal(
-      value.store.getDarkPendingBranchAbandonment(result.snapshot.attempt.attempt.branchId),
+      value.store.getBranch(result.snapshot.attempt.attempt.branchId)?.status,
+      'crashed',
+    );
+    assert.equal(
+      value.store.getDarkPendingBranchAbandonment(
+        result.snapshot.attempt.attempt.branchId,
+      ),
       null,
     );
     await execute(value.invocationId);
@@ -473,7 +785,10 @@ test('isolated provider executor recovers received responses without replay afte
       authorizedAt: 900,
     });
     assert.equal(started.fresh, true);
-    value.store.prepareIsolatedProviderExecutionEffect(started.attempt.attemptId, 901);
+    value.store.prepareIsolatedProviderExecutionEffect(
+      started.attempt.attemptId,
+      901,
+    );
     value.store.recordIsolatedProviderResponse({
       attemptId: started.attempt.attemptId,
       statusCode: 200,
@@ -518,7 +833,10 @@ test('isolated provider executor treats an error after a positive HTTP response 
       llm: fakeLlm(async (_messages, options = {}) => {
         calls += 1;
         options.dispatchLifecycle?.beforeNetwork({ attempt: 1 });
-        options.dispatchLifecycle?.responseReceived({ attempt: 1, status: 401 });
+        options.dispatchLifecycle?.responseReceived({
+          attempt: 1,
+          status: 401,
+        });
         throw new Error('unauthorized response was not retried');
       }),
       expectedWorldId: value.expectedWorldId,

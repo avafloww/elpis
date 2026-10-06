@@ -76,9 +76,14 @@ test('runMigrations registers schema authority functions on a raw connection', (
   const db = new DatabaseSync(':memory:');
   runMigrations(db);
   const row = db
-    .prepare("SELECT elpis_sha256('abc') AS hash, elpis_discord_nonce(elpis_sha256('abc')) AS nonce")
+    .prepare(
+      "SELECT elpis_sha256('abc') AS hash, elpis_discord_nonce(elpis_sha256('abc')) AS nonce",
+    )
     .get() as { hash: string; nonce: string };
-  assert.equal(row.hash, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(
+    row.hash,
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  );
   assert.equal(row.nonce, BigInt(`0x${row.hash.slice(0, 20)}`).toString(10));
   db.close();
 });
@@ -89,13 +94,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 53, 'user_version bumped to 53');
+  assert.equal(v1, 54, 'user_version bumped to 54');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 53);
+  assert.equal(v2, 54);
   db.close();
 });
 
@@ -135,7 +140,7 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    53,
+    54,
   );
   db.close();
 });
@@ -221,7 +226,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 53, 'user_version upgraded to 53');
+  assert.equal(finalVersion, 54, 'user_version upgraded to 54');
 
   // Assert fleet tables exist
   const tableNames = (
@@ -377,14 +382,18 @@ test('system layer approvals and profiles require exact scoped lineage and remai
     policyHash,
   );
   assert.throws(() =>
-    db.prepare(`
+    db
+      .prepare(
+        `
       INSERT INTO context_system_layer_approvals(
         approval_id, layer_id, approval_role, basis_kind, basis_ref,
         basis_hash, approval_generation, approved_at
       ) VALUES ('approval:backdated', 'layer:contract',
         'scoped_runtime_contract', 'authored_scoped_contract',
         'fixture:backdated', ?, 2, 99)
-    `).run(contractHash),
+    `,
+      )
+      .run(contractHash),
   );
 
   assert.throws(() =>
@@ -481,7 +490,8 @@ test('system layer approvals and profiles require exact scoped lineage and remai
   );
   assert.equal(
     (
-      db.prepare('SELECT COUNT(*) AS count FROM context_system_layer_approvals')
+      db
+        .prepare('SELECT COUNT(*) AS count FROM context_system_layer_approvals')
         .get() as { count: number }
     ).count,
     3,
@@ -537,7 +547,9 @@ test('system layer approvals and profiles require exact scoped lineage and remai
     ),
   );
   assert.throws(() =>
-    db.prepare(`
+    db
+      .prepare(
+        `
       INSERT OR REPLACE INTO context_system_profiles(
         profile_id, world_id, activation_epoch, system_renderer_generation,
         policy_generation, scoped_runtime_contract_approval_id,
@@ -546,7 +558,9 @@ test('system layer approvals and profiles require exact scoped lineage and remai
       ) VALUES ('profile:a', 'world:test-a', 0, 1, 1,
         'approval:contract', 'approval:identity', NULL, 'approval:policy',
         '{"profile":"changed"}', ?, 303)
-    `).run('4'.repeat(64)),
+    `,
+      )
+      .run('4'.repeat(64)),
   );
   const advance = db.prepare(`
     INSERT INTO context_system_profile_advances(
@@ -558,22 +572,30 @@ test('system layer approvals and profiles require exact scoped lineage and remai
   assert.throws(() => advance.run(3, 'profile:a', 'profile:b', 401));
   advance.run(2, 'profile:a', 'profile:b', 402);
   assert.throws(() =>
-    db.prepare(`
+    db
+      .prepare(
+        `
       INSERT OR REPLACE INTO context_system_profile_advances(
         world_id, activation_epoch, revision, predecessor_profile_id,
         profile_id, advanced_at
       ) VALUES ('world:test-a', 0, 2, 'profile:a', 'profile:b', 403)
-    `).run(),
+    `,
+      )
+      .run(),
   );
   assert.throws(() =>
-    db.prepare(
+    db
+      .prepare(
       "UPDATE context_system_profiles SET created_at = 999 WHERE profile_id = 'profile:a'",
-    ).run(),
+      )
+      .run(),
   );
   assert.throws(() =>
-    db.prepare(
+    db
+      .prepare(
       "DELETE FROM context_system_profile_advances WHERE world_id = 'world:test-a'",
-    ).run(),
+      )
+      .run(),
   );
   db.close();
 });
