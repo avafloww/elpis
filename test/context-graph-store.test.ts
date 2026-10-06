@@ -6444,6 +6444,10 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
         WHERE request_view_id = '${pending.assembled.requestView.requestViewId}';
       DROP TRIGGER context_dark_pending_branch_attempts_profile_binding_guard;
       DROP TRIGGER context_home_text_speech_finalizations_lineage_guard;
+      DROP TRIGGER context_active_home_ingress_admissions_no_update;
+      DROP TRIGGER context_active_home_ingress_admissions_no_delete;
+      DROP TRIGGER context_active_home_ingress_admissions_lineage_guard;
+      DROP TABLE context_active_home_ingress_admissions;
       DROP TRIGGER context_home_text_speech_finalizations_no_update;
       DROP TRIGGER context_home_text_speech_finalizations_no_delete;
       DROP TRIGGER context_home_text_speech_effect_transition_guard;
@@ -6579,7 +6583,8 @@ test('schema41 refuses an existing unbound dark pending attempt', () => {
             '0051-context-home-text-activation-scope',
             '0052-context-home-text-request-scope',
             '0053-context-home-text-speech-attempts',
-            '0054-context-home-text-speech-delivery'
+            '0054-context-home-text-speech-delivery',
+            '0055-context-active-home-ingress-admissions'
           );
       PRAGMA user_version = 40;
     `);
@@ -8276,6 +8281,514 @@ test('pending recovery rolls abandonment back when crash cannot proceed', () => 
     );
     assert.equal(tableCount(value.database, 'context_branch_recoveries'), 0);
     assert.equal(value.store.getContinuationHead().revision, 0);
+  } finally {
+    closeFixture(value);
+  }
+});
+test('active social ingress queues every world and atomically admits only exact home text', () => {
+  const value = fixture();
+  try {
+    const guildId = '123';
+    const channelId = '234';
+    const homeWorldId = worldId(`world:discord:guild:${guildId}`);
+    value.store.createHomeTextActivationScope({
+      expectedSourceActivationEpoch: 0,
+      expectedWorldId: homeWorldId,
+      guildId,
+      channelId,
+      maxOutputBytes: 1900,
+      authorizedAt: 110,
+    });
+    value.store.activate(0, 100);
+    const homePayload = {
+      schemaVersion: 1,
+      kind: 'discord',
+      source: null,
+      transport: null,
+      originWorldId: null,
+      forwarded: null,
+      content: 'hello from Bramble',
+      attachments: [],
+      bot: false,
+      wakeClass: 'wake',
+      guildId,
+      channelId,
+    };
+    const retroactiveId = eventId('event:active-home-before-scope');
+    assert.throws(
+      () =>
+        value.store.recordActiveSocialInbound({
+          eventId: retroactiveId,
+          worldId: homeWorldId,
+          kind: 'inbound:discord',
+          payload: homePayload,
+          occurredAt: 104,
+          recordedAt: 105,
+          admittedAt: 106,
+        }),
+      /authority is not current/,
+    );
+    assert.equal(value.store.getWorldEvent(retroactiveId), null);
+
+    const home = value.store.recordActiveSocialInbound({
+      eventId: eventId('event:active-home-1'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: homePayload,
+      occurredAt: 110,
+      recordedAt: 120,
+      admittedAt: 130,
+    });
+    assert.equal(home.projection?.message.content, homePayload.content);
+    assert.equal(home.admission?.sourceSequence, home.event.sequence);
+    assert.equal(home.admission?.activeActivationEpoch, 1);
+    assert.deepEqual(
+      value.store.recordActiveSocialInbound({
+        eventId: eventId('event:active-home-1'),
+        worldId: homeWorldId,
+        kind: 'inbound:discord',
+        payload: homePayload,
+        occurredAt: 110,
+        recordedAt: 120,
+        admittedAt: 130,
+      }),
+      home,
+    );
+    assert.throws(
+      () =>
+        value.store.recordActiveSocialInbound({
+          eventId: eventId('event:active-home-1'),
+          worldId: homeWorldId,
+          kind: 'inbound:discord',
+          payload: homePayload,
+          occurredAt: 110,
+          recordedAt: 120,
+          admittedAt: 131,
+        }),
+      /conflict/,
+    );
+
+    const signal = value.store.recordActiveSocialInbound({
+      eventId: eventId('event:active-signal-1'),
+      worldId: worldId('world:signal:contact:bramble'),
+      kind: 'inbound:signal',
+      payload: {
+        schemaVersion: 1,
+        kind: 'signal',
+        content: 'queued elsewhere',
+      },
+      occurredAt: 131,
+      recordedAt: 132,
+      admittedAt: 133,
+    });
+    assert.equal(signal.projection, null);
+    assert.equal(signal.admission, null);
+
+    const wrongChannel = value.store.recordActiveSocialInbound({
+      eventId: eventId('event:active-home-wrong-channel'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { ...homePayload, channelId: '345' },
+      occurredAt: 140,
+      recordedAt: 141,
+      admittedAt: 142,
+    });
+    assert.equal(wrongChannel.projection, null);
+    assert.equal(wrongChannel.admission, null);
+    assert.throws(
+      () =>
+        value.store.recordActiveSocialInbound({
+          eventId: eventId('event:active-home-1'),
+          worldId: homeWorldId,
+          kind: 'inbound:discord',
+          payload: { ...homePayload, content: 'changed replay' },
+          occurredAt: 110,
+          recordedAt: 120,
+          admittedAt: 130,
+        }),
+      /conflict/,
+    );
+
+    const oversizedContent = 'x'.repeat(8 * 1024 * 1024 + 1);
+    const oversizedId = eventId('event:active-home-oversized');
+    const oversized = value.store.recordActiveSocialInbound({
+      eventId: oversizedId,
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { ...homePayload, content: oversizedContent },
+      occurredAt: 150,
+      recordedAt: 151,
+      admittedAt: 152,
+    });
+    assert.equal(oversized.projection, null);
+    assert.equal(oversized.admission, null);
+    assert.equal(value.store.getWorldEvent(oversizedId)?.eventId, oversizedId);
+    assert.equal(tableCount(value.database, 'context_world_events'), 4);
+    value.database.exec(
+      `CREATE TEMP TRIGGER force_active_home_admission_failure
+       BEFORE INSERT ON context_active_home_ingress_admissions
+       BEGIN
+         SELECT RAISE(ABORT, 'forced active home admission failure');
+       END;`,
+    );
+    const failedAdmissionId = eventId('event:active-home-forced-failure');
+    assert.throws(
+      () =>
+        value.store.recordActiveSocialInbound({
+          eventId: failedAdmissionId,
+          worldId: homeWorldId,
+          kind: 'inbound:discord',
+          payload: homePayload,
+          occurredAt: 153,
+          recordedAt: 154,
+          admittedAt: 155,
+        }),
+      /forced active home admission failure/,
+    );
+    value.database.exec('DROP TRIGGER force_active_home_admission_failure');
+    assert.equal(value.store.getWorldEvent(failedAdmissionId), null);
+    assert.equal(
+      tableCount(value.database, 'context_active_home_ingress_admissions'),
+      1,
+    );
+    assert.equal(
+      tableCount(value.database, 'context_event_message_projections'),
+      1,
+    );
+    assert.equal(tableCount(value.database, 'context_world_events'), 4);
+
+    const scope = value.store.getHomeTextActivationScope();
+    assert.ok(scope);
+    const insertDirectAdmission = (
+      event: { eventId: string; worldId: string; sequence: number },
+      projection: { projectionId: string },
+      admittedAt: number,
+    ) =>
+      value.database
+        .prepare(
+          `INSERT INTO context_active_home_ingress_admissions(
+             event_id, world_id, source_sequence, active_activation_epoch,
+             activation_scope_hash, projection_id, renderer_generation,
+             admitted_at
+           ) VALUES (?, ?, ?, 1, ?, ?, 1, ?)`,
+        )
+        .run(
+          event.eventId,
+          event.worldId,
+          event.sequence,
+          scope.scopeHash,
+          projection.projectionId,
+          admittedAt,
+        );
+    const insertRawHomeEventAndProjection = (input: {
+      rawEventId: string;
+      content: string;
+      occurredAt: number;
+      recordedAt: number;
+      createdAt: number;
+    }) => {
+      const payloadJson = JSON.stringify({
+        ...homePayload,
+        content: input.content,
+      });
+      value.database
+        .prepare(
+          `INSERT INTO context_world_events(
+             event_id, world_id, event_kind, payload_json, payload_hash,
+             occurred_at, recorded_at
+           ) VALUES (?, ?, 'inbound:discord', ?, ?, ?, ?)`,
+        )
+        .run(
+          input.rawEventId,
+          homeWorldId,
+          payloadJson,
+          hashContextBytes(payloadJson),
+          input.occurredAt,
+          input.recordedAt,
+        );
+      const sequence = (
+        value.database
+          .prepare('SELECT sequence FROM context_world_events WHERE event_id = ?')
+          .get(input.rawEventId) as { sequence: number }
+      ).sequence;
+      const messageJson = JSON.stringify({
+        role: 'user',
+        content: input.content,
+      });
+      const messageHash = hashContextBytes(messageJson);
+      const projectionId = eventMessageProjectionId(
+        `event-message:${hashContextBytes(
+          JSON.stringify({
+            schemaVersion: 1,
+            sourceEventId: input.rawEventId,
+            worldId: homeWorldId,
+            rendererGeneration: 1,
+            messageHash,
+          }),
+        )}`,
+      );
+      value.database
+        .prepare(
+          `INSERT INTO context_event_message_projections(
+             projection_id, source_event_id, world_id, renderer_generation,
+             message_json, message_hash, created_at
+           ) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+        )
+        .run(
+          projectionId,
+          input.rawEventId,
+          homeWorldId,
+          messageJson,
+          messageHash,
+          input.createdAt,
+        );
+      return {
+        event: { eventId: input.rawEventId, worldId: homeWorldId, sequence },
+        projection: { projectionId },
+      };
+    };
+
+    const malformedEvent = insertRawHomeEventAndProjection({
+      rawEventId: 'x',
+      content: homePayload.content,
+      occurredAt: 153,
+      recordedAt: 154,
+      createdAt: 155,
+    });
+    assert.throws(
+      () =>
+        insertDirectAdmission(
+          malformedEvent.event,
+          malformedEvent.projection,
+          155,
+        ),
+      /active home ingress admission lineage is invalid/,
+    );
+
+    const astralEvent = insertRawHomeEventAndProjection({
+      rawEventId: `event:${'😀'.repeat(62)}`,
+      content: homePayload.content,
+      occurredAt: 153,
+      recordedAt: 154,
+      createdAt: 155,
+    });
+    assert.throws(
+      () =>
+        insertDirectAdmission(astralEvent.event, astralEvent.projection, 155),
+      /active home ingress admission lineage is invalid/,
+    );
+
+    const unsafeTimestamp = Number.MAX_SAFE_INTEGER + 1;
+    const unsafeTimeEvent = insertRawHomeEventAndProjection({
+      rawEventId: 'event:active-home-unsafe-time',
+      content: homePayload.content,
+      occurredAt: unsafeTimestamp,
+      recordedAt: unsafeTimestamp,
+      createdAt: unsafeTimestamp,
+    });
+    assert.throws(
+      () =>
+        insertDirectAdmission(
+          unsafeTimeEvent.event,
+          unsafeTimeEvent.projection,
+          unsafeTimestamp,
+        ),
+      /active home ingress admission lineage is invalid/,
+    );
+
+    const surrogateEvent = value.store.appendWorldEvent({
+      eventId: eventId('event:active-home-surrogate-content'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { ...homePayload, content: '\ud800' },
+      occurredAt: 156,
+      recordedAt: 157,
+    });
+    const surrogateProjection = value.store.createEventMessageProjection({
+      sourceEventId: surrogateEvent.eventId,
+      sourceSequence: surrogateEvent.sequence,
+      worldId: surrogateEvent.worldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: '\ud800' },
+      createdAt: 158,
+    });
+    insertDirectAdmission(surrogateEvent, surrogateProjection, 158);
+    assert.equal(
+      value.store.getEventMessageProjection(surrogateProjection.projectionId)
+        ?.message.content,
+      '\ud800',
+    );
+    assert.ok(value.store.getActiveHomeIngressAdmission(surrogateEvent.eventId));
+
+    const numericBotEvent = value.store.appendWorldEvent({
+      eventId: eventId('event:active-home-numeric-bot'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { ...homePayload, bot: 0 },
+      occurredAt: 160,
+      recordedAt: 161,
+    });
+    const numericBotProjection = value.store.createEventMessageProjection({
+      sourceEventId: numericBotEvent.eventId,
+      sourceSequence: numericBotEvent.sequence,
+      worldId: numericBotEvent.worldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: homePayload.content },
+      createdAt: 162,
+    });
+    assert.throws(
+      () => insertDirectAdmission(numericBotEvent, numericBotProjection, 162),
+      /active home ingress admission lineage is invalid/
+    );
+    assert.equal(
+      value.store.getActiveHomeIngressAdmission(numericBotEvent.eventId),
+      null,
+    );
+
+    const numericRouteEvent = value.store.appendWorldEvent({
+      eventId: eventId('event:active-home-numeric-route'),
+      worldId: homeWorldId,
+      kind: 'inbound:discord',
+      payload: { ...homePayload, guildId: 123, channelId: 234 },
+      occurredAt: 164,
+      recordedAt: 165,
+    });
+    const numericRouteProjection = value.store.createEventMessageProjection({
+      sourceEventId: numericRouteEvent.eventId,
+      sourceSequence: numericRouteEvent.sequence,
+      worldId: numericRouteEvent.worldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: homePayload.content },
+      createdAt: 166,
+    });
+    assert.throws(
+      () =>
+        insertDirectAdmission(
+          numericRouteEvent,
+          numericRouteProjection,
+          166,
+        ),
+      /active home ingress admission lineage is invalid/,
+    );
+    assert.equal(
+      value.store.getActiveHomeIngressAdmission(numericRouteEvent.eventId),
+      null,
+    );
+
+    const directOversizedEventId = eventId('event:active-home-direct-oversized');
+    const directOversizedPayloadJson = JSON.stringify({
+      ...homePayload,
+      content: oversizedContent,
+    });
+    value.database
+      .prepare(
+        `INSERT INTO context_world_events(
+           event_id, world_id, event_kind, payload_json, payload_hash,
+           occurred_at, recorded_at
+         ) VALUES (?, ?, 'inbound:discord', ?, ?, 167, 168)`,
+      )
+      .run(
+        directOversizedEventId,
+        homeWorldId,
+        directOversizedPayloadJson,
+        hashContextBytes(directOversizedPayloadJson),
+      );
+    const directOversizedEvent = value.store.getWorldEvent(
+      directOversizedEventId,
+    );
+    assert.ok(directOversizedEvent);
+    const directOversizedMessageJson = JSON.stringify({
+      role: 'user',
+      content: oversizedContent,
+    });
+    const directOversizedMessageHash = hashContextBytes(
+      directOversizedMessageJson,
+    );
+    const directOversizedProjectionId = eventMessageProjectionId(
+      `event-message:${hashContextBytes(
+        JSON.stringify({
+          schemaVersion: 1,
+          sourceEventId: directOversizedEvent.eventId,
+          worldId: directOversizedEvent.worldId,
+          rendererGeneration: 1,
+          messageHash: directOversizedMessageHash,
+        }),
+      )}`,
+    );
+    value.database
+      .prepare(
+        `INSERT INTO context_event_message_projections(
+           projection_id, source_event_id, world_id, renderer_generation,
+           message_json, message_hash, created_at
+         ) VALUES (?, ?, ?, 1, ?, ?, 169)`,
+      )
+      .run(
+        directOversizedProjectionId,
+        directOversizedEvent.eventId,
+        directOversizedEvent.worldId,
+        directOversizedMessageJson,
+        directOversizedMessageHash,
+      );
+    assert.throws(
+      () =>
+        insertDirectAdmission(
+          directOversizedEvent,
+          { projectionId: directOversizedProjectionId },
+          169,
+        ),
+      /active home ingress admission lineage is invalid/,
+    );
+    assert.equal(
+      value.store.getActiveHomeIngressAdmission(directOversizedEvent.eventId),
+      null,
+    );
+
+    const duplicateEventId = eventId('event:active-home-duplicate-route');
+    const duplicatePayloadJson = JSON.stringify(homePayload).replace(
+      `"channelId":"${channelId}"`,
+      `"channelId":"${channelId}","channelId":"345"`,
+    );
+    value.database
+      .prepare(
+        `INSERT INTO context_world_events(
+           event_id, world_id, event_kind, payload_json, payload_hash,
+           occurred_at, recorded_at
+         ) VALUES (?, ?, 'inbound:discord', ?, ?, 170, 171)`,
+      )
+      .run(
+        duplicateEventId,
+        homeWorldId,
+        duplicatePayloadJson,
+        hashContextBytes(duplicatePayloadJson),
+      );
+    const duplicateEvent = value.store.getWorldEvent(duplicateEventId);
+    assert.ok(duplicateEvent);
+    const duplicateProjection = value.store.createEventMessageProjection({
+      sourceEventId: duplicateEvent.eventId,
+      sourceSequence: duplicateEvent.sequence,
+      worldId: duplicateEvent.worldId,
+      rendererGeneration: 1,
+      message: { role: 'user', content: homePayload.content },
+      createdAt: 172,
+    });
+    assert.throws(
+      () => insertDirectAdmission(duplicateEvent, duplicateProjection, 172),
+      /active home ingress admission lineage is invalid/
+    );
+    assert.equal(
+      value.store.getActiveHomeIngressAdmission(duplicateEvent.eventId),
+      null,
+    );
+
+    assert.throws(
+      () =>
+        value.database
+          .prepare(
+            'UPDATE context_active_home_ingress_admissions SET admitted_at = admitted_at + 1',
+          )
+          .run(),
+      /immutable/,
+    );
   } finally {
     closeFixture(value);
   }

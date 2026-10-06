@@ -85,6 +85,40 @@ test('runMigrations registers schema authority functions on a raw connection', (
     'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
   );
   assert.equal(row.nonce, BigInt(`0x${row.hash.slice(0, 20)}`).toString(10));
+  const json = db
+    .prepare(
+      `SELECT elpis_json_is_roundtrip('{"a":1}') AS canonical,
+              elpis_json_is_roundtrip('{"a":1,"a":2}') AS duplicate`,
+    )
+    .get() as { canonical: number; duplicate: number };
+  assert.equal(json.canonical, 1);
+  assert.equal(json.duplicate, 0);
+  const payloadJson = JSON.stringify({
+    schemaVersion: 1,
+    kind: 'discord',
+    source: null,
+    transport: null,
+    originWorldId: null,
+    forwarded: null,
+    content: '\ud800',
+    attachments: [],
+    bot: false,
+    wakeClass: 'wake',
+    guildId: '123',
+    channelId: '234',
+  });
+  const active = db
+    .prepare(
+      `SELECT elpis_active_home_message_json(
+         ?, 'inbound:discord', 'world:discord:guild:123',
+         'world:discord:guild:123', '123', '234'
+       ) AS message_json`,
+    )
+    .get(payloadJson) as { message_json: string };
+  assert.equal(
+    active.message_json,
+    JSON.stringify({ role: 'user', content: '\ud800' }),
+  );
   db.close();
 });
 
@@ -94,13 +128,13 @@ test('runMigrations is idempotent and sets user_version', () => {
   const v1 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v1, 54, 'user_version bumped to 54');
+  assert.equal(v1, 55, 'user_version bumped to 55');
   // Re-running does not throw and leaves the current version unchanged.
   runMigrations(db);
   const v2 = (
     db.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(v2, 54);
+  assert.equal(v2, 55);
   db.close();
 });
 
@@ -136,11 +170,12 @@ test('fresh v4 database creates fleet tables (idempotent)', () => {
   assert.ok(tables.includes('worker_workspace_artifacts'));
   assert.ok(tables.includes('context_system_layer_projections'));
   assert.ok(tables.includes('context_system_layer_approvals'));
+  assert.ok(tables.includes('context_active_home_ingress_admissions'));
   runMigrations(db); // second run: no throw
   assert.equal(
     (db.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
-    54,
+    55,
   );
   db.close();
 });
@@ -226,7 +261,7 @@ test('true v3→v4 upgrade path preserves data and creates fleet tables', () => 
   const finalVersion = (
     upgradedDb.prepare('PRAGMA user_version').get() as { user_version: number }
   ).user_version;
-  assert.equal(finalVersion, 54, 'user_version upgraded to 54');
+  assert.equal(finalVersion, 55, 'user_version upgraded to 55');
 
   // Assert fleet tables exist
   const tableNames = (
@@ -586,14 +621,14 @@ test('system layer approvals and profiles require exact scoped lineage and remai
   assert.throws(() =>
     db
       .prepare(
-      "UPDATE context_system_profiles SET created_at = 999 WHERE profile_id = 'profile:a'",
+        "UPDATE context_system_profiles SET created_at = 999 WHERE profile_id = 'profile:a'",
       )
       .run(),
   );
   assert.throws(() =>
     db
       .prepare(
-      "DELETE FROM context_system_profile_advances WHERE world_id = 'world:test-a'",
+        "DELETE FROM context_system_profile_advances WHERE world_id = 'world:test-a'",
       )
       .run(),
   );

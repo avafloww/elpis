@@ -9,6 +9,8 @@
 // version-gated early return. See docs/persistence.md.
 
 import { createHash } from 'node:crypto';
+import { activeHomeIngressMessageJson } from '../context/active-home-ingress.js';
+import { isEventId } from '../context-graph.js';
 import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
 import {
@@ -37,6 +39,48 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
     }
     return BigInt(`0x${value.slice(0, 20)}`).toString(10);
   });
+  db.function('elpis_context_event_id_valid', { deterministic: true }, (value) =>
+    isEventId(value) && value.length <= 128 ? 1 : 0,
+  );
+  db.function('elpis_json_is_roundtrip', { deterministic: true }, (value) => {
+    if (typeof value !== 'string') return 0;
+    try {
+      return JSON.stringify(JSON.parse(value)) === value ? 1 : 0;
+    } catch {
+      return 0;
+    }
+  });
+  db.function(
+    'elpis_active_home_message_json',
+    { deterministic: true },
+    (
+      payloadJson,
+      eventKind,
+      eventWorldId,
+      scopeWorldId,
+      guildId,
+      channelId,
+    ) => {
+      if (
+        typeof payloadJson !== 'string' ||
+        typeof eventKind !== 'string' ||
+        typeof eventWorldId !== 'string' ||
+        typeof scopeWorldId !== 'string' ||
+        typeof guildId !== 'string' ||
+        typeof channelId !== 'string'
+      ) {
+        return null;
+      }
+      return activeHomeIngressMessageJson({
+        payloadJson,
+        eventKind,
+        eventWorldId,
+        scopeWorldId,
+        guildId,
+        channelId,
+      });
+    },
+  );
 }
 
 /** The current schema level. Every migration block runs on every boot
@@ -45,7 +89,7 @@ function registerContextGraphSqlFunctions(db: DatabaseSync): void {
  * external tooling/humans can inspect the file's schema level. A version
  * gate here would let a DB already at an older version silently skip a
  * later block, which is the exact defect the v5 migration guarded against. */
-const SCHEMA_VERSION = 54;
+const SCHEMA_VERSION = 55;
 
 /** Idempotent schema migrations. */
 export function runMigrations(db: DatabaseSync): void {
@@ -5375,6 +5419,87 @@ export function runMigrations(db: DatabaseSync): void {
             )
           BEGIN
             SELECT RAISE(ABORT, 'invalid context dark pending branch transition');
+          END;
+      `,
+    },
+    {
+      name: '0055-context-active-home-ingress-admissions',
+      sql: `
+        CREATE TABLE context_active_home_ingress_admissions (
+          event_id                TEXT PRIMARY KEY CHECK (length(event_id) BETWEEN 1 AND 128),
+          world_id                TEXT NOT NULL CHECK (length(world_id) BETWEEN 1 AND 512),
+          source_sequence         INTEGER NOT NULL UNIQUE CHECK (typeof(source_sequence) = 'integer' AND source_sequence >= 1),
+          active_activation_epoch INTEGER NOT NULL CHECK (typeof(active_activation_epoch) = 'integer' AND active_activation_epoch >= 1),
+          activation_scope_hash   TEXT NOT NULL CHECK (length(activation_scope_hash) = 64 AND activation_scope_hash NOT GLOB '*[^0-9a-f]*'),
+          projection_id           TEXT NOT NULL UNIQUE CHECK (length(projection_id) BETWEEN 1 AND 128),
+          renderer_generation     INTEGER NOT NULL CHECK (renderer_generation = 1),
+          admitted_at             INTEGER NOT NULL CHECK (typeof(admitted_at) = 'integer' AND admitted_at BETWEEN 0 AND 9007199254740991),
+          UNIQUE (event_id, world_id),
+          FOREIGN KEY (event_id, world_id) REFERENCES context_world_events(event_id, world_id) ON DELETE RESTRICT,
+          FOREIGN KEY (projection_id, world_id) REFERENCES context_event_message_projections(projection_id, world_id) ON DELETE RESTRICT
+        ) WITHOUT ROWID;
+        CREATE TRIGGER context_active_home_ingress_admissions_lineage_guard
+          BEFORE INSERT ON context_active_home_ingress_admissions
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM context_world_events AS events
+            JOIN context_event_message_projections AS projections
+              ON projections.projection_id = NEW.projection_id
+             AND projections.source_event_id = events.event_id
+             AND projections.world_id = events.world_id
+            JOIN context_graph_activation AS activation ON activation.singleton = 1
+            JOIN context_home_text_activation_scope AS scope ON scope.singleton = 1
+            WHERE events.event_id = NEW.event_id
+              AND elpis_context_event_id_valid(events.event_id) = 1
+              AND events.world_id = NEW.world_id
+              AND events.sequence = NEW.source_sequence
+              AND events.sequence BETWEEN 1 AND 9007199254740991
+              AND NEW.source_sequence BETWEEN 1 AND 9007199254740991
+              AND events.occurred_at BETWEEN 0 AND 9007199254740991
+              AND events.recorded_at BETWEEN 0 AND 9007199254740991
+              AND NEW.active_activation_epoch BETWEEN 0 AND 9007199254740991
+              AND NEW.admitted_at BETWEEN 0 AND 9007199254740991
+              AND events.event_kind = 'inbound:discord'
+              AND events.payload_hash = elpis_sha256(events.payload_json)
+              AND elpis_json_is_roundtrip(events.payload_json) = 1
+              AND events.recorded_at >= activation.updated_at
+              AND events.recorded_at >= scope.authorized_at
+              AND NEW.admitted_at >= scope.authorized_at
+              AND projections.renderer_generation = NEW.renderer_generation
+              AND projections.message_hash = elpis_sha256(projections.message_json)
+              AND projections.projection_id = 'event-message:' || elpis_sha256(json_object(
+                'schemaVersion', 1,
+                'sourceEventId', (events.event_id || ''),
+                'worldId', (events.world_id || ''),
+                'rendererGeneration', projections.renderer_generation,
+                'messageHash', (projections.message_hash || '')
+              ))
+              AND projections.created_at = NEW.admitted_at
+              AND projections.created_at >= events.recorded_at
+              AND activation.mode = 'active'
+              AND activation.epoch = NEW.active_activation_epoch
+              AND scope.active_activation_epoch = activation.epoch
+              AND scope.scope_hash = NEW.activation_scope_hash
+              AND scope.world_id = NEW.world_id
+              AND projections.message_json = elpis_active_home_message_json(
+                events.payload_json,
+                events.event_kind,
+                events.world_id,
+                scope.world_id,
+                scope.guild_id,
+                scope.channel_id
+              )
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'active home ingress admission lineage is invalid');
+          END;
+        CREATE TRIGGER context_active_home_ingress_admissions_no_update
+          BEFORE UPDATE ON context_active_home_ingress_admissions BEGIN
+            SELECT RAISE(ABORT, 'active home ingress admissions are immutable');
+          END;
+        CREATE TRIGGER context_active_home_ingress_admissions_no_delete
+          BEFORE DELETE ON context_active_home_ingress_admissions BEGIN
+            SELECT RAISE(ABORT, 'active home ingress admissions are immutable');
           END;
       `,
     },

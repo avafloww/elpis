@@ -3,6 +3,8 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { LLM_PROXY_PATHS } from '@elpis/gateway-protocol';
 
+import { activeHomeIngressContent } from '../context/active-home-ingress.js';
+
 import {
   isBranchId,
   isEventId,
@@ -916,6 +918,23 @@ export interface HomeTextActivationScopeRecord {
   readonly scope: HomeTextActivationScopeV1;
   readonly scopeJson: string;
   readonly scopeHash: string;
+}
+
+export interface ActiveHomeIngressAdmissionRecord {
+  readonly eventId: EventId;
+  readonly worldId: WorldId;
+  readonly sourceSequence: number;
+  readonly activeActivationEpoch: number;
+  readonly activationScopeHash: string;
+  readonly projectionId: EventMessageProjectionId;
+  readonly rendererGeneration: 1;
+  readonly admittedAt: number;
+}
+
+export interface ActiveSocialInboundRecord {
+  readonly event: WorldEventRecord;
+  readonly projection: EventMessageProjectionRecord | null;
+  readonly admission: ActiveHomeIngressAdmissionRecord | null;
 }
 
 export interface ActiveHomeTextInvocationRecord {
@@ -2583,6 +2602,17 @@ interface HomeTextActivationScopeRow {
   authorized_at: number;
 }
 
+interface ActiveHomeIngressAdmissionRow {
+  event_id: string;
+  world_id: string;
+  source_sequence: number;
+  active_activation_epoch: number;
+  activation_scope_hash: string;
+  projection_id: string;
+  renderer_generation: number;
+  admitted_at: number;
+}
+
 interface IsolatedProviderExecutionAttemptRow {
   attempt_id: string;
   invocation_id: string;
@@ -3015,6 +3045,39 @@ function mapDarkPendingBranchAbandonment(
     branchId: branchId(row.branch_id),
     abandonedAt: timestamp('abandonedAt', row.abandoned_at),
     reason: row.reason,
+  };
+}
+
+function mapActiveHomeIngressAdmission(
+  row: ActiveHomeIngressAdmissionRow,
+): ActiveHomeIngressAdmissionRecord {
+  const rendererGeneration = generation(
+    'active home ingress rendererGeneration',
+    row.renderer_generation,
+  );
+  if (rendererGeneration !== 1) {
+    throw new Error(
+      `stored active home ingress admission is invalid: ${row.event_id}`,
+    );
+  }
+  return {
+    eventId: eventId(row.event_id),
+    worldId: worldId(row.world_id),
+    sourceSequence: generation(
+      'active home ingress sourceSequence',
+      row.source_sequence,
+    ),
+    activeActivationEpoch: generation(
+      'active home ingress activation epoch',
+      row.active_activation_epoch,
+    ),
+    activationScopeHash: sha256(
+      'active home ingress activation scope hash',
+      row.activation_scope_hash,
+    ),
+    projectionId: eventMessageProjectionId(row.projection_id),
+    rendererGeneration: 1,
+    admittedAt: timestamp('active home ingress admittedAt', row.admitted_at),
   };
 }
 
@@ -7982,6 +8045,193 @@ export class ContextGraphStore {
       .prepare('SELECT * FROM context_world_events WHERE event_id = ?')
       .get(id) as unknown as WorldEventRow | undefined;
     return row ? mapWorldEvent(row) : null;
+  }
+
+  getActiveHomeIngressAdmission(
+    id: EventId,
+  ): ActiveHomeIngressAdmissionRecord | null {
+    const row = this.database
+      .prepare(
+        `SELECT event_id, world_id, source_sequence, active_activation_epoch,
+                activation_scope_hash, projection_id, renderer_generation,
+                admitted_at
+         FROM context_active_home_ingress_admissions WHERE event_id = ?`,
+      )
+      .get(id) as ActiveHomeIngressAdmissionRow | undefined;
+    if (!row) return null;
+    const admission = mapActiveHomeIngressAdmission(row);
+    const event = this.getWorldEvent(admission.eventId);
+    const projection = this.getEventMessageProjection(admission.projectionId);
+    const scope = this.getHomeTextActivationScope();
+    let payload: unknown;
+    try {
+      payload = event ? JSON.parse(event.payloadJson) : null;
+    } catch (error) {
+      throw new Error('stored active home ingress payload is invalid', {
+        cause: error,
+      });
+    }
+    const content =
+      event && scope
+        ? activeHomeIngressContent({
+            eventKind: event.kind,
+            eventWorldId: event.worldId,
+            payload,
+            scope: scope.scope,
+          })
+        : null;
+    if (
+      !event ||
+      !projection ||
+      !scope ||
+      content === null ||
+      admission.worldId !== event.worldId ||
+      admission.sourceSequence !== event.sequence ||
+      admission.activeActivationEpoch !== scope.scope.activeActivationEpoch ||
+      admission.activationScopeHash !== scope.scopeHash ||
+      projection.sourceEventId !== event.eventId ||
+      projection.worldId !== event.worldId ||
+      projection.rendererGeneration !== admission.rendererGeneration ||
+      projection.message.content !== content ||
+      event.recordedAt < scope.scope.authorizedAt ||
+      admission.admittedAt < scope.scope.authorizedAt ||
+      projection.createdAt < event.recordedAt ||
+      admission.admittedAt !== projection.createdAt
+    ) {
+      throw new Error(`stored active home ingress admission is invalid: ${id}`);
+    }
+    return admission;
+  }
+
+  recordActiveSocialInbound(input: {
+    eventId: EventId;
+    worldId: WorldId;
+    kind: 'inbound:discord' | 'inbound:signal';
+    payload: unknown;
+    occurredAt: number;
+    recordedAt: number;
+    admittedAt: number;
+  }): ActiveSocialInboundRecord {
+    const inboundEventId = eventId(input.eventId);
+    const inboundWorldId = worldId(input.worldId);
+    if (input.kind !== 'inbound:discord' && input.kind !== 'inbound:signal') {
+      throw new Error('active social ingress kind is unsupported');
+    }
+    const occurredAt = timestamp('active ingress occurredAt', input.occurredAt);
+    const recordedAt = timestamp('active ingress recordedAt', input.recordedAt);
+    const admittedAt = timestamp('active ingress admittedAt', input.admittedAt);
+    if (admittedAt < recordedAt) {
+      throw new Error('active ingress admission predates event recording');
+    }
+    const payloadJson = serialize(input.payload);
+    const payloadHash = hashContextBytes(payloadJson);
+
+    return transaction(this.database, () => {
+      const activation = this.getActivationState();
+      const scope = this.getHomeTextActivationScope();
+      if (
+        activation.mode !== 'active' ||
+        !scope ||
+        activation.epoch !== scope.scope.activeActivationEpoch ||
+        recordedAt < activation.updatedAt ||
+        recordedAt < scope.scope.authorizedAt ||
+        admittedAt < scope.scope.authorizedAt
+      ) {
+        throw new Error('active social ingress authority is not current');
+      }
+      const content = activeHomeIngressContent({
+        eventKind: input.kind,
+        eventWorldId: inboundWorldId,
+        payload: input.payload,
+        scope: scope.scope,
+      });
+      const existingEvent = this.getWorldEvent(inboundEventId);
+      const existingAdmission =
+        this.getActiveHomeIngressAdmission(inboundEventId);
+      if (existingEvent) {
+        if (
+          existingEvent.worldId !== inboundWorldId ||
+          existingEvent.kind !== input.kind ||
+          existingEvent.payloadJson !== payloadJson ||
+          existingEvent.payloadHash !== payloadHash ||
+          existingEvent.occurredAt !== occurredAt ||
+          existingEvent.recordedAt !== recordedAt
+        ) {
+          throw new Error(`active social ingress conflict: ${inboundEventId}`);
+        }
+        if (content === null) {
+          if (existingAdmission) {
+            throw new Error(
+              `queued social ingress has a home admission: ${inboundEventId}`,
+            );
+          }
+          return { event: existingEvent, projection: null, admission: null };
+        }
+        if (!existingAdmission) {
+          throw new Error(
+            `active home ingress was previously stored without admission: ${inboundEventId}`,
+          );
+        }
+        if (existingAdmission.admittedAt !== admittedAt) {
+          throw new Error(`active home ingress conflict: ${inboundEventId}`);
+        }
+        const projection = this.getEventMessageProjection(
+          existingAdmission.projectionId,
+        );
+        if (!projection) {
+          throw new Error('active home ingress projection disappeared');
+        }
+        return {
+          event: existingEvent,
+          projection,
+          admission: existingAdmission,
+        };
+      }
+      if (existingAdmission) {
+        throw new Error('active home ingress admission lacks its event');
+      }
+      const event = this.appendWorldEvent({
+        eventId: inboundEventId,
+        worldId: inboundWorldId,
+        kind: input.kind,
+        payload: input.payload,
+        occurredAt,
+        recordedAt,
+      });
+      if (content === null) {
+        return { event, projection: null, admission: null };
+      }
+      const projection = this.createEventMessageProjection({
+        sourceEventId: event.eventId,
+        sourceSequence: event.sequence,
+        worldId: event.worldId,
+        rendererGeneration: 1,
+        message: { role: 'user', content },
+        createdAt: admittedAt,
+      });
+      this.database
+        .prepare(
+          `INSERT INTO context_active_home_ingress_admissions(
+             event_id, world_id, source_sequence, active_activation_epoch,
+             activation_scope_hash, projection_id, renderer_generation,
+             admitted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+        )
+        .run(
+          event.eventId,
+          event.worldId,
+          event.sequence,
+          activation.epoch,
+          scope.scopeHash,
+          projection.projectionId,
+          admittedAt,
+        );
+      const admission = this.getActiveHomeIngressAdmission(event.eventId);
+      if (!admission) {
+        throw new Error('active home ingress admission was not stored');
+      }
+      return { event, projection, admission };
+    });
   }
 
   getDarkIngressGeneration(
